@@ -258,8 +258,9 @@ ManifestResult open_manifest(std::string_view manifest_bytes, std::string_view s
         return fail(ManifestError::Expired,
                     "the runtime list from this server is out of date");
     }
-    const auto last = check.last_sequences.find(key_id);
-    const std::int64_t last_sequence = last == check.last_sequences.end() ? 0 : last->second;
+    const auto previous = check.last_sequences.find(key_id);
+    const std::int64_t last_sequence =
+        previous == check.last_sequences.end() ? 0 : previous->second;
     if (m.sequence < last_sequence) {
         return fail(ManifestError::Rollback,
                     "this server sent an older runtime list than one already used");
