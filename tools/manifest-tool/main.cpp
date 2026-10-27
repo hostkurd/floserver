@@ -202,7 +202,7 @@ bool load_secret(const fs::path& file, SecretKey& key) {
 
 int keygen(const fs::path& file, const std::string& id) {
     if (!is_key_id(id)) {
-        std::cerr << "A key id is 1-32 characters: a-z, 0-9 and '-', such as hostkurd-2026.\n";
+        std::cerr << "A key id is 1-32 characters: a-z, 0-9 and '-', such as floserver-2026.\n";
         return 1;
     }
     SecretKey key;

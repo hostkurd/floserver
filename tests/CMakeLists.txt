@@ -1,4 +1,5 @@
 add_executable(floserver_tests
+    test_builtin.cpp
     test_encoding.cpp
     test_main.cpp
     test_manifest.cpp

@@ -3,6 +3,7 @@
 configure_file(build_info.h.in ${CMAKE_CURRENT_BINARY_DIR}/generated/floserver/core/build_info.h @ONLY)
 
 add_library(floserver_core STATIC
+    src/builtin.cpp
     src/encoding.cpp
     src/manifest.cpp
     src/ports.cpp
