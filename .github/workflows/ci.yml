@@ -23,6 +23,13 @@ jobs:
         run: cmake --build build --config Debug
       - name: Test (Debug)
         run: ctest --test-dir build -C Debug --output-on-failure
+      - name: Show failed tests as annotations
+        if: failure()
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem build -Recurse -Filter floserver_tests.exe | Select-Object -First 1
+          & $exe.FullName 2>&1 | Select-String 'TEST CASE|ERROR|FATAL|values:|logged:' |
+            ForEach-Object { "::error title=floserver_tests::$($_.Line.Trim())" }
       - name: Build (Release)
         run: cmake --build build --config Release
       - name: Test (Release)
