@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows (MSVC)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      # No -G: the runner's newest Visual Studio, so an image update can't
+      # break the build. Debug as well as Release so asserts and checked
+      # iterators run in the tests.
+      - name: Configure
+        run: cmake -S . -B build -A x64
+      - name: Build (Debug)
+        run: cmake --build build --config Debug
+      - name: Test (Debug)
+        run: ctest --test-dir build -C Debug --output-on-failure
+      - name: Show failed tests as annotations
+        if: failure()
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem build -Recurse -Filter floserver_tests.exe | Select-Object -First 1
+          & $exe.FullName 2>&1 | Select-String 'TEST CASE|ERROR|FATAL|values:|logged:' |
+            ForEach-Object { "::error title=floserver_tests::$($_.Line.Trim())" }
+      - name: Build (Release)
+        run: cmake --build build --config Release
+      - name: Test (Release)
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Report sizes
+        shell: pwsh
+        run: |
+          Get-ChildItem build -Recurse -Include FloServer.exe,floserverd.exe,floserver.exe |
+            Where-Object { $_.FullName -match '\\Release\\' } |
+            ForEach-Object { "{0,-16} {1,10:N0} bytes" -f $_.Name, $_.Length }
+
+  linux-sanitizers:
+    name: Linux (clang, ASan + UBSan)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build clang-18 libclang-rt-18-dev
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=clang++-18 -DFLOSERVER_SANITIZE=ON
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  clang-tidy:
+    name: clang-tidy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build clang-18 clang-tidy-18
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_COMPILER=clang++-18 -DFLOSERVER_CLANG_TIDY=ON
+      - name: Build with clang-tidy
+        run: cmake --build build
+
+  windows-cross:
+    name: Windows code builds with MinGW
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build mingw-w64
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=MinSizeRel -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64.cmake
+      - name: Build
+        run: cmake --build build
