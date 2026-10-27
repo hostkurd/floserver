@@ -7,6 +7,7 @@
 #include <ws2tcpip.h>
 #else
 #include <arpa/inet.h>
+#include <cerrno>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -14,9 +15,17 @@
 
 namespace floserver::core {
 
-#ifdef _WIN32
-
 namespace {
+
+#ifdef _WIN32
+using NativeSocket = SOCKET;
+using SockLen = int;
+constexpr NativeSocket kNoSocket = INVALID_SOCKET;
+void close_socket(NativeSocket s) { closesocket(s); }
+bool family_unsupported() {
+    const int e = WSAGetLastError();
+    return e == WSAEAFNOSUPPORT || e == WSAEADDRNOTAVAIL;
+}
 
 class WinsockSession {
 public:
@@ -31,60 +40,79 @@ public:
     }
     WinsockSession(const WinsockSession&) = delete;
     WinsockSession& operator=(const WinsockSession&) = delete;
+    WinsockSession(WinsockSession&&) = delete;
+    WinsockSession& operator=(WinsockSession&&) = delete;
     [[nodiscard]] bool ok() const { return ok_; }
 
 private:
     bool ok_ = false;
 };
+#else
+using NativeSocket = int;
+using SockLen = socklen_t;
+constexpr NativeSocket kNoSocket = -1;
+void close_socket(NativeSocket s) { close(s); }
+bool family_unsupported() { return errno == EAFNOSUPPORT || errno == EADDRNOTAVAIL; }
+#endif
 
-}  // namespace
+enum class Listen : std::uint8_t { Free, Taken, NoSuchAddress };
 
-bool can_listen_on_loopback(Port port) {
-    static const WinsockSession winsock;
-    if (!winsock.ok()) {
-        return false;
+// Tries to listen on 127.0.0.1:port or [::1]:port. No SO_REUSEADDR: on macOS
+// it would let us bind 127.0.0.1 while another program listens on 0.0.0.0,
+// and we never connect, so there is no TIME_WAIT of ours to skip.
+Listen try_listen(bool ipv6, Port port) {
+    const NativeSocket s = socket(ipv6 ? AF_INET6 : AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == kNoSocket) {
+        return family_unsupported() ? Listen::NoSuchAddress : Listen::Taken;
     }
-    const SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (s == INVALID_SOCKET) {
-        return false;
-    }
+#ifdef _WIN32
     // Exclusive use, so a port held by anyone else (including http.sys,
     // which IIS and some chat apps use for port 80) reads as taken.
     BOOL exclusive = TRUE;
     setsockopt(s, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, reinterpret_cast<const char*>(&exclusive),
                static_cast<int>(sizeof exclusive));
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    const bool free = bind(s, reinterpret_cast<const sockaddr*>(&addr), static_cast<int>(sizeof addr)) == 0 &&
-                      listen(s, 1) == 0;
-    closesocket(s);
-    return free;
+#endif
+    int bound = -1;
+    if (ipv6) {
+        int v6only = 1;
+        setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, reinterpret_cast<const char*>(&v6only),
+                   static_cast<int>(sizeof v6only));
+        sockaddr_in6 addr{};
+        addr.sin6_family = AF_INET6;
+        addr.sin6_port = htons(port);
+        addr.sin6_addr = in6addr_loopback;
+        bound = bind(s, reinterpret_cast<const sockaddr*>(&addr), static_cast<SockLen>(sizeof addr));
+    } else {
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        bound = bind(s, reinterpret_cast<const sockaddr*>(&addr), static_cast<SockLen>(sizeof addr));
+    }
+    Listen result = Listen::Free;
+    if (bound != 0) {
+        result = family_unsupported() ? Listen::NoSuchAddress : Listen::Taken;
+    } else if (listen(s, 1) != 0) {
+        result = Listen::Taken;
+    }
+    close_socket(s);
+    return result;
 }
 
-#else
+}  // namespace
 
 bool can_listen_on_loopback(Port port) {
-    const int s = socket(AF_INET, SOCK_STREAM, 0);
-    if (s < 0) {
+#ifdef _WIN32
+    static const WinsockSession winsock;
+    if (!winsock.ok()) {
         return false;
     }
-    // SO_REUSEADDR only skips our own TIME_WAIT leftovers; it never lets us
-    // share a port another program is listening on.
-    int reuse = 1;
-    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof reuse);
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    const bool free = bind(s, reinterpret_cast<const sockaddr*>(&addr), sizeof addr) == 0 &&
-                      listen(s, 1) == 0;
-    close(s);
-    return free;
-}
-
 #endif
+    // Browsers try [::1] first for *.localhost, and Node and Vite listen there
+    // by default, so a port is free only if both loopback addresses are.
+    // A machine without IPv6 counts as free on that side.
+    return try_listen(false, port) == Listen::Free && try_listen(true, port) != Listen::Taken;
+}
 
 std::optional<WebPorts> pick_web_ports(const PortProbe& probe) {
     if (probe(80) && probe(443)) {

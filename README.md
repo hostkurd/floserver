@@ -13,7 +13,7 @@ back to the note first.
 | --- | --- |
 | `src/core` | The shared core library: every rule and decision, no UI code (D1) |
 | `src/daemon` | `floserverd`, the background service in the user's session (D2) |
-| `src/cli` | `floserver` command line, also installed as `fls` (D2, Q2) |
+| `src/cli` | `floserver` command line; the build also makes a copy named `fls` (D2, Q2). Install rules come with the installer. |
 | `src/ui-win32` | `FloServer.exe`, the Windows window, plain Win32 (D1) |
 | `tests` | Unit tests for the core (doctest) |
 | `third_party` | Header-only libraries, see `third_party/README.md` |

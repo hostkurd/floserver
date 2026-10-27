@@ -1,6 +1,9 @@
 add_executable(floserver_cli main.cpp)
 set_target_properties(floserver_cli PROPERTIES OUTPUT_NAME floserver)
 target_link_libraries(floserver_cli PRIVATE floserver_core)
+if(MINGW)
+    target_link_options(floserver_cli PRIVATE -municode)  # entry point is wmain
+endif()
 floserver_code_rules(floserver_cli)
 
 # The short alias from Q2: the same program under the name `fls`.

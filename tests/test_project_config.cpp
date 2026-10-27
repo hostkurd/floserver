@@ -104,14 +104,35 @@ TEST_CASE("bad values are errors on their own key") {
 }
 
 TEST_CASE("MySQL is refused with a pointer to MariaDB (Q7)") {
-    const auto r = parse_project_config(R"({"database": "mysql-8.0"})");
-    REQUIRE(has_error(r, "database"));
-    CHECK(r.errors[0].message.find("MariaDB") != std::string::npos);
+    for (const char* text : {R"({"database": "mysql-8.0"})", R"({"database": "mysql"})"}) {
+        CAPTURE(text);
+        const auto r = parse_project_config(text);
+        REQUIRE(has_error(r, "database"));
+        CHECK(r.errors[0].message.find("use MariaDB") != std::string::npos);
+    }
+}
+
+TEST_CASE("names and versions are tidied") {
+    const auto r = parse_project_config(R"({"php": "08.02", "database": "MariaDB-011.4"})");
+    REQUIRE(r.config.has_value());
+    CHECK(r.config->php == "8.2");
+    REQUIRE(r.config->database.has_value());
+    CHECK(r.config->database->family == "mariadb");
+    CHECK(r.config->database->version == "11.4");
 }
 
 TEST_CASE("the document root must stay inside the project") {
-    for (const std::string bad : {"/var/www", "../other", "public/../../x", "C:/www", "c:www",
-                                  R"(\\server\share)", "//server/share", R"(\abs)", "public:x"}) {
+    const std::vector<std::string> bad_roots = {
+          "/var/www", "../other", "public/../../x", "a/../public", "C:/www", "c:www",
+          R"(\\server\share)", "//server/share", R"(\abs)", "public:x",
+          // Windows drops trailing dots and spaces: ".. " is "..".
+          ".. ", ".. /.. /etc", "public.", "public ", " public", "...",
+          // Device names, with or without an extension.
+          "CON", "nul", "public/aux", "Com1", "lpt9.txt",
+          // Characters that don't belong in a folder name or a server config.
+          "a<b", "a|b", "a?b", "a*b", "a\"b", "a;b", "a'b", "a`b", "~", "a\tb",
+          std::string("a\0b", 3), "a\nb", "\u00e9t\u00e9", "public\uff0f..\uff0fx"};
+    for (const std::string& bad : bad_roots) {
         CAPTURE(bad);
         const std::string text = R"({"root": )" + nlohmann::json(bad).dump() + "}";
         CHECK(has_error(parse_project_config(text), "root"));
@@ -129,7 +150,10 @@ TEST_CASE("document roots are tidied") {
     CHECK(root("public/") == "public");
     CHECK(root("./web/public") == "web/public");
     CHECK(root("web\\\\public") == "web/public");
-    CHECK(root("a/../public") == "public");
+    CHECK(root("public//dist") == "public/dist");
+    CHECK(root("my site/web-root_1") == "my site/web-root_1");
+    CHECK(root("console") == "console");  // not a device name
+    CHECK(root(".well-known") == ".well-known");
     CHECK(root("") == ".");
     CHECK(root(".") == ".");
 }
@@ -162,7 +186,13 @@ TEST_CASE("find_project_config walks up to the nearest file") {
     const fs::path project = tmp.path() / "shop";
     const fs::path deep = project / "src" / "Controllers";
     fs::create_directories(deep);
-    CHECK_FALSE(find_project_config(deep).has_value());
+
+    // Nothing inside the temp folder yet. (A floserver.json above the temp
+    // folder on this machine may be found; it just mustn't be one of ours.)
+    const auto none = find_project_config(deep);
+    if (none) {
+        CHECK(none->string().find(tmp.path().string()) == std::string::npos);
+    }
 
     std::ofstream(project / "floserver.json") << "{}";
     const auto found = find_project_config(deep);
@@ -171,5 +201,7 @@ TEST_CASE("find_project_config walks up to the nearest file") {
 
     // A folder named floserver.json is not a project file.
     fs::create_directories(deep / "floserver.json");
-    CHECK(fs::equivalent(*find_project_config(deep), project / "floserver.json"));
+    const auto again = find_project_config(deep);
+    REQUIRE(again.has_value());
+    CHECK(fs::equivalent(*again, project / "floserver.json"));
 }

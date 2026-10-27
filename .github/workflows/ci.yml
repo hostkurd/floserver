@@ -14,11 +14,18 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      # No -G: the runner's newest Visual Studio, so an image update can't
+      # break the build. Debug as well as Release so asserts and checked
+      # iterators run in the tests.
       - name: Configure
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-      - name: Build
+        run: cmake -S . -B build -A x64
+      - name: Build (Debug)
+        run: cmake --build build --config Debug
+      - name: Test (Debug)
+        run: ctest --test-dir build -C Debug --output-on-failure
+      - name: Build (Release)
         run: cmake --build build --config Release
-      - name: Test
+      - name: Test (Release)
         run: ctest --test-dir build -C Release --output-on-failure
       - name: Report sizes
         shell: pwsh
@@ -52,7 +59,6 @@ jobs:
         run: >
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
           -DCMAKE_CXX_COMPILER=clang++-18 -DFLOSERVER_CLANG_TIDY=ON
-          -DCLANG_TIDY_EXE=clang-tidy-18
       - name: Build with clang-tidy
         run: cmake --build build
 

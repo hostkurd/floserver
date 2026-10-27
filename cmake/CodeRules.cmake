@@ -7,7 +7,7 @@ target_include_directories(floserver_third_party SYSTEM INTERFACE
     ${PROJECT_SOURCE_DIR}/third_party)
 
 if(FLOSERVER_CLANG_TIDY)
-    find_program(CLANG_TIDY_EXE NAMES clang-tidy REQUIRED)
+    find_program(CLANG_TIDY_EXE NAMES clang-tidy-18 clang-tidy REQUIRED)
 endif()
 
 function(floserver_code_rules target)
