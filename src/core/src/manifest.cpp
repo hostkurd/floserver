@@ -35,16 +35,49 @@ bool is_name(std::string_view s) {
            });
 }
 
+// https://host[:port]/path with a plain lower-case host name, no user info,
+// no fragment, no NUL. The SHA-256 is what makes a download safe; this keeps
+// the downloader's input simple and predictable.
 bool is_https_url(std::string_view url) {
-    if (url.size() > kMaxUrlLength || !url.starts_with("https://") || url.size() <= 8) {
+    constexpr std::string_view kScheme = "https://";
+    if (url.size() > kMaxUrlLength || !url.starts_with(kScheme)) {
         return false;
     }
-    // No spaces, quotes or control characters: a URL we will hand to a
-    // downloader, never to a shell.
-    return std::all_of(url.begin(), url.end(), [](char c) {
+    const std::string_view rest = url.substr(kScheme.size());
+    const std::size_t host_end = rest.find_first_of(":/");
+    const std::string_view host = rest.substr(0, host_end);
+    if (host.empty() || host.front() == '.' || host.back() == '.' || host.front() == '-' ||
+        !std::all_of(host.begin(), host.end(), [](char c) {
+            return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '-';
+        })) {
+        return false;
+    }
+    std::string_view path = host_end == std::string_view::npos ? std::string_view{}
+                                                                : rest.substr(host_end);
+    if (path.starts_with(':')) {
+        const std::size_t slash = path.find('/');
+        const std::string_view port = path.substr(1, slash == std::string_view::npos ? path.npos : slash - 1);
+        unsigned value = 0;
+        if (port.empty() || port.size() > 5 ||
+            !std::all_of(port.begin(), port.end(), [](char c) { return c >= '0' && c <= '9'; })) {
+            return false;
+        }
+        for (const char c : port) {
+            value = value * 10U + static_cast<unsigned>(c - '0');
+        }
+        if (value == 0 || value > 65535) {
+            return false;
+        }
+        path = slash == std::string_view::npos ? std::string_view{} : path.substr(slash);
+    }
+    if (path.find("%00") != std::string_view::npos) {
+        return false;
+    }
+    // No spaces, quotes, fragments or control characters.
+    return std::all_of(path.begin(), path.end(), [](char c) {
         const auto u = static_cast<unsigned char>(c);
         return u > 0x20 && u < 0x7F && c != '"' && c != '\'' && c != '\\' && c != '<' &&
-               c != '>' && c != '`';
+               c != '>' && c != '`' && c != '#' && c != '@';
     });
 }
 
@@ -193,7 +226,9 @@ ManifestResult open_manifest(std::string_view manifest_bytes, std::string_view s
     if (schema == doc.end() || !schema->is_number_integer()) {
         return fail(ManifestError::BadField, "the runtime list has no schema number");
     }
-    if (schema->get<std::int64_t>() > kManifestSchema) {
+    if ((schema->is_number_unsigned() &&
+         schema->get<std::uint64_t>() > static_cast<std::uint64_t>(kManifestSchema)) ||
+        schema->get<std::int64_t>() > kManifestSchema) {
         return fail(ManifestError::UnsupportedSchema,
                     "the runtime list needs a newer FloServer; please update");
     }
@@ -218,12 +253,20 @@ ManifestResult open_manifest(std::string_view manifest_bytes, std::string_view s
 
     // 3. Freshness: a stale or older copy, even correctly signed, is refused.
     if (check.now >= m.expires) {
+        // Also what a computer whose clock runs ahead sees from every mirror;
+        // the caller says so when all mirrors give Expired.
         return fail(ManifestError::Expired,
-                    "the runtime list from this server is out of date; trying another mirror");
+                    "the runtime list from this server is out of date");
     }
-    if (m.sequence < check.last_sequence) {
+    const auto last = check.last_sequences.find(key_id);
+    const std::int64_t last_sequence = last == check.last_sequences.end() ? 0 : last->second;
+    if (m.sequence < last_sequence) {
         return fail(ManifestError::Rollback,
                     "this server sent an older runtime list than one already used");
+    }
+    if (m.sequence - last_sequence > kMaxSequenceJump) {
+        return fail(ManifestError::SequenceJump,
+                    "the runtime list's sequence number jumps too far ahead and was ignored");
     }
 
     // 4. Entries.
@@ -239,24 +282,31 @@ ManifestResult open_manifest(std::string_view manifest_bytes, std::string_view s
             }
             m.runtimes.push_back(std::move(entry));
         }
-    } else if (runtimes != doc.end()) {
-        result.warnings.emplace_back("the runtimes list isn't a list and was skipped");
+    } else {
+        result.warnings.emplace_back("the runtime list has no runtimes");
     }
+    result.key_id = key_id;
     result.manifest = std::move(m);
     return result;
 }
 
 std::vector<RuntimeFile> runtimes_for(const Manifest& manifest, std::string_view name,
                                       std::string_view platform) {
-    std::vector<RuntimeFile> out;
+    // Entries from open_manifest always have a valid version; a hand-built
+    // Manifest might not, so those sort last instead of crashing.
+    std::vector<std::pair<Version, RuntimeFile>> found;
     for (const RuntimeFile& r : manifest.runtimes) {
         if (r.name == name && r.platform == platform) {
-            out.push_back(r);
+            found.emplace_back(Version::parse(r.version).value_or(Version{}), r);
         }
     }
-    std::stable_sort(out.begin(), out.end(), [](const RuntimeFile& a, const RuntimeFile& b) {
-        return *Version::parse(a.version) > *Version::parse(b.version);
-    });
+    std::stable_sort(found.begin(), found.end(),
+                     [](const auto& a, const auto& b) { return a.first > b.first; });
+    std::vector<RuntimeFile> out;
+    out.reserve(found.size());
+    for (auto& f : found) {
+        out.push_back(std::move(f.second));
+    }
     return out;
 }
 

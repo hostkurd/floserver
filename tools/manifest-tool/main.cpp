@@ -5,8 +5,11 @@
 //   floserver-manifest sign   <manifest.json> <secret-key-file>
 //   floserver-manifest verify <manifest.json> <public-key-base64> <key-id>
 //
-// The secret key is only ever read from a file, never taken as an argument,
-// and it's wiped from memory after use. Keep the file on an offline machine.
+// The secret key is only ever read from a file, never taken as an argument.
+// The key file is created owner-only from its first byte (an ACL on Windows,
+// mode 0600 elsewhere) and never overwritten. Copies of the key in this
+// program's memory are wiped after use, as far as the code controls them.
+// Keep the file on an offline machine.
 
 #include "floserver/core/encoding.h"
 #include "floserver/core/manifest.h"
@@ -15,7 +18,9 @@
 #include <monocypher.h>
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -27,8 +32,11 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <bcrypt.h>
+#include <sddl.h>
 #else
-#include <sys/random.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/random.h>  // getrandom on Linux, getentropy on macOS
 #endif
 
 namespace {
@@ -36,14 +44,41 @@ namespace {
 namespace fs = std::filesystem;
 using namespace floserver::core;
 
+// Wipes a string's characters when it goes out of scope.
+class WipedString {
+public:
+    WipedString() = default;
+    explicit WipedString(std::string s) : value_(std::move(s)) {}
+    ~WipedString() { crypto_wipe(value_.data(), value_.size()); }
+    WipedString(const WipedString&) = delete;
+    WipedString& operator=(const WipedString&) = delete;
+    WipedString(WipedString&&) = delete;
+    WipedString& operator=(WipedString&&) = delete;
+    std::string& get() { return value_; }
+
+private:
+    std::string value_;
+};
+
 bool random_bytes(std::span<std::uint8_t> out) {
 #ifdef _WIN32
-    return BCryptGenRandom(nullptr, out.data(), static_cast<ULONG>(out.size()),
-                           BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0;
+    return BCRYPT_SUCCESS(BCryptGenRandom(nullptr, out.data(), static_cast<ULONG>(out.size()),
+                                          BCRYPT_USE_SYSTEM_PREFERRED_RNG));
+#elif defined(__APPLE__)
+    constexpr std::size_t kMaxChunk = 256;  // getentropy's limit
+    for (std::size_t done = 0; done < out.size(); done += kMaxChunk) {
+        if (getentropy(out.data() + done, std::min(kMaxChunk, out.size() - done)) != 0) {
+            return false;
+        }
+    }
+    return true;
 #else
     std::size_t done = 0;
     while (done < out.size()) {
         const ssize_t n = getrandom(out.data() + done, out.size() - done, 0);
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
         if (n <= 0) {
             return false;
         }
@@ -54,16 +89,77 @@ bool random_bytes(std::span<std::uint8_t> out) {
 }
 
 std::optional<std::string> read_file(const fs::path& p) {
-    const std::ifstream in(p, std::ios::binary);
+    std::ifstream in(p, std::ios::binary | std::ios::ate);
     if (!in) {
         return std::nullopt;
     }
-    std::stringstream ss;
-    ss << in.rdbuf();
-    return ss.str();
+    const std::streamoff size = in.tellg();
+    if (size < 0 || size > 64LL * 1024 * 1024) {
+        return std::nullopt;
+    }
+    std::string data(static_cast<std::size_t>(size), '\0');
+    in.seekg(0);
+    if (!in.read(data.data(), size)) {
+        return std::nullopt;
+    }
+    return data;
 }
 
-// The secret key file: {"key": "<id>", "seed": "<base64 of 32 bytes>"}.
+// Creates `file` (it must not exist) readable and writable by its owner only,
+// and writes `content`. The file is never readable by others, even briefly.
+bool write_new_private_file(const fs::path& file, std::string_view content) {
+#ifdef _WIN32
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    // Protected DACL: full access for the file's owner, nobody else.
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;FA;;;OW)", SDDL_REVISION_1,
+                                                              &sd, nullptr)) {
+        return false;
+    }
+    SECURITY_ATTRIBUTES sa{sizeof(SECURITY_ATTRIBUTES), sd, FALSE};
+    HANDLE h = CreateFileW(file.c_str(), GENERIC_WRITE, 0, &sa, CREATE_NEW, FILE_ATTRIBUTE_NORMAL,
+                           nullptr);
+    LocalFree(sd);
+    if (h == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    DWORD written = 0;
+    const bool ok = WriteFile(h, content.data(), static_cast<DWORD>(content.size()), &written,
+                              nullptr) &&
+                    written == content.size() && FlushFileBuffers(h);
+    CloseHandle(h);
+    return ok;
+#else
+    const int fd = open(file.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (fd < 0) {
+        return false;
+    }
+    std::size_t done = 0;
+    bool ok = true;
+    while (done < content.size()) {
+        const ssize_t n = write(fd, content.data() + done, content.size() - done);
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+        if (n <= 0) {
+            ok = false;
+            break;
+        }
+        done += static_cast<std::size_t>(n);
+    }
+    ok = ok && fsync(fd) == 0;
+    ok = close(fd) == 0 && ok;
+    return ok;
+#endif
+}
+
+bool is_key_id(std::string_view id) {
+    return !id.empty() && id.size() <= 32 && std::all_of(id.begin(), id.end(), [](char c) {
+        return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
+    });
+}
+
+// The secret key file has two lines: the key id, then the 32-byte seed in
+// base64. Plain text, so no parser keeps copies of the seed.
 struct SecretKey {
     std::string id;
     std::array<std::uint8_t, 64> secret{};  // monocypher's seed + public key
@@ -77,31 +173,36 @@ struct SecretKey {
 };
 
 bool load_secret(const fs::path& file, SecretKey& key) {
-    auto text = read_file(file);
-    if (!text) {
+    auto read = read_file(file);
+    if (!read) {
         std::cerr << "Can't read the secret key file.\n";
         return false;
     }
-    const auto doc = nlohmann::json::parse(*text, nullptr, false);
-    crypto_wipe(text->data(), text->size());
-    if (!doc.is_object() || !doc.contains("key") || !doc["key"].is_string() ||
-        !doc.contains("seed") || !doc["seed"].is_string()) {
+    WipedString text(std::move(*read));
+    const std::string& t = text.get();
+    const std::size_t nl = t.find('\n');
+    const std::size_t end = nl == std::string::npos ? nl : t.find('\n', nl + 1);
+    if (nl == std::string::npos || end == std::string::npos || end + 1 != t.size()) {
         std::cerr << "The secret key file is damaged.\n";
         return false;
     }
-    auto seed = from_base64(doc["seed"].get_ref<const std::string&>());
-    if (!seed || seed->size() != 32) {
+    const std::string id = t.substr(0, nl);
+    auto seed = from_base64(std::string_view(t).substr(nl + 1, end - nl - 1));
+    if (!is_key_id(id) || !seed || seed->size() != 32) {
+        if (seed) {
+            crypto_wipe(seed->data(), seed->size());
+        }
         std::cerr << "The secret key file is damaged.\n";
         return false;
     }
-    key.id = doc["key"].get<std::string>();
+    key.id = id;
     crypto_ed25519_key_pair(key.secret.data(), key.public_key.data(), seed->data());  // wipes seed
     return true;
 }
 
 int keygen(const fs::path& file, const std::string& id) {
-    if (fs::exists(file)) {
-        std::cerr << "Refusing to overwrite an existing key file.\n";
+    if (!is_key_id(id)) {
+        std::cerr << "A key id is 1-32 characters: a-z, 0-9 and '-', such as hostkurd-2026.\n";
         return 1;
     }
     SecretKey key;
@@ -111,22 +212,12 @@ int keygen(const fs::path& file, const std::string& id) {
         std::cerr << "The system random number generator failed.\n";
         return 1;
     }
-    std::string seed_b64 = to_base64(seed);
-    crypto_ed25519_key_pair(key.secret.data(), key.public_key.data(), seed.data());
-    // Create the file empty and owner-only first, so the key is never in a
-    // file others can read, even for a moment.
-    std::ofstream(file, std::ios::binary).close();
-    fs::permissions(file, fs::perms::owner_read | fs::perms::owner_write,
-                    fs::perm_options::replace);
-    {
-        std::ofstream out(file, std::ios::binary | std::ios::trunc);
-        out << nlohmann::json{{"key", id}, {"seed", seed_b64}}.dump() << "\n";
-        if (!out) {
-            std::cerr << "Can't write the key file.\n";
-            return 1;
-        }
+    WipedString content(id + "\n" + to_base64(seed) + "\n");
+    crypto_ed25519_key_pair(key.secret.data(), key.public_key.data(), seed.data());  // wipes seed
+    if (!write_new_private_file(file, content.get())) {
+        std::cerr << "Can't create the key file (it must not exist yet).\n";
+        return 1;
     }
-    crypto_wipe(seed_b64.data(), seed_b64.size());
     std::cout << "Key id:     " << id << "\n"
               << "Public key: " << to_base64(key.public_key) << "\n"
               << "Build the public key and id into FloServer. Keep the key file offline.\n";
@@ -163,7 +254,13 @@ int sign(const fs::path& manifest_file, const fs::path& key_file) {
     }
     fs::path out_path = manifest_file;
     out_path += ".sig";
-    std::ofstream(out_path, std::ios::binary) << sig_file;
+    std::ofstream out(out_path, std::ios::binary | std::ios::trunc);
+    out << sig_file;
+    out.close();
+    if (!out) {
+        std::cerr << "Can't write the .sig file.\n";
+        return 1;
+    }
     std::cout << "Signed " << result.manifest->runtimes.size() << " runtimes, sequence "
               << result.manifest->sequence << ".\n";
     return 0;

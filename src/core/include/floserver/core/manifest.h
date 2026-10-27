@@ -13,7 +13,7 @@
 // manifest.json, schema 1:
 //   {
 //     "schema": 1,
-//     "sequence": 42,                       // only ever goes up
+//     "sequence": 42,                       // only ever goes up, per signing key
 //     "expires": "2026-12-01T00:00:00Z",    // a stale copy can't be replayed
 //     "runtimes": [
 //       {
@@ -35,6 +35,8 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <functional>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -76,7 +78,8 @@ enum class ManifestError : std::uint8_t {
     UnsupportedSchema, // newer than this app understands: update FloServer
     BadField,          // schema, sequence or expires missing or wrong
     Expired,           // a stale copy; try another mirror
-    Rollback,          // older than one we've already used
+    Rollback,          // older than one we've already used with this key
+    SequenceJump,      // jumps further ahead than any real release could
 };
 
 struct ManifestResult {
@@ -84,13 +87,22 @@ struct ManifestResult {
     ManifestError error = ManifestError::None;
     std::string message;                // plain English for logs and the UI
     std::vector<std::string> warnings;  // skipped entries
+    std::string key_id;                 // the trusted key that signed it; set on success
 };
 
 struct ManifestCheck {
     std::vector<TrustedKey> trusted_keys;
     std::chrono::sys_seconds now;
-    std::int64_t last_sequence = 0;  // highest sequence accepted before
+    // Highest sequence accepted before, per key id. Kept per key so that a
+    // list signed with a stolen key and a huge sequence can't lock users out
+    // for good: the replacement key starts its own count. The caller stores
+    // result.key_id -> manifest.sequence after a successful open.
+    std::map<std::string, std::int64_t, std::less<>> last_sequences;
 };
+
+// A list may move the sequence ahead by at most this much at once. Daily
+// re-signing for 100 years stays far below it; a typo or an attack doesn't.
+inline constexpr std::int64_t kMaxSequenceJump = 100'000;
 
 [[nodiscard]] ManifestResult open_manifest(std::string_view manifest_bytes,
                                            std::string_view signature_file,

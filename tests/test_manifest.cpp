@@ -5,6 +5,7 @@
 #include <monocypher-ed25519.h>
 #include <nlohmann/json.hpp>
 
+#include <limits>
 #include <string>
 
 using namespace floserver::core;
@@ -42,7 +43,7 @@ ManifestCheck default_check() {
     ManifestCheck c;
     c.trusted_keys = {{"hostkurd-2026", kKey.pub}};
     c.now = at("2026-10-27T12:00:00Z");
-    c.last_sequence = 5;
+    c.last_sequences = {{"hostkurd-2026", 5}};
     return c;
 }
 
@@ -148,10 +149,35 @@ TEST_CASE("expired and older manifests are refused even when signed") {
     CHECK(open_signed(doc, check).manifest.has_value());
 
     check = default_check();
-    check.last_sequence = 8;
+    check.last_sequences["hostkurd-2026"] = 8;
     CHECK(open_signed(doc, check).error == ManifestError::Rollback);
-    check.last_sequence = 7;  // the same one again is fine
-    CHECK(open_signed(doc, check).manifest.has_value());
+    check.last_sequences["hostkurd-2026"] = 7;  // the same one again is fine
+    const auto r = open_signed(doc, check);
+    REQUIRE(r.manifest.has_value());
+    CHECK(r.key_id == "hostkurd-2026");
+}
+
+TEST_CASE("sequence numbers are counted per key and can't jump too far") {
+    // A stolen key signs a huge sequence: refused, it jumps too far.
+    auto doc = good_doc();
+    doc["sequence"] = 5 + kMaxSequenceJump + 1;
+    CHECK(open_signed(doc).error == ManifestError::SequenceJump);
+    doc["sequence"] = 5 + kMaxSequenceJump;
+    CHECK(open_signed(doc).manifest.has_value());
+    doc["sequence"] = std::numeric_limits<std::int64_t>::max();
+    CHECK(open_signed(doc).error == ManifestError::SequenceJump);
+
+    // After a key change the new key starts its own count, so a high count
+    // under the old key can't lock users out.
+    ManifestCheck check = default_check();
+    check.trusted_keys.push_back({"hostkurd-2027", kOtherKey.pub});
+    check.last_sequences["hostkurd-2026"] = 90'000;
+    auto fresh = good_doc();
+    fresh["sequence"] = 1;
+    const std::string bytes = fresh.dump(2);
+    const auto r = open_manifest(bytes, kOtherKey.sign(bytes, "hostkurd-2027"), check);
+    REQUIRE(r.manifest.has_value());
+    CHECK(r.key_id == "hostkurd-2027");
 }
 
 TEST_CASE("schema, sequence and expires are required") {
@@ -167,9 +193,24 @@ TEST_CASE("schema, sequence and expires are required") {
     doc = good_doc();
     doc["sequence"] = -1;
     CHECK(open_signed(doc).error == ManifestError::BadField);
+    doc["sequence"] = 7.5;
+    CHECK(open_signed(doc).error == ManifestError::BadField);
+    doc["sequence"] = std::numeric_limits<std::uint64_t>::max();
+    CHECK(open_signed(doc).error == ManifestError::BadField);
+    doc = good_doc();
+    doc["schema"] = 0;
+    CHECK(open_signed(doc).error == ManifestError::BadField);
+    doc["schema"] = std::numeric_limits<std::uint64_t>::max();
+    CHECK(open_signed(doc).error == ManifestError::UnsupportedSchema);
     doc = good_doc();
     doc["expires"] = "2026-12-01";
     CHECK(open_signed(doc).error == ManifestError::BadField);
+
+    for (const char* other : {"[1, 2]", "\"text\"", "42"}) {
+        CAPTURE(other);
+        CHECK(open_manifest(other, kKey.sign(other, "hostkurd-2026"), default_check()).error ==
+              ManifestError::NotJson);
+    }
 
     const std::string not_json = "this is signed but not JSON";
     CHECK(open_manifest(not_json, kKey.sign(not_json, "hostkurd-2026"), default_check()).error ==
@@ -181,6 +222,17 @@ TEST_CASE("a bad entry is skipped with a warning, the rest still load") {
         {"http URL", {{"urls", {"http://example.com/php.zip"}}}},
         {"URL with a quote", {{"urls", {"https://example.com/a\"b"}}}},
         {"URL with a space", {{"urls", {"https://example.com/a b"}}}},
+        {"URL with user info", {{"urls", {"https://evil@mirror.hostkurd.net/php.zip"}}}},
+        {"URL with an empty host", {{"urls", {"https:///php.zip"}}}},
+        {"URL with only user info", {{"urls", {"https://@x/php.zip"}}}},
+        {"URL with a bad port", {{"urls", {"https://example.com:99999/a"}}}},
+        {"URL with port 0", {{"urls", {"https://example.com:0/a"}}}},
+        {"URL with a fragment", {{"urls", {"https://example.com/a#b"}}}},
+        {"URL with an encoded NUL", {{"urls", {"https://example.com/a%00.zip"}}}},
+        {"URL with an upper-case host", {{"urls", {"https://Example.com/a"}}}},
+        {"URL with a dotted host end", {{"urls", {"https://example.com./a"}}}},
+        {"http URL first", {{"urls", {"http://example.com/a", "https://example.com/a"}}}},
+        {"size over 4 GiB", {{"size", 4ULL * 1024 * 1024 * 1024 + 1}}},
         {"no URLs", {{"urls", nlohmann::json::array()}}},
         {"short hash", {{"sha256", "abcd"}}},
         {"non-hex hash", {{"sha256", std::string(64, 'g')}}},
@@ -201,6 +253,72 @@ TEST_CASE("a bad entry is skipped with a warning, the rest still load") {
         REQUIRE(r.warnings.size() == 1);
         CHECK(r.warnings[0].find("entry 1") != std::string::npos);
     }
+}
+
+TEST_CASE("well-formed URLs pass") {
+    auto doc = good_doc();
+    doc["runtimes"][0]["urls"] = {"https://mirror.hostkurd.net/php/php-8.2.27-nts-x64.zip",
+                                  "https://windows.php.net:443/downloads/releases/php-8.2.27.zip",
+                                  "https://a-b.c/x?y=1&z=%20"};
+    const auto r = open_signed(doc);
+    REQUIRE(r.manifest.has_value());
+    CHECK(r.warnings.empty());
+    CHECK(r.manifest->runtimes[0].urls.size() == 3);
+}
+
+TEST_CASE("signatures of the wrong length or non-canonical form are refused") {
+    const std::string bytes = good_doc().dump(2);
+    const auto sig_json = nlohmann::json::parse(kKey.sign(bytes, "hostkurd-2026"));
+    auto sig = *from_base64(sig_json["signature"].get<std::string>());
+    for (std::size_t len : {std::size_t{63}, std::size_t{65}}) {
+        CAPTURE(len);
+        auto wrong = sig;
+        wrong.resize(len);
+        const std::string file =
+            nlohmann::json{{"key", "hostkurd-2026"}, {"signature", to_base64(wrong)}}.dump();
+        CHECK(open_manifest(bytes, file, default_check()).error == ManifestError::BadSignatureFile);
+    }
+    // S + L (the group order) is the same signature in another spelling:
+    // RFC 8032 requires it to be refused, so signatures can't be altered.
+    constexpr std::array<std::uint8_t, 32> kL = {
+        0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7,
+        0xa2, 0xde, 0xf9, 0xde, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10};
+    unsigned carry = 0;
+    for (std::size_t i = 0; i < 32; ++i) {
+        const unsigned v = sig[32 + i] + kL[i] + carry;
+        sig[32 + i] = static_cast<std::uint8_t>(v);
+        carry = v >> 8U;
+    }
+    const std::string file =
+        nlohmann::json{{"key", "hostkurd-2026"}, {"signature", to_base64(sig)}}.dump();
+    CHECK(open_manifest(bytes, file, default_check()).error == ManifestError::BadSignature);
+}
+
+TEST_CASE("a list without runtimes opens with a warning") {
+    auto doc = good_doc();
+    doc.erase("runtimes");
+    auto r = open_signed(doc);
+    REQUIRE(r.manifest.has_value());
+    CHECK(r.warnings.size() == 1);
+    doc["runtimes"] = "php";
+    r = open_signed(doc);
+    REQUIRE(r.manifest.has_value());
+    CHECK(r.warnings.size() == 1);
+}
+
+TEST_CASE("runtimes_for doesn't crash on a hand-built manifest") {
+    Manifest m;
+    RuntimeFile bad;
+    bad.name = "php";
+    bad.platform = "windows-x64";
+    bad.version = "not a version";
+    RuntimeFile good = bad;
+    good.version = "8.4.1";
+    m.runtimes = {bad, good};
+    const auto list = runtimes_for(m, "php", "windows-x64");
+    REQUIRE(list.size() == 2);
+    CHECK(list[0].version == "8.4.1");
 }
 
 TEST_CASE("unknown keys are ignored for newer manifests") {
