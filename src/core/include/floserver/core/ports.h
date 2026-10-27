@@ -15,7 +15,9 @@ namespace floserver::core {
 
 using Port = std::uint16_t;
 
-// Asks the operating system whether 127.0.0.1:port can be listened on now.
+// Asks the operating system whether we could listen on 127.0.0.1:port and
+// [::1]:port now without sharing the port with anyone, including a program
+// listening on 0.0.0.0 or [::]. Never connects.
 [[nodiscard]] bool can_listen_on_loopback(Port port);
 
 // Lets tests replace the operating-system check.

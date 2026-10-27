@@ -57,10 +57,11 @@ bool family_unsupported() { return errno == EAFNOSUPPORT || errno == EADDRNOTAVA
 
 enum class Listen : std::uint8_t { Free, Taken, NoSuchAddress };
 
-// Tries to listen on 127.0.0.1:port or [::1]:port. No SO_REUSEADDR: on macOS
+// Tries to listen on 127.0.0.1:port or [::1]:port, or with `wildcard` only
+// binds 0.0.0.0:port or [::]:port (no listen, so no firewall prompt). No SO_REUSEADDR: on macOS
 // it would let us bind 127.0.0.1 while another program listens on 0.0.0.0,
 // and we never connect, so there is no TIME_WAIT of ours to skip.
-Listen try_listen(bool ipv6, Port port) {
+Listen try_listen(bool ipv6, bool wildcard, Port port) {
     const NativeSocket s = socket(ipv6 ? AF_INET6 : AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (s == kNoSocket) {
         return family_unsupported() ? Listen::NoSuchAddress : Listen::Taken;
@@ -80,19 +81,19 @@ Listen try_listen(bool ipv6, Port port) {
         sockaddr_in6 addr{};
         addr.sin6_family = AF_INET6;
         addr.sin6_port = htons(port);
-        addr.sin6_addr = in6addr_loopback;
+        addr.sin6_addr = wildcard ? in6addr_any : in6addr_loopback;
         bound = bind(s, reinterpret_cast<const sockaddr*>(&addr), static_cast<SockLen>(sizeof addr));
     } else {
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_port = htons(port);
-        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_addr.s_addr = htonl(wildcard ? INADDR_ANY : INADDR_LOOPBACK);
         bound = bind(s, reinterpret_cast<const sockaddr*>(&addr), static_cast<SockLen>(sizeof addr));
     }
     Listen result = Listen::Free;
     if (bound != 0) {
         result = family_unsupported() ? Listen::NoSuchAddress : Listen::Taken;
-    } else if (listen(s, 1) != 0) {
+    } else if (!wildcard && listen(s, 1) != 0) {
         result = Listen::Taken;
     }
     close_socket(s);
@@ -108,10 +109,18 @@ bool can_listen_on_loopback(Port port) {
         return false;
     }
 #endif
-    // Browsers try [::1] first for *.localhost, and Node and Vite listen there
-    // by default, so a port is free only if both loopback addresses are.
-    // A machine without IPv6 counts as free on that side.
-    return try_listen(false, port) == Listen::Free && try_listen(true, port) != Listen::Taken;
+    // Loopback: browsers try [::1] first for *.localhost, and Node and Vite
+    // listen there by default, so both loopback addresses must be free. A
+    // machine without IPv6 counts as free on that side.
+    //
+    // Wildcard: on Windows we can listen on 127.0.0.1:port even while another
+    // program (XAMPP's Apache, say) listens on 0.0.0.0:port, and we would then
+    // take its local traffic. Binding the wildcard address fails when anyone
+    // holds the port on any address, so that catches it.
+    return try_listen(false, false, port) == Listen::Free &&
+           try_listen(false, true, port) == Listen::Free &&
+           try_listen(true, false, port) != Listen::Taken &&
+           try_listen(true, true, port) != Listen::Taken;
 }
 
 std::optional<WebPorts> pick_web_ports(const PortProbe& probe) {
