@@ -1,0 +1,7 @@
+add_executable(floserver_manifest main.cpp)
+set_target_properties(floserver_manifest PROPERTIES OUTPUT_NAME floserver-manifest)
+target_link_libraries(floserver_manifest PRIVATE floserver_core floserver_third_party floserver_monocypher)
+if(WIN32)
+    target_link_libraries(floserver_manifest PRIVATE bcrypt advapi32)
+endif()
+floserver_code_rules(floserver_manifest)

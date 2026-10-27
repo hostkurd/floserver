@@ -15,8 +15,9 @@ back to the note first.
 | `src/daemon` | `floserverd`, the background service in the user's session (D2) |
 | `src/cli` | `floserver` command line; the build also makes a copy named `fls` (D2, Q2). Install rules come with the installer. |
 | `src/ui-win32` | `FloServer.exe`, the Windows window, plain Win32 (D1) |
+| `tools/manifest-tool` | `floserver-manifest`: makes the signing key and signs the runtime manifest; see `docs/manifest.md` |
 | `tests` | Unit tests for the core (doctest) |
-| `third_party` | Header-only libraries, see `third_party/README.md` |
+| `third_party` | Vendored libraries, see `third_party/README.md` |
 
 ## Building
 
