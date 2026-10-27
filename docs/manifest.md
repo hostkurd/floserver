@@ -33,7 +33,7 @@ If every mirror's list reads as out of date, the user's clock may be ahead. The 
 
 ## The signing key
 
-- Make it once with `floserver-manifest keygen <key file> hostkurd-2026`, on an offline machine.
+- Make it once with `floserver-manifest keygen <key file> floserver-2026`, on an offline machine. The first key, `floserver-2026`, was made on 27 Oct 2026 and is built into `src/core/src/builtin.cpp`.
   - The tool creates the key file readable only by you: an access list on Windows, mode 600 elsewhere. It refuses to overwrite an existing file.
   - The tool prints the public key, which goes into the app's built-in list.
   - The key file never goes on a server, in git, or in chat.
