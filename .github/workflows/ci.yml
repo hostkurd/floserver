@@ -20,7 +20,19 @@ jobs:
       - name: Configure
         run: cmake -S . -B build -A x64
       - name: Build (Debug)
-        run: cmake --build build --config Debug
+        shell: pwsh
+        run: |
+          cmake --build build --config Debug 2>&1 | Tee-Object -FilePath build-debug.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Show compiler errors as annotations
+        if: failure()
+        shell: pwsh
+        run: |
+          if (Test-Path build-debug.log) {
+            Select-String -Path build-debug.log -Pattern ': (fatal )?error [A-Z]+[0-9]+|: warning C[0-9]+' |
+              Select-Object -First 30 |
+              ForEach-Object { "::error title=MSVC::$($_.Line.Trim())" }
+          }
       - name: Test (Debug)
         run: ctest --test-dir build -C Debug --output-on-failure
       - name: Show failed tests as annotations
