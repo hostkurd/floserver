@@ -13,7 +13,7 @@ back to the note first.
 | --- | --- |
 | `src/core` | The shared core library: every rule and decision, no UI code (D1) |
 | `src/daemon` | `floserverd`, the background service in the user's session (D2) |
-| `src/cli` | `floserver` command line; the build also makes a copy named `fls` (D2, Q2). Install rules come with the installer. |
+| `src/cli` | `floserver` command line; the build also makes a copy named `flo` (D2). Install rules come with the installer. |
 | `src/ui-win32` | `FloServer.exe`, the Windows window, plain Win32 (D1) |
 | `tools/manifest-tool` | `floserver-manifest`: builds, signs and verifies the runtime manifest, and makes the signing key; see `docs/manifest.md` |
 | `tools/cdn-check` | `check-floserver-cdn.ps1`: checks the files on cdn.floserver.org against the official releases |
