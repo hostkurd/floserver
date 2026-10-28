@@ -4,6 +4,11 @@ configure_file(build_info.h.in ${CMAKE_CURRENT_BINARY_DIR}/generated/floserver/c
 
 add_library(floserver_core STATIC
     src/builtin.cpp
+    src/der.cpp
+    src/crypto_common.cpp
+    src/crypto_windows.cpp
+    src/crypto_openssl.cpp
+    src/certificates.cpp
     src/downloader.cpp
     src/encoding.cpp
     src/http.cpp
@@ -21,6 +26,7 @@ add_library(floserver_core STATIC
     src/project_service.cpp
     src/site_plan.cpp
     src/protocol.cpp
+    src/trust_store.cpp
     src/runtime_service.cpp
     src/runtime_store.cpp
     src/service_client.cpp
@@ -34,6 +40,16 @@ target_include_directories(floserver_core PUBLIC
 # nlohmann/json is part of core's interface (protocol.h).
 target_link_libraries(floserver_core PUBLIC floserver_third_party PRIVATE floserver_monocypher floserver_miniz)
 if(WIN32)
-    target_link_libraries(floserver_core PRIVATE ws2_32 advapi32 psapi winhttp)
+    target_link_libraries(floserver_core PRIVATE ws2_32 advapi32 psapi winhttp bcrypt crypt32)
+else()
+    # The local certificate authority (D7) uses the system's OpenSSL on Linux
+    # and macOS. Without it the build works, but can't make certificates.
+    find_package(OpenSSL 3.0 COMPONENTS Crypto)
+    if(OpenSSL_FOUND)
+        target_link_libraries(floserver_core PRIVATE OpenSSL::Crypto)
+        target_compile_definitions(floserver_core PRIVATE FLOSERVER_HAVE_OPENSSL)
+    else()
+        message(WARNING "OpenSSL 3 not found: this build can't make HTTPS certificates")
+    endif()
 endif()
 floserver_code_rules(floserver_core)

@@ -2,11 +2,13 @@
 // short name `flo` (FloCMS's own CLI is `php flo`, a PHP script, so they don't clash).
 
 #include "floserver/core/build_info.h"
+#include "floserver/core/encoding.h"
 #include "floserver/core/ipc.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/project_config.h"
 #include "floserver/core/version.h"
 #include "floserver/core/service_client.h"
+#include "floserver/core/trust_store.h"
 
 #include <chrono>
 #include <csignal>
@@ -51,6 +53,8 @@ void print_help(std::ostream& out) {
         << "  add [folder] [--name <n>]  Add a folder as a project (this folder if none)\n"
         << "  remove <name>              Forget a project (its files are kept)\n"
         << "  use <php|node|mariadb> <v> Set a version in this project's floserver.json\n"
+        << "  trust                      Let your browsers trust FloServer's HTTPS certificates\n"
+        << "  untrust                    Remove FloServer's certificate authority\n"
         << "  check [folder]             Check the floserver.json for a project\n"
         << "  version                    Show the version\n"
         << "  help                       Show this help\n";
@@ -507,6 +511,93 @@ int use(const std::vector<std::string>& args) {
     return 0;
 }
 
+std::optional<std::vector<std::uint8_t>> ca_der(const nlohmann::json& ca) {
+    return floserver::core::from_base64(text_of(ca, "der"));
+}
+
+// Makes the CA (in the service) and adds it to the user's trust store here,
+// in the foreground, because Windows asks the user to confirm.
+int trust() {
+    auto client = connect_or_start(std::chrono::seconds(30));
+    if (!client) {
+        return 1;
+    }
+    const auto reply = client->call("certs.ensure_ca");
+    if (!reply || !reply->ok || !reply->result.contains("ca")) {
+        return print_refusal(reply);
+    }
+    const auto& ca = reply->result["ca"];
+    const auto der = ca_der(ca);
+    if (!der) {
+        std::cerr << "FloServer sent a certificate that can't be read.\n";
+        return 1;
+    }
+    const std::string name = text_of(ca, "common_name");
+    switch (floserver::core::ca_trust_state(*der)) {
+        case floserver::core::TrustState::Trusted:
+            std::cout << name << " is already trusted.\n";
+            return 0;
+        case floserver::core::TrustState::Unsupported:
+            std::cout << "On this system, add " << text_of(ca, "path")
+                      << " to your browser's or system's trusted certificates by hand.\n";
+            return 1;
+        case floserver::core::TrustState::NotTrusted:
+            break;
+    }
+    std::cout << "Adding " << name << " to your certificates.\n"
+              << "Windows will ask you to confirm; the prompt names \"" << name << "\".\n"
+              << "It can only sign localhost names, so it can't be used for any real website.\n";
+    bool cancelled = false;
+    std::string error;
+    if (!floserver::core::trust_ca(*der, cancelled, error)) {
+        std::cerr << (cancelled ? "Not added: you said no. Run flo trust again when you're ready.\n"
+                                : "Not added: " + error + "\n");
+        return 1;
+    }
+    std::cout << "Done. Browsers accept https://<project>.localhost now (restart a browser that was open).\n"
+              << "Firefox: if it still warns, open about:config and set security.enterprise_roots.enabled to true.\n";
+    return 0;
+}
+
+int untrust() {
+    auto client = connect_or_start(std::chrono::seconds(30));
+    if (!client) {
+        return 1;
+    }
+    const auto status = client->call("certs.status");
+    if (!status || !status->ok) {
+        // A damaged CA can still be removed from disk; its store entry needs
+        // the certificate, which we no longer have.
+        if (status && status->error_code == "ca_damaged") {
+            const auto removed = client->call("certs.remove");
+            if (removed && removed->ok) {
+                std::cout << "Removed the damaged certificate authority's files. If Windows still lists a "
+                             "\"FloServer local CA\", remove it in certmgr.msc under Trusted Root Certification "
+                             "Authorities.\n";
+                return 0;
+            }
+        }
+        return print_refusal(status);
+    }
+    const auto& ca = status->result["ca"];
+    if (ca.is_object()) {
+        const auto der = ca_der(ca);
+        bool cancelled = false;
+        std::string error;
+        if (der && !floserver::core::untrust_ca(*der, cancelled, error)) {
+            std::cerr << (cancelled ? "Not removed: you said no.\n" : "Not removed: " + error + "\n");
+            return 1;
+        }
+    }
+    const auto removed = client->call("certs.remove");
+    if (!removed || !removed->ok) {
+        return print_refusal(removed);
+    }
+    std::cout << "FloServer's certificate authority and project certificates are removed.\n"
+              << "Run flo trust to make a new one.\n";
+    return 0;
+}
+
 int check(const fs::path& start) {
     const auto file = floserver::core::find_project_config(start);
     if (!file) {
@@ -576,6 +667,12 @@ int run_command(const std::vector<std::string>& args, const std::vector<fs::path
     }
     if (args[0] == "use") {
         return use(args);
+    }
+    if (args[0] == "trust" && args.size() == 1) {
+        return trust();
+    }
+    if (args[0] == "untrust" && args.size() == 1) {
+        return untrust();
     }
     if (args[0] == "check") {
         return check(paths.size() > 1 ? paths[1] : fs::current_path());

@@ -106,6 +106,27 @@ TEST_CASE("the real service starts, answers, refuses a second copy and stops") {
     CHECK(gone->error_code == "unknown_project");
     CHECK(std::filesystem::is_directory(shop));
 
+    // The certificate authority: made on request, never trusted by the
+    // service itself (that needs the user's confirmation), removed on request.
+    const auto none = client->call("certs.status");
+    REQUIRE(none.has_value());
+    REQUIRE(none->ok);
+    CHECK(none->result["ca"].is_null());
+    const auto made = client->call("certs.ensure_ca");
+    REQUIRE(made.has_value());
+    INFO(made->error_message);
+    if (made->ok) {  // a build without crypto refuses instead
+        CHECK(made->result["ca"]["trusted"] != "yes");
+        CHECK(made->result["ca"]["der"].is_string());
+        const auto again = client->call("certs.status");
+        REQUIRE(again.has_value());
+        CHECK(again->result["ca"]["fingerprint"] == made->result["ca"]["fingerprint"]);
+        const auto removed_ca = client->call("certs.remove");
+        REQUIRE(removed_ca.has_value());
+        CHECK(removed_ca->ok);
+        CHECK_FALSE(std::filesystem::exists(data.path() / "certs"));
+    }
+
     // A second service for the same user and instance says so and exits.
     const auto second = run_and_wait(daemon, {}, std::chrono::seconds(30), error);
     INFO(error);

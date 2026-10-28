@@ -45,6 +45,12 @@ namespace floserver::core {
 [[nodiscard]] bool write_file_atomically(const std::filesystem::path& file, std::string_view bytes,
                                          std::string& error);
 
+// The same for secrets (private keys): on macOS and Linux the file is
+// owner-only (0600) before any byte is written. On Windows the per-user app
+// folder already keeps other users out.
+[[nodiscard]] bool write_private_file_atomically(const std::filesystem::path& file, std::string_view bytes,
+                                                 std::string& error);
+
 // The whole file, or nothing if it can't be read or is larger than `max_bytes`.
 [[nodiscard]] std::optional<std::string> read_small_file(const std::filesystem::path& file,
                                                          std::size_t max_bytes);

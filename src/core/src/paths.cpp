@@ -110,7 +110,9 @@ std::string_view current_platform() {
 #endif
 }
 
-bool write_file_atomically(const fs::path& file, std::string_view bytes, std::string& error) {
+namespace {
+
+bool write_atomically(const fs::path& file, std::string_view bytes, bool owner_only, std::string& error) {
     std::error_code ec;
     fs::create_directories(file.parent_path(), ec);
     if (ec) {
@@ -122,6 +124,19 @@ bool write_file_atomically(const fs::path& file, std::string_view bytes, std::st
     temp += ".tmp-" + std::to_string(rd());
     {
         std::ofstream out(temp, std::ios::binary | std::ios::trunc);
+#ifndef _WIN32
+        if (owner_only && out) {
+            fs::permissions(temp, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace, ec);
+            if (ec) {
+                error = "can't make " + path_to_utf8(temp) + " private: " + error_text(ec);
+                out.close();
+                fs::remove(temp, ec);
+                return false;
+            }
+        }
+#else
+        (void)owner_only;
+#endif
         out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
         out.flush();
         if (!out) {
@@ -141,6 +156,16 @@ bool write_file_atomically(const fs::path& file, std::string_view bytes, std::st
         return false;
     }
     return true;
+}
+
+}  // namespace
+
+bool write_file_atomically(const fs::path& file, std::string_view bytes, std::string& error) {
+    return write_atomically(file, bytes, false, error);
+}
+
+bool write_private_file_atomically(const fs::path& file, std::string_view bytes, std::string& error) {
+    return write_atomically(file, bytes, true, error);
 }
 
 std::optional<std::string> read_small_file(const fs::path& file, std::size_t max_bytes) {

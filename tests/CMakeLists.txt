@@ -1,5 +1,6 @@
 add_executable(floserver_tests
     test_builtin.cpp
+    test_certificates.cpp
     test_downloader.cpp
     test_encoding.cpp
     test_ipc.cpp
@@ -22,7 +23,14 @@ add_dependencies(floserver_tests floserverd)
 target_compile_definitions(floserver_tests PRIVATE FLOSERVER_TEST_BIN_DIR="$<TARGET_FILE_DIR:floserverd>")
 target_link_libraries(floserver_tests PRIVATE floserver_core floserver_third_party floserver_monocypher floserver_miniz)
 if(WIN32)
-    target_link_libraries(floserver_tests PRIVATE ws2_32)
+    target_link_libraries(floserver_tests PRIVATE ws2_32 crypt32)
+else()
+    # Certificates are checked with OpenSSL's own verifier where it's there.
+    find_package(OpenSSL 3.0 COMPONENTS Crypto)
+    if(OpenSSL_FOUND)
+        target_link_libraries(floserver_tests PRIVATE OpenSSL::Crypto)
+        target_compile_definitions(floserver_tests PRIVATE FLOSERVER_TEST_OPENSSL)
+    endif()
 endif()
 floserver_code_rules(floserver_tests)
 add_test(NAME floserver_tests COMMAND floserver_tests)
