@@ -1,8 +1,9 @@
 #include "ipc_impl.h"
 
+#include "floserver/core/process.h"
+
 #include <algorithm>
 #include <array>
-#include <cstdlib>
 
 namespace floserver::core::ipc {
 
@@ -14,9 +15,8 @@ bool is_instance_name(std::string_view name) {
 
 std::string default_instance() {
     std::string name = "floserverd";
-    // NOLINTNEXTLINE(concurrency-mt-unsafe): read once at start-up
-    if (const char* suffix = std::getenv("FLOSERVER_INSTANCE"); suffix != nullptr && *suffix != '\0') {
-        const std::string candidate = name + "-" + suffix;
+    if (const auto suffix = get_env("FLOSERVER_INSTANCE"); suffix && !suffix->empty()) {
+        const std::string candidate = name + "-" + *suffix;
         if (is_instance_name(candidate)) {
             name = candidate;
         }
@@ -71,6 +71,10 @@ std::optional<std::string> Connection::receive() {
         return std::nullopt;
     }
     return message;
+}
+
+bool Connection::set_timeout(std::chrono::milliseconds limit) {
+    return impl_ && impl_->set_timeout(limit);
 }
 
 void Connection::close() {

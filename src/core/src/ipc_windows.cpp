@@ -1,15 +1,31 @@
-// Windows half of the private channel: a named pipe whose access list lets
-// only the current user in, claimed with FILE_FLAG_FIRST_PIPE_INSTANCE, and a
-// check of the user that runs the program at the other end.
+// Windows half of the private channel.
+//
+// The service creates the pipe with an explicit security descriptor:
+//   owner      the current user
+//   access     full for the current user; network logons denied
+//   label      Medium integrity, no write-up and no read-up, so sandboxed
+//              (Low integrity, AppContainer) programs of the same user can't
+//              open it at all
+// It claims the name with FILE_FLAG_FIRST_PIPE_INSTANCE and refuses remote
+// clients.
+//
+// A client checks the pipe itself, not the process behind it: the owner must
+// be the current user and the integrity label at least Medium. Another account
+// can't make the user the owner, and a sandboxed program of the same user
+// can't give its pipe a label above its own (Low), so neither can pose as the
+// service by creating the pipe first. Clients connect at identification level,
+// so the service can learn who they are but never act as them.
 
 #ifdef _WIN32
 
 #include "ipc_impl.h"
 
+#include <aclapi.h>
 #include <sddl.h>
 
 #include <atomic>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 namespace floserver::core::ipc {
@@ -18,6 +34,7 @@ namespace {
 
 constexpr DWORD kBufferSize = 64 * 1024;
 constexpr DWORD kBusyWaitMs = 2000;
+constexpr auto kBackoff = std::chrono::milliseconds(200);
 
 class Handle {
 public:
@@ -38,42 +55,32 @@ private:
     HANDLE h_;
 };
 
-// The SID of the user a process runs as, as text ("S-1-5-21-..."), or empty.
-std::wstring token_user_sid(HANDLE process) {
-    Handle token;
-    if (!OpenProcessToken(process, TOKEN_QUERY, token.out())) {
-        return {};
-    }
-    DWORD size = 0;
-    (void)GetTokenInformation(token.get(), TokenUser, nullptr, 0, &size);
-    if (size == 0) {
-        return {};
-    }
-    std::vector<unsigned char> buffer(size);
-    if (!GetTokenInformation(token.get(), TokenUser, buffer.data(), size, &size)) {
-        return {};
-    }
-    const auto* user = reinterpret_cast<const TOKEN_USER*>(buffer.data());
+std::wstring sid_text(PSID sid) {
     LPWSTR text = nullptr;
-    if (!ConvertSidToStringSidW(user->User.Sid, &text)) {
+    if (sid == nullptr || !ConvertSidToStringSidW(sid, &text)) {
         return {};
     }
-    std::wstring sid(text);
+    std::wstring out(text);
     LocalFree(text);
-    return sid;
+    return out;
 }
 
+// The SID of the user this process runs as, as text ("S-1-5-21-..."), or empty.
 const std::wstring& current_user_sid() {
-    static const std::wstring sid = token_user_sid(GetCurrentProcess());
+    static const std::wstring sid = [] {
+        Handle token;
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, token.out())) {
+            return std::wstring();
+        }
+        DWORD size = 0;
+        (void)GetTokenInformation(token.get(), TokenUser, nullptr, 0, &size);
+        std::vector<unsigned char> buffer(size);
+        if (size == 0 || !GetTokenInformation(token.get(), TokenUser, buffer.data(), size, &size)) {
+            return std::wstring();
+        }
+        return sid_text(reinterpret_cast<const TOKEN_USER*>(buffer.data())->User.Sid);
+    }();
     return sid;
-}
-
-std::wstring process_user_sid(ULONG pid) {
-    const Handle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid));
-    if (process.get() == nullptr) {
-        return {};
-    }
-    return token_user_sid(process.get());
 }
 
 std::wstring pipe_name(const std::string& instance) {
@@ -91,6 +98,76 @@ std::string narrow(const std::wstring& w) {
 
 std::string error_text(DWORD code) { return "Windows error " + std::to_string(code); }
 
+// True when the pipe was made by FloServer running as this user (see the top
+// of this file).
+bool pipe_is_ours(HANDLE h) {
+    PSID owner = nullptr;
+    PACL sacl = nullptr;
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    if (GetSecurityInfo(h, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION,
+                        &owner, nullptr, nullptr, &sacl, &descriptor) != ERROR_SUCCESS) {
+        return false;
+    }
+    bool ours = !current_user_sid().empty() && sid_text(owner) == current_user_sid();
+    if (ours && sacl != nullptr) {
+        for (DWORD i = 0; i < sacl->AceCount; ++i) {
+            void* ace = nullptr;
+            if (!GetAce(sacl, i, &ace) ||
+                static_cast<const ACE_HEADER*>(ace)->AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE) {
+                continue;
+            }
+            auto* label = static_cast<SYSTEM_MANDATORY_LABEL_ACE*>(ace);
+            PSID label_sid = &label->SidStart;
+            const UCHAR parts = *GetSidSubAuthorityCount(label_sid);
+            if (parts == 0 || *GetSidSubAuthority(label_sid, parts - 1U) < SECURITY_MANDATORY_MEDIUM_RID) {
+                ours = false;  // made by a sandboxed program
+            }
+        }
+    }
+    // No label at all means the implicit Medium label: fine.
+    LocalFree(descriptor);
+    return ours;
+}
+
+// Service-side handles are synchronous. Client handles are opened overlapped
+// so a request can time out when the service doesn't answer.
+bool transfer(HANDLE h, bool overlapped, DWORD timeout_ms, bool write, std::uint8_t* data,
+              std::size_t size) {
+    const Handle event(overlapped ? CreateEventW(nullptr, TRUE, FALSE, nullptr) : nullptr);
+    if (overlapped && event.get() == nullptr) {
+        return false;
+    }
+    while (size > 0) {
+        const DWORD chunk = size > kBufferSize ? kBufferSize : static_cast<DWORD>(size);
+        DWORD done = 0;
+        if (!overlapped) {
+            const BOOL ok = write ? WriteFile(h, data, chunk, &done, nullptr) : ReadFile(h, data, chunk, &done, nullptr);
+            if (!ok || done == 0) {
+                return false;
+            }
+        } else {
+            OVERLAPPED ov{};
+            ov.hEvent = event.get();
+            ResetEvent(event.get());
+            const BOOL ok = write ? WriteFile(h, data, chunk, nullptr, &ov) : ReadFile(h, data, chunk, nullptr, &ov);
+            if (!ok && GetLastError() != ERROR_IO_PENDING) {
+                return false;
+            }
+            if (WaitForSingleObject(event.get(), timeout_ms == 0 ? INFINITE : timeout_ms) != WAIT_OBJECT_0) {
+                CancelIoEx(h, &ov);
+                (void)GetOverlappedResult(h, &ov, &done, TRUE);
+                return false;
+            }
+            if (!GetOverlappedResult(h, &ov, &done, FALSE) || done == 0) {
+                return false;
+            }
+        }
+        data += done;
+        size -= done;
+    }
+    return true;
+}
+
 }  // namespace
 
 // ---- Connection ------------------------------------------------------------
@@ -98,29 +175,12 @@ std::string error_text(DWORD code) { return "Windows error " + std::to_string(co
 bool Connection::Impl::is_open() const { return handle != INVALID_HANDLE_VALUE; }
 
 bool Connection::Impl::write_all(const std::uint8_t* data, std::size_t size) const {
-    while (size > 0) {
-        const DWORD chunk = size > kBufferSize ? kBufferSize : static_cast<DWORD>(size);
-        DWORD written = 0;
-        if (!WriteFile(handle, data, chunk, &written, nullptr) || written == 0) {
-            return false;
-        }
-        data += written;
-        size -= written;
-    }
-    return true;
+    // WriteFile takes a const buffer; transfer() shares one signature for both.
+    return transfer(handle, overlapped, timeout_ms, true, const_cast<std::uint8_t*>(data), size);
 }
 
 bool Connection::Impl::read_all(std::uint8_t* data, std::size_t size) const {
-    while (size > 0) {
-        const DWORD chunk = size > kBufferSize ? kBufferSize : static_cast<DWORD>(size);
-        DWORD got = 0;
-        if (!ReadFile(handle, data, chunk, &got, nullptr) || got == 0) {
-            return false;
-        }
-        data += got;
-        size -= got;
-    }
-    return true;
+    return transfer(handle, overlapped, timeout_ms, false, data, size);
 }
 
 void Connection::Impl::close() {
@@ -128,6 +188,14 @@ void Connection::Impl::close() {
         CloseHandle(handle);
         handle = INVALID_HANDLE_VALUE;
     }
+}
+
+bool Connection::Impl::set_timeout(std::chrono::milliseconds limit) {
+    if (!overlapped) {
+        return false;  // service-side handles don't time out
+    }
+    timeout_ms = static_cast<DWORD>(limit.count());
+    return true;
 }
 
 // ---- Server ----------------------------------------------------------------
@@ -181,8 +249,8 @@ ListenStatus Server::listen(const std::string& instance, std::unique_ptr<Server>
     auto impl = std::make_unique<Impl>();
     impl->name = pipe_name(instance);
 
-    // Protected access list: full access for this user, nobody else.
-    const std::wstring sddl = L"D:P(A;;GA;;;" + sid + L")";
+    // See the top of this file.
+    const std::wstring sddl = L"O:" + sid + L"D:P(D;;GA;;;NU)(A;;GA;;;" + sid + L")S:(ML;;NWNR;;;ME)";
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1,
                                                               &impl->descriptor, nullptr)) {
         error = "can't build the channel's access list: " + error_text(GetLastError());
@@ -217,17 +285,27 @@ std::optional<Connection> Server::accept() {
         HANDLE h = INVALID_HANDLE_VALUE;
         {
             const std::lock_guard lock(impl_->mutex);
+            if (impl_->pending == INVALID_HANDLE_VALUE) {
+                // Creating the next instance failed last time (out of
+                // resources?): try again rather than stop serving.
+                impl_->pending = impl_->create_instance(false);
+            }
             h = impl_->pending;
         }
         if (h == INVALID_HANDLE_VALUE) {
-            return std::nullopt;
+            std::this_thread::sleep_for(kBackoff);
+            continue;
         }
         const BOOL connected = ConnectNamedPipe(h, nullptr) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED);
         if (impl_->stopped.load()) {
             return std::nullopt;
         }
         if (!connected) {
-            DisconnectNamedPipe(h);  // the client left before we got to it
+            const DWORD code = GetLastError();
+            DisconnectNamedPipe(h);
+            if (code != ERROR_NO_DATA) {
+                std::this_thread::sleep_for(kBackoff);  // not just a client that left: don't spin
+            }
             continue;
         }
 
@@ -236,10 +314,8 @@ std::optional<Connection> Server::accept() {
             const std::lock_guard lock(impl_->mutex);
             impl_->pending = impl_->create_instance(false);
         }
-
-        // Only this user gets here: the pipe's access list admits nobody else.
-        // (Checking the client's process here would turn away `fls` run from
-        // an administrator terminal, whose token a normal program can't read.)
+        // Only this user gets here: the pipe's access list and label admit
+        // nobody else.
         auto impl = std::make_unique<Connection::Impl>();
         impl->handle = h;
         return Connection(std::move(impl));
@@ -273,10 +349,8 @@ std::optional<Connection> connect(const std::string& instance, std::string& erro
     const std::wstring name = pipe_name(instance);
     HANDLE h = INVALID_HANDLE_VALUE;
     for (int attempt = 0; attempt < 3; ++attempt) {
-        // SECURITY_IDENTIFICATION: the service may learn who we are, but can't
-        // act as us.
         h = CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
-                        SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr);
+                        FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr);
         if (h != INVALID_HANDLE_VALUE) {
             break;
         }
@@ -294,15 +368,15 @@ std::optional<Connection> connect(const std::string& instance, std::string& erro
     if (h == INVALID_HANDLE_VALUE) {
         return std::nullopt;
     }
-    // The program serving the pipe must run as this user.
-    ULONG pid = 0;
-    if (!GetNamedPipeServerProcessId(h, &pid) || process_user_sid(pid) != current_user_sid()) {
+    if (!pipe_is_ours(h)) {
         CloseHandle(h);
-        error = "the FloServer channel is held by another user's program; not using it";
+        error = "the FloServer channel was created by another program, not FloServer running as you; "
+                "not using it";
         return std::nullopt;
     }
     auto impl = std::make_unique<Connection::Impl>();
     impl->handle = h;
+    impl->overlapped = true;
     return Connection(std::move(impl));
 }
 

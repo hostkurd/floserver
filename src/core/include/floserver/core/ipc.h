@@ -6,17 +6,19 @@
 //   - its access list lets only the current user in; remote clients are refused
 //   - the service claims the name with FILE_FLAG_FIRST_PIPE_INSTANCE, so only
 //     one service per user and instance can run
-//   - a client checks that the program serving the pipe runs as the same user,
-//     so another account can't pose as the service by taking the name first
+//   - its owner is the user and its integrity label Medium, so sandboxed
+//     programs can't open it; a client checks both on the pipe it opened, so
+//     neither another account nor a sandboxed program can pose as the service
 //
 // macOS and Linux: a Unix socket in a folder only the user can open
-//   ($XDG_RUNTIME_DIR/floserver, else $TMPDIR/floserver-<uid>, else
-//   /tmp/floserver-<uid>), with a lock file for the single instance; both sides
+//   ($XDG_RUNTIME_DIR/floserver; on macOS $TMPDIR/floserver-<uid>; else
+//   ~/.floserver/run), with a lock file for the single instance; both sides
 //   check the other end's user id.
 //
 // Messages are a 4-byte little-endian length, then that many bytes of UTF-8
 // JSON, at most kMaxMessage bytes.
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -47,6 +49,10 @@ public:
     [[nodiscard]] bool send(std::string_view message);
     [[nodiscard]] std::optional<std::string> receive();
     void close();
+
+    // Makes send and receive give up after `limit` (0: wait for ever). For
+    // client connections; returns false where it isn't supported.
+    bool set_timeout(std::chrono::milliseconds limit);
 
     struct Impl;
     explicit Connection(std::unique_ptr<Impl> impl);

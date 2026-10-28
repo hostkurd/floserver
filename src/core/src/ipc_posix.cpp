@@ -6,10 +6,14 @@
 
 #include "ipc_impl.h"
 
+#include "floserver/core/process.h"
+
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <thread>
+#include <vector>
 #include <cerrno>
-#include <cstdlib>
 #include <cstring>
 
 #include <fcntl.h>
@@ -17,6 +21,7 @@
 #include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -61,27 +66,29 @@ bool peer_uid(int fd, uid_t& uid) {
 #endif
 }
 
-std::string run_dir() {
-    // NOLINTBEGIN(concurrency-mt-unsafe): environment read, not written
-    const char* xdg = std::getenv("XDG_RUNTIME_DIR");
-    if (xdg != nullptr && xdg[0] == '/') {
-        return std::string(xdg) + "/floserver";
+// The folder for the socket, and the folders above it that we create.
+std::vector<std::string> run_dirs() {
+    if (const auto xdg = get_env("XDG_RUNTIME_DIR"); xdg && xdg->starts_with('/')) {
+        return {*xdg + "/floserver"};
     }
-    const std::string uid = std::to_string(getuid());
 #ifdef __APPLE__
     // macOS gives each user a private TMPDIR under /var/folders.
-    const char* tmp = std::getenv("TMPDIR");
-    if (tmp != nullptr && tmp[0] == '/') {
-        std::string dir(tmp);
-        while (dir.size() > 1 && dir.back() == '/') {
-            dir.pop_back();
+    if (auto tmp = get_env("TMPDIR"); tmp && tmp->starts_with('/')) {
+        while (tmp->size() > 1 && tmp->back() == '/') {
+            tmp->pop_back();
         }
-        return dir + "/floserver-" + uid;
+        return {*tmp + "/floserver-" + std::to_string(getuid())};
     }
 #endif
-    // NOLINTEND(concurrency-mt-unsafe)
-    return "/tmp/floserver-" + uid;
+    // In the home folder, which another user can't create things in first
+    // (a shared /tmp would let them block us).
+    if (const auto home = get_env("HOME"); home && home->starts_with('/')) {
+        return {*home + "/.floserver", *home + "/.floserver/run"};
+    }
+    return {"/tmp/floserver-" + std::to_string(getuid())};
 }
+
+std::string run_dir() { return run_dirs().back(); }
 
 // Creates `dir` if needed and makes sure it is a real folder owned by this
 // user that nobody else can open.
@@ -160,6 +167,15 @@ void Connection::Impl::close() {
     }
 }
 
+// Not const: the Windows version stores the limit in the connection.
+bool Connection::Impl::set_timeout(std::chrono::milliseconds limit) {  // NOLINT(readability-make-member-function-const)
+    timeval tv{};
+    tv.tv_sec = static_cast<time_t>(limit.count() / 1000);
+    tv.tv_usec = static_cast<suseconds_t>((limit.count() % 1000) * 1000);
+    return setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv) == 0 &&
+           setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv) == 0;
+}
+
 // ---- Server ----------------------------------------------------------------
 
 struct Server::Impl {
@@ -200,10 +216,12 @@ ListenStatus Server::listen(const std::string& instance, std::unique_ptr<Server>
         error = "invalid instance name";
         return ListenStatus::Failed;
     }
-    const std::string dir = run_dir();
-    if (!ensure_private_dir(dir, error)) {
-        return ListenStatus::Failed;
+    for (const std::string& d : run_dirs()) {
+        if (!ensure_private_dir(d, error)) {
+            return ListenStatus::Failed;
+        }
     }
+    const std::string dir = run_dir();
     auto impl = std::make_unique<Impl>();
     impl->socket_path = dir + "/" + instance + ".sock";
     const std::string lock_path = dir + "/" + instance + ".lock";
@@ -265,8 +283,17 @@ std::optional<Connection> Server::accept() {
         if ((fds[0].revents & POLLIN) == 0) {
             continue;
         }
+#ifdef __linux__
+        const int fd = ::accept4(impl_->listen_fd, nullptr, nullptr, SOCK_CLOEXEC);
+#else
         const int fd = set_cloexec(::accept(impl_->listen_fd, nullptr, nullptr));
+#endif
         if (fd < 0) {
+            if (errno != EINTR && errno != ECONNABORTED) {
+                // Out of file descriptors or memory: the socket stays
+                // readable, so wait instead of spinning.
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            }
             continue;
         }
         uid_t uid = 0;

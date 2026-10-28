@@ -15,6 +15,7 @@
 #include <memory>
 #include <mutex>
 #include <string_view>
+#include <system_error>
 #include <thread>
 
 namespace {
@@ -24,12 +25,21 @@ namespace protocol = floserver::core::protocol;
 using nlohmann::json;
 using Clock = std::chrono::steady_clock;
 
+// Same-user programs only can connect (the channel sees to that), but cap
+// them anyway so a stuck one can't pile up threads without end.
+constexpr int kMaxClients = 64;
+
 // Counts client threads so shutdown can wait for replies to be sent.
 class ActiveClients {
 public:
-    void add() {
+    // False when kMaxClients are already being served.
+    bool try_add() {
         const std::lock_guard lock(mutex_);
+        if (count_ >= kMaxClients) {
+            return false;
+        }
         ++count_;
+        return true;
     }
     void remove() {
         {
@@ -63,8 +73,16 @@ struct Service {
                 {"memory_bytes", memory ? json(*memory) : json(nullptr)}};
     }
 
-    // One client: requests in, replies out, until it hangs up.
-    void serve(ipc::Connection connection) {
+    // One client: requests in, replies out, until it hangs up. Nothing a
+    // client sends may take the service down.
+    void serve(ipc::Connection connection) noexcept {
+        try {
+            serve_requests(connection);
+        } catch (...) {  // NOLINT(bugprone-empty-catch): drop this client, keep serving others
+        }
+    }
+
+    void serve_requests(ipc::Connection& connection) {
         while (auto text = connection.receive()) {
             std::string error_code;
             const auto request = protocol::parse_request(*text, error_code);
@@ -110,11 +128,17 @@ int run() {
     service->server = std::move(server);
 
     while (auto connection = service->server->accept()) {
-        service->clients.add();
-        std::thread([service, c = std::move(*connection)]() mutable {
-            service->serve(std::move(c));
-            service->clients.remove();
-        }).detach();
+        if (!service->clients.try_add()) {
+            continue;  // too many clients: this one is closed
+        }
+        try {
+            std::thread([service, c = std::move(*connection)]() mutable {
+                service->serve(std::move(c));
+                service->clients.remove();
+            }).detach();
+        } catch (const std::system_error&) {
+            service->clients.remove();  // no thread for this client; keep serving
+        }
     }
     // Give the client that asked us to quit time to read the reply.
     service->clients.wait_until_idle(std::chrono::seconds(2));

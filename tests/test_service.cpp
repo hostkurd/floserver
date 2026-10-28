@@ -71,9 +71,11 @@ TEST_CASE("the real service starts, answers, refuses a second copy and stops") {
     CHECK_FALSE(unknown->ok);
     CHECK(unknown->error_code == "unknown_method");
 
-    // A second service for the same user and instance doesn't take over.
-    REQUIRE(spawn_detached(daemon, {}, error));
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    // A second service for the same user and instance says so and exits.
+    const auto second = run_and_wait(daemon, {}, std::chrono::seconds(30), error);
+    INFO(error);
+    REQUIRE(second.has_value());
+    CHECK(*second == 0);
     const auto again = client->call("status");
     REQUIRE(again.has_value());
     CHECK(again->result["pid"] == status->result["pid"]);

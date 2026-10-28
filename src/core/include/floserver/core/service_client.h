@@ -15,8 +15,10 @@ namespace floserver::core {
 class ServiceClient {
 public:
     // Nothing when the service isn't running (or `error` says what's wrong).
-    [[nodiscard]] static std::optional<ServiceClient> connect(const std::string& instance,
-                                                              std::string& error);
+    // A request that gets no answer within `timeout` fails instead of hanging.
+    [[nodiscard]] static std::optional<ServiceClient> connect(
+        const std::string& instance, std::string& error,
+        std::chrono::milliseconds timeout = std::chrono::seconds(15));
 
     // Sends one request and waits for its reply. Nothing if the connection broke.
     [[nodiscard]] std::optional<protocol::Reply> call(const std::string& method,

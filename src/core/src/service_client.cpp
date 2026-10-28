@@ -18,11 +18,13 @@ bool is_running(const std::string& instance) {
 
 }  // namespace
 
-std::optional<ServiceClient> ServiceClient::connect(const std::string& instance, std::string& error) {
+std::optional<ServiceClient> ServiceClient::connect(const std::string& instance, std::string& error,
+                                                    std::chrono::milliseconds timeout) {
     auto connection = ipc::connect(instance, error);
     if (!connection) {
         return std::nullopt;
     }
+    (void)connection->set_timeout(timeout);
     return ServiceClient(std::move(*connection));
 }
 
