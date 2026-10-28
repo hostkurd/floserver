@@ -1,8 +1,8 @@
 // floserverd: the background service in the user's session (D2).
 //
-// So far: one service per user, the private channel, status and quit, and
-// the runtimes (the signed list, installs as jobs, removal). Projects and
-// idle timers come next.
+// So far: one service per user, the private channel, status and quit, the
+// runtimes (the signed list, installs as jobs, removal) and the project list.
+// Running nginx and the PHP pools, and idle timers, come next.
 
 #include "floserver/core/build_info.h"
 #include "floserver/core/builtin.h"
@@ -10,6 +10,7 @@
 #include "floserver/core/ipc.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/process.h"
+#include "floserver/core/project_service.h"
 #include "floserver/core/protocol.h"
 #include "floserver/core/runtime_service.h"
 
@@ -104,9 +105,17 @@ std::string string_param(const json& params, const char* key) {
     return {};
 }
 
+std::optional<bool> bool_param(const json& params, const char* key) {
+    if (params.contains(key) && params[key].is_boolean()) {
+        return params[key].get<bool>();
+    }
+    return std::nullopt;
+}
+
 struct Service {
     std::shared_ptr<ipc::Server> server;
     std::unique_ptr<floserver::core::RuntimeService> runtimes;
+    std::unique_ptr<floserver::core::ProjectService> projects;
     Clock::time_point started = Clock::now();
     ActiveClients clients;
     std::atomic<bool> quitting{false};
@@ -146,6 +155,34 @@ struct Service {
         return protocol::make_result(r.id, {{"cancelled", runtimes->cancel(*id)}});
     }
 
+    // The reply to one projects.* request.
+    [[nodiscard]] std::string project_request(const protocol::Request& r) const {
+        namespace core = floserver::core;
+        if (!projects) {
+            return protocol::make_error(r.id, "no_data_folder",
+                                        "FloServer can't find a folder to keep its settings in (LOCALAPPDATA or HOME)");
+        }
+        core::ServiceRefusal refusal;
+        std::optional<json> result;
+        const std::string name = string_param(r.params, "name");
+        if (r.method == "projects.list") {
+            result = projects->list(refusal);
+        } else if (r.method == "projects.add") {
+            const std::filesystem::path dir = core::path_from_utf8(string_param(r.params, "path"));
+            if (!dir.is_absolute()) {
+                return protocol::make_error(r.id, "bad_params", "the project folder must be a full path");
+            }
+            result = projects->add(dir, name, refusal);
+        } else if (r.method == "projects.remove") {
+            if (projects->remove(name, refusal)) {
+                result = json::object();
+            }
+        } else {  // projects.set
+            result = projects->set(name, bool_param(r.params, "on"), bool_param(r.params, "keep_running"), refusal);
+        }
+        return result ? protocol::make_result(r.id, *result) : protocol::make_error(r.id, refusal.code, refusal.message);
+    }
+
     [[nodiscard]] json status() const {
         const auto memory = floserver::core::memory_in_use();
         return {{"version", floserver::core::kVersion},
@@ -177,6 +214,9 @@ struct Service {
                        request->method == "runtimes.remove" || request->method == "jobs.get" ||
                        request->method == "jobs.cancel") {
                 reply = runtime_request(*request);
+            } else if (request->method == "projects.list" || request->method == "projects.add" ||
+                       request->method == "projects.remove" || request->method == "projects.set") {
+                reply = project_request(*request);
             } else if (request->method == "quit") {
                 reply = protocol::make_result(request->id, json::object());
                 quit = true;
@@ -212,6 +252,9 @@ int run() {
     auto service = std::make_shared<Service>();
     service->server = std::move(server);
     service->runtimes = make_runtimes();
+    if (const auto data = floserver::core::data_dir()) {
+        service->projects = std::make_unique<floserver::core::ProjectService>(*data);
+    }
 
     while (auto connection = service->server->accept()) {
         if (!service->clients.try_add()) {

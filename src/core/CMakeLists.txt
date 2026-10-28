@@ -12,10 +12,14 @@ add_library(floserver_core STATIC
     src/ipc_posix.cpp
     src/ipc_windows.cpp
     src/manifest.cpp
+    src/nginx_config.cpp
     src/paths.cpp
     src/ports.cpp
     src/process.cpp
     src/project_config.cpp
+    src/project_registry.cpp
+    src/project_service.cpp
+    src/site_plan.cpp
     src/protocol.cpp
     src/runtime_service.cpp
     src/runtime_store.cpp

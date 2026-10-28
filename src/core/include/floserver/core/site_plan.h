@@ -1,0 +1,89 @@
+#pragma once
+
+// What the service should run for the current project list (D6, D10, D11):
+// for each project, its document root, the installed PHP it uses and what's
+// missing; and the PHP FastCGI pools those projects need.
+//
+// Pools: D10 gives each PHP version in use its own pool. A php-cgi process
+// reads one php.ini, so projects asking for different extensions on the same
+// version can't share one; a pool is therefore one PHP install plus one set
+// of extensions. Projects with the same pair share it, and a shared pool may
+// sleep only when none of its projects has "Keep running" on (D11).
+//
+// Planning reads no files and starts nothing: the caller passes in each
+// project's floserver.json result and the installed runtimes, so it can be
+// tested with plain values.
+
+#include "floserver/core/ports.h"
+#include "floserver/core/project_config.h"
+#include "floserver/core/project_registry.h"
+#include "floserver/core/runtime_store.h"
+
+#include <cstddef>
+#include <filesystem>
+#include <functional>
+#include <map>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace floserver::core {
+
+enum class SiteState : std::uint8_t {
+    Off,            // the user turned it off
+    Ready,          // everything it needs is installed
+    NeedsDownload,  // a runtime it asks for isn't installed (see `missing`)
+    Problem,        // floserver.json has an error, the folder is gone, or it asks for what this version can't run
+};
+
+struct PlannedSite {
+    std::string name;
+    std::filesystem::path dir;
+    std::filesystem::path doc_root;     // dir / root from floserver.json
+    SiteState state = SiteState::Off;
+    std::optional<std::size_t> pool;    // index into WebPlan::pools; set when Ready
+    std::vector<std::string> missing;   // "php 8.2", "mariadb 11.4"
+    std::string problem;                // plain English, when state is Problem
+    std::optional<DatabaseSpec> database;
+};
+
+struct PhpPool {
+    std::string key;                       // "php-8.4.27+gd+intl": stable while nothing changes
+    std::string version;                   // "8.4.27"
+    std::filesystem::path php_dir;         // the install folder
+    std::vector<std::string> extensions;   // sorted, no duplicates
+    std::vector<std::string> sites;        // project names, in list order
+    bool keep_running = false;             // any of its projects has Keep running on
+    Port port = 0;                         // given by assign_pool_ports()
+};
+
+struct WebPlan {
+    std::vector<PlannedSite> sites;  // same order as the project list
+    std::vector<PhpPool> pools;      // in order of first use
+};
+
+// The floserver.json result for a project. A project without the file reads
+// as an empty config (the defaults).
+using ConfigReader = std::function<ConfigResult(const Project&)>;
+
+// Reads <dir>/floserver.json from the disk (at most 64 KiB). A missing file
+// gives the defaults; a missing folder or an unreadable file gives an error.
+[[nodiscard]] ConfigResult read_project_config_file(const Project& project);
+
+// `default_php` is the version to use for projects whose floserver.json names
+// none ("8.5"); nothing means the newest installed PHP.
+[[nodiscard]] WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
+                                 const std::vector<InstalledRuntime>& installed,
+                                 const std::optional<std::string>& default_php);
+
+// Gives each pool a loopback port from 9100 upwards. A pool listed in
+// `previous` (key -> port) keeps its port without a check, because the
+// service itself holds that socket (D11); a reload never moves a pool that
+// didn't change. New pools get the first port that `probe` says is free and
+// no other pool uses. False when ports run out.
+[[nodiscard]] bool assign_pool_ports(WebPlan& plan, const std::map<std::string, Port>& previous,
+                                     const PortProbe& probe);
+
+inline constexpr Port kFirstPoolPort = 9100;
+
+}  // namespace floserver::core

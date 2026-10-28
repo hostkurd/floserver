@@ -141,3 +141,9 @@ TEST_CASE("the real probe sees a port someone else listens on as taken") {
         CHECK(can_listen_on_loopback(*port));
     }
 }
+
+TEST_CASE("the IPv6 loopback check gives a steady answer") {
+    // Without IPv6 (this CI sandbox has none) nginx must not be told to listen on [::1].
+    const bool first = loopback_ipv6_available();
+    CHECK(loopback_ipv6_available() == first);
+}

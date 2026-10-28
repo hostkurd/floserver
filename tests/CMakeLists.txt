@@ -7,11 +7,14 @@ add_executable(floserver_tests
     test_manifest.cpp
     test_ports.cpp
     test_project_config.cpp
+    test_project_registry.cpp
+    test_project_service.cpp
     test_protocol.cpp
     test_runtime_service.cpp
     test_runtime_store.cpp
     test_service.cpp
     test_sha256.cpp
+    test_site_plan.cpp
     test_version.cpp
     test_zip.cpp)
 # test_service.cpp runs the real floserverd.

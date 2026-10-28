@@ -3,7 +3,9 @@
 
 #include "floserver/core/build_info.h"
 #include "floserver/core/ipc.h"
+#include "floserver/core/paths.h"
 #include "floserver/core/project_config.h"
+#include "floserver/core/version.h"
 #include "floserver/core/service_client.h"
 
 #include <chrono>
@@ -45,6 +47,10 @@ void print_help(std::ostream& out) {
         << "  runtimes [--refresh]       List installed runtimes and the ones you can install\n"
         << "  install <name> [version]   Install a runtime: flo install php 8.5\n"
         << "  uninstall <name> <version> Remove an installed runtime: flo uninstall php 8.5.12\n"
+        << "  projects                   List your projects and what each one needs\n"
+        << "  add [folder] [--name <n>]  Add a folder as a project (this folder if none)\n"
+        << "  remove <name>              Forget a project (its files are kept)\n"
+        << "  use <php|node|mariadb> <v> Set a version in this project's floserver.json\n"
         << "  check [folder]             Check the floserver.json for a project\n"
         << "  version                    Show the version\n"
         << "  help                       Show this help\n";
@@ -304,6 +310,203 @@ int uninstall(const std::vector<std::string>& args) {
     return 0;
 }
 
+std::string text_of(const nlohmann::json& j, const char* key) {
+    return j.contains(key) && j[key].is_string() ? j[key].get<std::string>() : std::string();
+}
+
+std::string missing_list(const nlohmann::json& p) {
+    std::string out;
+    if (p.contains("missing") && p["missing"].is_array()) {
+        for (const auto& m : p["missing"]) {
+            if (m.is_string()) {
+                out += (out.empty() ? "" : ", ") + m.get<std::string>();
+            }
+        }
+    }
+    return out;
+}
+
+std::string state_line(const nlohmann::json& p) {
+    const std::string state = text_of(p, "state");
+    const std::string missing = missing_list(p);
+    if (state == "ready") {
+        return "ready";
+    }
+    if (state == "off") {
+        return missing.empty() ? "off" : "off (needs " + missing + ")";
+    }
+    if (state == "needs_download") {
+        return "needs " + missing;
+    }
+    return "problem: " + text_of(p, "problem");
+}
+
+int projects() {
+    auto client = connect_or_start(std::chrono::seconds(15));
+    if (!client) {
+        return 1;
+    }
+    const auto reply = client->call("projects.list");
+    if (!reply || !reply->ok || !reply->result.is_object()) {
+        return print_refusal(reply);
+    }
+    const auto& list = reply->result["projects"];
+    if (list.empty()) {
+        std::cout << "No projects yet. Add a folder with: flo add <folder>\n";
+        return 0;
+    }
+    for (const auto& p : list) {
+        const std::string php = text_of(p, "php");
+        std::cout << std::left << std::setw(22) << text_of(p, "name") << std::setw(12)
+                  << (php.empty() ? std::string("-") : "php " + php)
+                  << (p.value("keep_running", false) ? "keep running  " : "") << state_line(p) << "\n"
+                  << "  " << text_of(p, "path") << "\n";
+    }
+    return 0;
+}
+
+int add(const std::vector<std::string>& args, const std::vector<fs::path>& paths) {
+    std::optional<fs::path> folder;
+    std::string name;
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        if (args[i] == "--name" && i + 1 < args.size()) {
+            name = args[++i];
+        } else if (!folder && !args[i].starts_with("--")) {
+            folder = paths[i];
+        } else {
+            std::cerr << "Usage: flo add [folder] [--name <name>]\n";
+            return 2;
+        }
+    }
+    std::error_code ec;
+    const fs::path dir = fs::absolute(folder.value_or(fs::current_path()), ec).lexically_normal();
+    if (ec) {
+        std::cerr << "Can't use that folder: " << floserver::core::error_text(ec) << "\n";
+        return 1;
+    }
+    auto client = connect_or_start(std::chrono::seconds(15));
+    if (!client) {
+        return 1;
+    }
+    nlohmann::json params = {{"path", shown(dir)}};
+    if (!name.empty()) {
+        params["name"] = name;
+    }
+    const auto reply = client->call("projects.add", params);
+    if (!reply || !reply->ok) {
+        return print_refusal(reply);
+    }
+    std::cout << "Added " << text_of(reply->result, "name") << " (" << shown(dir) << ").\n";
+    const std::string missing = missing_list(reply->result);
+    if (!missing.empty()) {
+        std::cout << "It needs " << missing << ". Install with: flo install <name> <version>\n";
+    }
+    return 0;
+}
+
+int remove_cmd(const std::vector<std::string>& args) {
+    if (args.size() != 2) {
+        std::cerr << "Usage: flo remove <name>   (see your projects with: flo projects)\n";
+        return 2;
+    }
+    auto client = connect_or_start(std::chrono::seconds(15));
+    if (!client) {
+        return 1;
+    }
+    const auto reply = client->call("projects.remove", {{"name", args[1]}});
+    if (!reply || !reply->ok) {
+        return print_refusal(reply);
+    }
+    std::cout << args[1] << " is no longer a FloServer project. Its files are untouched.\n";
+    return 0;
+}
+
+// The registered project folder that holds `here`, when the service is
+// running and knows one. The CLI doesn't start the service just for this.
+std::optional<fs::path> project_folder_for(const fs::path& here) {
+    std::string error;
+    auto client = floserver::core::ServiceClient::connect(floserver::core::ipc::default_instance(), error);
+    if (!client) {
+        return std::nullopt;
+    }
+    const auto reply = client->call("projects.list");
+    if (!reply || !reply->ok || !reply->result.contains("projects")) {
+        return std::nullopt;
+    }
+    std::error_code ec;
+    const fs::path real_here = fs::weakly_canonical(here, ec);
+    std::optional<fs::path> best;
+    for (const auto& p : reply->result["projects"]) {
+        const fs::path dir = floserver::core::path_from_utf8(text_of(p, "path"));
+        const fs::path inside = real_here.lexically_relative(dir);
+        if (!inside.empty() && *inside.begin() != ".." &&
+            (!best || dir.native().size() > best->native().size())) {
+            best = dir;
+        }
+    }
+    return best;
+}
+
+// Sets one version in the project's floserver.json, keeping every other key
+// and its order as it was. The file is the registered project's own when the
+// current folder is inside one; otherwise the nearest one above, or a new one
+// here.
+int use(const std::vector<std::string>& args) {
+    if (args.size() != 3 || (args[1] != "php" && args[1] != "node" && args[1] != "mariadb")) {
+        std::cerr << "Usage: flo use <php|node|mariadb> <version>   for example: flo use php 8.4\n";
+        return 2;
+    }
+    const auto version = floserver::core::Version::parse(args[2]);
+    if (!version) {
+        std::cerr << "\"" << args[2] << "\" is not a version such as 8.4 or 8.4.27\n";
+        return 2;
+    }
+    const fs::path here = fs::current_path();
+    const fs::path name = floserver::core::path_from_utf8(floserver::core::kProjectConfigFileName);
+    fs::path file;
+    bool registered = false;
+    if (const auto project = project_folder_for(here)) {
+        file = *project / name;
+        registered = true;
+    } else {
+        file = floserver::core::find_project_config(here).value_or(here / name);
+    }
+
+    nlohmann::ordered_json doc = nlohmann::ordered_json::object();
+    std::error_code ec;
+    if (fs::exists(file, ec)) {
+        const auto text = floserver::core::read_small_file(file, std::size_t{64} * 1024);
+        if (text) {
+            doc = nlohmann::ordered_json::parse(*text, nullptr, false);
+        }
+        if (!text || doc.is_discarded() || !doc.is_object()) {
+            std::cerr << shown(file) << " isn't valid; fix it first (flo check shows what's wrong).\n";
+            return 1;
+        }
+    }
+    if (args[1] == "mariadb") {
+        doc["database"] = "mariadb-" + version->to_string();
+    } else {
+        doc[args[1]] = version->to_string();
+    }
+    const std::string out = doc.dump(2, ' ', false, nlohmann::ordered_json::error_handler_t::replace) + "\n";
+    const auto parsed = parse_project_config(out);
+    if (!parsed.config) {
+        std::cerr << shown(file) << " has an error; fix it first (flo check shows what's wrong).\n";
+        return 1;
+    }
+    std::string error;
+    if (!floserver::core::write_file_atomically(file, out, error)) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+    std::cout << shown(file) << ": " << args[1] << " " << version->to_string() << "\n";
+    if (!registered) {
+        std::cout << "(This folder isn't a FloServer project yet. Add it with: flo add)\n";
+    }
+    return 0;
+}
+
 int check(const fs::path& start) {
     const auto file = floserver::core::find_project_config(start);
     if (!file) {
@@ -361,6 +564,18 @@ int run_command(const std::vector<std::string>& args, const std::vector<fs::path
     }
     if (args[0] == "uninstall") {
         return uninstall(args);
+    }
+    if (args[0] == "projects") {
+        return projects();
+    }
+    if (args[0] == "add") {
+        return add(args, paths);
+    }
+    if (args[0] == "remove") {
+        return remove_cmd(args);
+    }
+    if (args[0] == "use") {
+        return use(args);
     }
     if (args[0] == "check") {
         return check(paths.size() > 1 ? paths[1] : fs::current_path());
