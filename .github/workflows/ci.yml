@@ -12,6 +12,7 @@ jobs:
   windows:
     name: Windows (MSVC)
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       # No -G: the runner's newest Visual Studio, so an image update can't
@@ -56,6 +57,7 @@ jobs:
   linux-sanitizers:
     name: Linux (clang, ASan + UBSan)
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Install tools
@@ -70,6 +72,7 @@ jobs:
   linux-release:
     name: Linux (GCC, release)
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Install tools
@@ -85,6 +88,7 @@ jobs:
   clang-tidy:
     name: clang-tidy
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Install tools
@@ -99,6 +103,7 @@ jobs:
   windows-cross:
     name: Windows code builds with MinGW
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Install tools

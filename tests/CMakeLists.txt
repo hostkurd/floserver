@@ -19,6 +19,8 @@ if(WIN32)
 endif()
 floserver_code_rules(floserver_tests)
 add_test(NAME floserver_tests COMMAND floserver_tests)
+# A hung test fails after 5 minutes instead of holding CI for hours.
+set_tests_properties(floserver_tests PROPERTIES TIMEOUT 300)
 
 # The manifest tool's build logic, when the tools are built.
 if(TARGET floserver_manifest_build)

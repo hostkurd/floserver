@@ -4,6 +4,7 @@
 #include <doctest/doctest.h>
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <random>
@@ -23,36 +24,62 @@ using namespace std::chrono_literals;
 
 namespace {
 
-// Writes raw bytes to the channel, bypassing the message framing.
-bool raw_send(const std::string& instance, const std::uint8_t* data, std::size_t size) {
+// A client that writes raw bytes, bypassing the message framing. It stays
+// connected until destroyed: on Windows, a client that hangs up before the
+// server reaches ConnectNamedPipe is never seen by the server at all.
+class RawClient {
+public:
+    explicit RawClient(const std::string& instance) {
+        const std::string path = ipc::endpoint_path(instance);
 #ifdef _WIN32
-    const std::string path = ipc::endpoint_path(instance);
-    const std::wstring wide(path.begin(), path.end());
-    const HANDLE h = CreateFileW(wide.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
-    if (h == INVALID_HANDLE_VALUE) {
-        return false;
-    }
-    DWORD written = 0;
-    const bool ok = WriteFile(h, data, static_cast<DWORD>(size), &written, nullptr) && written == size;
-    CloseHandle(h);
-    return ok;
+        const std::wstring wide(path.begin(), path.end());
+        h_ = CreateFileW(wide.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
 #else
-    sockaddr_un addr{};
-    addr.sun_family = AF_UNIX;
-    const std::string path = ipc::endpoint_path(instance);
-    if (path.size() >= sizeof addr.sun_path) {
-        return false;
-    }
-    std::memcpy(addr.sun_path, path.c_str(), path.size() + 1);
-    const int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    const bool ok = fd >= 0 && connect(fd, reinterpret_cast<const sockaddr*>(&addr), sizeof addr) == 0 &&
-                    write(fd, data, size) == static_cast<ssize_t>(size);
-    if (fd >= 0) {
-        close(fd);
-    }
-    return ok;
+        sockaddr_un addr{};
+        addr.sun_family = AF_UNIX;
+        if (path.size() < sizeof addr.sun_path) {
+            std::memcpy(addr.sun_path, path.c_str(), path.size() + 1);
+            fd_ = socket(AF_UNIX, SOCK_STREAM, 0);
+            if (fd_ >= 0 && connect(fd_, reinterpret_cast<const sockaddr*>(&addr), sizeof addr) != 0) {
+                close(fd_);
+                fd_ = -1;
+            }
+        }
 #endif
-}
+    }
+    ~RawClient() {
+#ifdef _WIN32
+        if (h_ != INVALID_HANDLE_VALUE) {
+            CloseHandle(h_);
+        }
+#else
+        if (fd_ >= 0) {
+            close(fd_);
+        }
+#endif
+    }
+    RawClient(const RawClient&) = delete;
+    RawClient& operator=(const RawClient&) = delete;
+    RawClient(RawClient&&) = delete;
+    RawClient& operator=(RawClient&&) = delete;
+
+    [[nodiscard]] bool write_bytes(const std::uint8_t* data, std::size_t size) const {
+#ifdef _WIN32
+        DWORD written = 0;
+        return h_ != INVALID_HANDLE_VALUE && WriteFile(h_, data, static_cast<DWORD>(size), &written, nullptr) &&
+               written == size;
+#else
+        return fd_ >= 0 && write(fd_, data, size) == static_cast<ssize_t>(size);
+#endif
+    }
+
+private:
+#ifdef _WIN32
+    HANDLE h_ = INVALID_HANDLE_VALUE;
+#else
+    int fd_ = -1;
+#endif
+};
 
 // A channel name no other test run uses.
 std::string unique_instance(const char* what) {
@@ -180,8 +207,9 @@ TEST_CASE("a receiver refuses a length over the limit without reading it") {
     const std::array<std::uint8_t, 4> header = {
         static_cast<std::uint8_t>(too_long), static_cast<std::uint8_t>(too_long >> 8U),
         static_cast<std::uint8_t>(too_long >> 16U), static_cast<std::uint8_t>(too_long >> 24U)};
-    REQUIRE(raw_send(instance, header.data(), header.size()));
-    reader.join();
+    RawClient raw(instance);
+    REQUIRE(raw.write_bytes(header.data(), header.size()));
+    reader.join();  // the client stays connected until the server has read
     CHECK_FALSE(received.has_value());
     CHECK_FALSE(still_valid);
 }
@@ -207,17 +235,24 @@ TEST_CASE("a hang-up mid-message is reported, not hung on") {
     const auto instance = unique_instance("hangup");
     auto server = listen_ok(instance);
     std::optional<std::string> received = std::string("not set");
+    std::atomic<bool> accepted{false};
     std::thread reader([&] {
         if (auto c = server->accept()) {
+            accepted = true;
             received = c->receive();
         }
     });
-    {
-        std::string error;
-        auto client = ipc::connect(instance, error);
-        REQUIRE(client.has_value());
-    }  // closed without sending anything
+    std::string error;
+    auto client = ipc::connect(instance, error);
+    REQUIRE(client.has_value());
+    // Hang up only once the server has the connection (on Windows, an
+    // earlier hang-up means the server never sees this client at all).
+    for (int i = 0; i < 200 && !accepted; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    client->close();
     reader.join();
+    CHECK(accepted);
     CHECK_FALSE(received.has_value());
 }
 
