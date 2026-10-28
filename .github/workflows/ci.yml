@@ -53,6 +53,49 @@ jobs:
           Get-ChildItem build -Recurse -Include FloServer.exe,floserverd.exe,floserver.exe |
             Where-Object { $_.FullName -match '\\Release\\' } |
             ForEach-Object { "{0,-16} {1,10:N0} bytes" -f $_.Name, $_.Length }
+          "vcruntime/:"
+          Get-ChildItem build/bin/Release/vcruntime | ForEach-Object { "  {0,-28} {1,10:N0} bytes" -f $_.Name, $_.Length }
+      # Real downloads from cdn.floserver.org through WinHTTP, into a
+      # throwaway data folder: the signed list, then nginx (a zip that needs
+      # the VC++ DLLs, so `nginx -v` proves they were added) and Composer (a
+      # plain file).
+      - name: Install runtimes from the live CDN
+        shell: pwsh
+        env:
+          FLOSERVER_DATA_DIR: ${{ runner.temp }}\floserver-data
+          FLOSERVER_INSTANCE: ci
+        run: |
+          $bin = "build/bin/Release"
+          & "$bin/flo.exe" runtimes
+          if ($LASTEXITCODE -ne 0) { throw "flo runtimes failed" }
+          & "$bin/flo.exe" install nginx
+          if ($LASTEXITCODE -ne 0) { throw "flo install nginx failed" }
+          & "$bin/flo.exe" install composer
+          if ($LASTEXITCODE -ne 0) { throw "flo install composer failed" }
+          $nginx = Get-ChildItem "$env:FLOSERVER_DATA_DIR/runtimes/nginx" -Directory | Select-Object -First 1
+          Get-ChildItem $nginx.FullName -Filter *.dll | ForEach-Object { "  " + $_.Name }
+          & "$($nginx.FullName)/nginx.exe" -v
+          if ($LASTEXITCODE -ne 0) { throw "the installed nginx doesn't start" }
+          if (-not (Test-Path "$env:FLOSERVER_DATA_DIR/runtimes/composer/*/composer.phar")) { throw "composer.phar missing" }
+          & "$bin/flo.exe" runtimes
+          & "$bin/flo.exe" service stop
+      - name: Show the service's view on failure
+        if: failure()
+        shell: pwsh
+        env:
+          FLOSERVER_DATA_DIR: ${{ runner.temp }}\floserver-data
+        run: |
+          Get-ChildItem -Recurse $env:FLOSERVER_DATA_DIR -ErrorAction SilentlyContinue |
+            ForEach-Object { "::error title=data folder::$($_.FullName)" }
+      # The build, for trying on a real PC: download it from the run's page.
+      - name: Upload the Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: FloServer-windows-x64-${{ github.sha }}
+          path: |
+            build/bin/Release/*.exe
+            build/bin/Release/vcruntime/*.dll
+          retention-days: 14
 
   linux-sanitizers:
     name: Linux (clang, ASan + UBSan)

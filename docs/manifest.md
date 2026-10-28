@@ -20,9 +20,53 @@ before reading anything in it. After that it refuses the list when:
 
 The app counts sequence numbers per signing key, so a new key starts its own count.
 
-Every downloaded file must then match its `size` and `sha256`. The downloader that applies this comes with the service.
+Every downloaded file must then match its `size` and `sha256`. The service's
+downloader (`src/core/src/downloader.cpp`) applies this:
 
-If every mirror's list reads as out of date, the user's clock may be ahead. The app should then ask them to check the date and time. A clock that is behind only switches off the expiry check; the sequence check still works.
+- https only, TLS 1.2 or newer, at most 5 redirects and never from https to http (WinHTTP on Windows);
+- the list and its signature are capped at 1 MiB and 4 KiB;
+- a list whose signature doesn't match is fetched once more after 3 seconds,
+  in case CloudFront briefly holds one new file and one old one;
+- each file is tried at its URLs in order (the CDN, then the project's own
+  server); the body streams to a `.part` file while its SHA-256 is computed,
+  and the transfer stops as soon as it goes past the listed size;
+- only a file of the exact size and hash is kept. Anything else is deleted
+  and the next URL is tried.
+
+The last sequence accepted per key is kept in
+`%LOCALAPPDATA%\FloServer\state\manifest-state.json`.
+
+If the list has expired, the app compares the computer's clock with the
+server's `Date` header. When they differ by more than an hour it asks the
+user to fix the date and time; otherwise the list really is stale and the
+message says the problem is on our side. A clock that is behind only
+switches off the expiry check; the sequence check still works.
+
+## Installs
+
+`flo install php 8.5` (or the window) asks the service to install the newest
+listed version that matches. Runtimes are shared by every project on the
+computer, one copy per version (D8, D10):
+
+```
+%LOCALAPPDATA%\FloServer\
+  runtimes\php\8.5.12\            php-cgi.exe, ext\, the VC++ DLLs...
+  runtimes\composer\2.10.3\       composer.phar
+  downloads\                       archives while they download
+  state\manifest-state.json
+```
+
+The archive is unpacked into a hidden `.staging-...` folder next to the final
+one. Names that could escape the folder (`..`, absolute or drive paths,
+`:`, Windows device names), symbolic links and encrypted entries are
+refused before anything is written. A single top folder in the zip
+(`node-v24.22.1-win-x64\`) is dropped. The Visual C++ runtime DLLs shipped
+in `vcruntime\` next to `floserverd.exe` are copied next to the runtime's
+programs (top folder, `bin\`, `Apache24\bin\`) unless the runtime brings its
+own. A `.floserver-runtime.json` marker is written last and the folder is
+renamed into place, so a folder without a marker is never taken for an
+install. Other variants than PHP's usual NTS get their own folder
+(`8.5.12-ts`).
 
 ## Publishing a new list
 

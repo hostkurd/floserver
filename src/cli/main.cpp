@@ -6,6 +6,12 @@
 #include "floserver/core/project_config.h"
 #include "floserver/core/service_client.h"
 
+#include <chrono>
+#include <csignal>
+#include <iomanip>
+#include <optional>
+#include <thread>
+
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -33,12 +39,15 @@ void print_help(std::ostream& out) {
     out << "FloServer " << floserver::core::kVersion << "\n\n"
         << "Usage: floserver <command>   (or: flo <command>)\n\n"
         << "Commands:\n"
-        << "  status           Show whether FloServer is running\n"
-        << "  service start    Start FloServer in the background\n"
-        << "  service stop     Stop FloServer and everything it runs\n"
-        << "  check [folder]   Check the floserver.json for a project\n"
-        << "  version          Show the version\n"
-        << "  help             Show this help\n";
+        << "  status                     Show whether FloServer is running\n"
+        << "  service start              Start FloServer in the background\n"
+        << "  service stop               Stop FloServer and everything it runs\n"
+        << "  runtimes [--refresh]       List installed runtimes and the ones you can install\n"
+        << "  install <name> [version]   Install a runtime: flo install php 8.5\n"
+        << "  uninstall <name> <version> Remove an installed runtime: flo uninstall php 8.5.12\n"
+        << "  check [folder]             Check the floserver.json for a project\n"
+        << "  version                    Show the version\n"
+        << "  help                       Show this help\n";
 }
 
 std::string human_bytes(std::uint64_t bytes) {
@@ -121,6 +130,180 @@ int service(const std::vector<std::string>& args) {
     return 2;
 }
 
+volatile std::sig_atomic_t g_interrupted = 0;
+
+extern "C" void on_interrupt(int /*signal*/) { g_interrupted = 1; }
+
+// Connects to the service, starting it first if it isn't running.
+std::optional<floserver::core::ServiceClient> connect_or_start(std::chrono::milliseconds timeout) {
+    const std::string instance = floserver::core::ipc::default_instance();
+    std::string error;
+    if (auto client = floserver::core::ServiceClient::connect(instance, error, timeout)) {
+        return client;
+    }
+    if (!error.empty()) {
+        std::cerr << "FloServer: " << error << "\n";
+        return std::nullopt;
+    }
+    if (floserver::core::start_service(instance, error) == floserver::core::StartResult::Failed) {
+        std::cerr << "FloServer didn't start: " << error << "\n";
+        return std::nullopt;
+    }
+    auto client = floserver::core::ServiceClient::connect(instance, error, timeout);
+    if (!client) {
+        std::cerr << "FloServer started but can't be reached" << (error.empty() ? "" : ": " + error) << "\n";
+    }
+    return client;
+}
+
+// Prints a refused request and returns the exit code.
+int print_refusal(const std::optional<floserver::core::protocol::Reply>& reply) {
+    if (!reply) {
+        std::cerr << "FloServer stopped answering.\n";
+    } else {
+        std::cerr << reply->error_message << "\n";
+    }
+    return 1;
+}
+
+int runtimes(const std::vector<std::string>& args) {
+    const bool refresh = args.size() > 1 && args[1] == "--refresh";
+    auto client = connect_or_start(std::chrono::seconds(90));
+    if (!client) {
+        return 1;
+    }
+    const auto reply = client->call("runtimes.list", {{"refresh", refresh}});
+    if (!reply || !reply->ok || !reply->result.is_object()) {
+        return print_refusal(reply);
+    }
+    const auto& r = reply->result;
+    const auto text = [](const nlohmann::json& j, const char* key) {
+        return j.contains(key) && j[key].is_string() ? j[key].get<std::string>() : std::string();
+    };
+    std::cout << "Installed:\n";
+    if (r["installed"].empty()) {
+        std::cout << "  nothing yet\n";
+    }
+    for (const auto& i : r["installed"]) {
+        std::cout << "  " << std::left << std::setw(10) << text(i, "name") << std::setw(10) << text(i, "folder")
+                  << text(i, "path") << "\n";
+    }
+    std::cout << "\n";
+    if (!r["list"].is_object()) {
+        std::cout << "The runtime list isn't available: " << text(r, "list_error") << "\n";
+        return 1;
+    }
+    std::cout << "Available for " << text(r, "platform") << " (list " << r["list"].value("sequence", 0)
+              << ", valid until " << text(r["list"], "expires") << "):\n";
+    for (const auto& a : r["available"]) {
+        const std::string variant = text(a, "variant");
+        std::cout << "  " << std::left << std::setw(10) << text(a, "name") << std::setw(10)
+                  << (text(a, "version") + (variant.empty() || variant == "nts" ? "" : "-" + variant))
+                  << std::right << std::setw(10) << human_bytes(a.value("size", std::uint64_t{0}))
+                  << (a.value("installed", false) ? "   installed" : "") << "\n";
+    }
+    for (const auto& w : r["list"]["warnings"]) {
+        if (w.is_string()) {
+            std::cout << "  warning: " << w.get<std::string>() << "\n";
+        }
+    }
+    return 0;
+}
+
+int install(const std::vector<std::string>& args) {
+    if (args.size() < 2 || args.size() > 3) {
+        std::cerr << "Usage: flo install <name> [version]   for example: flo install php 8.5\n";
+        return 2;
+    }
+    auto client = connect_or_start(std::chrono::seconds(15));
+    if (!client) {
+        return 1;
+    }
+    nlohmann::json params = {{"name", args[1]}};
+    if (args.size() == 3) {
+        params["version"] = args[2];
+    }
+    const auto started = client->call("runtimes.install", params);
+    if (!started || !started->ok || !started->result.contains("job")) {
+        return print_refusal(started);
+    }
+    const std::int64_t job = started->result["job"].get<std::int64_t>();
+
+    (void)std::signal(SIGINT, on_interrupt);
+    bool cancel_sent = false;
+    std::size_t last_width = 0;
+    for (;;) {
+        if (g_interrupted != 0 && !cancel_sent) {
+            (void)client->call("jobs.cancel", {{"id", job}});
+            cancel_sent = true;
+        }
+        const auto reply = client->call("jobs.get", {{"id", job}});
+        if (!reply || !reply->ok || !reply->result.is_object()) {
+            std::cout << "\n";
+            return print_refusal(reply);
+        }
+        const auto& j = reply->result;
+        const std::string state = j.value("state", std::string());
+        const std::string what = j.value("name", std::string()) + " " +
+                                 (j.value("version", std::string()).empty() ? j.value("requested", std::string())
+                                                                            : j.value("version", std::string()));
+        std::string line;
+        if (state == "queued") {
+            line = "Waiting for another install to finish...";
+        } else if (state == "checking") {
+            line = "Checking the runtime list...";
+        } else if (state == "downloading") {
+            const auto received = j.value("received", std::uint64_t{0});
+            const auto total = j.value("total", std::uint64_t{0});
+            line = "Downloading " + what + ": " + human_bytes(received) + " of " + human_bytes(total);
+            if (total > 0) {
+                line += " (" + std::to_string(received * 100 / total) + "%)";
+            }
+        } else if (state == "installing") {
+            line = "Installing " + what + "...";
+        }
+        if (!line.empty()) {
+            std::cout << "\r" << line << std::string(last_width > line.size() ? last_width - line.size() : 0, ' ')
+                      << std::flush;
+            last_width = line.size();
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            continue;
+        }
+        if (last_width > 0) {
+            std::cout << "\r" << std::string(last_width, ' ') << "\r";
+        }
+        const std::string message = j.value("message", std::string());
+        if (state == "done") {
+            std::cout << message << "\n";
+            return 0;
+        }
+        if (state == "cancelled") {
+            std::cout << "Install cancelled.\n";
+            return 130;
+        }
+        std::cerr << "Install failed: " << message << "\n";
+        return 1;
+    }
+}
+
+int uninstall(const std::vector<std::string>& args) {
+    if (args.size() != 3) {
+        std::cerr << "Usage: flo uninstall <name> <version>   for example: flo uninstall php 8.5.12\n"
+                  << "(see the installed versions with: flo runtimes)\n";
+        return 2;
+    }
+    auto client = connect_or_start(std::chrono::seconds(60));
+    if (!client) {
+        return 1;
+    }
+    const auto reply = client->call("runtimes.remove", {{"name", args[1]}, {"version", args[2]}});
+    if (!reply || !reply->ok) {
+        return print_refusal(reply);
+    }
+    std::cout << args[1] << " " << args[2] << " is removed.\n";
+    return 0;
+}
+
 int check(const fs::path& start) {
     const auto file = floserver::core::find_project_config(start);
     if (!file) {
@@ -155,7 +338,7 @@ int check(const fs::path& start) {
     return 0;
 }
 
-int run(const std::vector<std::string>& args, const std::vector<fs::path>& paths) {
+int run_command(const std::vector<std::string>& args, const std::vector<fs::path>& paths) {
     if (args.empty() || args[0] == "help" || args[0] == "--help" || args[0] == "-h") {
         print_help(std::cout);
         return 0;
@@ -170,12 +353,33 @@ int run(const std::vector<std::string>& args, const std::vector<fs::path>& paths
     if (args[0] == "service") {
         return service(args);
     }
+    if (args[0] == "runtimes") {
+        return runtimes(args);
+    }
+    if (args[0] == "install") {
+        return install(args);
+    }
+    if (args[0] == "uninstall") {
+        return uninstall(args);
+    }
     if (args[0] == "check") {
         return check(paths.size() > 1 ? paths[1] : fs::current_path());
     }
     std::cerr << "Unknown command: " << args[0] << "\n\n";
     print_help(std::cerr);
     return 2;
+}
+
+// Nothing a command does may end the program with an unhandled exception.
+int run(const std::vector<std::string>& args, const std::vector<fs::path>& paths) noexcept {
+    try {
+        return run_command(args, paths);
+    } catch (const std::exception& e) {
+        std::cerr << "FloServer: unexpected error: " << e.what() << "\n";
+    } catch (...) {
+        std::cerr << "FloServer: unexpected error\n";
+    }
+    return 1;
 }
 
 }  // namespace
