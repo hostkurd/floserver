@@ -52,11 +52,18 @@ std::optional<Project> read_project(const json& item, std::size_t index, std::st
         return std::nullopt;
     }
     p.dir = p.dir.lexically_normal();
-    const auto flag = [&item](const char* key) {
-        return item.contains(key) && item[key].is_boolean() && item[key].get<bool>();
-    };
-    p.on = flag("on");
-    p.keep_running = flag("keep_running");
+    for (const char* key : {"on", "keep_running"}) {
+        if (item.contains(key) && !item[key].is_boolean()) {
+            error = where + ": " + key + " must be true or false";
+            return std::nullopt;
+        }
+    }
+    p.on = item.value("on", false);
+    p.keep_running = item.value("keep_running", false);
+    p.other = item;
+    for (const char* key : {"name", "path", "on", "keep_running"}) {
+        p.other.erase(key);
+    }
     return p;
 }
 
@@ -194,7 +201,12 @@ std::string write_app_config(const AppConfig& config) {
     }
     json list = json::array();
     for (const Project& p : config.projects) {
-        list.push_back({{"name", p.name}, {"path", generic_utf8(p.dir)}, {"on", p.on}, {"keep_running", p.keep_running}});
+        json item = p.other.is_object() ? p.other : json::object();
+        item["name"] = p.name;
+        item["path"] = generic_utf8(p.dir);
+        item["on"] = p.on;
+        item["keep_running"] = p.keep_running;
+        list.push_back(std::move(item));
     }
     doc["projects"] = std::move(list);
     // A folder name that isn't valid UTF-8 can't reach here (paths come from
@@ -224,8 +236,7 @@ const Project* project_for_folder(const AppConfig& config, const fs::path& dir) 
     return it == config.projects.end() ? nullptr : &*it;
 }
 
-std::optional<Project> add_project(AppConfig& config, const fs::path& dir, std::string_view name,
-                                   std::string& error) {
+std::optional<fs::path> real_folder(const fs::path& dir, std::string& error) {
     if (!dir.is_absolute()) {
         error = "the folder must be a full path";
         return std::nullopt;
@@ -235,20 +246,42 @@ std::optional<Project> add_project(AppConfig& config, const fs::path& dir, std::
         error = "there's no folder " + path_to_utf8(dir);
         return std::nullopt;
     }
+    fs::path real = fs::canonical(dir, ec);
+    if (ec) {
+        error = "can't use " + path_to_utf8(dir) + ": " + error_text(ec);
+        return std::nullopt;
+    }
+#ifdef _WIN32
+    // Some standard libraries return the long-path form "\\?\C:\...".
+    std::wstring text = real.native();
+    if (text.starts_with(LR"(\\?\)") && text.size() > 6 && text[5] == L':') {
+        real = fs::path(text.substr(4));
+    }
+    const std::wstring root = real.root_name().native();
+    if (root.size() != 2 || root[1] != L':') {
+        error = path_to_utf8(dir) + " is on a network share; FloServer projects must be on a local drive";
+        return std::nullopt;
+    }
+#endif
+    return real;
+}
+
+std::optional<Project> add_project(AppConfig& config, const fs::path& dir, std::string_view name,
+                                   std::string& error) {
+    const auto real = real_folder(dir, error);
+    if (!real) {
+        return std::nullopt;
+    }
     if (config.projects.size() >= kMaxProjects) {
         error = "FloServer can keep at most " + std::to_string(kMaxProjects) + " projects";
         return std::nullopt;
     }
-    if (const Project* existing = project_for_folder(config, dir)) {
-        error = path_to_utf8(dir) + " is already the project " + existing->name;
+    if (const Project* existing = project_for_folder(config, *real)) {
+        error = path_to_utf8(*real) + " is already the project " + existing->name;
         return std::nullopt;
     }
 
-    // "C:/sites/shop/" has an empty filename; drop the trailing separator.
-    fs::path folder = dir.lexically_normal();
-    if (folder.filename().empty() && folder.has_relative_path()) {
-        folder = folder.parent_path();
-    }
+    const fs::path& folder = *real;  // canonical: no trailing separator
 
     std::string chosen(name);
     if (chosen.empty()) {
@@ -270,7 +303,7 @@ std::optional<Project> add_project(AppConfig& config, const fs::path& dir, std::
         return std::nullopt;
     }
 
-    Project p{chosen, folder, false, false};
+    Project p{chosen, folder, false, false, json::object()};
     config.projects.push_back(p);
     return p;
 }

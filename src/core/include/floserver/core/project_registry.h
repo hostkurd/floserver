@@ -32,6 +32,7 @@ struct Project {
     std::filesystem::path dir;  // absolute
     bool on = false;            // D11: the address answers (processes may still sleep)
     bool keep_running = false;  // D11: never put to sleep
+    nlohmann::json other = nlohmann::json::object();  // keys of this entry this version doesn't use
 
     bool operator==(const Project&) const = default;
 };
@@ -73,8 +74,15 @@ inline constexpr std::size_t kMaxProjectNameLength = 63;  // one DNS label
 // The project whose folder is `dir`, or nothing.
 [[nodiscard]] const Project* project_for_folder(const AppConfig& config, const std::filesystem::path& dir);
 
+// The folder as the file system names it: full long names (no 8.3 short
+// names, which nginx for Windows refuses), the real case, no "\\?\" prefix.
+// Nothing (with `error`) when it doesn't exist or, on Windows, isn't on a
+// drive letter (network shares aren't supported).
+[[nodiscard]] std::optional<std::filesystem::path> real_folder(const std::filesystem::path& dir, std::string& error);
+
 // Adds an existing folder. With an empty `name` one is made from the folder
-// name, with "-2", "-3"... when it's taken. The new project starts Off.
+// name, with "-2", "-3"... when it's taken. The folder is stored as
+// real_folder() gives it. The new project starts Off.
 // Nothing (with `error`) when the folder is missing, already a project, or
 // the name can't be used or is taken.
 [[nodiscard]] std::optional<Project> add_project(AppConfig& config, const std::filesystem::path& dir,

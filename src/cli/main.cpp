@@ -421,8 +421,36 @@ int remove_cmd(const std::vector<std::string>& args) {
     return 0;
 }
 
-// Sets one version in the nearest floserver.json (or a new one in this
-// folder), keeping every other key and its order as it was.
+// The registered project folder that holds `here`, when the service is
+// running and knows one. The CLI doesn't start the service just for this.
+std::optional<fs::path> project_folder_for(const fs::path& here) {
+    std::string error;
+    auto client = floserver::core::ServiceClient::connect(floserver::core::ipc::default_instance(), error);
+    if (!client) {
+        return std::nullopt;
+    }
+    const auto reply = client->call("projects.list");
+    if (!reply || !reply->ok || !reply->result.contains("projects")) {
+        return std::nullopt;
+    }
+    std::error_code ec;
+    const fs::path real_here = fs::weakly_canonical(here, ec);
+    std::optional<fs::path> best;
+    for (const auto& p : reply->result["projects"]) {
+        const fs::path dir = floserver::core::path_from_utf8(text_of(p, "path"));
+        const fs::path inside = real_here.lexically_relative(dir);
+        if (!inside.empty() && *inside.begin() != ".." &&
+            (!best || dir.native().size() > best->native().size())) {
+            best = dir;
+        }
+    }
+    return best;
+}
+
+// Sets one version in the project's floserver.json, keeping every other key
+// and its order as it was. The file is the registered project's own when the
+// current folder is inside one; otherwise the nearest one above, or a new one
+// here.
 int use(const std::vector<std::string>& args) {
     if (args.size() != 3 || (args[1] != "php" && args[1] != "node" && args[1] != "mariadb")) {
         std::cerr << "Usage: flo use <php|node|mariadb> <version>   for example: flo use php 8.4\n";
@@ -434,8 +462,15 @@ int use(const std::vector<std::string>& args) {
         return 2;
     }
     const fs::path here = fs::current_path();
-    const fs::path file = floserver::core::find_project_config(here).value_or(
-        here / floserver::core::path_from_utf8(floserver::core::kProjectConfigFileName));
+    const fs::path name = floserver::core::path_from_utf8(floserver::core::kProjectConfigFileName);
+    fs::path file;
+    bool registered = false;
+    if (const auto project = project_folder_for(here)) {
+        file = *project / name;
+        registered = true;
+    } else {
+        file = floserver::core::find_project_config(here).value_or(here / name);
+    }
 
     nlohmann::ordered_json doc = nlohmann::ordered_json::object();
     std::error_code ec;
@@ -466,6 +501,9 @@ int use(const std::vector<std::string>& args) {
         return 1;
     }
     std::cout << shown(file) << ": " << args[1] << " " << version->to_string() << "\n";
+    if (!registered) {
+        std::cout << "(This folder isn't a FloServer project yet. Add it with: flo add)\n";
+    }
     return 0;
 }
 

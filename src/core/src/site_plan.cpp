@@ -1,5 +1,6 @@
 #include "floserver/core/site_plan.h"
 
+#include "floserver/core/nginx_config.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/version.h"
 
@@ -69,13 +70,35 @@ ConfigResult read_project_config_file(const Project& project) {
         r.config = ProjectConfig{};
         return r;
     }
+    // Only a plain file: a link to a pipe or a device would hang the read.
+    if (!fs::is_regular_file(file, ec)) {
+        ConfigResult r;
+        r.errors.push_back({"", "floserver.json isn't a plain file"});
+        return r;
+    }
     const auto text = read_small_file(file, kMaxProjectConfigBytes);
     if (!text) {
         ConfigResult r;
-        r.errors.push_back({"", "can't be read (or is larger than 64 KB)"});
+        r.errors.push_back({"", "floserver.json can't be read (or is larger than 64 KB)"});
         return r;
     }
-    return parse_project_config(*text);
+    ConfigResult result = parse_project_config(*text);
+    for (ConfigProblem& e : result.errors) {
+        e.message = "floserver.json: " + (e.key.empty() ? std::string() : e.key + " ") + e.message;
+        e.key.clear();
+    }
+    // The root is checked as text by the parser; a link inside the project
+    // (git can store one) could still lead outside it.
+    if (result.config && result.config->root != ".") {
+        const fs::path real_dir = fs::weakly_canonical(project.dir, ec);
+        const fs::path real_root = ec ? fs::path() : fs::weakly_canonical(project.dir / path_from_utf8(result.config->root), ec);
+        const fs::path inside = real_root.lexically_relative(real_dir);
+        if (ec || inside.empty() || *inside.begin() == "..") {
+            result.errors.push_back({"", "floserver.json: root leads outside the project folder (through a link)"});
+            result.config.reset();
+        }
+    }
+    return result;
 }
 
 WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
@@ -95,13 +118,20 @@ WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
         if (!result.config) {
             site.state = SiteState::Problem;
             const ConfigProblem& first = result.errors.empty() ? ConfigProblem{"", "can't be read"} : result.errors.front();
-            site.problem = "floserver.json: " + (first.key.empty() ? std::string() : first.key + " ") + first.message;
+            site.problem = (first.key.empty() ? std::string() : first.key + " ") + first.message;
             plan.sites.push_back(std::move(site));
             continue;
         }
         const ProjectConfig& pc = *result.config;
         site.doc_root = pc.root == "." ? project.dir : (project.dir / path_from_utf8(pc.root)).lexically_normal();
         site.database = pc.database;
+        // One unusable folder name must not stop nginx for every project.
+        if (!nginx_quoted_path(site.doc_root)) {
+            site.state = SiteState::Problem;
+            site.problem = "the folder path has a $ or \" in it, which nginx can't use; rename the folder";
+            plan.sites.push_back(std::move(site));
+            continue;
+        }
 
         // Not served by this build yet: Apache projects (D6) and Node-only
         // projects, which nginx will proxy to their dev server (D11).

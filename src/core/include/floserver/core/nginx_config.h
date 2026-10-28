@@ -38,7 +38,7 @@ struct NginxSpec {
     std::filesystem::path nginx_dir;  // the installed nginx (its conf/mime.types, conf/fastcgi_params)
     std::filesystem::path work_dir;   // our folder: logs/, temp/, the pid file
     WebPorts ports{};
-    bool ipv6 = true;                 // also listen on [::1]
+    bool ipv6 = false;                // also listen on [::1]: set from loopback_ipv6_available()
     std::vector<NginxSite> sites;
 };
 

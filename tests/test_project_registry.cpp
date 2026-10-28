@@ -69,6 +69,18 @@ TEST_CASE("projects are added, found, named uniquely and removed") {
         REQUIRE(api);
         CHECK(api->name == "backend");
     }
+    SUBCASE("the folder is stored as the file system names it") {
+        const auto api = add_project(config, tmp.path() / "api" / ".." / "api" / ".", "", error);
+        REQUIRE(api);
+        CHECK(api->dir == fs::canonical(tmp.path() / "api"));
+        CHECK(api->name == "api");
+#ifndef _WIN32
+        // The same folder through a link is the same project.
+        fs::create_directory_symlink(tmp.path() / "api", tmp.path() / "api-link");
+        CHECK_FALSE(add_project(config, tmp.path() / "api-link", "", error));
+        CHECK(error.find("already the project api") != std::string::npos);
+#endif
+    }
     SUBCASE("missing and relative folders are refused") {
         CHECK_FALSE(add_project(config, tmp.path() / "missing", "", error));
         CHECK_FALSE(add_project(config, "api", "", error));
@@ -118,6 +130,27 @@ TEST_CASE("config.json round-trips and keeps keys it doesn't use") {
         CHECK_FALSE(back->other.contains("projects"));
     }
 
+    SUBCASE("unknown keys inside a project entry survive a change") {
+        fs::create_directories(tmp.path() / "shop");
+        test_util::write_file(file, R"({"projects": [{"name": "shop", "path": ")" +
+                                        (tmp.path() / "shop").generic_string() +
+                                        R"(", "on": false, "colour": "teal", "notes": {"a": 1}}]})");
+        auto config = load_app_config(file, error);
+        REQUIRE(config);
+        config->projects[0].on = true;
+        REQUIRE(save_app_config(file, *config, error));
+        const auto back = load_app_config(file, error);
+        REQUIRE(back);
+        CHECK(back->projects[0].on);
+        CHECK(back->projects[0].other["colour"] == "teal");
+        CHECK(back->projects[0].other["notes"]["a"] == 1);
+        CHECK_FALSE(back->projects[0].other.contains("name"));
+    }
+    SUBCASE("on and keep_running must be true or false") {
+        test_util::write_file(file, R"({"projects": [{"name": "a", "path": "/x", "on": "true"}]})");
+        CHECK_FALSE(load_app_config(file, error));
+        CHECK(error.find("true or false") != std::string::npos);
+    }
     SUBCASE("a damaged file is reported, not replaced") {
         test_util::write_file(file, "{ not json");
         CHECK_FALSE(load_app_config(file, error));

@@ -151,8 +151,10 @@ private:
         }
         out_ << "        server_name " << host << ";\n"
              << "        root " << *root << ";\n";
-        // Hidden files and folders (.env, .git) are never served.
-        out_ << R"(        location ~ /\.(?!well-known/) {
+        // Hidden files and folders (.env, .git) are never served. Locations
+        // are caseless (~*): on a disk that ignores case, /x.PHP is x.php and
+        // must run, never be sent as source.
+        out_ << R"(        location ~* /\.(?!well-known/) {
             return 404;
         }
 )";
@@ -168,7 +170,7 @@ private:
                  << "        location / {\n"
                  << "            try_files $uri $uri/ /index.php$is_args$args;\n"
                  << "        }\n"
-                 << R"(        location ~ [^/]\.php(/|$) {
+                 << R"(        location ~* [^/]\.php(/|$) {
             fastcgi_split_path_info ^(.+?\.php)(/.*)$;
             # try_files empties $fastcgi_path_info, so keep a copy first.
             set $floserver_path_info $fastcgi_path_info;

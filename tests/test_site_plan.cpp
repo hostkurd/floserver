@@ -112,7 +112,7 @@ TEST_CASE("missing databases, bad files and not-yet-supported projects are repor
     CHECK(plan.sites[0].state == SiteState::NeedsDownload);
     CHECK(plan.sites[0].missing == std::vector<std::string>{"mariadb 11.8"});
     CHECK(plan.sites[1].state == SiteState::Problem);
-    CHECK(plan.sites[1].problem.starts_with("floserver.json: php "));
+    CHECK(plan.sites[1].problem.starts_with("php "));  // the file reader adds "floserver.json: "
     CHECK(plan.sites[2].state == SiteState::Problem);
     CHECK(plan.sites[3].state == SiteState::Problem);
     CHECK(plan.sites[4].state == SiteState::NeedsDownload);
@@ -130,6 +130,16 @@ TEST_CASE("keep running on any project keeps its shared pool awake") {
     CHECK_FALSE(plan.pools[1].keep_running);
 }
 
+TEST_CASE("one unusable folder name only stops that project") {
+    AppConfig config;
+    config.projects = {project("good"), {"bad", kBase / "projects" / "$shop", true, false, {}}};
+    const auto plan = plan_sites(config, reader({}), kInstalled, std::nullopt);
+    CHECK(plan.sites[0].state == SiteState::Ready);
+    CHECK(plan.sites[1].state == SiteState::Problem);
+    CHECK(plan.sites[1].problem.find('$') != std::string::npos);
+    CHECK(plan.pools.size() == 1);
+}
+
 TEST_CASE("the project's folder file is read from the disk") {
     const test_util::TempDir tmp;
     const Project p{"shop", tmp.path() / "shop", true, false};
@@ -140,9 +150,38 @@ TEST_CASE("the project's folder file is read from the disk") {
     const auto r = read_project_config_file(p);
     REQUIRE(r.config);
     CHECK(r.config->php == "8.2");
+    test_util::write_file(p.dir / "floserver.json", R"({"php": 8})");
+    const auto bad = read_project_config_file(p);
+    REQUIRE_FALSE(bad.config);
+    CHECK(bad.errors.at(0).message.starts_with("floserver.json: php "));
     test_util::write_file(p.dir / "floserver.json", std::string(std::size_t{70} * 1024, ' '));
     CHECK_FALSE(read_project_config_file(p).config);
+    fs::remove(p.dir / "floserver.json");
+    fs::create_directory(p.dir / "floserver.json");  // not a plain file
+    CHECK_FALSE(read_project_config_file(p).config);
 }
+
+#ifndef _WIN32  // symlinks need extra rights on Windows; the check is the same code
+TEST_CASE("a root that leads outside the project through a link is refused") {
+    const test_util::TempDir tmp;
+    const Project p{"shop", tmp.path() / "shop", true, false, {}};
+    fs::create_directories(p.dir);
+    fs::create_directories(tmp.path() / "elsewhere");
+    fs::create_directory_symlink(tmp.path() / "elsewhere", p.dir / "public");
+    test_util::write_file(p.dir / "floserver.json", R"({"root": "public"})");
+    const auto r = read_project_config_file(p);
+    REQUIRE_FALSE(r.config);
+    CHECK(r.errors.at(0).message.find("outside the project") != std::string::npos);
+
+    // A link that stays inside is fine, and so is a root that doesn't exist yet.
+    fs::remove(p.dir / "public");
+    fs::create_directories(p.dir / "web");
+    fs::create_directory_symlink(p.dir / "web", p.dir / "public");
+    CHECK(read_project_config_file(p).config);
+    test_util::write_file(p.dir / "floserver.json", R"({"root": "dist/site"})");
+    CHECK(read_project_config_file(p).config);
+}
+#endif
 
 TEST_CASE("pool ports start at 9100, avoid taken ports and stay put across reloads") {
     WebPlan plan;
@@ -191,6 +230,7 @@ TEST_CASE("the nginx config serves PHP and static sites on loopback") {
     spec.nginx_dir = kBase / "runtimes" / "nginx" / "1.30.6";
     spec.work_dir = kBase / "web";
     spec.ports = {80, 443, false};
+    spec.ipv6 = true;
     spec.sites = {{"shop", kBase / "projects" / "shop" / "public", 9101, kBase / "web" / "logs" / "php-8.4.27.log",
                    NginxTls{kBase / "certs" / "shop.pem", kBase / "certs" / "shop.key"}},
                   {"docs", kBase / "projects" / "docs", 0, {}, std::nullopt}};
@@ -210,6 +250,10 @@ TEST_CASE("the nginx config serves PHP and static sites on loopback") {
     CHECK(has("access_log \"" + kBase.generic_string() + "/web/logs/php-8.4.27.log\" floserver_idle;"));
     CHECK(has("root \"" + kBase.generic_string() + "/projects/shop/public\";"));
     CHECK(has("try_files $uri $uri/ =404;"));  // docs: static only
+    // Caseless, so /x.PHP runs (or is hidden) instead of being sent as source.
+    CHECK(has(R"(location ~* [^/]\.php(/|$) {)"));
+    CHECK(has(R"(location ~* /\.(?!well-known/) {)"));
+    CHECK_FALSE(has("location ~ "));
     CHECK_FALSE(has("0.0.0.0"));
     CHECK_FALSE(has("listen 80"));
     // The static site has no PHP location and no https.
