@@ -69,14 +69,14 @@ jobs:
           # Native programs write to stderr (nginx -v does); that isn't an error here.
           $ErrorActionPreference = "Continue"
           trap {
-            "::error title=live install::script error at line $($_.InvocationInfo.ScriptLineNumber): $($_.Exception.Message)"
+            Write-Host "::error title=live install::script error at line $($_.InvocationInfo.ScriptLineNumber): $($_.Exception.Message)"
             exit 1
           }
           # Logs can't be read from outside, so every failure becomes an annotation.
           function Fail([string]$what, [string]$output) {
             $flat = ($output -replace "`r?`n", " | ").Trim()
             if ($flat.Length -gt 600) { $flat = $flat.Substring(0, 600) }
-            "::error title=live install::$what :: $flat"
+            Write-Host "::error title=live install::$what :: $flat"
             exit 1
           }
           function Run([string]$what, [scriptblock]$block) {
