@@ -582,9 +582,13 @@ int untrust() {
     const auto& ca = status->result["ca"];
     if (ca.is_object()) {
         const auto der = ca_der(ca);
+        if (!der) {
+            std::cerr << "FloServer sent a certificate that can't be read, so nothing was removed.\n";
+            return 1;
+        }
         bool cancelled = false;
         std::string error;
-        if (der && !floserver::core::untrust_ca(*der, cancelled, error)) {
+        if (!floserver::core::untrust_ca(*der, cancelled, error)) {
             std::cerr << (cancelled ? "Not removed: you said no.\n" : "Not removed: " + error + "\n");
             return 1;
         }

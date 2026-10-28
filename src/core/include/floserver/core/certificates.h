@@ -35,6 +35,11 @@ namespace floserver::core {
 
 enum class CertificateKind : std::uint8_t { Authority, Site };
 
+inline constexpr std::string_view kPurposeServerAuth = "1.3.6.1.5.5.7.3.1";
+inline constexpr std::string_view kPurposeClientAuth = "1.3.6.1.5.5.7.3.2";
+inline constexpr std::string_view kPurposeCodeSigning = "1.3.6.1.5.5.7.3.3";
+inline constexpr std::string_view kPurposeEmail = "1.3.6.1.5.5.7.3.4";
+
 struct CertificateFields {
     CertificateKind kind = CertificateKind::Site;
     std::vector<std::uint8_t> serial;  // 1 to 20 bytes, top bit clear
@@ -45,6 +50,10 @@ struct CertificateFields {
     EcPublicKey subject_key;
     EcPublicKey issuer_key;              // for the Authority Key Identifier
     std::vector<std::string> dns_names;  // Site: the subjectAltName entries
+    // Site: extended key usages (OIDs). FloServer issues serverAuth only; the
+    // tests use others to prove the CA refuses them, as with email_names.
+    std::vector<std::string> purposes = {std::string(kPurposeServerAuth)};
+    std::vector<std::string> email_names;
 };
 
 // A Name with one CN and one O, as UTF8Strings.
@@ -96,7 +105,8 @@ public:
     // damaged, with `error`).
     [[nodiscard]] std::optional<CaInfo> load_ca(std::string& error) const;
 
-    // The CA, made first when there's none or it has expired.
+    // The CA, made first when there's none. A damaged or expired one is
+    // reported (with `error`), never replaced here.
     [[nodiscard]] std::optional<CaInfo> ensure_ca(std::string& error);
 
     // The certificate for <name>.localhost, issued or renewed when needed.
@@ -109,6 +119,7 @@ public:
 
 private:
     [[nodiscard]] std::optional<CaInfo> create_ca(std::string& error);
+    [[nodiscard]] std::optional<CaInfo> ensure_ca_locked(std::string& error);
     [[nodiscard]] std::optional<EcKeyPair> load_ca_key(std::string& error) const;
     [[nodiscard]] std::chrono::sys_seconds now() const;
 

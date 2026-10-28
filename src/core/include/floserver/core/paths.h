@@ -46,8 +46,8 @@ namespace floserver::core {
                                          std::string& error);
 
 // The same for secrets (private keys): on macOS and Linux the file is
-// owner-only (0600) before any byte is written. On Windows the per-user app
-// folder already keeps other users out.
+// created owner-only (0600, O_EXCL) and its folder is made owner-only (0700).
+// On Windows the per-user app folder already keeps other users out.
 [[nodiscard]] bool write_private_file_atomically(const std::filesystem::path& file, std::string_view bytes,
                                                  std::string& error);
 

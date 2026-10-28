@@ -22,7 +22,8 @@
 //   projects.remove  {"name": "shop"} -> {}   (the folder is never touched)
 //   projects.set     {"name": "shop", "on"?: bool, "keep_running"?: bool} -> the project
 //   certs.status     {} -> {"ca": null or {"common_name", "fingerprint", "not_after",
-//                                          "path", "der" (base64), "trusted": "yes"|"no"|"unsupported"}}
+//                                          "path", "der" (base64), "trusted": "yes"|"no"|"unsupported",
+//                                          "expires_soon": bool}}
 //   certs.ensure_ca  {} -> {"ca": {...}}   makes the CA when there's none
 //   certs.remove     {} -> {}              deletes the CA and project certificates
 

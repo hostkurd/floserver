@@ -4,6 +4,9 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
 #endif
 
 #include <array>
@@ -122,21 +125,36 @@ bool write_atomically(const fs::path& file, std::string_view bytes, bool owner_o
     std::random_device rd;
     fs::path temp = file;
     temp += ".tmp-" + std::to_string(rd());
+#ifndef _WIN32
+    if (owner_only) {
+        // Owner-only from the first moment: created 0600 with O_EXCL, so no
+        // other user can open it while it's being written; the folder too.
+        fs::permissions(file.parent_path(), fs::perms::owner_all, fs::perm_options::replace, ec);
+        const int fd = ::open(temp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (fd < 0) {
+            error = "can't create " + path_to_utf8(temp);
+            return false;
+        }
+        std::size_t done = 0;
+        while (done < bytes.size()) {
+            const ssize_t n = ::write(fd, bytes.data() + done, bytes.size() - done);
+            if (n <= 0) {
+                break;
+            }
+            done += static_cast<std::size_t>(n);
+        }
+        const bool synced = done == bytes.size() && ::fsync(fd) == 0;
+        if (::close(fd) != 0 || !synced) {
+            error = "can't write " + path_to_utf8(temp);
+            fs::remove(temp, ec);
+            return false;
+        }
+    } else
+#else
+    (void)owner_only;
+#endif
     {
         std::ofstream out(temp, std::ios::binary | std::ios::trunc);
-#ifndef _WIN32
-        if (owner_only && out) {
-            fs::permissions(temp, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace, ec);
-            if (ec) {
-                error = "can't make " + path_to_utf8(temp) + " private: " + error_text(ec);
-                out.close();
-                fs::remove(temp, ec);
-                return false;
-            }
-        }
-#else
-        (void)owner_only;
-#endif
         out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
         out.flush();
         if (!out) {

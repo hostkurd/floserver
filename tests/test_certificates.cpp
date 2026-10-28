@@ -40,14 +40,22 @@ sys_seconds at(int y, unsigned m, unsigned d) {
     return sys_seconds{std::chrono::sys_days(std::chrono::year(y) / std::chrono::month(m) / std::chrono::day(d))};
 }
 
-// A CA and a certificate it signs for `host`, built by hand so a test can
-// also make one for a name our store would never issue.
+// A certificate to sign with a fresh test CA, built by hand so a test can
+// make what our store would never issue.
+struct LeafSpec {
+    std::string common_name = "shop.localhost";
+    std::string organisation = "FloServer";
+    std::vector<std::string> dns_names = {"shop.localhost"};
+    std::vector<std::string> email_names;
+    std::vector<std::string> purposes = {std::string(kPurposeServerAuth)};
+};
+
 struct Chain {
     der::Bytes ca;
     der::Bytes leaf;
 };
 
-std::optional<Chain> make_chain(const std::string& host, sys_seconds start) {
+std::optional<Chain> make_chain(const LeafSpec& spec, sys_seconds start) {
     std::string error;
     const auto ca_key = generate_ec_key(error);
     const auto leaf_key = generate_ec_key(error);
@@ -66,12 +74,14 @@ std::optional<Chain> make_chain(const std::string& host, sys_seconds start) {
     CertificateFields leaf;
     leaf.serial = {0x03};
     leaf.issuer = ca.subject;
-    leaf.subject = certificate_name(host, "FloServer");
+    leaf.subject = certificate_name(spec.common_name, spec.organisation);
     leaf.not_before = start;
     leaf.not_after = start + kSiteLifetime;
     leaf.subject_key = leaf_key->public_key();
     leaf.issuer_key = ca_key->public_key();
-    leaf.dns_names = {host};
+    leaf.dns_names = spec.dns_names;
+    leaf.email_names = spec.email_names;
+    leaf.purposes = spec.purposes;
     auto ca_der = sign_certificate(ca, *ca_key, error);
     auto leaf_der = sign_certificate(leaf, *ca_key, error);
     if (!ca_der || !leaf_der) {
@@ -80,10 +90,20 @@ std::optional<Chain> make_chain(const std::string& host, sys_seconds start) {
     return Chain{std::move(*ca_der), std::move(*leaf_der)};
 }
 
+std::optional<Chain> make_chain(const std::string& host, sys_seconds start) {
+    LeafSpec spec;
+    spec.common_name = host;
+    spec.dns_names = {host};
+    return make_chain(spec, start);
+}
+
+// What the certificate is checked for, as the platform's verifier sees it.
+enum class Use : std::uint8_t { WebServer, ClientLogin, Email, CodeSigning };
+
 #ifdef _WIN32
-// CryptoAPI with only `ca` trusted, as an SSL server certificate for `host`.
-// Returns the policy's error code (0 = accepted).
-long verify_with_platform(const der::Bytes& ca, const der::Bytes& leaf, const std::string& host, sys_seconds when) {
+// CryptoAPI with only `ca` trusted. Returns 0 when accepted.
+long verify_with_platform(const der::Bytes& ca, const der::Bytes& leaf, Use use, const std::string& host,
+                          sys_seconds when) {
     HCERTSTORE roots = CertOpenStore(CERT_STORE_PROV_MEMORY, 0, 0, 0, nullptr);
     REQUIRE(roots != nullptr);
     REQUIRE(CertAddEncodedCertificateToStore(roots, X509_ASN_ENCODING, ca.data(), static_cast<DWORD>(ca.size()),
@@ -98,8 +118,16 @@ long verify_with_platform(const der::Bytes& ca, const der::Bytes& leaf, const st
 
     const auto ft_ticks = (when.time_since_epoch().count() + 11644473600LL) * 10000000LL;
     FILETIME ft{static_cast<DWORD>(ft_ticks & 0xFFFFFFFF), static_cast<DWORD>(ft_ticks >> 32)};
+    const char* usage_oid = use == Use::WebServer     ? szOID_PKIX_KP_SERVER_AUTH
+                            : use == Use::ClientLogin ? szOID_PKIX_KP_CLIENT_AUTH
+                            : use == Use::Email       ? szOID_PKIX_KP_EMAIL_PROTECTION
+                                                      : szOID_PKIX_KP_CODE_SIGNING;
+    LPSTR usages[] = {const_cast<LPSTR>(usage_oid)};  // NOLINT
     CERT_CHAIN_PARA para{};
     para.cbSize = sizeof para;
+    para.RequestedUsage.dwType = USAGE_MATCH_TYPE_AND;
+    para.RequestedUsage.Usage.cUsageIdentifier = 1;
+    para.RequestedUsage.Usage.rgpszUsageIdentifier = usages;
     PCCERT_CHAIN_CONTEXT chain = nullptr;
     REQUIRE(CertGetCertificateChain(engine, cert, &ft, nullptr, &para, 0, nullptr, &chain));
 
@@ -110,15 +138,19 @@ long verify_with_platform(const der::Bytes& ca, const der::Bytes& leaf, const st
     ssl.pwszServerName = whost.data();
     CERT_CHAIN_POLICY_PARA policy{};
     policy.cbSize = sizeof policy;
-    policy.pvExtraPolicyPara = &ssl;
+    if (use == Use::WebServer) {
+        policy.pvExtraPolicyPara = &ssl;
+    }
     CERT_CHAIN_POLICY_STATUS status{};
     status.cbSize = sizeof status;
-    REQUIRE(CertVerifyCertificateChainPolicy(CERT_CHAIN_POLICY_SSL, chain, &policy, &status));
-    // A name-constraint failure shows in the chain's trust status even when
-    // the SSL policy reports the name itself as fine.
+    REQUIRE(CertVerifyCertificateChainPolicy(use == Use::WebServer ? CERT_CHAIN_POLICY_SSL : CERT_CHAIN_POLICY_BASE,
+                                             chain, &policy, &status));
+    // Name-constraint and usage failures show in the chain's trust status
+    // even when a policy reports the name itself as fine.
     long result = static_cast<long>(status.dwError);
-    if (result == 0 && (chain->TrustStatus.dwErrorStatus & ~CERT_TRUST_IS_OFFLINE_REVOCATION &
-                        ~CERT_TRUST_REVOCATION_STATUS_UNKNOWN) != 0) {
+    // Revocation can't be checked for a local CA (it publishes no list).
+    constexpr DWORD kIgnored = DWORD{CERT_TRUST_IS_OFFLINE_REVOCATION} | DWORD{CERT_TRUST_REVOCATION_STATUS_UNKNOWN};
+    if (result == 0 && (chain->TrustStatus.dwErrorStatus & ~kIgnored) != 0) {
         result = static_cast<long>(chain->TrustStatus.dwErrorStatus);
     }
     CertFreeCertificateChain(chain);
@@ -133,9 +165,10 @@ X509* parse(const der::Bytes& d) {
     return d2i_X509(nullptr, &p, static_cast<long>(d.size()));
 }
 
-// OpenSSL with only `ca` trusted, checking `host` like a TLS client.
-// Returns the verify error (0 = accepted).
-long verify_with_platform(const der::Bytes& ca, const der::Bytes& leaf, const std::string& host, sys_seconds when) {
+// OpenSSL with only `ca` trusted. Returns 0 when accepted. OpenSSL 3.0 has
+// no code-signing purpose, so that use is checked on Windows only.
+long verify_with_platform(const der::Bytes& ca, const der::Bytes& leaf, Use use, const std::string& host,
+                          sys_seconds when) {
     X509* ca_cert = parse(ca);
     X509* leaf_cert = parse(leaf);
     REQUIRE(ca_cert != nullptr);
@@ -146,8 +179,12 @@ long verify_with_platform(const der::Bytes& ca, const der::Bytes& leaf, const st
     REQUIRE(X509_STORE_CTX_init(ctx, store, leaf_cert, nullptr) == 1);
     X509_VERIFY_PARAM* param = X509_STORE_CTX_get0_param(ctx);
     X509_VERIFY_PARAM_set_time(param, static_cast<time_t>(when.time_since_epoch().count()));
-    X509_VERIFY_PARAM_set1_host(param, host.c_str(), host.size());
-    X509_VERIFY_PARAM_set_purpose(param, X509_PURPOSE_SSL_SERVER);
+    if (use == Use::WebServer) {
+        X509_VERIFY_PARAM_set1_host(param, host.c_str(), host.size());
+    }
+    X509_VERIFY_PARAM_set_purpose(param, use == Use::WebServer     ? X509_PURPOSE_SSL_SERVER
+                                         : use == Use::ClientLogin ? X509_PURPOSE_SSL_CLIENT
+                                                                   : X509_PURPOSE_SMIME_SIGN);
     X509_VERIFY_PARAM_set_flags(param, X509_V_FLAG_X509_STRICT);
     const int ok = X509_verify_cert(ctx);
     const long err = ok == 1 ? 0 : X509_STORE_CTX_get_error(ctx);
@@ -158,6 +195,15 @@ long verify_with_platform(const der::Bytes& ca, const der::Bytes& leaf, const st
     return err;
 }
 #endif
+
+long verify_web(const Chain& c, const std::string& host, sys_seconds when) {
+#if defined(_WIN32) || defined(FLOSERVER_TEST_OPENSSL)
+    return verify_with_platform(c.ca, c.leaf, Use::WebServer, host, when);
+#else
+    (void)c, (void)host, (void)when;
+    return 0;
+#endif
+}
 
 }  // namespace
 
@@ -193,18 +239,56 @@ TEST_CASE("the CA allows only localhost names") {
     const auto good = make_chain("shop.localhost", start);
     REQUIRE(good);
 #if defined(_WIN32) || defined(FLOSERVER_TEST_OPENSSL)
-    CHECK(verify_with_platform(good->ca, good->leaf, "shop.localhost", when) == 0);
-    CHECK(verify_with_platform(good->ca, good->leaf, "other.localhost", when) != 0);  // wrong host
-    CHECK(verify_with_platform(good->ca, good->leaf, "shop.localhost", at(2028, 1, 1)) != 0);  // expired
+    CHECK(verify_web(*good, "shop.localhost", when) == 0);
+    CHECK(verify_web(*good, "other.localhost", when) != 0);              // wrong host
+    CHECK(verify_web(*good, "shop.localhost", at(2028, 1, 1)) != 0);     // expired
 
     // Even with the CA's own key, a real website's name doesn't verify.
     const auto rogue = make_chain("www.example.com", start);
     REQUIRE(rogue);
-    CHECK(verify_with_platform(rogue->ca, rogue->leaf, "www.example.com", when) != 0);
+    CHECK(verify_web(*rogue, "www.example.com", when) != 0);
     // A name that only contains "localhost" is outside it too.
     const auto lookalike = make_chain("shop.localhost.example.com", start);
     REQUIRE(lookalike);
-    CHECK(verify_with_platform(lookalike->ca, lookalike->leaf, "shop.localhost.example.com", when) != 0);
+    CHECK(verify_web(*lookalike, "shop.localhost.example.com", when) != 0);
+
+    // The CA signs for web servers only, and only under O=FloServer: email,
+    // client logins, code signing and another organisation's name all fail,
+    // even though the CA's own key signed them.
+    LeafSpec email;
+    email.common_name = "ceo@example.com";
+    email.dns_names = {};
+    email.email_names = {"ceo@example.com"};
+    email.purposes = {std::string(kPurposeEmail)};
+    const auto mail = make_chain(email, start);
+    REQUIRE(mail);
+    CHECK(verify_with_platform(mail->ca, mail->leaf, Use::Email, "", when) != 0);
+    email.email_names = {"me@localhost"};  // even at host localhost: the CA isn't for email
+    const auto mail_local = make_chain(email, start);
+    REQUIRE(mail_local);
+    CHECK(verify_with_platform(mail_local->ca, mail_local->leaf, Use::Email, "", when) != 0);
+
+    LeafSpec client;
+    client.purposes = {std::string(kPurposeClientAuth), std::string(kPurposeServerAuth)};
+    const auto login = make_chain(client, start);
+    REQUIRE(login);
+    CHECK(verify_with_platform(login->ca, login->leaf, Use::ClientLogin, "", when) != 0);
+    CHECK(verify_web(*login, "shop.localhost", when) == 0);  // its web use is still fine
+
+    LeafSpec other_org;
+    other_org.organisation = "Microsoft Corporation";
+    const auto foreign = make_chain(other_org, start);
+    REQUIRE(foreign);
+    CHECK(verify_web(*foreign, "shop.localhost", when) != 0);
+#ifdef _WIN32
+    LeafSpec signing;
+    signing.common_name = "Microsoft Corporation";
+    signing.dns_names = {};
+    signing.purposes = {std::string(kPurposeCodeSigning)};
+    const auto code = make_chain(signing, start);
+    REQUIRE(code);
+    CHECK(verify_with_platform(code->ca, code->leaf, Use::CodeSigning, "", when) != 0);
+#endif
 #else
     MESSAGE("no platform verifier in this build");
 #endif
@@ -265,8 +349,11 @@ TEST_CASE("the store makes the CA once and project certificates on demand") {
     CHECK(ca_trust_state(ca->der) != TrustState::Trusted);           // never added by the store
 
 #ifndef _WIN32
-    const auto perms = fs::status(certs_dir(data.path()) / "ca.key").permissions();
-    CHECK((perms & (fs::perms::group_all | fs::perms::others_all)) == fs::perms::none);
+    // Keys and the folder holding them are owner-only.
+    const auto key_perms = fs::status(certs_dir(data.path()) / "ca.key").permissions();
+    CHECK((key_perms & (fs::perms::group_all | fs::perms::others_all)) == fs::perms::none);
+    const auto dir_perms = fs::status(certs_dir(data.path())).permissions();
+    CHECK((dir_perms & (fs::perms::group_all | fs::perms::others_all)) == fs::perms::none);
 #endif
 
     const auto site = store.ensure_site("shop", error);
@@ -298,8 +385,8 @@ TEST_CASE("the store makes the CA once and project certificates on demand") {
         std::erase(body, '\n');
         return *from_base64(body);
     };
-    CHECK(verify_with_platform(ca->der, first_cert(test_util::read_file(renewed->certificate)), "shop.localhost",
-                               clock) == 0);
+    CHECK(verify_with_platform(ca->der, first_cert(test_util::read_file(renewed->certificate)), Use::WebServer,
+                               "shop.localhost", clock) == 0);
 #endif
 #ifdef FLOSERVER_TEST_OPENSSL
     // The key file is the certificate's key, in a form nginx (OpenSSL) reads.
@@ -333,6 +420,20 @@ TEST_CASE("the store makes the CA once and project certificates on demand") {
         clock += kSiteLifetime;  // force a new certificate
         CHECK_FALSE(store.ensure_site("shop", error));
         CHECK(error.find("doesn't match") != std::string::npos);
+    }
+    SUBCASE("an expired CA is reported, never replaced silently") {
+        clock = ca->not_after + std::chrono::days(1);
+        CHECK_FALSE(store.ensure_ca(error));
+        CHECK(error.find("expired") != std::string::npos);
+        CHECK_FALSE(store.ensure_site("blog", error));
+        std::string e;
+        CHECK(store.load_ca(e)->fingerprint == ca->fingerprint);  // still the same one
+    }
+    SUBCASE("nothing the store keeps in the clear holds the CA's key") {
+        const auto meta = test_util::read_file(certs_dir(data.path()) / "ca.json");
+        CHECK(meta.find("PRIVATE") == std::string::npos);
+        CHECK(meta.find("\"key\"") == std::string::npos);
+        CHECK(meta.find("\"key_id\"") != std::string::npos);
     }
     SUBCASE("remove_all clears everything") {
         CHECK(store.remove_all(error));

@@ -59,20 +59,33 @@ der::Bytes extension(std::string_view id, bool critical, const der::Bytes& value
 der::Bytes authority_extensions(const CertificateFields& f) {
     // keyCertSign (bit 5) and cRLSign (bit 6): 0000 0110, one unused bit.
     const der::Bytes usage = {0x06};
-    // permittedSubtrees: dNSName "localhost" (covers *.localhost),
-    // iPAddress 127.0.0.0/8 and ::1/128. Nothing else may be named.
+    // Permitted subtrees, one or more per name type, so every type a
+    // certificate could name is limited (a type with no permitted subtree
+    // would be unlimited, RFC 5280 4.2.1.10):
+    //   dNSName "localhost" (and its subdomains), iPAddress 127.0.0.0/8 and
+    //   ::1/128, rfc822Name and URI only at host "localhost", and
+    //   directoryName under O=FloServer (our certificates' subjects).
     const der::Bytes v4 = {127, 0, 0, 0, 255, 0, 0, 0};
     der::Bytes v6(32, 0);
     v6[15] = 1;
     std::fill(v6.begin() + 16, v6.end(), static_cast<std::uint8_t>(0xFF));
+    const der::Bytes floserver_dn =
+        der::sequence({der::tlv(0x31, der::sequence({der::oid(kOrganisation), der::utf8_string("FloServer")}))});
     const der::Bytes permitted = der::concat({
         der::sequence({der::context_primitive(2, bytes_of("localhost"))}),
         der::sequence({der::context_primitive(7, v4)}),
         der::sequence({der::context_primitive(7, v6)}),
+        der::sequence({der::context_primitive(1, bytes_of("localhost"))}),
+        der::sequence({der::context_primitive(6, bytes_of("localhost"))}),
+        der::sequence({der::context_constructed(4, floserver_dn)}),
     });
     return der::sequence({
         extension(kBasicConstraints, true, der::sequence({der::boolean(true), der::small_integer(0)})),
         extension(kKeyUsage, true, der::bit_string(usage, 1)),
+        // On a CA, verifiers (CryptoAPI, NSS, Chrome, OpenSSL) read this as
+        // the uses it may sign for: web servers only, never email, code
+        // signing or client logins.
+        extension(kExtKeyUsage, false, der::sequence({der::oid(kServerAuth)})),
         extension(kNameConstraints, true, der::sequence({der::context_constructed(0, permitted)})),
         extension(kSubjectKeyId, false, der::octet_string(key_identifier(f.subject_key))),
     });
@@ -82,14 +95,22 @@ der::Bytes site_extensions(const CertificateFields& f) {
     // digitalSignature (bit 0): 1000 0000, seven unused bits.
     const der::Bytes usage = {0x80};
     std::vector<der::Bytes> names;
-    names.reserve(f.dns_names.size());
+    names.reserve(f.dns_names.size() + f.email_names.size());
     for (const std::string& n : f.dns_names) {
         names.push_back(der::context_primitive(2, bytes_of(n)));
+    }
+    for (const std::string& n : f.email_names) {
+        names.push_back(der::context_primitive(1, bytes_of(n)));
+    }
+    std::vector<der::Bytes> purposes;
+    purposes.reserve(f.purposes.size());
+    for (const std::string& p : f.purposes) {
+        purposes.push_back(der::oid(p));
     }
     return der::sequence({
         extension(kBasicConstraints, true, der::sequence({})),
         extension(kKeyUsage, true, der::bit_string(usage, 7)),
-        extension(kExtKeyUsage, false, der::sequence({der::oid(kServerAuth)})),
+        extension(kExtKeyUsage, false, der::sequence_of(purposes)),
         // Critical when the subject would otherwise say nothing usable; ours
         // has a CN, so it isn't marked critical.
         extension(kSubjectAltName, false, der::sequence_of(names)),
@@ -215,13 +236,14 @@ std::optional<CaInfo> CertStore::load_ca(std::string& error) const {
 }
 
 std::optional<EcKeyPair> CertStore::load_ca_key(std::string& error) const {
-    const auto sealed = read_small_file(dir_ / "ca.key", kMaxKeyBytes);
+    auto sealed = read_small_file(dir_ / "ca.key", kMaxKeyBytes);
     if (!sealed) {
         error = "the FloServer certificate authority's key is missing";
         return std::nullopt;
     }
     const std::span<const std::uint8_t> bytes(reinterpret_cast<const std::uint8_t*>(sealed->data()), sealed->size());
     auto raw = unprotect_secret(bytes, error);
+    wipe(std::span<std::uint8_t>(reinterpret_cast<std::uint8_t*>(sealed->data()), sealed->size()));
     if (!raw) {
         return std::nullopt;
     }
@@ -295,18 +317,28 @@ std::optional<CaInfo> CertStore::create_ca(std::string& error) {
 
 std::optional<CaInfo> CertStore::ensure_ca(std::string& error) {
     const std::lock_guard lock(mutex_);
+    return ensure_ca_locked(error);
+}
+
+// A CA is made only when there's none. The user trusted the one there, and a
+// new one would need trusting again (and leave the old root in their store),
+// so a damaged or expired CA is reported, never replaced here: `flo untrust`
+// then `flo trust` replaces it with the user's say.
+std::optional<CaInfo> CertStore::ensure_ca_locked(std::string& error) {
     std::string load_error;
     auto ca = load_ca(load_error);
-    if (ca && ca->not_after - now() > kRenewBefore) {
-        return ca;
-    }
     if (!load_error.empty()) {
-        // Never replace a damaged CA silently: the user trusted it, and a new
-        // one needs trusting again. Say so instead.
-        error = load_error + "; remove it with: flo untrust";
+        error = load_error + "; replace it with: flo untrust, then flo trust";
         return std::nullopt;
     }
-    return create_ca(error);
+    if (!ca) {
+        return create_ca(error);
+    }
+    if (ca->not_after <= now()) {
+        error = "the FloServer certificate authority has expired; replace it with: flo untrust, then flo trust";
+        return std::nullopt;
+    }
+    return ca;
 }
 
 std::optional<SiteCertificate> CertStore::ensure_site(const std::string& name, std::string& error) {
@@ -314,11 +346,13 @@ std::optional<SiteCertificate> CertStore::ensure_site(const std::string& name, s
         error = "can't make a certificate for \"" + name + "\": " + *problem;
         return std::nullopt;
     }
-    const auto ca = ensure_ca(error);
+    // One lock for all of it: the CA can't be removed or replaced between
+    // reading it and signing with it.
+    const std::lock_guard lock(mutex_);
+    const auto ca = ensure_ca_locked(error);
     if (!ca) {
         return std::nullopt;
     }
-    const std::lock_guard lock(mutex_);
     const fs::path sites = dir_ / "sites";
     const fs::path base = sites / path_from_utf8(name);
     SiteCertificate out;

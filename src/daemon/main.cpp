@@ -203,6 +203,9 @@ struct Service {
         return {{"common_name", ca.common_name},
                 {"fingerprint", ca.fingerprint},
                 {"not_after", ca.not_after.time_since_epoch().count()},
+                // The CA is never replaced on its own (the user trusted it); the
+                // window warns ahead and `flo untrust` + `flo trust` replace it.
+                {"expires_soon", ca.not_after - std::chrono::system_clock::now() < core::kRenewBefore},
                 {"path", core::path_to_utf8(ca.certificate)},
                 {"der", core::to_base64(ca.der)},
                 {"trusted", trust}};

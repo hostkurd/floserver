@@ -39,6 +39,8 @@ struct FreeParamBld {
     void operator()(OSSL_PARAM_BLD* p) const { OSSL_PARAM_BLD_free(p); }
 };
 struct FreeParams {
+    // OSSL_PARAM_clear_free would also wipe the copy of the private key, but
+    // it needs OpenSSL 3.2 and Ubuntu 24.04 has 3.0.
     void operator()(OSSL_PARAM* p) const { OSSL_PARAM_free(p); }
 };
 struct FreeSig {
