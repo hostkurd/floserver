@@ -66,6 +66,12 @@ jobs:
           FLOSERVER_INSTANCE: ci
         run: |
           $bin = "build/bin/Release"
+          # Native programs write to stderr (nginx -v does); that isn't an error here.
+          $ErrorActionPreference = "Continue"
+          trap {
+            "::error title=live install::script error at line $($_.InvocationInfo.ScriptLineNumber): $($_.Exception.Message)"
+            exit 1
+          }
           # Logs can't be read from outside, so every failure becomes an annotation.
           function Fail([string]$what, [string]$output) {
             $flat = ($output -replace "`r?`n", " | ").Trim()
@@ -93,7 +99,9 @@ jobs:
           }
           Run "flo runtimes" { & "$bin/flo.exe" runtimes } | Out-Null
           Run "flo uninstall" { & "$bin/flo.exe" uninstall composer $phar.Directory.Name } | Out-Null
-          & "$bin/flo.exe" service stop
+          Run "flo service stop" { & "$bin/flo.exe" service stop } | Out-Null
+          "::notice title=live install::nginx and Composer installed from the CDN; nginx -v ran"
+          exit 0
       # The build, for trying on a real PC: download it from the run's page.
       - name: Upload the Windows build
         uses: actions/upload-artifact@v4
