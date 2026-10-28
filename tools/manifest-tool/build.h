@@ -5,7 +5,8 @@
 // releases.
 //
 // Report (floserver-cdn-report.json, written by check-floserver-cdn.ps1):
-//   {"cdn": "https://cdn.floserver.org",
+//   {"cdn": "https://cdn.floserver.org",       // where the files were checked
+//    "only": "",                               // set when only some files were checked
 //    "files": [{"path": "php/8.5.12/php-8.5.12-1-nts-Win32-vs17-x64.zip",
 //               "size": 36310917, "sha256": "<64 hex>",
 //               "result": "ok" | "fail" | "unchecked"}, ...]}
@@ -23,8 +24,9 @@
 
 namespace floserver::manifest_tool {
 
+// The CDN address in the list is the one the report was checked against, so
+// every listed URL is one that was really fetched and compared.
 struct BuildOptions {
-    std::string cdn = "https://cdn.floserver.org";
     std::int64_t sequence = 0;       // must be higher than the last published list
     int days = 30;                   // expiry, 1-90 days from `now`
     std::chrono::sys_seconds now;

@@ -61,7 +61,7 @@ TEST_CASE("the real report builds a list the app accepts") {
     REQUIRE(r.manifest_json.has_value());
     CHECK(r.runtime_count == 7);
     REQUIRE(r.notes.size() == 1);  // the MariaDB source archive
-    CHECK(r.notes[0].find("source archive") != std::string::npos);
+    CHECK(r.notes[0].find("source archive, not listed") != std::string::npos);
 
     const auto doc = json::parse(*r.manifest_json);
     CHECK(doc["schema"] == 1);
@@ -135,18 +135,73 @@ TEST_CASE("files that don't fit the catalog are refused or left out") {
         {{"path", "php.zip"}, {"size", 1}, {"sha256", std::string(64, 'a')}, {"result", "ok"}});
     CHECK(has_error_with(build_manifest(report.dump(), options()), "expected <runtime>/<version>/<file>"));
 
-    // A file whose name says another version than its folder is left out.
+    // A file whose name says another version than its folder stops the build.
     report = real_report();
     report["files"][0]["path"] = "php/8.5.11/php-8.5.12-1-nts-Win32-vs17-x64.zip";
-    const auto r = build_manifest(report.dump(), options());
+    auto r = build_manifest(report.dump(), options());
+    CHECK_FALSE(r.manifest_json.has_value());
+    CHECK(has_error_with(r, "doesn't match a php 8.5.11 Windows download"));
+
+    // So does a misspelt name, such as a lower-case "win64".
+    report = real_report();
+    report["files"][7]["path"] = "apache/2.4.69/httpd-2.4.69-261002-win64-VS18.zip";
+    auto o = options();
+    o.accepted = {"apache/2.4.69/httpd-2.4.69-261002-win64-VS18.zip"};
+    CHECK(has_error_with(build_manifest(report.dump(), o), "doesn't match a apache 2.4.69"));
+
+    // Thread-safe PHP is another build of the release: noted, not listed.
+    report = real_report();
+    report["files"][0]["path"] = "php/8.5.12/php-8.5.12-1-Win32-vs17-x64.zip";
+    r = build_manifest(report.dump(), options());
     REQUIRE(r.manifest_json.has_value());
     CHECK(r.runtime_count == 6);
     CHECK(r.notes.size() == 2);
+}
 
-    // Thread-safe PHP isn't the build FloServer runs.
-    report = real_report();
-    report["files"][0]["path"] = "php/8.5.12/php-8.5.12-1-Win32-vs17-x64.zip";
-    CHECK(build_manifest(report.dump(), options()).runtime_count == 6);
+TEST_CASE("the CDN address comes from the report and must be plain https") {
+    auto report = real_report();
+    report["cdn"] = "https://cdn.floserver.org/";  // a trailing slash is fine
+    auto r = build_manifest(report.dump(), options());
+    REQUIRE(r.manifest_json.has_value());
+    CHECK(json::parse(*r.manifest_json)["runtimes"][0]["urls"][0] ==
+          "https://cdn.floserver.org/php/8.5.12/php-8.5.12-1-nts-Win32-vs17-x64.zip");
+
+    report["cdn"] = "https://mirror.example.net/floserver";
+    r = build_manifest(report.dump(), options());
+    REQUIRE(r.manifest_json.has_value());
+    CHECK(json::parse(*r.manifest_json)["runtimes"][0]["urls"][0] ==
+          "https://mirror.example.net/floserver/php/8.5.12/php-8.5.12-1-nts-Win32-vs17-x64.zip");
+
+    for (const char* bad : {"http://cdn.floserver.org", "https://CDN.floserver.org", "https://x/../y",
+                            "https://x/./y", "https://x/a%2e", "https://x/?q=1", "https://x:443",
+                            "https://x//y", "", "https://"}) {
+        CAPTURE(bad);
+        report["cdn"] = bad;
+        CHECK(has_error_with(build_manifest(report.dump(), options()), "plain https address"));
+    }
+    report.erase("cdn");
+    CHECK(has_error_with(build_manifest(report.dump(), options()), "plain https address"));
+}
+
+TEST_CASE("a partial check (-Only) can't be published") {
+    auto report = real_report();
+    report["only"] = "php/";
+    CHECK(has_error_with(build_manifest(report.dump(), options()), "only some files"));
+    report["only"] = "";
+    CHECK(build_manifest(report.dump(), options()).manifest_json.has_value());
+    report["only"] = nullptr;
+    CHECK(has_error_with(build_manifest(report.dump(), options()), "only some files"));
+}
+
+TEST_CASE("null or missing fields are errors, not crashes") {
+    for (const char* key : {"result", "sha256", "size"}) {
+        CAPTURE(key);
+        auto report = real_report();
+        report["files"][0][key] = nullptr;
+        const auto r = build_manifest(report.dump(), options());
+        CHECK_FALSE(r.manifest_json.has_value());
+        CHECK_FALSE(r.errors.empty());
+    }
 }
 
 TEST_CASE("sequence, days and the report itself are checked") {

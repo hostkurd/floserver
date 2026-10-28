@@ -40,12 +40,17 @@ CloudFront) at `<runtime>/<version>/<original file name>`.
    ```
    powershell -ExecutionPolicy Bypass -File check-floserver-cdn.ps1 -Bucket floserver-cdn-origin -Region eu-central-1
    ```
-   Every file must say OK. Apache Lounge publishes no machine-readable checksum,
-   so compare Apache's SHA-256 by hand with apachelounge.com/download.
+   Every file must say OK, except Apache: Apache Lounge publishes no
+   machine-readable checksum, so it always says CHECK BY HAND. Compare its
+   SHA-256 with the checksum on apachelounge.com/download yourself.
+   Don't use `-Only` for a run you'll publish from; `build` refuses such a report.
 4. **Build** the list from the JSON report, on the same computer:
    ```
    floserver-manifest build floserver-cdn-report.json --sequence <last + 1> --days 30 --accept apache/2.4.69/httpd-2.4.69-261002-Win64-VS18.zip
    ```
+   - It writes `manifest.json` in the current folder (`--out <file>` to change that).
+   - The CDN address in the list is the one in the report, the address the files were checked on.
+   - A file under a known runtime whose name doesn't fit (a typo, a wrong version folder) stops the build.
    - `--accept` names files you compared by hand.
    - Source archives such as MariaDB's `.tar.gz` stay on the CDN for the GPL but aren't listed.
    - The tool knows each runtime's licence, platform and official fallback URL (the catalog in `tools/manifest-tool/build.cpp`).
@@ -54,7 +59,9 @@ CloudFront) at `<runtime>/<version>/<original file name>`.
    ```
    floserver-manifest sign manifest.json floserver-2026.key
    ```
-   It refuses a list whose `expires` is more than 90 days ahead.
+   It refuses a list whose `expires` is more than 90 days ahead, counted by the
+   offline computer's clock. Keep that clock right, or `--days 90` built on
+   another computer may be refused.
 6. **Check the signature** the way the app will (any computer):
    ```
    floserver-manifest verify manifest.json

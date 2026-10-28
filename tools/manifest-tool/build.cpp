@@ -23,6 +23,9 @@ using namespace floserver::core;
 
 struct CatalogEntry {
     std::string_view name;
+    // Files of this runtime that are deliberately not listed (other builds of
+    // the same release); anything else that doesn't match file_pattern is an error.
+    std::string_view other_builds;
     std::string_view license;
     std::string_view platform;
     std::string_view variant;
@@ -36,16 +39,16 @@ struct CatalogEntry {
 // The runtimes FloServer 1.0 knows (Windows x64). Add a row here before
 // publishing a new kind of runtime.
 constexpr std::array<CatalogEntry, 6> kCatalog = {{
-    {"php", "PHP-3.01", "windows-x64", "nts", R"(php-{v}(-\d+)?-nts-Win32-vs1[67]-x64\.zip)",
+    {"php", R"(php-{v}(-\d+)?-Win32-vs1[67]-x64\.zip)", "PHP-3.01", "windows-x64", "nts", R"(php-{v}(-\d+)?-nts-Win32-vs1[67]-x64\.zip)",
      "https://downloads.php.net/~windows/releases/archives/{file}"},
-    {"mariadb", "GPL-2.0", "windows-x64", "", R"(mariadb-{v}-winx64\.zip)",
+    {"mariadb", "", "GPL-2.0", "windows-x64", "", R"(mariadb-{v}-winx64\.zip)",
      "https://archive.mariadb.org/mariadb-{v}/winx64-packages/{file}"},
-    {"node", "MIT", "windows-x64", "", R"(node-v{v}-win-x64\.zip)",
+    {"node", "", "MIT", "windows-x64", "", R"(node-v{v}-win-x64\.zip)",
      "https://nodejs.org/dist/v{v}/{file}"},
-    {"composer", "MIT", "any", "", R"(composer\.phar)", "https://getcomposer.org/download/{v}/{file}"},
-    {"nginx", "BSD-2-Clause", "windows-x64", "", R"(nginx-{v}\.zip)",
+    {"composer", "", "MIT", "any", "", R"(composer\.phar)", "https://getcomposer.org/download/{v}/{file}"},
+    {"nginx", "", "BSD-2-Clause", "windows-x64", "", R"(nginx-{v}\.zip)",
      "https://nginx.org/download/{file}"},
-    {"apache", "Apache-2.0", "windows-x64", "", R"(httpd-{v}-\d+-Win64-VS1[78]\.zip)", ""},
+    {"apache", "", "Apache-2.0", "windows-x64", "", R"(httpd-{v}-\d+-Win64-VS1[78]\.zip)", ""},
 }};
 
 std::string join(std::initializer_list<std::string_view> parts) {
@@ -73,6 +76,33 @@ std::string regex_escape(std::string_view s) {
         out += c;
     }
     return out;
+}
+
+// https://<lower-case host>[/<path>], no query, percent signs or dot segments:
+// the base every listed URL is built on.
+bool is_cdn_base(std::string_view url) {
+    constexpr std::string_view kScheme = "https://";
+    if (!url.starts_with(kScheme) || url.size() > 200) {
+        return false;
+    }
+    const std::string_view rest = url.substr(kScheme.size());
+    const std::string_view host = rest.substr(0, rest.find('/'));
+    if (host.empty() || host.front() == '.' || host.back() == '.' || host.front() == '-' ||
+        !std::all_of(host.begin(), host.end(), [](char c) {
+            return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '-';
+        })) {
+        return false;
+    }
+    const std::string_view path = rest.substr(host.size());
+    if (!std::all_of(path.begin(), path.end(), [](char c) {
+            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                   c == '/' || c == '-' || c == '_' || c == '.';
+        })) {
+        return false;
+    }
+    const std::string padded = std::string(path) + "/";
+    return padded.find("/./") == std::string::npos && padded.find("/../") == std::string::npos &&
+           padded.find("//") == std::string::npos;
 }
 
 std::string archive_of(std::string_view file) {
@@ -149,6 +179,21 @@ BuildResult build_manifest(std::string_view report_json, const BuildOptions& opt
         fail("the report isn't a FloServer CDN check report");
         return result;
     }
+    if (report.contains("only") && !(report["only"].is_string() && report["only"].get<std::string>().empty())) {
+        fail("the report checked only some files (-Only); a published list must come from a full check");
+        return result;
+    }
+    std::string cdn;
+    if (report.contains("cdn") && report["cdn"].is_string()) {
+        cdn = report["cdn"].get<std::string>();
+    }
+    while (cdn.ends_with('/')) {
+        cdn.pop_back();
+    }
+    if (!is_cdn_base(cdn)) {
+        fail("the report's \"cdn\" isn't a plain https address such as https://cdn.floserver.org");
+        return result;
+    }
 
     std::set<std::string> seen_paths;
     std::set<std::string> seen_runtimes;
@@ -177,7 +222,7 @@ BuildResult build_manifest(std::string_view report_json, const BuildOptions& opt
         const std::string version = path.substr(first + 1, second - first - 1);
         const std::string file = path.substr(second + 1);
 
-        const auto* entry = std::find_if(kCatalog.begin(), kCatalog.end(),
+        const auto entry = std::find_if(kCatalog.begin(), kCatalog.end(),
                                          [&](const CatalogEntry& c) { return c.name == name; });
         if (entry == kCatalog.end()) {
             fail(join({path, ": \"", name, "\" isn't a runtime FloServer knows; add it to the catalog"}));
@@ -190,12 +235,23 @@ BuildResult build_manifest(std::string_view report_json, const BuildOptions& opt
         const std::regex pattern(
             replace_all(std::string(entry->file_pattern), "{v}", regex_escape(version)));
         if (!std::regex_match(file, pattern)) {
-            result.notes.push_back(path + ": not the Windows runtime file, left out" +
-                                   (file.ends_with(".tar.gz") ? " (source archive)" : ""));
+            const bool source = file.ends_with(".tar.gz") || file.ends_with(".tar.xz");
+            const bool other_build =
+                !entry->other_builds.empty() &&
+                std::regex_match(file, std::regex(replace_all(std::string(entry->other_builds), "{v}",
+                                                              regex_escape(version))));
+            if (source || other_build) {
+                result.notes.push_back(join({path, source ? ": source archive, not listed"
+                                                          : ": another build of this release, not listed"}));
+            } else {
+                fail(join({path, ": the file name doesn't match a ", name, " ", version,
+                           " Windows download; check the name and the version folder"}));
+            }
             continue;
         }
 
-        const std::string state = f.value("result", "");
+        const std::string state =
+            f.contains("result") && f["result"].is_string() ? f["result"].get<std::string>() : "";
         if (state == "unchecked") {
             if (options.accepted.contains(path)) {
                 used_accepts.insert(path);
@@ -214,7 +270,8 @@ BuildResult build_manifest(std::string_view report_json, const BuildOptions& opt
             fail(path + ": the report has no size");
             continue;
         }
-        const std::string sha = f.value("sha256", "");
+        const std::string sha =
+            f.contains("sha256") && f["sha256"].is_string() ? f["sha256"].get<std::string>() : "";
         if (sha.size() != 64 || !from_hex(sha)) {
             fail(path + ": the report has no valid sha256");
             continue;
@@ -225,7 +282,7 @@ BuildResult build_manifest(std::string_view report_json, const BuildOptions& opt
         }
 
         nlohmann::ordered_json urls = nlohmann::ordered_json::array();
-        urls.push_back(options.cdn + "/" + path);
+        urls.push_back(join({cdn, "/", path}));
         if (!entry->upstream.empty()) {
             urls.push_back(replace_all(replace_all(std::string(entry->upstream), "{v}", version),
                                        "{file}", file));

@@ -2,6 +2,7 @@
 // For HostKurd's release process, not shipped to users.
 //
 //   floserver-manifest build  <report.json> --sequence N [--days D] [--accept PATH]... [--out FILE]
+//     (the CDN address comes from the report: the one the files were checked on)
 //   floserver-manifest keygen <secret-key-file> <key-id>
 //   floserver-manifest sign   <manifest.json> <secret-key-file>
 //   floserver-manifest verify <manifest.json> [<public-key-base64> <key-id>]
@@ -346,11 +347,6 @@ int build(const std::vector<std::string>& args) {
             ++i;
         } else if (a == "--accept" && has_value) {
             options.accepted.insert(args[++i]);
-        } else if (a == "--cdn" && has_value) {
-            options.cdn = args[++i];
-            while (options.cdn.ends_with('/')) {
-                options.cdn.pop_back();
-            }
         } else if (a == "--out" && has_value) {
             out = args[++i];
         } else {

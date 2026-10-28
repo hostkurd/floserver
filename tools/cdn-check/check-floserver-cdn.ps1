@@ -71,8 +71,9 @@ function Find-OfficialHash([string]$sumsUrl, [string]$name) {
             if ($line -match "\b([0-9a-fA-F]{64})\b") { return $Matches[1].ToLower() }
         }
     }
-    # composer.phar.sha256sum and similar hold just the hash
-    if ($text.Trim() -match "^([0-9a-fA-F]{64})(\s|$)") { return $Matches[1].ToLower() }
+    # composer.phar.sha256sum and similar hold just the hash, on one line
+    $lines = @($text -split "`r?`n" | Where-Object { $_.Trim() -ne "" })
+    if ($lines.Count -eq 1 -and $lines[0].Trim() -match "^([0-9a-fA-F]{64})(\s|$)") { return $Matches[1].ToLower() }
     return $null
 }
 
@@ -134,7 +135,10 @@ foreach ($f in $files) {
 # The bucket itself must refuse direct reads: only CloudFront may read it.
 $direct = ""
 if ($Bucket -and $Region) {
-    $s3 = "https://$Bucket.s3.$Region.amazonaws.com/$($files[10].Path)"
+    # Any one listed file will do; the smallest keeps it quick.
+    $probe = ($files | Where-Object { $_.Path -like "composer/*" } | Select-Object -First 1)
+    if (-not $probe) { $probe = $files[0] }
+    $s3 = "https://$Bucket.s3.$Region.amazonaws.com/$($probe.Path)"
     try {
         $r = Invoke-WebRequest -Uri $s3 -UseBasicParsing -Method Head -TimeoutSec 60
         $direct = "FAIL: $s3 answered $([int]$r.StatusCode); the bucket is readable without CloudFront"
@@ -166,7 +170,10 @@ $report += "Direct S3 access: $direct"
 $ok = @($results | Where-Object { $_.Result -eq "OK" }).Count
 $report += "Summary: $ok of $($results.Count) files OK"
 
-$out = Join-Path $PSScriptRoot "floserver-cdn-report.txt"
+# Next to the script; the current folder when the script has no file (pasted, ISE).
+$here = $PSScriptRoot
+if (-not $here) { $here = (Get-Location).Path }
+$out = Join-Path $here "floserver-cdn-report.txt"
 $report | Set-Content -Path $out -Encoding UTF8
 
 # Machine-readable copy for floserver-manifest build.
@@ -174,9 +181,10 @@ $jsonFiles = @()
 foreach ($r in $results) {
     $jsonFiles += [ordered]@{ path = $r.Path; size = $r.Size; sha256 = $r.Sha256; result = $r.Code }
 }
-$json = [ordered]@{ cdn = $Cdn; checked = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ"); files = $jsonFiles } | ConvertTo-Json -Depth 4
+$checked = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ", [Globalization.CultureInfo]::InvariantCulture)
+$json = [ordered]@{ cdn = $Cdn; only = $Only; checked = $checked; files = $jsonFiles } | ConvertTo-Json -Depth 4
 # UTF-8 without a byte-order mark, which Windows PowerShell 5.1 would otherwise add.
-$jsonOut = Join-Path $PSScriptRoot "floserver-cdn-report.json"
+$jsonOut = Join-Path $here "floserver-cdn-report.json"
 [IO.File]::WriteAllText($jsonOut, $json, (New-Object Text.UTF8Encoding $false))
 $report | ForEach-Object { Write-Host $_ }
 Write-Host ""
