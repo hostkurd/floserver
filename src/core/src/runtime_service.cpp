@@ -30,6 +30,11 @@ std::chrono::sys_seconds system_now() {
     return std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
 }
 
+// Composer and other platform-free runtimes are listed as "any".
+bool runs_on(const RuntimeFile& r, std::string_view platform) {
+    return r.platform == platform || r.platform == "any";
+}
+
 bool is_finished(std::string_view state) {
     return state == "done" || state == "failed" || state == "cancelled";
 }
@@ -179,7 +184,7 @@ json RuntimeService::list(bool refresh) {
                    {"key", cached->key_id},
                    {"warnings", cached->warnings}};
     for (const RuntimeFile& r : cached->manifest.runtimes) {
-        if (r.platform != config_.platform) {
+        if (!runs_on(r, config_.platform)) {
             continue;
         }
         out["available"].push_back({{"name", r.name},
@@ -354,7 +359,14 @@ void RuntimeService::run(Job& job) {
     const auto wanted = job.requested.empty() ? std::optional<Version>() : Version::parse(job.requested);
     std::optional<RuntimeFile> entry;
     std::vector<std::string> offered;
-    for (const RuntimeFile& r : runtimes_for(cached->manifest, job.name, config_.platform)) {
+    std::vector<RuntimeFile> candidates = runtimes_for(cached->manifest, job.name, config_.platform);
+    for (RuntimeFile& r : runtimes_for(cached->manifest, job.name, "any")) {
+        candidates.push_back(std::move(r));
+    }
+    std::stable_sort(candidates.begin(), candidates.end(), [](const RuntimeFile& a, const RuntimeFile& b) {
+        return Version::parse(a.version).value_or(Version{}) > Version::parse(b.version).value_or(Version{});
+    });
+    for (const RuntimeFile& r : candidates) {
         if (!r.variant.empty() && r.variant != "nts") {
             continue;
         }

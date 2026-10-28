@@ -38,6 +38,7 @@ struct World {
     std::shared_ptr<FakeTransport> transport = std::make_shared<FakeTransport>();
     std::string php85 = make_zip("php-cgi.exe", "MZ 8.5");
     std::string php84 = make_zip("php-cgi.exe", "MZ 8.4");
+    std::string phar = "<?php // composer";
 
     nlohmann::json entry(const char* name, const char* version, const std::string& bytes,
                          const char* platform = "windows-x64") const {
@@ -51,6 +52,13 @@ struct World {
                 {"urls", {"https://cdn.example.org/" + std::string(name) + "/" + version + ".zip"}}};
     }
 
+    [[nodiscard]] nlohmann::json composer() const {
+        auto e = entry("composer", "2.10.3", phar, "any");
+        e["archive"] = "file";
+        e["urls"] = {"https://cdn.example.org/composer/2.10.3/composer.phar"};
+        return e;
+    }
+
     void publish(std::int64_t sequence) {
         const nlohmann::json doc = {
             {"schema", 1},
@@ -58,12 +66,13 @@ struct World {
             {"expires", "2026-12-01T00:00:00Z"},
             {"runtimes",
              {entry("php", "8.5.12", php85), entry("php", "8.4.27", php84),
-              entry("php", "8.5.12", php85, "linux-x64")}}};
+              entry("php", "8.5.12", php85, "linux-x64"), composer()}}};
         const std::string bytes = doc.dump();
         transport->serve(kSource.manifest_url, {200, bytes});
         transport->serve(kSource.signature_url, {200, kKey.sign(bytes, kKeyId)});
         transport->serve("https://cdn.example.org/php/8.5.12.zip", {200, php85});
         transport->serve("https://cdn.example.org/php/8.4.27.zip", {200, php84});
+        transport->serve("https://cdn.example.org/composer/2.10.3/composer.phar", {200, phar});
     }
 
     [[nodiscard]] RuntimeServiceConfig config() const {
@@ -103,7 +112,7 @@ TEST_CASE("the service lists, installs the newest match, and remembers the seque
     INFO(listed.dump(2));
     REQUIRE(listed["list"].is_object());
     CHECK(listed["list"]["sequence"] == 7);
-    CHECK(listed["available"].size() == 2);  // windows-x64 only
+    CHECK(listed["available"].size() == 3);  // windows-x64 and "any", not linux-x64
     CHECK(listed["installed"].empty());
 
     ServiceRefusal refusal;
@@ -129,6 +138,12 @@ TEST_CASE("the service lists, installs the newest match, and remembers the seque
     CHECK(job["state"] == "done");
     CHECK(job["message"].get<std::string>().find("already installed") != std::string::npos);
     CHECK(w.transport->requests("https://cdn.example.org/php/8.5.12.zip") == 1);
+
+    // Composer is listed for any platform.
+    job = wait_for(s, *s.install("composer", "", refusal));
+    INFO(job.dump(2));
+    CHECK(job["state"] == "done");
+    CHECK(read_file(w.tmp.path() / "runtimes" / "composer" / "2.10.3" / "composer.phar") == w.phar);
 }
 
 TEST_CASE("a list older than the stored sequence is refused") {
