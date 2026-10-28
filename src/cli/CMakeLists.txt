@@ -12,3 +12,4 @@ add_custom_command(TARGET floserver_cli POST_BUILD
         $<TARGET_FILE:floserver_cli>
         $<TARGET_FILE_DIR:floserver_cli>/fls${CMAKE_EXECUTABLE_SUFFIX}
     VERBATIM)
+set_target_properties(floserver_cli PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${FLOSERVER_BIN_DIR})

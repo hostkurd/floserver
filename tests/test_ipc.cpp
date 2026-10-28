@@ -1,0 +1,283 @@
+#include "floserver/core/ipc.h"
+#include "floserver/core/process.h"
+
+#include <doctest/doctest.h>
+
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <cstring>
+#include <random>
+#include <string>
+#include <thread>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+#endif
+
+using namespace floserver::core;
+using namespace std::chrono_literals;
+
+namespace {
+
+// A client that writes raw bytes, bypassing the message framing. It stays
+// connected until destroyed: on Windows, a client that hangs up before the
+// server reaches ConnectNamedPipe is never seen by the server at all.
+class RawClient {
+public:
+    explicit RawClient(const std::string& instance) {
+        const std::string path = ipc::endpoint_path(instance);
+#ifdef _WIN32
+        const std::wstring wide(path.begin(), path.end());
+        h_ = CreateFileW(wide.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+#else
+        sockaddr_un addr{};
+        addr.sun_family = AF_UNIX;
+        if (path.size() < sizeof addr.sun_path) {
+            std::memcpy(addr.sun_path, path.c_str(), path.size() + 1);
+            fd_ = socket(AF_UNIX, SOCK_STREAM, 0);
+            if (fd_ >= 0 && connect(fd_, reinterpret_cast<const sockaddr*>(&addr), sizeof addr) != 0) {
+                close(fd_);
+                fd_ = -1;
+            }
+        }
+#endif
+    }
+    ~RawClient() {
+#ifdef _WIN32
+        if (h_ != INVALID_HANDLE_VALUE) {
+            CloseHandle(h_);
+        }
+#else
+        if (fd_ >= 0) {
+            close(fd_);
+        }
+#endif
+    }
+    RawClient(const RawClient&) = delete;
+    RawClient& operator=(const RawClient&) = delete;
+    RawClient(RawClient&&) = delete;
+    RawClient& operator=(RawClient&&) = delete;
+
+    [[nodiscard]] bool write_bytes(const std::uint8_t* data, std::size_t size) const {
+#ifdef _WIN32
+        DWORD written = 0;
+        return h_ != INVALID_HANDLE_VALUE && WriteFile(h_, data, static_cast<DWORD>(size), &written, nullptr) &&
+               written == size;
+#else
+        return fd_ >= 0 && write(fd_, data, size) == static_cast<ssize_t>(size);
+#endif
+    }
+
+private:
+#ifdef _WIN32
+    HANDLE h_ = INVALID_HANDLE_VALUE;
+#else
+    int fd_ = -1;
+#endif
+};
+
+// A channel name no other test run uses.
+std::string unique_instance(const char* what) {
+    std::random_device rd;
+    return std::string("test-") + what + "-" + std::to_string(current_pid()) + "-" + std::to_string(rd() % 100000);
+}
+
+std::unique_ptr<ipc::Server> listen_ok(const std::string& instance) {
+    std::unique_ptr<ipc::Server> server;
+    std::string error;
+    const auto status = ipc::Server::listen(instance, server, error);
+    INFO(error);
+    REQUIRE(status == ipc::ListenStatus::Listening);
+    REQUIRE(server != nullptr);
+    return server;
+}
+
+}  // namespace
+
+TEST_CASE("a client and the server exchange messages both ways") {
+    const auto instance = unique_instance("echo");
+    auto server = listen_ok(instance);
+
+    std::thread echo([&] {
+        auto c = server->accept();
+        if (!c) {
+            return;  // the client's checks below then fail
+        }
+        while (auto m = c->receive()) {
+            if (!c->send("echo:" + *m)) {
+                break;
+            }
+        }
+    });
+
+    std::string error;
+    auto client = ipc::connect(instance, error);
+    INFO(error);
+    REQUIRE(client.has_value());
+    CHECK(error.empty());
+    for (const std::string& m : {std::string("hello"), std::string(), std::string(200000, 'x'),
+                                std::string("\xd9\x83\xd9\x88\xd8\xb1\xd8\xaf\xdb\x8c")}) {
+        REQUIRE(client->send(m));
+        const auto reply = client->receive();
+        REQUIRE(reply.has_value());
+        CHECK(*reply == "echo:" + m);
+    }
+    client->close();
+    echo.join();
+}
+
+TEST_CASE("connecting when nothing listens gives nothing, without an error") {
+    std::string error;
+    CHECK_FALSE(ipc::connect(unique_instance("none"), error).has_value());
+    CHECK(error.empty());
+}
+
+TEST_CASE("only one server per instance") {
+    const auto instance = unique_instance("single");
+    auto first = listen_ok(instance);
+    std::unique_ptr<ipc::Server> second;
+    std::string error;
+    CHECK(ipc::Server::listen(instance, second, error) == ipc::ListenStatus::AlreadyRunning);
+    CHECK(second == nullptr);
+
+    // Once the first is gone, the name can be claimed again.
+    first.reset();
+    auto again = listen_ok(instance);
+    CHECK(again != nullptr);
+}
+
+TEST_CASE("stop() wakes a thread waiting in accept()") {
+    const auto instance = unique_instance("stop");
+    auto server = listen_ok(instance);
+    std::optional<ipc::Connection> got;
+    bool returned = false;
+    std::thread waiter([&] {
+        got = server->accept();
+        returned = true;
+    });
+    std::this_thread::sleep_for(100ms);
+    server->stop();
+    server->stop();  // twice is fine
+    waiter.join();
+    CHECK(returned);
+    CHECK_FALSE(got.has_value());
+    CHECK_FALSE(server->accept().has_value());
+}
+
+TEST_CASE("messages up to the limit pass; a sender refuses a longer one") {
+    const auto instance = unique_instance("big");
+    auto server = listen_ok(instance);
+    std::optional<std::string> received;
+    bool still_valid = false;
+    std::thread reader([&] {
+        if (auto c = server->accept()) {
+            received = c->receive();
+            still_valid = c->valid();
+        }
+    });
+    std::string error;
+    auto client = ipc::connect(instance, error);
+    REQUIRE(client.has_value());
+    CHECK_FALSE(client->send(std::string(ipc::kMaxMessage + 1, 'x')));  // refused before sending
+    CHECK(client->send(std::string(ipc::kMaxMessage, 'y')));            // the limit itself is fine
+    reader.join();
+    REQUIRE(received.has_value());
+    CHECK(received->size() == ipc::kMaxMessage);
+    CHECK(still_valid);
+}
+
+TEST_CASE("a receiver refuses a length over the limit without reading it") {
+    const auto instance = unique_instance("hdr");
+    auto server = listen_ok(instance);
+    std::optional<std::string> received = std::string("not set");
+    bool still_valid = true;
+    std::thread reader([&] {
+        if (auto c = server->accept()) {
+            received = c->receive();
+            still_valid = c->valid();
+        }
+    });
+    // Send a raw header announcing kMaxMessage + 1 bytes, as a hostile client could.
+    const std::uint32_t too_long = ipc::kMaxMessage + 1;
+    const std::array<std::uint8_t, 4> header = {
+        static_cast<std::uint8_t>(too_long), static_cast<std::uint8_t>(too_long >> 8U),
+        static_cast<std::uint8_t>(too_long >> 16U), static_cast<std::uint8_t>(too_long >> 24U)};
+    const RawClient raw(instance);
+    REQUIRE(raw.write_bytes(header.data(), header.size()));
+    reader.join();  // the client stays connected until the server has read
+    CHECK_FALSE(received.has_value());
+    CHECK_FALSE(still_valid);
+}
+
+TEST_CASE("a client gives up when the service doesn't answer") {
+    const auto instance = unique_instance("slow");
+    auto server = listen_ok(instance);
+    std::optional<ipc::Connection> held;
+    std::thread silent([&] { held = server->accept(); });  // accepts, never replies
+    std::string error;
+    auto client = ipc::connect(instance, error);
+    REQUIRE(client.has_value());
+    REQUIRE(client->set_timeout(std::chrono::milliseconds(300)));
+    REQUIRE(client->send("ping"));
+    const auto start = std::chrono::steady_clock::now();
+    CHECK_FALSE(client->receive().has_value());
+    CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    CHECK_FALSE(client->valid());
+    silent.join();
+}
+
+TEST_CASE("a hang-up mid-message is reported, not hung on") {
+    const auto instance = unique_instance("hangup");
+    auto server = listen_ok(instance);
+    std::optional<std::string> received = std::string("not set");
+    std::atomic<bool> accepted{false};
+    std::thread reader([&] {
+        if (auto c = server->accept()) {
+            accepted = true;
+            received = c->receive();
+        }
+    });
+    std::string error;
+    auto client = ipc::connect(instance, error);
+    REQUIRE(client.has_value());
+    // Hang up only once the server has the connection (on Windows, an
+    // earlier hang-up means the server never sees this client at all).
+    for (int i = 0; i < 200 && !accepted; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    client->close();
+    reader.join();
+    CHECK(accepted);
+    CHECK_FALSE(received.has_value());
+}
+
+TEST_CASE("instance names are checked") {
+    std::unique_ptr<ipc::Server> server;
+    std::string error;
+    for (const char* bad : {"", "../x", "a/b", "UPPER", "a b", "a\\b"}) {
+        CAPTURE(bad);
+        CHECK(ipc::Server::listen(bad, server, error) == ipc::ListenStatus::Failed);
+        CHECK_FALSE(ipc::connect(bad, error).has_value());
+    }
+}
+
+#ifndef _WIN32
+#include <sys/stat.h>
+
+TEST_CASE("the socket and its folder are private to this user") {
+    const auto instance = unique_instance("perm");
+    auto server = listen_ok(instance);
+    const std::string path = ipc::endpoint_path(instance);
+    struct stat st{};
+    REQUIRE(stat(path.c_str(), &st) == 0);
+    CHECK((st.st_mode & 077U) == 0);
+    const std::string dir = path.substr(0, path.rfind('/'));
+    REQUIRE(stat(dir.c_str(), &st) == 0);
+    CHECK((st.st_mode & 077U) == 0);
+}
+#endif

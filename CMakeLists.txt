@@ -17,6 +17,10 @@ option(FLOSERVER_BUILD_TOOLS "Build the release tools (manifest signing)" ON)
 
 include(cmake/CodeRules.cmake)
 
+# The shipped programs sit side by side in bin/, as they will when installed,
+# so the CLI and the window find floserverd next to them.
+set(FLOSERVER_BIN_DIR ${PROJECT_BINARY_DIR}/bin)
+
 add_subdirectory(third_party/monocypher)
 add_subdirectory(src/core)
 add_subdirectory(src/daemon)
