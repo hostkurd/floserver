@@ -19,7 +19,7 @@
 //       {
 //         "name": "php", "version": "8.4.14", "platform": "windows-x64",
 //         "variant": "nts",                 // optional
-//         "archive": "zip",                 // zip | tar.gz | tar.xz
+//         "archive": "zip",                 // zip | tar.gz | tar.xz | file (used as is)
 //         "size": 31457280, "sha256": "<64 hex>",
 //         "license": "PHP-3.01",
 //         "urls": ["https://mirror.hostkurd.net/...", "https://windows.php.net/..."]
@@ -56,7 +56,7 @@ struct RuntimeFile {
     std::string version;   // "8.4.14"
     std::string platform;  // windows-x64, windows-arm64, macos-arm64, linux-x64...
     std::string variant;   // "nts", "ts", or empty
-    std::string archive;   // zip, tar.gz, tar.xz
+    std::string archive;   // zip, tar.gz, tar.xz, or "file" (not unpacked, e.g. composer.phar)
     std::uint64_t size = 0;
     Sha256Digest sha256{};
     std::string license;

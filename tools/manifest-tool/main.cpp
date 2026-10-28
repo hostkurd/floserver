@@ -1,9 +1,13 @@
 // floserver-manifest: makes the signing key and signs manifest.json (D5).
 // For HostKurd's release process, not shipped to users.
 //
+//   floserver-manifest build  <report.json> --sequence N [--days D] [--accept PATH]... [--out FILE]
+//     (the CDN address comes from the report: the one the files were checked on)
 //   floserver-manifest keygen <secret-key-file> <key-id>
 //   floserver-manifest sign   <manifest.json> <secret-key-file>
-//   floserver-manifest verify <manifest.json> <public-key-base64> <key-id>
+//   floserver-manifest verify <manifest.json> [<public-key-base64> <key-id>]
+//
+// build works on any computer (nothing secret). sign belongs on the offline one.
 //
 // The secret key is only ever read from a file, never taken as an argument.
 // The key file is created owner-only from its first byte (an ACL on Windows,
@@ -11,6 +15,8 @@
 // program's memory are wiped after use, as far as the code controls them.
 // Keep the file on an offline machine.
 
+#include "build.h"
+#include "floserver/core/builtin.h"
 #include "floserver/core/encoding.h"
 #include "floserver/core/manifest.h"
 
@@ -249,6 +255,13 @@ int sign(const fs::path& manifest_file, const fs::path& key_file) {
         std::cerr << "Not signed: " << result.message << "\n";
         return 1;
     }
+    if (result.manifest->expires - check.now >
+        std::chrono::days{floserver::manifest_tool::kMaxExpiryDays}) {
+        std::cerr << "Not signed: \"expires\" is more than "
+                  << floserver::manifest_tool::kMaxExpiryDays
+                  << " days ahead. A stale list must not stay valid for long.\n";
+        return 1;
+    }
     for (const auto& w : result.warnings) {
         std::cerr << "warning: " << w << "\n";
     }
@@ -266,21 +279,31 @@ int sign(const fs::path& manifest_file, const fs::path& key_file) {
     return 0;
 }
 
+// With no key given, checks against the keys built into FloServer, which is
+// exactly what the app will do.
 int verify(const fs::path& manifest_file, const std::string& public_b64, const std::string& id) {
     const auto bytes = read_file(manifest_file);
     fs::path sig_path = manifest_file;
     sig_path += ".sig";
     const auto sig = read_file(sig_path);
-    const auto pub = from_base64(public_b64);
-    if (!bytes || !sig || !pub || pub->size() != 32) {
-        std::cerr << "Can't read the manifest, its .sig file, or the public key.\n";
+    if (!bytes || !sig) {
+        std::cerr << "Can't read the manifest or its .sig file.\n";
         return 1;
     }
     ManifestCheck check;
-    TrustedKey trusted;
-    trusted.id = id;
-    std::copy(pub->begin(), pub->end(), trusted.public_key.begin());
-    check.trusted_keys = {trusted};
+    if (public_b64.empty()) {
+        check.trusted_keys = builtin_manifest_keys();
+    } else {
+        const auto pub = from_base64(public_b64);
+        if (!pub || pub->size() != 32) {
+            std::cerr << "The public key isn't valid base64 of 32 bytes.\n";
+            return 1;
+        }
+        TrustedKey trusted;
+        trusted.id = id;
+        std::copy(pub->begin(), pub->end(), trusted.public_key.begin());
+        check.trusted_keys = {trusted};
+    }
     check.now = std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
     const auto result = open_manifest(*bytes, *sig, check);
     for (const auto& w : result.warnings) {
@@ -290,12 +313,84 @@ int verify(const fs::path& manifest_file, const std::string& public_b64, const s
         std::cout << "FAILED: " << result.message << "\n";
         return 1;
     }
-    std::cout << "OK: sequence " << result.manifest->sequence << ", "
-              << result.manifest->runtimes.size() << " runtimes\n";
+    std::cout << "OK: signed by " << result.key_id << ", sequence " << result.manifest->sequence
+              << ", " << result.manifest->runtimes.size() << " runtimes, expires "
+              << floserver::manifest_tool::format_utc_time(result.manifest->expires) << "\n";
+    return 0;
+}
+
+bool parse_count(const std::string& text, long long low, long long high, long long& out) {
+    if (text.empty() || text.size() > 12 ||
+        !std::all_of(text.begin(), text.end(), [](char c) { return c >= '0' && c <= '9'; })) {
+        return false;
+    }
+    out = std::stoll(text);
+    return out >= low && out <= high;
+}
+
+int build(const std::vector<std::string>& args) {
+    namespace mt = floserver::manifest_tool;
+    mt::BuildOptions options;
+    options.now = std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
+    fs::path out = "manifest.json";
+    bool have_sequence = false;
+    for (std::size_t i = 2; i < args.size(); ++i) {
+        const std::string& a = args[i];
+        const bool has_value = i + 1 < args.size();
+        long long n = 0;
+        if (a == "--sequence" && has_value && parse_count(args[i + 1], 1, 1'000'000'000'000, n)) {
+            options.sequence = n;
+            have_sequence = true;
+            ++i;
+        } else if (a == "--days" && has_value && parse_count(args[i + 1], 1, mt::kMaxExpiryDays, n)) {
+            options.days = static_cast<int>(n);
+            ++i;
+        } else if (a == "--accept" && has_value) {
+            options.accepted.insert(args[++i]);
+        } else if (a == "--out" && has_value) {
+            out = args[++i];
+        } else {
+            std::cerr << "Unknown or incomplete option: " << a << "\n";
+            return 2;
+        }
+    }
+    if (!have_sequence) {
+        std::cerr << "--sequence is required: one more than the last published list (1 for the first).\n";
+        return 2;
+    }
+    const auto report = read_file(args[1]);
+    if (!report) {
+        std::cerr << "Can't read the report file.\n";
+        return 1;
+    }
+    const auto result = mt::build_manifest(*report, options);
+    for (const auto& note : result.notes) {
+        std::cout << "note: " << note << "\n";
+    }
+    for (const auto& e : result.errors) {
+        std::cerr << "error: " << e << "\n";
+    }
+    if (!result.manifest_json) {
+        std::cerr << "No manifest written.\n";
+        return 1;
+    }
+    std::ofstream file(out, std::ios::binary | std::ios::trunc);
+    file << *result.manifest_json;
+    file.close();
+    if (!file) {
+        std::cerr << "Can't write the manifest file.\n";
+        return 1;
+    }
+    std::cout << "Wrote " << result.runtime_count << " runtimes, sequence " << options.sequence
+              << ", expires " << mt::format_utc_time(options.now + std::chrono::days{options.days})
+              << ".\nNext: sign it on the offline computer.\n";
     return 0;
 }
 
 int run(const std::vector<std::string>& args) {
+    if (args.size() >= 2 && args[0] == "build") {
+        return build(args);
+    }
     if (args.size() == 3 && args[0] == "keygen") {
         return keygen(args[1], args[2]);
     }
@@ -305,10 +400,14 @@ int run(const std::vector<std::string>& args) {
     if (args.size() == 4 && args[0] == "verify") {
         return verify(args[1], args[2], args[3]);
     }
+    if (args.size() == 2 && args[0] == "verify") {
+        return verify(args[1], "", "");
+    }
     std::cerr << "Usage:\n"
+              << "  floserver-manifest build  <report.json> --sequence N [--days D] [--accept PATH]... [--out FILE]\n"
               << "  floserver-manifest keygen <secret-key-file> <key-id>\n"
               << "  floserver-manifest sign   <manifest.json> <secret-key-file>\n"
-              << "  floserver-manifest verify <manifest.json> <public-key-base64> <key-id>\n";
+              << "  floserver-manifest verify <manifest.json> [<public-key-base64> <key-id>]\n";
     return 2;
 }
 

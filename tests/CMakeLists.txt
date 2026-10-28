@@ -13,3 +13,9 @@ if(WIN32)
 endif()
 floserver_code_rules(floserver_tests)
 add_test(NAME floserver_tests COMMAND floserver_tests)
+
+# The manifest tool's build logic, when the tools are built.
+if(TARGET floserver_manifest_build)
+    target_sources(floserver_tests PRIVATE test_manifest_build.cpp)
+    target_link_libraries(floserver_tests PRIVATE floserver_manifest_build)
+endif()
