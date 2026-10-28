@@ -1,5 +1,5 @@
 // floserver: the command line (D2). Built as `floserver` and copied as the
-// short alias `fls` (Q2).
+// short name `flo` (FloCMS's own CLI is `php flo`, a PHP script, so they don't clash).
 
 #include "floserver/core/build_info.h"
 #include "floserver/core/ipc.h"
@@ -31,7 +31,7 @@ std::string shown(const fs::path& p) {
 
 void print_help(std::ostream& out) {
     out << "FloServer " << floserver::core::kVersion << "\n\n"
-        << "Usage: floserver <command>   (or: fls <command>)\n\n"
+        << "Usage: floserver <command>   (or: flo <command>)\n\n"
         << "Commands:\n"
         << "  status           Show whether FloServer is running\n"
         << "  service start    Start FloServer in the background\n"
@@ -75,7 +75,7 @@ int status() {
             std::cerr << "FloServer: " << error << "\n";
             return 1;
         }
-        std::cout << "FloServer isn't running. Start it with: fls service start\n";
+        std::cout << "FloServer isn't running. Start it with: flo service start\n";
         return 3;
     }
     const auto reply = client->call("status");
@@ -117,7 +117,7 @@ int service(const std::vector<std::string>& args) {
         std::cout << "FloServer is stopped.\n";
         return 0;
     }
-    std::cerr << "Usage: fls service start | fls service stop\n";
+    std::cerr << "Usage: flo service start | flo service stop\n";
     return 2;
 }
 
