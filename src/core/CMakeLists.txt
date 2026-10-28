@@ -5,17 +5,24 @@ configure_file(build_info.h.in ${CMAKE_CURRENT_BINARY_DIR}/generated/floserver/c
 add_library(floserver_core STATIC
     src/builtin.cpp
     src/encoding.cpp
+    src/ipc_common.cpp
+    src/ipc_posix.cpp
+    src/ipc_windows.cpp
     src/manifest.cpp
     src/ports.cpp
+    src/process.cpp
     src/project_config.cpp
+    src/protocol.cpp
+    src/service_client.cpp
     src/sha256.cpp
     src/version.cpp)
 
 target_include_directories(floserver_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_BINARY_DIR}/generated)
-target_link_libraries(floserver_core PRIVATE floserver_third_party floserver_monocypher)
+# nlohmann/json is part of core's interface (protocol.h).
+target_link_libraries(floserver_core PUBLIC floserver_third_party PRIVATE floserver_monocypher)
 if(WIN32)
-    target_link_libraries(floserver_core PRIVATE ws2_32)
+    target_link_libraries(floserver_core PRIVATE ws2_32 advapi32 psapi)
 endif()
 floserver_code_rules(floserver_core)
