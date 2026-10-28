@@ -9,6 +9,14 @@
 // Methods so far:
 //   status  -> {"version", "pid", "uptime_s", "memory_bytes" (or null)}
 //   quit    -> {}   the service stops after replying
+//   runtimes.list    {"refresh"?: bool}
+//                    -> {"platform", "installed": [...], "available": [...],
+//                        "list": {"sequence", "expires", "key", "warnings"} or null,
+//                        "list_error"?: "..."}
+//   runtimes.install {"name": "php", "version"?: "8.5"} -> {"job": 3}
+//   runtimes.remove  {"name": "php", "version": "8.5.12"} -> {}
+//   jobs.get         {"id": 3} -> runtime_service.h, RuntimeService::job()
+//   jobs.cancel      {"id": 3} -> {"cancelled": bool}
 
 #include <nlohmann/json.hpp>
 

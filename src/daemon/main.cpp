@@ -1,19 +1,26 @@
 // floserverd: the background service in the user's session (D2).
 //
-// This stage: one service per user, the private channel, and the first two
-// requests (status, quit). Runtimes, projects and idle timers come next.
+// So far: one service per user, the private channel, status and quit, and
+// the runtimes (the signed list, installs as jobs, removal). Projects and
+// idle timers come next.
 
 #include "floserver/core/build_info.h"
+#include "floserver/core/builtin.h"
+#include "floserver/core/http.h"
 #include "floserver/core/ipc.h"
+#include "floserver/core/paths.h"
 #include "floserver/core/process.h"
 #include "floserver/core/protocol.h"
+#include "floserver/core/runtime_service.h"
 
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string_view>
 #include <system_error>
 #include <thread>
@@ -48,9 +55,10 @@ public:
         }
         changed_.notify_all();
     }
-    void wait_until_idle(std::chrono::milliseconds limit) {
+    // True when every client has finished.
+    bool wait_until_idle(std::chrono::milliseconds limit) {
         std::unique_lock lock(mutex_);
-        changed_.wait_for(lock, limit, [this] { return count_ == 0; });
+        return changed_.wait_for(lock, limit, [this] { return count_ == 0; });
     }
 
 private:
@@ -59,11 +67,84 @@ private:
     int count_ = 0;
 };
 
+// The runtime work, or nothing when there's no data folder to keep it in.
+std::unique_ptr<floserver::core::RuntimeService> make_runtimes() {
+    namespace core = floserver::core;
+    const auto data = core::data_dir();
+    if (!data) {
+        return nullptr;
+    }
+    core::RuntimeServiceConfig config;
+    config.data_dir = *data;
+    config.platform = std::string(core::current_platform());
+    config.keys = core::builtin_manifest_keys();
+    config.source = {std::string(core::kManifestUrl), std::string(core::kManifestSignatureUrl)};
+    // The Visual C++ runtime DLLs ship next to floserverd (cmake: vcruntime/).
+    if (const auto self = core::executable_path()) {
+        const auto vc = self->parent_path() / "vcruntime";
+        std::error_code ec;
+        if (std::filesystem::is_directory(vc, ec)) {
+            config.vc_runtime_dir = vc;
+        }
+    }
+    return std::make_unique<core::RuntimeService>(std::move(config), core::make_system_transport());
+}
+
+std::optional<std::int64_t> job_id(const json& params) {
+    if (params.contains("id") && params["id"].is_number_integer()) {
+        return params["id"].get<std::int64_t>();
+    }
+    return std::nullopt;
+}
+
+std::string string_param(const json& params, const char* key) {
+    if (params.contains(key) && params[key].is_string()) {
+        return params[key].get<std::string>();
+    }
+    return {};
+}
+
 struct Service {
     std::shared_ptr<ipc::Server> server;
+    std::unique_ptr<floserver::core::RuntimeService> runtimes;
     Clock::time_point started = Clock::now();
     ActiveClients clients;
     std::atomic<bool> quitting{false};
+
+    // The reply to one runtime or job request.
+    [[nodiscard]] std::string runtime_request(const protocol::Request& r) const {
+        if (!runtimes) {
+            return protocol::make_error(r.id, "no_data_folder",
+                                        "FloServer can't find a folder to keep runtimes in (LOCALAPPDATA or HOME)");
+        }
+        floserver::core::ServiceRefusal refusal;
+        if (r.method == "runtimes.list") {
+            const bool refresh = r.params.contains("refresh") && r.params["refresh"].is_boolean() &&
+                                 r.params["refresh"].get<bool>();
+            return protocol::make_result(r.id, runtimes->list(refresh));
+        }
+        if (r.method == "runtimes.install") {
+            const auto id = runtimes->install(string_param(r.params, "name"), string_param(r.params, "version"),
+                                              refusal);
+            return id ? protocol::make_result(r.id, {{"job", *id}})
+                      : protocol::make_error(r.id, refusal.code, refusal.message);
+        }
+        if (r.method == "runtimes.remove") {
+            return runtimes->remove(string_param(r.params, "name"), string_param(r.params, "version"), refusal)
+                       ? protocol::make_result(r.id, json::object())
+                       : protocol::make_error(r.id, refusal.code, refusal.message);
+        }
+        const auto id = job_id(r.params);
+        if (!id) {
+            return protocol::make_error(r.id, "bad_params", "a job id is needed");
+        }
+        if (r.method == "jobs.get") {
+            const auto job = runtimes->job(*id);
+            return job ? protocol::make_result(r.id, *job)
+                       : protocol::make_error(r.id, "unknown_job", "there's no job " + std::to_string(*id));
+        }
+        return protocol::make_result(r.id, {{"cancelled", runtimes->cancel(*id)}});
+    }
 
     [[nodiscard]] json status() const {
         const auto memory = floserver::core::memory_in_use();
@@ -92,6 +173,10 @@ struct Service {
                 reply = protocol::make_error(0, error_code, "the request couldn't be read");
             } else if (request->method == "status") {
                 reply = protocol::make_result(request->id, status());
+            } else if (request->method == "runtimes.list" || request->method == "runtimes.install" ||
+                       request->method == "runtimes.remove" || request->method == "jobs.get" ||
+                       request->method == "jobs.cancel") {
+                reply = runtime_request(*request);
             } else if (request->method == "quit") {
                 reply = protocol::make_result(request->id, json::object());
                 quit = true;
@@ -126,6 +211,7 @@ int run() {
 
     auto service = std::make_shared<Service>();
     service->server = std::move(server);
+    service->runtimes = make_runtimes();
 
     while (auto connection = service->server->accept()) {
         if (!service->clients.try_add()) {
@@ -141,7 +227,19 @@ int run() {
         }
     }
     // Give the client that asked us to quit time to read the reply.
-    service->clients.wait_until_idle(std::chrono::seconds(2));
+    if (service->runtimes) {
+        service->runtimes->stop();
+    }
+    if (!service->clients.wait_until_idle(std::chrono::seconds(2))) {
+        // A client thread is still busy and holds the service, so it can't be
+        // torn down safely here. Exit now; the next start clears what an
+        // interrupted install left.
+        std::cout.flush();
+        std::_Exit(0);
+    }
+    // Waits for the cancelled install to wind down (a moment: the transfer
+    // ends as soon as it's cancelled).
+    service->runtimes.reset();
     return 0;
 }
 

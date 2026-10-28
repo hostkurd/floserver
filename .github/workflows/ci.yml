@@ -53,6 +53,64 @@ jobs:
           Get-ChildItem build -Recurse -Include FloServer.exe,floserverd.exe,floserver.exe |
             Where-Object { $_.FullName -match '\\Release\\' } |
             ForEach-Object { "{0,-16} {1,10:N0} bytes" -f $_.Name, $_.Length }
+          "vcruntime/:"
+          Get-ChildItem build/bin/Release/vcruntime | ForEach-Object { "  {0,-28} {1,10:N0} bytes" -f $_.Name, $_.Length }
+      # Real downloads from cdn.floserver.org through WinHTTP, into a
+      # throwaway data folder: the signed list, then nginx (a zip that needs
+      # the VC++ DLLs, so `nginx -v` proves they were added) and Composer (a
+      # plain file).
+      - name: Install runtimes from the live CDN
+        shell: pwsh
+        env:
+          FLOSERVER_DATA_DIR: ${{ runner.temp }}\floserver-data
+          FLOSERVER_INSTANCE: ci
+        run: |
+          $bin = "build/bin/Release"
+          # Native programs write to stderr (nginx -v does); that isn't an error here.
+          $ErrorActionPreference = "Continue"
+          trap {
+            Write-Host "::error title=live install::script error at line $($_.InvocationInfo.ScriptLineNumber): $($_.Exception.Message)"
+            exit 1
+          }
+          # Logs can't be read from outside, so every failure becomes an annotation.
+          function Fail([string]$what, [string]$output) {
+            $flat = ($output -replace "`r?`n", " | ").Trim()
+            if ($flat.Length -gt 600) { $flat = $flat.Substring(0, 600) }
+            Write-Host "::error title=live install::$what :: $flat"
+            exit 1
+          }
+          function Run([string]$what, [scriptblock]$block) {
+            $out = & $block 2>&1 | Out-String
+            Write-Host $out
+            if ($LASTEXITCODE -ne 0) { Fail "$what (exit $LASTEXITCODE)" $out }
+            return $out
+          }
+          Run "flo runtimes" { & "$bin/flo.exe" runtimes } | Out-Null
+          Run "flo install nginx" { & "$bin/flo.exe" install nginx } | Out-Null
+          Run "flo install composer" { & "$bin/flo.exe" install composer } | Out-Null
+          $nginx = Get-ChildItem "$env:FLOSERVER_DATA_DIR/runtimes/nginx" -Directory | Select-Object -First 1
+          $files = (Get-ChildItem $nginx.FullName -File | ForEach-Object Name) -join ", "
+          "nginx folder: $files"
+          Run "installed nginx -v (files: $files)" { & "$($nginx.FullName)/nginx.exe" -v } | Out-Null
+          $phar = Get-ChildItem "$env:FLOSERVER_DATA_DIR/runtimes/composer" -Recurse -Filter composer.phar
+          if (-not $phar) {
+            $all = (Get-ChildItem "$env:FLOSERVER_DATA_DIR/runtimes/composer" -Recurse | ForEach-Object Name) -join ", "
+            Fail "composer.phar missing" $all
+          }
+          Run "flo runtimes" { & "$bin/flo.exe" runtimes } | Out-Null
+          Run "flo uninstall" { & "$bin/flo.exe" uninstall composer $phar.Directory.Name } | Out-Null
+          Run "flo service stop" { & "$bin/flo.exe" service stop } | Out-Null
+          "::notice title=live install::nginx and Composer installed from the CDN; nginx -v ran"
+          exit 0
+      # The build, for trying on a real PC: download it from the run's page.
+      - name: Upload the Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: FloServer-windows-x64-${{ github.sha }}
+          path: |
+            build/bin/Release/*.exe
+            build/bin/Release/vcruntime/*.dll
+          retention-days: 14
 
   linux-sanitizers:
     name: Linux (clang, ASan + UBSan)

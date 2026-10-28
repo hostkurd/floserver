@@ -22,6 +22,7 @@ include(cmake/CodeRules.cmake)
 set(FLOSERVER_BIN_DIR ${PROJECT_BINARY_DIR}/bin)
 
 add_subdirectory(third_party/monocypher)
+add_subdirectory(third_party/miniz)
 add_subdirectory(src/core)
 add_subdirectory(src/daemon)
 add_subdirectory(src/cli)

@@ -47,3 +47,13 @@ TEST_CASE("replies round-trip") {
     CHECK_FALSE(parse_reply(R"({"v":1,"id":1})"));
     CHECK_FALSE(parse_reply(R"({"v":2,"id":1,"result":{}})"));
 }
+
+TEST_CASE("a reply carrying text that isn't UTF-8 is still sent") {
+    // A localized Windows error message in a non-UTF-8 code page.
+    const std::string bad = "can't write: \xe4\xe5 \xff";
+    std::string text;
+    CHECK_NOTHROW(text = floserver::core::protocol::make_error(3, "failed", bad));
+    const auto reply = floserver::core::protocol::parse_reply(text);
+    REQUIRE(reply.has_value());
+    CHECK(reply->error_message.find("can't write") == 0);
+}
