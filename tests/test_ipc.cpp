@@ -207,7 +207,7 @@ TEST_CASE("a receiver refuses a length over the limit without reading it") {
     const std::array<std::uint8_t, 4> header = {
         static_cast<std::uint8_t>(too_long), static_cast<std::uint8_t>(too_long >> 8U),
         static_cast<std::uint8_t>(too_long >> 16U), static_cast<std::uint8_t>(too_long >> 24U)};
-    RawClient raw(instance);
+    const RawClient raw(instance);
     REQUIRE(raw.write_bytes(header.data(), header.size()));
     reader.join();  // the client stays connected until the server has read
     CHECK_FALSE(received.has_value());
