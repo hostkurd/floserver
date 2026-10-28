@@ -117,7 +117,8 @@ std::optional<std::string> read_entry(const json& e, RuntimeFile& out) {
         out.variant = std::move(*variant);
     }
     auto archive = get_string(e, "archive");
-    if (!archive || (*archive != "zip" && *archive != "tar.gz" && *archive != "tar.xz")) {
+    if (!archive || (*archive != "zip" && *archive != "tar.gz" && *archive != "tar.xz" &&
+                     *archive != "file")) {
         return "has no valid archive type";
     }
     out.archive = std::move(*archive);

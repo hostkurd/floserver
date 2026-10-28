@@ -26,10 +26,46 @@ If every mirror's list reads as out of date, the user's clock may be ahead. The 
 
 ## Publishing a new list
 
-1. Edit `manifest.json`. Raise `sequence` by one. Set `expires` about 30 days ahead.
-2. Run `floserver-manifest sign manifest.json <key file>` on the signing machine. The tool checks the list opens before writing the `.sig`.
-3. Upload both files: mirrors first, then the main server.
-4. Re-sign before `expires`, even when nothing changed: raise `sequence` and move `expires` on. Otherwise apps stop accepting the list.
+The list is built from what the CDN actually serves, after each file has been
+compared with the official release. Files live on `https://cdn.floserver.org`
+(S3 bucket `floserver-cdn-origin`, eu-central-1, readable only through
+CloudFront) at `<runtime>/<version>/<original file name>`.
+
+1. **Upload** new runtime files to the bucket. Keep the original file name, in a
+   folder named after the plain version (`php/8.5.12/php-8.5.12-1-nts-Win32-vs17-x64.zip`).
+2. **Add them** to the `$files` list at the top of
+   `tools/cdn-check/check-floserver-cdn.ps1`, with the project's official
+   checksum list (or the original download, for nginx and Apache).
+3. **Check** on any computer with internet:
+   ```
+   powershell -ExecutionPolicy Bypass -File check-floserver-cdn.ps1 -Bucket floserver-cdn-origin -Region eu-central-1
+   ```
+   Every file must say OK. Apache Lounge publishes no machine-readable checksum,
+   so compare Apache's SHA-256 by hand with apachelounge.com/download.
+4. **Build** the list from the JSON report, on the same computer:
+   ```
+   floserver-manifest build floserver-cdn-report.json --sequence <last + 1> --days 30 --accept apache/2.4.69/httpd-2.4.69-261002-Win64-VS18.zip
+   ```
+   - `--accept` names files you compared by hand.
+   - Source archives such as MariaDB's `.tar.gz` stay on the CDN for the GPL but aren't listed.
+   - The tool knows each runtime's licence, platform and official fallback URL (the catalog in `tools/manifest-tool/build.cpp`).
+   - It runs the finished list through the app's own checks before writing it.
+5. **Sign** on the offline computer:
+   ```
+   floserver-manifest sign manifest.json floserver-2026.key
+   ```
+   It refuses a list whose `expires` is more than 90 days ahead.
+6. **Check the signature** the way the app will (any computer):
+   ```
+   floserver-manifest verify manifest.json
+   ```
+7. **Upload** `manifest.json` and `manifest.json.sig` together to the top of the
+   bucket, then invalidate both paths in CloudFront so users get the new pair.
+8. **Re-sign before `expires`**, even when nothing changed: build again with the
+   next `--sequence`, sign, upload. Otherwise apps stop accepting the list.
+
+Keep a note of the last published `sequence`. Re-using a lower number makes
+every app that saw the higher one refuse the list.
 
 ## The signing key
 

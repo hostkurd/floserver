@@ -1,6 +1,11 @@
+add_library(floserver_manifest_build STATIC build.cpp)
+target_include_directories(floserver_manifest_build PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(floserver_manifest_build PUBLIC floserver_core PRIVATE floserver_third_party floserver_monocypher)
+floserver_code_rules(floserver_manifest_build)
+
 add_executable(floserver_manifest main.cpp)
 set_target_properties(floserver_manifest PROPERTIES OUTPUT_NAME floserver-manifest)
-target_link_libraries(floserver_manifest PRIVATE floserver_core floserver_third_party floserver_monocypher)
+target_link_libraries(floserver_manifest PRIVATE floserver_manifest_build floserver_core floserver_third_party floserver_monocypher)
 if(WIN32)
     target_link_libraries(floserver_manifest PRIVATE bcrypt advapi32)
 endif()

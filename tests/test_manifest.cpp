@@ -255,6 +255,15 @@ TEST_CASE("a bad entry is skipped with a warning, the rest still load") {
     }
 }
 
+TEST_CASE("a single file such as composer.phar is allowed") {
+    auto doc = good_doc();
+    doc["runtimes"][0]["archive"] = "file";
+    const auto r = open_signed(doc);
+    REQUIRE(r.manifest.has_value());
+    CHECK(r.warnings.empty());
+    CHECK(r.manifest->runtimes[0].archive == "file");
+}
+
 TEST_CASE("well-formed URLs pass") {
     auto doc = good_doc();
     doc["runtimes"][0]["urls"] = {"https://mirror.hostkurd.net/php/php-8.2.27-nts-x64.zip",

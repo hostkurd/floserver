@@ -1,0 +1,182 @@
+#include "build.h"
+
+#include "floserver/core/manifest.h"
+
+#include <doctest/doctest.h>
+#include <nlohmann/json.hpp>
+
+using namespace floserver::manifest_tool;
+using nlohmann::json;
+
+namespace {
+
+// The CDN check of 28 Oct 2026 (values from the user's report).
+json real_report() {
+    const auto file = [](const char* path, std::uint64_t size, const char* sha, const char* result) {
+        return json{{"path", path}, {"size", size}, {"sha256", sha}, {"result", result}};
+    };
+    return {{"cdn", "https://cdn.floserver.org"},
+            {"files",
+             {file("php/8.5.12/php-8.5.12-1-nts-Win32-vs17-x64.zip", 36310917,
+                   "2a36a2edcb7a5b9252f638fd5e4cf84d7f6e066092654220dc0b63e5cf4e9723", "ok"),
+              file("php/8.4.27/php-8.4.27-1-nts-Win32-vs17-x64.zip", 35296081,
+                   "dbae154a0a89791f36c3d48e68bae797878333e7d6cb5721e74617de59b63ab7", "ok"),
+              file("mariadb/11.4.13/mariadb-11.4.13-winx64.zip", 95024126,
+                   "d62986d433eeebfde218560b276103831604a61e929e87f1a17f5aebd80257e2", "ok"),
+              file("mariadb/11.4.13/mariadb-11.4.13.tar.gz", 221118336,
+                   "1bb254b106d0a7ca871cfa18fa6e18d4b80a7430f9ec9d1571ec4271a13def96", "ok"),
+              file("node/24.22.1/node-v24.22.1-win-x64.zip", 37748064,
+                   "d2046d28c2c3dcd211ac5145c0bf30e2047ef9dfb306693c8c6e2eccd8b95fa5", "ok"),
+              file("composer/2.10.3/composer.phar", 3642137,
+                   "7a2d379d5b8ffdaa028580ef26494c36d2feef4b178d3dd1473a4dbc5e17c8d6", "ok"),
+              file("nginx/1.30.6/nginx-1.30.6.zip", 2773293,
+                   "c6ee35edb0a861063323f709192ae50d1eefaf2ea7d00678bd2b22d8542dc61e", "ok"),
+              file("apache/2.4.69/httpd-2.4.69-261002-Win64-VS18.zip", 14495691,
+                   "77d715d0d9cee731e2251e7ddc2090a7a8e6d41fedef2e9827cd918593c5a652", "unchecked")}}};
+}
+
+BuildOptions options() {
+    BuildOptions o;
+    o.sequence = 1;
+    o.days = 30;
+    o.now = *floserver::core::parse_utc_time("2026-10-28T12:00:00Z");
+    o.accepted = {"apache/2.4.69/httpd-2.4.69-261002-Win64-VS18.zip"};
+    return o;
+}
+
+bool has_error_with(const BuildResult& r, std::string_view text) {
+    for (const auto& e : r.errors) {
+        if (e.find(text) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
+TEST_CASE("the real report builds a list the app accepts") {
+    const auto r = build_manifest(real_report().dump(), options());
+    REQUIRE(r.errors.empty());
+    REQUIRE(r.manifest_json.has_value());
+    CHECK(r.runtime_count == 7);
+    REQUIRE(r.notes.size() == 1);  // the MariaDB source archive
+    CHECK(r.notes[0].find("source archive") != std::string::npos);
+
+    const auto doc = json::parse(*r.manifest_json);
+    CHECK(doc["schema"] == 1);
+    CHECK(doc["sequence"] == 1);
+    CHECK(doc["expires"] == "2026-11-27T12:00:00Z");
+    const auto& rt = doc["runtimes"];
+    REQUIRE(rt.size() == 7);
+
+    const auto& php = rt[0];
+    CHECK(php["name"] == "php");
+    CHECK(php["version"] == "8.5.12");  // not "8.5.12-1"
+    CHECK(php["platform"] == "windows-x64");
+    CHECK(php["variant"] == "nts");
+    CHECK(php["archive"] == "zip");
+    CHECK(php["license"] == "PHP-3.01");
+    CHECK(php["urls"] ==
+          json::array({"https://cdn.floserver.org/php/8.5.12/php-8.5.12-1-nts-Win32-vs17-x64.zip",
+                       "https://downloads.php.net/~windows/releases/archives/"
+                       "php-8.5.12-1-nts-Win32-vs17-x64.zip"}));
+
+    const auto find = [&](const char* name) {
+        for (const auto& e : rt) {
+            if (e["name"] == name) {
+                return e;
+            }
+        }
+        FAIL("missing " << name);
+        return json{};
+    };
+    CHECK(find("composer")["archive"] == "file");
+    CHECK(find("composer")["platform"] == "any");
+    CHECK(find("mariadb")["urls"][1] ==
+          "https://archive.mariadb.org/mariadb-11.4.13/winx64-packages/mariadb-11.4.13-winx64.zip");
+    CHECK(find("node")["urls"][1] == "https://nodejs.org/dist/v24.22.1/node-v24.22.1-win-x64.zip");
+    CHECK(find("nginx")["license"] == "BSD-2-Clause");
+    CHECK(find("apache")["urls"].size() == 1);  // no stable upstream link
+}
+
+TEST_CASE("an unchecked file needs --accept, and a failed one is refused") {
+    auto o = options();
+    o.accepted.clear();
+    auto r = build_manifest(real_report().dump(), o);
+    CHECK_FALSE(r.manifest_json.has_value());
+    CHECK(has_error_with(r, "--accept apache/2.4.69/httpd-2.4.69-261002-Win64-VS18.zip"));
+
+    auto report = real_report();
+    report["files"][0]["result"] = "fail";
+    r = build_manifest(report.dump(), options());
+    CHECK_FALSE(r.manifest_json.has_value());
+    CHECK(has_error_with(r, "does NOT match"));
+
+    o = options();
+    o.accepted.insert("php/9.9.9/typo.zip");
+    r = build_manifest(real_report().dump(), o);
+    CHECK(has_error_with(r, "no unchecked file with that path"));
+}
+
+TEST_CASE("files that don't fit the catalog are refused or left out") {
+    auto report = real_report();
+    report["files"].push_back(
+        {{"path", "python/3.13.0/python.zip"}, {"size", 1}, {"sha256", std::string(64, 'a')}, {"result", "ok"}});
+    CHECK(has_error_with(build_manifest(report.dump(), options()), "isn't a runtime FloServer knows"));
+
+    report = real_report();
+    report["files"].push_back(
+        {{"path", "php/8.5.x/php.zip"}, {"size", 1}, {"sha256", std::string(64, 'a')}, {"result", "ok"}});
+    CHECK(has_error_with(build_manifest(report.dump(), options()), "isn't a version folder"));
+
+    report = real_report();
+    report["files"].push_back(
+        {{"path", "php.zip"}, {"size", 1}, {"sha256", std::string(64, 'a')}, {"result", "ok"}});
+    CHECK(has_error_with(build_manifest(report.dump(), options()), "expected <runtime>/<version>/<file>"));
+
+    // A file whose name says another version than its folder is left out.
+    report = real_report();
+    report["files"][0]["path"] = "php/8.5.11/php-8.5.12-1-nts-Win32-vs17-x64.zip";
+    const auto r = build_manifest(report.dump(), options());
+    REQUIRE(r.manifest_json.has_value());
+    CHECK(r.runtime_count == 6);
+    CHECK(r.notes.size() == 2);
+
+    // Thread-safe PHP isn't the build FloServer runs.
+    report = real_report();
+    report["files"][0]["path"] = "php/8.5.12/php-8.5.12-1-Win32-vs17-x64.zip";
+    CHECK(build_manifest(report.dump(), options()).runtime_count == 6);
+}
+
+TEST_CASE("sequence, days and the report itself are checked") {
+    auto o = options();
+    o.sequence = 0;
+    CHECK(has_error_with(build_manifest(real_report().dump(), o), "--sequence"));
+    o = options();
+    o.days = 91;
+    CHECK(has_error_with(build_manifest(real_report().dump(), o), "--days"));
+    o.days = 90;
+    CHECK(build_manifest(real_report().dump(), o).manifest_json.has_value());
+
+    CHECK(has_error_with(build_manifest("not json", options()), "isn't a FloServer CDN check report"));
+    CHECK(has_error_with(build_manifest("{}", options()), "isn't a FloServer CDN check report"));
+
+    auto report = real_report();
+    report["files"].push_back(report["files"][0]);
+    CHECK(has_error_with(build_manifest(report.dump(), options()), "listed twice"));
+
+    report = real_report();
+    report["files"][0]["sha256"] = "abc";
+    CHECK(has_error_with(build_manifest(report.dump(), options()), "no valid sha256"));
+    report = real_report();
+    report["files"][0]["size"] = 0;
+    CHECK(has_error_with(build_manifest(report.dump(), options()), "no size"));
+}
+
+TEST_CASE("UTC times are written in the manifest's format") {
+    CHECK(format_utc_time(*floserver::core::parse_utc_time("2028-02-29T23:59:59Z")) ==
+          "2028-02-29T23:59:59Z");
+    CHECK(format_utc_time(*floserver::core::parse_utc_time("2026-01-05T03:04:05Z")) ==
+          "2026-01-05T03:04:05Z");
+}
