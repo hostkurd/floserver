@@ -113,6 +113,16 @@ TEST_CASE("Apache's DLLs go into Apache24/bin; a plain file is copied as is") {
     CHECK(read_file(r.dir / "composer.phar") == "<?php composer");
     CHECK_FALSE(fs::exists(r.dir / "vcruntime140.dll"));
 
+    // A file name that would clash with the marker isn't used.
+    auto odd = entry("tool", "1.0.0", "file");
+    odd.urls = {"https://cdn.example.org/tool/1.0.0/.floserver-runtime.json"};
+    const auto o = install_runtime(odd, phar, root, vc);
+    REQUIRE(o.ok);
+    CHECK(fs::exists(o.dir / "tool.bin"));
+    REQUIRE(list_installed(root).size() == 3);
+    std::string error;
+    REQUIRE(remove_runtime(root, "tool", "1.0.0", error));
+
     const auto listed = list_installed(root);
     REQUIRE(listed.size() == 2);
     CHECK(listed[0].name == "apache");

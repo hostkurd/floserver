@@ -18,6 +18,7 @@
 #include "floserver/core/http.h"
 #include "floserver/core/manifest.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -61,7 +62,12 @@ struct ManifestFetchOptions {
     std::chrono::milliseconds retry_delay{3000};
     // Waits between attempts; tests pass one that returns at once.
     std::function<void(std::chrono::milliseconds)> sleep;
+    // When set and true, the fetch stops as soon as possible.
+    const std::atomic<bool>* cancel = nullptr;
 };
+
+// Each of the two files must arrive within this time.
+inline constexpr std::chrono::seconds kManifestMaxTime{60};
 
 [[nodiscard]] ManifestFetch fetch_manifest(HttpTransport& transport, const ManifestSource& source,
                                            const ManifestFetchOptions& options);
@@ -84,7 +90,14 @@ struct DownloadProgress {
 struct DownloadOptions {
     // Called as bytes arrive; return false to cancel.
     std::function<bool(const DownloadProgress&)> progress;
+    // When set and true, the download stops even while waiting for data.
+    const std::atomic<bool>* cancel = nullptr;
 };
+
+// How long one attempt at a file may take: two minutes plus the time at
+// 16 KiB/s, so a slow but honest line finishes and a stalling server doesn't
+// hold the install for ever.
+[[nodiscard]] std::chrono::seconds download_time_limit(std::uint64_t size);
 
 struct DownloadResult {
     bool ok = false;

@@ -204,6 +204,11 @@ TEST_CASE("damaged or oversized archives are refused") {
         limits.max_entries = 1;
         CHECK_FALSE(extract_zip(save(tmp, make_zip({{"a", "1"}, {"b", "2"}})), tmp.path() / "out", limits).ok);
     }
+    SUBCASE("no files") {
+        const auto r = extract_zip(save(tmp, make_zip({{"empty/", ""}})), tmp.path() / "out");
+        CHECK_FALSE(r.ok);
+        CHECK(r.message.find("no files") != std::string::npos);
+    }
     SUBCASE("not a zip") {
         CHECK_FALSE(extract_zip(save(tmp, "this is not a zip file at all"), tmp.path() / "out").ok);
     }

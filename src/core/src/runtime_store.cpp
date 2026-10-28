@@ -59,7 +59,7 @@ std::string plain_file_name(const RuntimeFile& entry) {
         std::string_view url = entry.urls.front();
         url = url.substr(0, url.find_first_of("?#"));
         const std::string_view last = url.substr(url.rfind('/') + 1);
-        if (!safe_entry_path(last).empty() && last.find('/') == std::string_view::npos) {
+        if (!safe_entry_path(last).empty() && !last.starts_with('.')) {
             return std::string(last);
         }
     }
@@ -95,7 +95,7 @@ bool add_vc_runtime(const fs::path& install, const fs::path& vc_dir, std::string
         }
     }
     if (ec) {
-        error = "can't read the Visual C++ runtime folder " + path_to_utf8(vc_dir) + ": " + ec.message();
+        error = "can't read the Visual C++ runtime folder " + path_to_utf8(vc_dir) + ": " + error_text(ec);
         return false;
     }
     for (const fs::path& sub : {fs::path("."), fs::path("bin"), fs::path("Apache24") / "bin"}) {
@@ -110,7 +110,7 @@ bool add_vc_runtime(const fs::path& install, const fs::path& vc_dir, std::string
             }
             fs::copy_file(dll, to, ec);
             if (ec) {
-                error = "can't copy " + path_to_utf8(dll.filename()) + ": " + ec.message();
+                error = "can't copy " + path_to_utf8(dll.filename()) + ": " + error_text(ec);
                 return false;
             }
         }
@@ -223,7 +223,7 @@ InstallResult install_runtime(const RuntimeFile& entry, const fs::path& archive,
     std::error_code ec;
     fs::create_directories(parent, ec);
     if (ec) {
-        result.message = "can't create " + path_to_utf8(parent) + ": " + ec.message();
+        result.message = "can't create " + path_to_utf8(parent) + ": " + error_text(ec);
         return result;
     }
     const fs::path staging = parent / path_from_utf8(std::string(kStagingPrefix) + folder + "-" + random_suffix());
@@ -245,7 +245,7 @@ InstallResult install_runtime(const RuntimeFile& entry, const fs::path& archive,
             fs::copy_file(archive, staging / path_from_utf8(plain_file_name(entry)), ec);
         }
         if (ec) {
-            return fail("couldn't copy " + entry.name + " " + entry.version + ": " + ec.message());
+            return fail("couldn't copy " + entry.name + " " + entry.version + ": " + error_text(ec));
         }
     } else {
         return fail("FloServer can't unpack " + entry.archive + " archives on this platform yet");
@@ -278,13 +278,13 @@ InstallResult install_runtime(const RuntimeFile& entry, const fs::path& archive,
         const fs::path aside = parent / path_from_utf8(std::string(kRemovingPrefix) + folder + "-" + random_suffix());
         fs::rename(result.dir, aside, ec);
         if (ec) {
-            return fail("can't replace the broken install in " + path_to_utf8(result.dir) + ": " + ec.message());
+            return fail("can't replace the broken install in " + path_to_utf8(result.dir) + ": " + error_text(ec));
         }
         fs::remove_all(aside, ec);
     }
     fs::rename(staging, result.dir, ec);
     if (ec) {
-        return fail("can't move the install into " + path_to_utf8(result.dir) + ": " + ec.message());
+        return fail("can't move the install into " + path_to_utf8(result.dir) + ": " + error_text(ec));
     }
     result.ok = true;
     return result;
@@ -308,7 +308,7 @@ bool remove_runtime(const fs::path& runtimes_root, const std::string& name, cons
     const fs::path aside = parent / path_from_utf8(std::string(kRemovingPrefix) + folder + "-" + random_suffix());
     fs::rename(dir, aside, ec);
     if (ec) {
-        error = "can't remove " + name + " " + folder + " (is it running?): " + ec.message();
+        error = "can't remove " + name + " " + folder + " (is it running?): " + error_text(ec);
         return false;
     }
     fs::remove_all(aside, ec);

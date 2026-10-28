@@ -243,7 +243,7 @@ ZipResult extract_zip(const fs::path& archive, const fs::path& target, const Zip
 
     fs::create_directories(target, ec);
     if (ec) {
-        result.message = "can't create " + path_to_utf8(target) + ": " + ec.message();
+        result.message = "can't create " + path_to_utf8(target) + ": " + error_text(ec);
         return result;
     }
     for (const Entry& e : entries) {
@@ -257,14 +257,14 @@ ZipResult extract_zip(const fs::path& archive, const fs::path& target, const Zip
         if (e.folder) {
             fs::create_directories(out, ec);
             if (ec) {
-                result.message = "can't create " + path_to_utf8(out) + ": " + ec.message();
+                result.message = "can't create " + path_to_utf8(out) + ": " + error_text(ec);
                 return result;
             }
             continue;
         }
         fs::create_directories(out.parent_path(), ec);
         if (ec) {
-            result.message = "can't create " + path_to_utf8(out.parent_path()) + ": " + ec.message();
+            result.message = "can't create " + path_to_utf8(out.parent_path()) + ": " + error_text(ec);
             return result;
         }
         if (fs::exists(fs::symlink_status(out, ec))) {
@@ -291,6 +291,10 @@ ZipResult extract_zip(const fs::path& archive, const fs::path& target, const Zip
         }
         ++result.files;
         result.bytes += w.written;
+    }
+    if (result.files == 0) {
+        result.message = "the archive has no files";
+        return result;
     }
     result.ok = true;
     return result;

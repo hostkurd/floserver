@@ -14,6 +14,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -62,6 +63,10 @@ public:
     // Cancels the running install and waits for the worker to finish.
     ~RuntimeService();
 
+    // Cancels every job and any list fetch without waiting. Safe from any
+    // thread; for a process about to exit.
+    void stop();
+
     // Installed runtimes and the ones the list offers for this platform.
     // With `refresh`, the list is fetched again even when it's fresh.
     [[nodiscard]] nlohmann::json list(bool refresh);
@@ -104,8 +109,11 @@ private:
     RuntimeServiceConfig config_;
     std::shared_ptr<HttpTransport> transport_;
 
-    std::mutex list_mutex_;  // held while fetching, so two callers fetch once
+    std::mutex list_mutex_;  // guards list_ and fetching_; not held during network I/O
+    std::condition_variable list_changed_;
     std::optional<CachedList> list_;
+    bool fetching_ = false;
+    std::atomic<bool> stop_requested_{false};
 
     mutable std::mutex jobs_mutex_;
     std::condition_variable jobs_changed_;

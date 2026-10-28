@@ -2,6 +2,10 @@
 
 #include "floserver/core/process.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include <array>
 #include <fstream>
 #include <random>
@@ -67,6 +71,29 @@ fs::path runtimes_dir(const fs::path& data) { return data / "runtimes"; }
 fs::path downloads_dir(const fs::path& data) { return data / "downloads"; }
 fs::path manifest_state_file(const fs::path& data) { return data / "state" / "manifest-state.json"; }
 
+std::string error_text(const std::error_code& ec) {
+#ifdef _WIN32
+    if (ec.category() == std::system_category()) {
+        std::array<wchar_t, 512> text{};
+        DWORD n = FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr,
+                                 static_cast<DWORD>(ec.value()), 0, text.data(), static_cast<DWORD>(text.size()),
+                                 nullptr);
+        while (n > 0 && (text[n - 1] == L'\n' || text[n - 1] == L'\r' || text[n - 1] == L' ' || text[n - 1] == L'.')) {
+            --n;
+        }
+        if (n > 0) {
+            const int bytes = WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(n), nullptr, 0, nullptr,
+                                                  nullptr);
+            std::string out(static_cast<std::size_t>(bytes), '\0');
+            WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(n), out.data(), bytes, nullptr, nullptr);
+            return out;
+        }
+        return "system error " + std::to_string(ec.value());
+    }
+#endif
+    return ec.message();
+}
+
 std::string_view current_platform() {
 #if defined(_WIN32) && (defined(_M_ARM64) || defined(__aarch64__))
     return "windows-arm64";
@@ -87,7 +114,7 @@ bool write_file_atomically(const fs::path& file, std::string_view bytes, std::st
     std::error_code ec;
     fs::create_directories(file.parent_path(), ec);
     if (ec) {
-        error = "can't create " + path_to_utf8(file.parent_path()) + ": " + ec.message();
+        error = "can't create " + path_to_utf8(file.parent_path()) + ": " + error_text(ec);
         return false;
     }
     std::random_device rd;
@@ -108,7 +135,7 @@ bool write_file_atomically(const fs::path& file, std::string_view bytes, std::st
     // MOVEFILE_REPLACE_EXISTING on Windows).
     fs::rename(temp, file, ec);
     if (ec) {
-        error = "can't replace " + path_to_utf8(file) + ": " + ec.message();
+        error = "can't replace " + path_to_utf8(file) + ": " + error_text(ec);
         std::error_code ignored;
         fs::remove(temp, ignored);
         return false;

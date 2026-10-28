@@ -5,6 +5,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <fstream>
@@ -28,9 +29,10 @@ struct Fetched {
     bool too_big = false;
 };
 
-Fetched fetch_small(HttpTransport& transport, const std::string& url, std::uint64_t cap) {
+Fetched fetch_small(HttpTransport& transport, const std::string& url, std::uint64_t cap,
+                    const std::atomic<bool>* cancel) {
     Fetched f;
-    f.reply = transport.get(url, [&](std::span<const std::uint8_t> chunk) {
+    f.reply = transport.get(url, {kManifestMaxTime, cancel}, [&](std::span<const std::uint8_t> chunk) {
         if (f.body.size() + chunk.size() > cap) {
             f.too_big = true;
             return false;
@@ -75,15 +77,15 @@ std::string utc_text(std::chrono::sys_seconds t) {
 }
 
 ManifestFetch attempt(HttpTransport& transport, const ManifestSource& source, const ManifestCheck& check,
-                      std::optional<std::chrono::sys_seconds>& server_date) {
+                      const std::atomic<bool>* cancel, std::optional<std::chrono::sys_seconds>& server_date) {
     ManifestFetch out;
     // The signature first: if the pair changes between the two requests, the
     // retry below catches it either way.
-    const Fetched sig = fetch_small(transport, source.signature_url, kMaxSignatureBytes);
+    const Fetched sig = fetch_small(transport, source.signature_url, kMaxSignatureBytes, cancel);
     if (!check_transfer(sig, source.signature_url, out)) {
         return out;
     }
-    const Fetched list = fetch_small(transport, source.manifest_url, kMaxManifestBytes);
+    const Fetched list = fetch_small(transport, source.manifest_url, kMaxManifestBytes, cancel);
     if (!check_transfer(list, source.manifest_url, out)) {
         return out;
     }
@@ -107,8 +109,9 @@ ManifestFetch attempt(HttpTransport& transport, const ManifestSource& source, co
 ManifestFetch fetch_manifest(HttpTransport& transport, const ManifestSource& source,
                              const ManifestFetchOptions& options) {
     std::optional<std::chrono::sys_seconds> server_date;
-    ManifestFetch out = attempt(transport, source, options.check, server_date);
-    if (out.error == FetchError::Manifest && out.manifest_error == ManifestError::BadSignature) {
+    ManifestFetch out = attempt(transport, source, options.check, options.cancel, server_date);
+    if (out.error == FetchError::Manifest && out.manifest_error == ManifestError::BadSignature &&
+        (options.cancel == nullptr || !options.cancel->load())) {
         // Most likely a cache holding one new file and one old: wait and retry once.
         if (options.sleep) {
             options.sleep(options.retry_delay);
@@ -116,7 +119,7 @@ ManifestFetch fetch_manifest(HttpTransport& transport, const ManifestSource& sou
             std::this_thread::sleep_for(options.retry_delay);
         }
         server_date.reset();
-        out = attempt(transport, source, options.check, server_date);
+        out = attempt(transport, source, options.check, options.cancel, server_date);
     }
     if (out.error == FetchError::Manifest && out.manifest_error == ManifestError::Expired) {
         const auto now = options.check.now;
@@ -166,6 +169,13 @@ bool store_last_sequence(const fs::path& file, const std::string& key_id, std::i
     return write_file_atomically(file, doc.dump(2) + "\n", error);
 }
 
+std::chrono::seconds download_time_limit(std::uint64_t size) {
+    constexpr std::uint64_t kSlowestBytesPerSecond = std::uint64_t{16} * 1024;
+    constexpr std::uint64_t kMaxSeconds = std::uint64_t{24} * 3600;
+    return std::chrono::seconds(
+        static_cast<std::int64_t>(std::min(kMaxSeconds, 120 + size / kSlowestBytesPerSecond)));
+}
+
 std::optional<FileDigest> digest_file(const fs::path& file) {
     std::ifstream in(file, std::ios::binary);
     if (!in) {
@@ -199,7 +209,7 @@ DownloadResult download_file(HttpTransport& transport, const RuntimeFile& entry,
     }
     fs::create_directories(destination.parent_path(), ec);
     if (ec) {
-        result.message = "can't create " + path_to_utf8(destination.parent_path()) + ": " + ec.message();
+        result.message = "can't create " + path_to_utf8(destination.parent_path()) + ": " + error_text(ec);
         return result;
     }
     fs::path part = destination;
@@ -218,7 +228,8 @@ DownloadResult download_file(HttpTransport& transport, const RuntimeFile& entry,
         bool too_much = false;
         bool write_failed = false;
         bool cancelled = false;
-        const HttpReply reply = transport.get(url, [&](std::span<const std::uint8_t> chunk) {
+        const HttpReply reply = transport.get(url, {download_time_limit(entry.size), options.cancel},
+                                              [&](std::span<const std::uint8_t> chunk) {
             if (chunk.size() > entry.size - received) {
                 too_much = true;
                 return false;
@@ -242,6 +253,9 @@ DownloadResult download_file(HttpTransport& transport, const RuntimeFile& entry,
         }
 
         std::string problem;
+        if (options.cancel != nullptr && options.cancel->load()) {
+            cancelled = true;
+        }
         if (cancelled) {
             fs::remove(part, ec);
             result.cancelled = true;
@@ -268,7 +282,7 @@ DownloadResult download_file(HttpTransport& transport, const RuntimeFile& entry,
         if (problem.empty()) {
             fs::rename(part, destination, ec);
             if (ec) {
-                problem = "can't move it into place: " + ec.message();
+                problem = "can't move it into place: " + error_text(ec);
             } else {
                 result.ok = true;
                 result.attempts.push_back(url + ": ok");

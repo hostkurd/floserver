@@ -116,7 +116,8 @@ public:
         return bytes_sent_;
     }
 
-    floserver::core::HttpReply get(const std::string& url, const floserver::core::HttpBody& body) override {
+    floserver::core::HttpReply get(const std::string& url, const floserver::core::HttpLimits& limits,
+                                   const floserver::core::HttpBody& body) override {
         Reply r;
         {
             const std::lock_guard lock(mutex_);
@@ -139,6 +140,11 @@ public:
         }
         constexpr std::size_t kChunk = 7;
         for (std::size_t at = 0; at < r.body.size(); at += kChunk) {
+            if (limits.cancel != nullptr && limits.cancel->load()) {
+                out.status = 0;
+                out.error = "cancelled";
+                return out;
+            }
             const std::size_t n = std::min(kChunk, r.body.size() - at);
             {
                 const std::lock_guard lock(mutex_);

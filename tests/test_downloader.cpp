@@ -5,6 +5,9 @@
 
 #include <doctest/doctest.h>
 
+#include <atomic>
+#include <limits>
+
 using namespace floserver::core;
 using namespace test_util;
 using namespace std::chrono;
@@ -308,4 +311,27 @@ TEST_CASE("a file already downloaded is kept; a wrong one is replaced") {
     REQUIRE(download_file(t, entry, dest).ok);
     CHECK(t.requests(entry.urls[0]) == 1);
     CHECK(read_file(dest) == content);
+}
+
+TEST_CASE("each attempt has a time limit that a slow honest line can meet") {
+    CHECK(download_time_limit(0) == seconds(120));
+    CHECK(download_time_limit(std::uint64_t{16} * 1024 * 100) == seconds(220));
+    CHECK(download_time_limit(95'024'126) > seconds(5000));  // MariaDB at 16 KiB/s
+    CHECK(download_time_limit(std::numeric_limits<std::uint64_t>::max()) == hours(24));
+}
+
+TEST_CASE("the cancel flag stops a download even without progress callbacks") {
+    const TempDir tmp;
+    FakeTransport t;
+    const std::string content(500, 'c');
+    const auto entry = file_entry(content, {"https://cdn.example.org/x", "https://upstream.example.org/x"});
+    t.serve(entry.urls[0], {200, content});
+    t.serve(entry.urls[1], {200, content});
+    const std::atomic<bool> cancel{true};
+    DownloadOptions o;
+    o.cancel = &cancel;
+    const auto r = download_file(t, entry, tmp.path() / "x", o);
+    CHECK(r.cancelled);
+    CHECK(t.requests(entry.urls[1]) == 0);  // no fallback after a cancel
+    CHECK(fs::is_empty(tmp.path()));
 }

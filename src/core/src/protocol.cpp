@@ -15,15 +15,15 @@ bool is_method_name(const std::string& s) {
 }  // namespace
 
 std::string make_request(std::int64_t id, std::string_view method, const json& params) {
-    return json{{"v", kVersion}, {"id", id}, {"method", method}, {"params", params}}.dump();
+    return json{{"v", kVersion}, {"id", id}, {"method", method}, {"params", params}}.dump(-1, ' ', false, json::error_handler_t::replace);
 }
 
 std::string make_result(std::int64_t id, const json& result) {
-    return json{{"v", kVersion}, {"id", id}, {"result", result}}.dump();
+    return json{{"v", kVersion}, {"id", id}, {"result", result}}.dump(-1, ' ', false, json::error_handler_t::replace);
 }
 
 std::string make_error(std::int64_t id, std::string_view code, std::string_view message) {
-    return json{{"v", kVersion}, {"id", id}, {"error", {{"code", code}, {"message", message}}}}.dump();
+    return json{{"v", kVersion}, {"id", id}, {"error", {{"code", code}, {"message", message}}}}.dump(-1, ' ', false, json::error_handler_t::replace);
 }
 
 std::optional<Request> parse_request(std::string_view text, std::string& error_code) {

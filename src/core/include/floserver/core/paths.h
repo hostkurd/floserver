@@ -18,6 +18,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 namespace floserver::core {
 
@@ -31,6 +32,10 @@ namespace floserver::core {
 // path(std::string) reads the ANSI code page on Windows; these always use UTF-8.
 [[nodiscard]] std::filesystem::path path_from_utf8(std::string_view text);
 [[nodiscard]] std::string path_to_utf8(const std::filesystem::path& path);
+
+// A system error as UTF-8. std::error_code::message() gives the ANSI code
+// page on Windows, which isn't UTF-8 on an Arabic or Greek system.
+[[nodiscard]] std::string error_text(const std::error_code& ec);
 
 // The platform name used in the manifest: "windows-x64", "linux-x64"...
 [[nodiscard]] std::string_view current_platform();

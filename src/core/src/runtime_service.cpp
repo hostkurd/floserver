@@ -18,6 +18,7 @@ using nlohmann::json;
 namespace {
 
 constexpr std::size_t kKeptFinishedJobs = 32;
+constexpr std::size_t kMaxWaitingJobs = 16;
 
 bool is_runtime_name(std::string_view s) {
     return !s.empty() && s.size() <= 32 && std::all_of(s.begin(), s.end(), [](char c) {
@@ -69,7 +70,9 @@ RuntimeService::RuntimeService(RuntimeServiceConfig config, std::shared_ptr<Http
     remove_leftovers(runtimes_root());
     std::error_code ec;
     for (fs::directory_iterator it(downloads_dir(config_.data_dir), ec), end; !ec && it != end; it.increment(ec)) {
-        if (it->path().extension() == ".part") {
+        // .part: cut off mid-download; .download: complete, but the install
+        // after it didn't finish (the hash is checked again if reused).
+        if (it->path().extension() == ".part" || it->path().extension() == ".download") {
             std::error_code ignored;
             fs::remove(it->path(), ignored);
         }
@@ -77,6 +80,14 @@ RuntimeService::RuntimeService(RuntimeServiceConfig config, std::shared_ptr<Http
 }
 
 RuntimeService::~RuntimeService() {
+    stop();
+    if (worker_.joinable()) {
+        worker_.join();
+    }
+}
+
+void RuntimeService::stop() {
+    stop_requested_ = true;
     {
         const std::lock_guard lock(jobs_mutex_);
         stopping_ = true;
@@ -85,15 +96,14 @@ RuntimeService::~RuntimeService() {
         }
     }
     jobs_changed_.notify_all();
-    if (worker_.joinable()) {
-        worker_.join();
-    }
 }
 
 fs::path RuntimeService::runtimes_root() const { return runtimes_dir(config_.data_dir); }
 
 std::optional<RuntimeService::CachedList> RuntimeService::get_list(bool refresh, std::string& error) {
-    const std::lock_guard lock(list_mutex_);
+    std::unique_lock lock(list_mutex_);
+    // One fetch at a time; the others wait for it rather than fetch again.
+    list_changed_.wait(lock, [this] { return !fetching_; });
     const auto now = config_.now();
     if (list_ && !refresh && std::chrono::steady_clock::now() - list_->fetched < config_.list_max_age &&
         list_->manifest.expires > now) {
@@ -103,25 +113,47 @@ std::optional<RuntimeService::CachedList> RuntimeService::get_list(bool refresh,
         error = "downloads aren't available on this platform yet";
         return std::nullopt;
     }
-    const fs::path state = manifest_state_file(config_.data_dir);
-    ManifestFetchOptions options;
-    options.check.trusted_keys = config_.keys;
-    options.check.now = now;
-    options.check.last_sequences = load_last_sequences(state);
-    options.retry_delay = config_.retry_delay;
-    options.sleep = config_.sleep;
-    ManifestFetch fetched = fetch_manifest(*transport_, config_.source, options);
-    if (!fetched.manifest) {
-        error = fetched.message;
-        return std::nullopt;
+    fetching_ = true;
+    lock.unlock();
+
+    // The network part runs without the lock, so a slow server can't block
+    // callers that only need the cached list.
+    std::optional<CachedList> fresh;
+    try {
+        const fs::path state = manifest_state_file(config_.data_dir);
+        ManifestFetchOptions options;
+        options.check.trusted_keys = config_.keys;
+        options.check.now = now;
+        options.check.last_sequences = load_last_sequences(state);
+        options.retry_delay = config_.retry_delay;
+        options.sleep = config_.sleep;
+        options.cancel = &stop_requested_;
+        ManifestFetch fetched = fetch_manifest(*transport_, config_.source, options);
+        if (fetched.manifest) {
+            std::string store_error;
+            // Not being able to store the sequence only weakens rollback
+            // protection on this computer; the list itself is good, so use it.
+            (void)store_last_sequence(state, fetched.key_id, fetched.manifest->sequence, store_error);
+            fresh = CachedList{std::move(*fetched.manifest), std::move(fetched.key_id), std::move(fetched.warnings),
+                               std::chrono::steady_clock::now()};
+        } else {
+            error = fetched.message;
+        }
+    } catch (...) {
+        lock.lock();
+        fetching_ = false;
+        list_changed_.notify_all();
+        throw;
     }
-    std::string store_error;
-    // Not being able to store the sequence only weakens rollback protection
-    // on this computer; the list itself is good, so use it.
-    (void)store_last_sequence(state, fetched.key_id, fetched.manifest->sequence, store_error);
-    list_ = CachedList{std::move(*fetched.manifest), std::move(fetched.key_id), std::move(fetched.warnings),
-                       std::chrono::steady_clock::now()};
-    return list_;
+
+    lock.lock();
+    fetching_ = false;
+    const bool got = fresh.has_value();
+    if (got) {
+        list_ = std::move(fresh);
+    }
+    list_changed_.notify_all();
+    return got ? list_ : std::nullopt;
 }
 
 json RuntimeService::list(bool refresh) {
@@ -179,10 +211,18 @@ std::optional<std::int64_t> RuntimeService::install(const std::string& name, con
         refusal = {"stopping", "FloServer is stopping"};
         return std::nullopt;
     }
+    std::size_t waiting = 0;
     for (const auto& [id, job] : jobs_) {
         if (job->name == name && job->requested == version && !is_finished(job->state) && !job->cancel) {
             return id;
         }
+        if (!is_finished(job->state)) {
+            ++waiting;
+        }
+    }
+    if (waiting >= kMaxWaitingJobs) {
+        refusal = {"busy", "too many installs are waiting; try again when they're done"};
+        return std::nullopt;
     }
     auto job = std::make_shared<Job>();
     job->id = next_job_++;
@@ -348,8 +388,12 @@ void RuntimeService::run(Job& job) {
         return;
     }
 
-    set_state(job, "downloading");
     const std::string folder = runtime_folder(*entry);
+    if (folder.empty()) {
+        set_state(job, "failed", "the runtime list names " + job.name + " in a way FloServer can't install");
+        return;
+    }
+    set_state(job, "downloading");
     const fs::path archive =
         downloads_dir(config_.data_dir) / path_from_utf8(entry->name + "-" + folder + ".download");
     DownloadOptions options;
@@ -360,6 +404,7 @@ void RuntimeService::run(Job& job) {
         }
         return !job.cancel.load();
     };
+    options.cancel = &job.cancel;
     const DownloadResult downloaded = download_file(*transport_, *entry, archive, options);
     if (downloaded.cancelled || job.cancel) {
         std::error_code ignored;

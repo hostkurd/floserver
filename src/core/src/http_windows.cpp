@@ -9,7 +9,10 @@
 #include <winhttp.h>
 
 #include <array>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <string>
 #include <vector>
 
@@ -117,11 +120,72 @@ std::optional<std::wstring> query_string(HINTERNET request, DWORD what) {
     return value;
 }
 
+// Closes the request handle from another thread when the deadline passes or
+// the caller cancels: WinHTTP then fails the blocked call at once
+// (ERROR_WINHTTP_OPERATION_CANCELLED). Owns the request handle.
+class Watchdog {
+public:
+    Watchdog(HINTERNET request, const HttpLimits& limits)
+        : request_(request),
+          cancel_(limits.cancel),
+          deadline_(std::chrono::steady_clock::now() + limits.max_time),
+          thread_([this] { watch(); }) {}
+    Watchdog(const Watchdog&) = delete;
+    Watchdog& operator=(const Watchdog&) = delete;
+    Watchdog(Watchdog&&) = delete;
+    Watchdog& operator=(Watchdog&&) = delete;
+    ~Watchdog() {
+        bool close = false;
+        {
+            const std::lock_guard lock(mutex_);
+            done_ = true;
+            close = !fired_;
+        }
+        changed_.notify_all();
+        thread_.join();
+        if (close) {
+            WinHttpCloseHandle(request_);
+        }
+    }
+    [[nodiscard]] HINTERNET request() const { return request_; }
+    // Stops watching. Returns why the transfer was ended, or empty if it wasn't.
+    [[nodiscard]] std::string finish() {
+        const std::lock_guard lock(mutex_);
+        done_ = true;
+        return reason_;
+    }
+
+private:
+    void watch() {
+        std::unique_lock lock(mutex_);
+        while (!done_) {
+            const bool cancelled = cancel_ != nullptr && cancel_->load();
+            if (cancelled || std::chrono::steady_clock::now() >= deadline_) {
+                fired_ = true;
+                reason_ = cancelled ? "cancelled" : "the download took too long";
+                WinHttpCloseHandle(request_);
+                return;
+            }
+            changed_.wait_for(lock, std::chrono::milliseconds(200));
+        }
+    }
+
+    HINTERNET request_;
+    const std::atomic<bool>* cancel_;
+    std::chrono::steady_clock::time_point deadline_;
+    std::mutex mutex_;
+    std::condition_variable changed_;
+    bool done_ = false;
+    bool fired_ = false;
+    std::string reason_;
+    std::thread thread_;  // last: starts after the members above exist
+};
+
 class WinHttpTransport final : public HttpTransport {
 public:
     explicit WinHttpTransport(Handle session) : session_(std::move(session)) {}
 
-    HttpReply get(const std::string& url, const HttpBody& body) override {
+    HttpReply get(const std::string& url, const HttpLimits& limits, const HttpBody& body) override {
         HttpReply reply;
         const std::wstring wide_url = widen(url);
         URL_COMPONENTS parts{};
@@ -146,68 +210,73 @@ public:
             reply.error = describe(GetLastError());
             return reply;
         }
-        const Handle request(WinHttpOpenRequest(connection.get(), L"GET", path.c_str(), nullptr,
-                                                WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
-                                                WINHTTP_FLAG_SECURE));
-        if (!request) {
+        HINTERNET raw = WinHttpOpenRequest(connection.get(), L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER,
+                                           WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+        if (raw == nullptr) {
             reply.error = describe(GetLastError());
             return reply;
         }
-        if (!WinHttpSendRequest(request.get(), WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0,
-                                0) ||
-            !WinHttpReceiveResponse(request.get(), nullptr)) {
-            reply.error = describe(GetLastError());
-            return reply;
+        Watchdog watchdog(raw, limits);
+        exchange(watchdog.request(), body, reply);
+        if (const std::string why = watchdog.finish(); !why.empty()) {
+            reply = HttpReply{};
+            reply.error = why;
         }
+        return reply;
+    }
 
+private:
+    // Sends the request and streams the reply into `body`.
+    static void exchange(HINTERNET request, const HttpBody& body, HttpReply& reply) {
+        if (!WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+            !WinHttpReceiveResponse(request, nullptr)) {
+            reply.error = describe(GetLastError());
+            return;
+        }
         // The redirect policy already refuses https -> http; check the final
         // address anyway, as the rule matters more than the option.
-        if (const auto final_url = query_url(request.get());
-            !final_url || final_url->rfind(L"https://", 0) != 0) {
+        if (const auto final_url = query_url(request); !final_url || final_url->rfind(L"https://", 0) != 0) {
             reply.error = "the server redirected to an address that isn't https";
-            return reply;
+            return;
         }
-
         DWORD status = 0;
         DWORD size = sizeof(status);
-        if (!WinHttpQueryHeaders(request.get(), WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+        if (!WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
                                  WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX)) {
             reply.error = describe(GetLastError());
-            return reply;
+            return;
         }
         reply.status = static_cast<int>(status);
-        if (const auto date = query_string(request.get(), WINHTTP_QUERY_DATE)) {
+        if (const auto date = query_string(request, WINHTTP_QUERY_DATE)) {
             reply.server_date = parse_http_date(narrow(*date));
         }
         ULONGLONG length = 0;
         size = sizeof(length);
-        if (WinHttpQueryHeaders(request.get(), WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER64,
+        if (WinHttpQueryHeaders(request, WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER64,
                                 WINHTTP_HEADER_NAME_BY_INDEX, &length, &size, WINHTTP_NO_HEADER_INDEX)) {
             reply.content_length = static_cast<std::uint64_t>(length);
         }
         if (status != 200) {
-            return reply;
+            return;
         }
-
-        std::vector<std::uint8_t> buffer(64 * 1024);
+        std::vector<std::uint8_t> buffer(std::size_t{64} * 1024);
         for (;;) {
             DWORD got = 0;
-            if (!WinHttpReadData(request.get(), buffer.data(), static_cast<DWORD>(buffer.size()), &got)) {
+            if (!WinHttpReadData(request, buffer.data(), static_cast<DWORD>(buffer.size()), &got)) {
                 reply.error = describe(GetLastError());
                 reply.status = 0;
-                return reply;
+                return;
             }
             if (got == 0) {
-                return reply;
+                return;
             }
             if (!body(std::span<const std::uint8_t>(buffer.data(), got))) {
                 reply.stopped = true;
-                return reply;
+                return;
             }
         }
     }
 
-private:
     static std::optional<std::wstring> query_url(HINTERNET request) {
         DWORD bytes = 0;
         WinHttpQueryOption(request, WINHTTP_OPTION_URL, nullptr, &bytes);

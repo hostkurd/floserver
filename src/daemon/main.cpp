@@ -16,6 +16,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -226,12 +227,19 @@ int run() {
         }
     }
     // Give the client that asked us to quit time to read the reply.
-    if (service->clients.wait_until_idle(std::chrono::seconds(2))) {
-        // Cancels a running install and waits for it. With a client still
-        // busy (a slow list fetch) the process just exits; the next start
-        // clears what the install left.
-        service->runtimes.reset();
+    if (service->runtimes) {
+        service->runtimes->stop();
     }
+    if (!service->clients.wait_until_idle(std::chrono::seconds(2))) {
+        // A client thread is still busy and holds the service, so it can't be
+        // torn down safely here. Exit now; the next start clears what an
+        // interrupted install left.
+        std::cout.flush();
+        std::_Exit(0);
+    }
+    // Waits for the cancelled install to wind down (a moment: the transfer
+    // ends as soon as it's cancelled).
+    service->runtimes.reset();
     return 0;
 }
 

@@ -66,27 +66,34 @@ jobs:
           FLOSERVER_INSTANCE: ci
         run: |
           $bin = "build/bin/Release"
-          & "$bin/flo.exe" runtimes
-          if ($LASTEXITCODE -ne 0) { throw "flo runtimes failed" }
-          & "$bin/flo.exe" install nginx
-          if ($LASTEXITCODE -ne 0) { throw "flo install nginx failed" }
-          & "$bin/flo.exe" install composer
-          if ($LASTEXITCODE -ne 0) { throw "flo install composer failed" }
+          # Logs can't be read from outside, so every failure becomes an annotation.
+          function Fail([string]$what, [string]$output) {
+            $flat = ($output -replace "`r?`n", " | ").Trim()
+            if ($flat.Length -gt 600) { $flat = $flat.Substring(0, 600) }
+            "::error title=live install::$what :: $flat"
+            exit 1
+          }
+          function Run([string]$what, [scriptblock]$block) {
+            $out = & $block 2>&1 | Out-String
+            Write-Host $out
+            if ($LASTEXITCODE -ne 0) { Fail "$what (exit $LASTEXITCODE)" $out }
+            return $out
+          }
+          Run "flo runtimes" { & "$bin/flo.exe" runtimes } | Out-Null
+          Run "flo install nginx" { & "$bin/flo.exe" install nginx } | Out-Null
+          Run "flo install composer" { & "$bin/flo.exe" install composer } | Out-Null
           $nginx = Get-ChildItem "$env:FLOSERVER_DATA_DIR/runtimes/nginx" -Directory | Select-Object -First 1
-          Get-ChildItem $nginx.FullName -Filter *.dll | ForEach-Object { "  " + $_.Name }
-          & "$($nginx.FullName)/nginx.exe" -v
-          if ($LASTEXITCODE -ne 0) { throw "the installed nginx doesn't start" }
-          if (-not (Test-Path "$env:FLOSERVER_DATA_DIR/runtimes/composer/*/composer.phar")) { throw "composer.phar missing" }
-          & "$bin/flo.exe" runtimes
+          $files = (Get-ChildItem $nginx.FullName -File | ForEach-Object Name) -join ", "
+          "nginx folder: $files"
+          Run "installed nginx -v (files: $files)" { & "$($nginx.FullName)/nginx.exe" -v } | Out-Null
+          $phar = Get-ChildItem "$env:FLOSERVER_DATA_DIR/runtimes/composer" -Recurse -Filter composer.phar
+          if (-not $phar) {
+            $all = (Get-ChildItem "$env:FLOSERVER_DATA_DIR/runtimes/composer" -Recurse | ForEach-Object Name) -join ", "
+            Fail "composer.phar missing" $all
+          }
+          Run "flo runtimes" { & "$bin/flo.exe" runtimes } | Out-Null
+          Run "flo uninstall" { & "$bin/flo.exe" uninstall composer $phar.Directory.Name } | Out-Null
           & "$bin/flo.exe" service stop
-      - name: Show the service's view on failure
-        if: failure()
-        shell: pwsh
-        env:
-          FLOSERVER_DATA_DIR: ${{ runner.temp }}\floserver-data
-        run: |
-          Get-ChildItem -Recurse $env:FLOSERVER_DATA_DIR -ErrorAction SilentlyContinue |
-            ForEach-Object { "::error title=data folder::$($_.FullName)" }
       # The build, for trying on a real PC: download it from the run's page.
       - name: Upload the Windows build
         uses: actions/upload-artifact@v4
