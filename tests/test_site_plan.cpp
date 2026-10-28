@@ -1,4 +1,5 @@
 #include "floserver/core/nginx_config.h"
+#include "floserver/core/paths.h"
 #include "floserver/core/site_plan.h"
 
 #include "test_util.h"
@@ -217,7 +218,7 @@ TEST_CASE("addresses show the port only when it isn't the usual one") {
 TEST_CASE("nginx paths are quoted with forward slashes; unsafe ones are refused") {
     CHECK(nginx_quoted_path(kBase / "projects" / "my shop" / "public") ==
           "\"" + kBase.generic_string() + "/projects/my shop/public\"");
-    CHECK(nginx_quoted_path(kBase / "\xD9\x85\xD8\xAA\xD8\xAC\xD8\xB1") ==
+    CHECK(nginx_quoted_path(kBase / path_from_utf8("\xD9\x85\xD8\xAA\xD8\xAC\xD8\xB1")) ==
           "\"" + kBase.generic_string() + "/\xD9\x85\xD8\xAA\xD8\xAC\xD8\xB1\"");  // UTF-8 kept
     CHECK_FALSE(nginx_quoted_path(kBase / "a$b"));
     CHECK_FALSE(nginx_quoted_path(kBase / "a\"b"));

@@ -146,8 +146,10 @@ TEST_CASE("config.json round-trips and keeps keys it doesn't use") {
         CHECK(back->projects[0].other["notes"]["a"] == 1);
         CHECK_FALSE(back->projects[0].other.contains("name"));
     }
+    // A full path on this platform, as JSON text.
+    const std::string abs = (tmp.path() / "x").generic_string();
     SUBCASE("on and keep_running must be true or false") {
-        test_util::write_file(file, R"({"projects": [{"name": "a", "path": "/x", "on": "true"}]})");
+        test_util::write_file(file, R"({"projects": [{"name": "a", "path": ")" + abs + R"(", "on": "true"}]})");
         CHECK_FALSE(load_app_config(file, error));
         CHECK(error.find("true or false") != std::string::npos);
     }
@@ -157,11 +159,12 @@ TEST_CASE("config.json round-trips and keeps keys it doesn't use") {
         CHECK(error.find("not valid JSON") != std::string::npos);
     }
     SUBCASE("bad entries are reported") {
-        test_util::write_file(file, R"({"projects": [{"name": "Bad Name", "path": "/x"}]})");
+        test_util::write_file(file, R"({"projects": [{"name": "Bad Name", "path": ")" + abs + R"("}]})");
         CHECK_FALSE(load_app_config(file, error));
         test_util::write_file(file, R"({"projects": [{"name": "a", "path": "relative"}]})");
         CHECK_FALSE(load_app_config(file, error));
-        test_util::write_file(file, R"({"projects": [{"name": "a", "path": "/x"}, {"name": "a", "path": "/y"}]})");
+        test_util::write_file(file, R"({"projects": [{"name": "a", "path": ")" + abs + R"("}, {"name": "a", "path": ")" +
+                                        abs + R"(2"}]})");
         CHECK_FALSE(load_app_config(file, error));
         CHECK(error.find("used twice") != std::string::npos);
         test_util::write_file(file, R"({"projects": "none"})");
