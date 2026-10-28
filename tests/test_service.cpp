@@ -1,9 +1,11 @@
 // Runs the real floserverd from the build: start, status, a second copy,
-// an unknown request, stop.
+// an unknown request, the project list, stop.
 
 #include "floserver/core/ipc.h"
+#include "floserver/core/paths.h"
 #include "floserver/core/process.h"
 #include "floserver/core/service_client.h"
+#include "test_util.h"
 
 #include <doctest/doctest.h>
 
@@ -39,6 +41,9 @@ TEST_CASE("the real service starts, answers, refuses a second copy and stops") {
     // The service reads FLOSERVER_INSTANCE, so it meets only this test.
     set_env("FLOSERVER_INSTANCE", fresh_instance_suffix());
     const std::string instance = ipc::default_instance();
+    // ...and keeps its files here, never in the real user folder.
+    const test_util::TempDir data;
+    set_env("FLOSERVER_DATA_DIR", path_to_utf8(data.path()));
 
 #ifdef _WIN32
     const std::filesystem::path daemon = std::filesystem::path(FLOSERVER_TEST_BIN_DIR) / "floserverd.exe";
@@ -70,6 +75,36 @@ TEST_CASE("the real service starts, answers, refuses a second copy and stops") {
     REQUIRE(unknown.has_value());
     CHECK_FALSE(unknown->ok);
     CHECK(unknown->error_code == "unknown_method");
+
+    // Projects over the channel: add a folder, see it, turn it on, forget it.
+    const std::filesystem::path shop = data.path() / "My Shop";
+    std::filesystem::create_directories(shop);
+    const auto added = client->call("projects.add", {{"path", path_to_utf8(shop)}});
+    REQUIRE(added.has_value());
+    INFO(added->error_message);
+    REQUIRE(added->ok);
+    CHECK(added->result["name"] == "my-shop");
+    CHECK(added->result["state"] == "off");
+    const auto relative = client->call("projects.add", {{"path", "My Shop"}});
+    REQUIRE(relative.has_value());
+    CHECK(relative->error_code == "bad_params");
+    const auto turned_on = client->call("projects.set", {{"name", "my-shop"}, {"on", true}});
+    REQUIRE(turned_on.has_value());
+    REQUIRE(turned_on->ok);
+    CHECK(turned_on->result["on"] == true);
+    CHECK(turned_on->result["state"] == "needs_download");  // no PHP installed in this data folder
+    const auto listed = client->call("projects.list");
+    REQUIRE(listed.has_value());
+    REQUIRE(listed->ok);
+    REQUIRE(listed->result["projects"].size() == 1);
+    CHECK(std::filesystem::is_regular_file(data.path() / "config.json"));
+    const auto removed = client->call("projects.remove", {{"name", "my-shop"}});
+    REQUIRE(removed.has_value());
+    CHECK(removed->ok);
+    const auto gone = client->call("projects.remove", {{"name", "my-shop"}});
+    REQUIRE(gone.has_value());
+    CHECK(gone->error_code == "unknown_project");
+    CHECK(std::filesystem::is_directory(shop));
 
     // A second service for the same user and instance says so and exits.
     const auto second = run_and_wait(daemon, {}, std::chrono::seconds(30), error);

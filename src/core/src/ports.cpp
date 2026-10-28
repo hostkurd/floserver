@@ -100,15 +100,21 @@ Listen try_listen(bool ipv6, bool wildcard, Port port) {
     return result;
 }
 
+bool winsock_ready() {
+#ifdef _WIN32
+    static const WinsockSession winsock;
+    return winsock.ok();
+#else
+    return true;
+#endif
+}
+
 }  // namespace
 
 bool can_listen_on_loopback(Port port) {
-#ifdef _WIN32
-    static const WinsockSession winsock;
-    if (!winsock.ok()) {
+    if (!winsock_ready()) {
         return false;
     }
-#endif
     // Loopback: browsers try [::1] first for *.localhost, and Node and Vite
     // listen there by default, so both loopback addresses must be free. A
     // machine without IPv6 counts as free on that side.
@@ -121,6 +127,12 @@ bool can_listen_on_loopback(Port port) {
            try_listen(false, true, port) == Listen::Free &&
            try_listen(true, false, port) != Listen::Taken &&
            try_listen(true, true, port) != Listen::Taken;
+}
+
+bool loopback_ipv6_available() {
+    // Port 0: the system picks any free port, so this only asks whether
+    // [::1] exists here.
+    return winsock_ready() && try_listen(true, false, 0) == Listen::Free;
 }
 
 std::optional<WebPorts> pick_web_ports(const PortProbe& probe) {

@@ -20,6 +20,11 @@ using Port = std::uint16_t;
 // listening on 0.0.0.0 or [::]. Never connects.
 [[nodiscard]] bool can_listen_on_loopback(Port port);
 
+// True when this machine has IPv6 loopback ([::1]), so servers listen there
+// as well as on 127.0.0.1. nginx won't start if told to listen on an address
+// the machine doesn't have. Never connects.
+[[nodiscard]] bool loopback_ipv6_available();
+
 // Lets tests replace the operating-system check.
 using PortProbe = std::function<bool(Port)>;
 

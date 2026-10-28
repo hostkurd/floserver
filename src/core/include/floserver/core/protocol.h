@@ -17,6 +17,10 @@
 //   runtimes.remove  {"name": "php", "version": "8.5.12"} -> {}
 //   jobs.get         {"id": 3} -> runtime_service.h, RuntimeService::job()
 //   jobs.cancel      {"id": 3} -> {"cancelled": bool}
+//   projects.list    {} -> project_service.h, ProjectService::list()
+//   projects.add     {"path": "C:/sites/shop", "name"?: "shop"} -> the project
+//   projects.remove  {"name": "shop"} -> {}   (the folder is never touched)
+//   projects.set     {"name": "shop", "on"?: bool, "keep_running"?: bool} -> the project
 
 #include <nlohmann/json.hpp>
 
