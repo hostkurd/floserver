@@ -69,8 +69,15 @@ public:
         out_ << "\n    # Addresses that aren't a project.\n"
              << "    server {\n";
         listen(spec_.ports.http, " default_server");
-        out_ << "        default_type text/plain;\n"
-             << "        return 404 \"There's no FloServer project at this address.\\n\";\n"
+        out_ << "        default_type text/plain;\n";
+        if (!spec_.config_id.empty()) {
+            out_ << "        location = /.floserver/config-id {\n"
+                 << "            return 200 \"" << spec_.config_id << "\";\n"
+                 << "        }\n";
+        }
+        out_ << "        location / {\n"
+             << "            return 404 \"There's no FloServer project at this address.\\n\";\n"
+             << "        }\n"
              << "    }\n";
         if (any_tls) {
             out_ << "    server {\n";

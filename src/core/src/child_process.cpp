@@ -3,6 +3,7 @@
 #include "floserver/core/paths.h"
 
 #include <algorithm>
+#include <array>
 #include <thread>
 
 #ifdef _WIN32
@@ -29,6 +30,20 @@ extern char** environ;  // NOLINT(readability-redundant-declaration)
 namespace floserver::core {
 
 // ---------------------------------------------------------------- listener
+
+namespace {
+
+// The body of an HTTP/1.x response with status 200, or nothing.
+std::optional<std::string> http_body_if_ok(const std::string& response) {
+    const auto body = response.find("\r\n\r\n");
+    if (body == std::string::npos || !response.starts_with("HTTP/1.") || response.compare(8, 5, " 200 ") != 0) {
+        return std::nullopt;
+    }
+    return response.substr(body + 4);
+}
+
+}  // namespace
+
 
 #ifdef _WIN32
 
@@ -70,6 +85,35 @@ std::unique_ptr<LoopbackListener> LoopbackListener::open(Port port, std::string&
         return nullptr;
     }
     return std::unique_ptr<LoopbackListener>(new LoopbackListener(static_cast<std::uintptr_t>(s), port));
+}
+
+std::optional<std::string> loopback_http_get(Port port, const std::string& host, const std::string& path,
+                                             std::chrono::milliseconds limit) {
+    if (!winsock_started()) {
+        return std::nullopt;
+    }
+    const SOCKET s = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, nullptr, 0, WSA_FLAG_NO_HANDLE_INHERIT);
+    if (s == INVALID_SOCKET) {
+        return std::nullopt;
+    }
+    const DWORD ms = static_cast<DWORD>(limit.count());
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&ms), static_cast<int>(sizeof ms));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&ms), static_cast<int>(sizeof ms));
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    std::string response;
+    if (connect(s, reinterpret_cast<const sockaddr*>(&addr), static_cast<int>(sizeof addr)) == 0) {
+        const std::string req = "GET " + path + " HTTP/1.0\r\nHost: " + host + "\r\n\r\n";
+        send(s, req.data(), static_cast<int>(req.size()), 0);
+        std::array<char, 2048> buf{};
+        for (int n = 0; (n = recv(s, buf.data(), static_cast<int>(buf.size()), 0)) > 0 && response.size() < 65536;) {
+            response.append(buf.data(), static_cast<std::size_t>(n));
+        }
+    }
+    closesocket(s);
+    return http_body_if_ok(response);
 }
 
 LoopbackListener::~LoopbackListener() { closesocket(static_cast<SOCKET>(socket_)); }
@@ -142,6 +186,34 @@ std::unique_ptr<LoopbackListener> LoopbackListener::open(Port port, std::string&
         return nullptr;
     }
     return std::unique_ptr<LoopbackListener>(new LoopbackListener(static_cast<std::uintptr_t>(s), port));
+}
+
+std::optional<std::string> loopback_http_get(Port port, const std::string& host, const std::string& path,
+                                             std::chrono::milliseconds limit) {
+    const int s = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_TCP);
+    if (s < 0) {
+        return std::nullopt;
+    }
+    timeval tv{};
+    tv.tv_sec = static_cast<time_t>(limit.count() / 1000);
+    tv.tv_usec = static_cast<suseconds_t>((limit.count() % 1000) * 1000);
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    std::string response;
+    if (connect(s, reinterpret_cast<const sockaddr*>(&addr), sizeof addr) == 0) {
+        const std::string req = "GET " + path + " HTTP/1.0\r\nHost: " + host + "\r\n\r\n";
+        (void)send(s, req.data(), req.size(), MSG_NOSIGNAL);
+        std::array<char, 2048> buf{};
+        for (ssize_t n = 0; (n = recv(s, buf.data(), buf.size(), 0)) > 0 && response.size() < 65536;) {
+            response.append(buf.data(), static_cast<std::size_t>(n));
+        }
+    }
+    close(s);
+    return http_body_if_ok(response);
 }
 
 LoopbackListener::~LoopbackListener() { close(static_cast<int>(socket_)); }

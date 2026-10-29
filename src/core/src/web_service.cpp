@@ -5,11 +5,14 @@
 #include "floserver/core/process.h"
 #include "floserver/core/project_registry.h"
 #include "floserver/core/runtime_store.h"
+#include "floserver/core/encoding.h"
+#include "floserver/core/sha256.h"
 #include "floserver/core/trust_store.h"
 #include "floserver/core/version.h"
 
 #include <algorithm>
 #include <system_error>
+#include <thread>
 
 #ifndef _WIN32
 #include <unistd.h>
@@ -391,7 +394,13 @@ void WebService::reload_locked() {
     spec.http2_directive = !v || !http2_on || !(*v < *http2_on);
     spec.user = running_as_root() ? "root" : "";
     spec.sites = std::move(serve);
+    // The id comes from the config itself, so the same config has the same
+    // id and an unchanged one still compares equal.
     auto text = make_nginx_config(spec, error);
+    if (text) {
+        spec.config_id = to_hex(sha256(*text)).substr(0, 16);
+        text = make_nginx_config(spec, error);
+    }
     if (!text) {
         error_ = error;
         keep_both();
@@ -448,6 +457,17 @@ void WebService::reload_locked() {
     } else {
         nginx_error_.clear();
         nginx_started_ = Clock::now();
+    }
+    // -s reload returns before nginx has switched over: new workers start,
+    // then the old ones stop taking connections. Reply only once the new
+    // config answers several times in a row, so an address shown by
+    // `flo start` works at once.
+    const auto deadline = Clock::now() + 5s;
+    for (int in_a_row = 0; in_a_row < 5 && Clock::now() < deadline;) {
+        const bool current =
+            loopback_http_get(ports_->http, "floserver-check.invalid", "/.floserver/config-id", 1s) == spec.config_id;
+        in_a_row = current ? in_a_row + 1 : 0;
+        std::this_thread::sleep_for(10ms);
     }
     config_text_ = std::move(*text);
     pools_ = std::move(pools);  // pools the new config no longer uses end here

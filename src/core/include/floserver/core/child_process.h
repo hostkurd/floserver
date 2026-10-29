@@ -49,6 +49,11 @@ private:
     Port port_;
 };
 
+// GET http://127.0.0.1:port<path> with that Host header; the body when the
+// status is 200, else nothing. For the service's own checks on nginx.
+[[nodiscard]] std::optional<std::string> loopback_http_get(Port port, const std::string& host, const std::string& path,
+                                                           std::chrono::milliseconds limit);
+
 // Which of `listeners` have a connection waiting, waiting at most `limit`.
 // Indexes into `listeners`; empty when none did in time.
 [[nodiscard]] std::vector<std::size_t> waiting_connections(const std::vector<const LoopbackListener*>& listeners,

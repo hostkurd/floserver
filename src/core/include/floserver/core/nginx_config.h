@@ -44,6 +44,9 @@ struct NginxSpec {
     // Only when the service itself runs as root (containers): nginx then
     // needs to be told to keep that user for its workers.
     std::string user;
+    // Answered at /.floserver/config-id by the default http server, so the
+    // service can tell when nginx serves this config after a reload.
+    std::string config_id;
     std::vector<NginxSite> sites;
 };
 

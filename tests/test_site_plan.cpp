@@ -257,6 +257,7 @@ TEST_CASE("the nginx config serves PHP and static sites on loopback") {
     CHECK_FALSE(has("location ~ "));
     CHECK_FALSE(has("0.0.0.0"));
     CHECK_FALSE(has("listen 80"));
+    CHECK_FALSE(has("config-id"));  // only when the spec has one
     // The static site has no PHP location and no https.
     const auto docs = text->find("# Project docs");
     REQUIRE(docs != std::string::npos);
