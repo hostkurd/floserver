@@ -467,7 +467,7 @@ void MainWindow::make_fonts() {
     fonts_.title = make(20, true);
     fonts_.body = make(14, false);
     fonts_.body_bold = make(14, true);
-    fonts_.small = make(12, false);
+    fonts_.caption = make(12, false);
     fonts_.small_bold = make(12, true);
     fonts_.button = make(13, false);
     fonts_.button_bold = make(13, true);
@@ -483,12 +483,12 @@ void MainWindow::make_fonts() {
 }
 
 void MainWindow::make_icons() {
-    win::UniqueIcon small(make_app_icon(GetSystemMetricsForDpi(SM_CXSMICON, dpi_)));
-    win::UniqueIcon big(make_app_icon(GetSystemMetricsForDpi(SM_CXICON, dpi_)));
-    SendMessageW(hwnd_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(small.get()));
-    SendMessageW(hwnd_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(big.get()));
-    icon_small_ = std::move(small);
-    icon_big_ = std::move(big);
+    win::UniqueIcon small_icon(make_app_icon(GetSystemMetricsForDpi(SM_CXSMICON, dpi_)));
+    win::UniqueIcon big_icon(make_app_icon(GetSystemMetricsForDpi(SM_CXICON, dpi_)));
+    SendMessageW(hwnd_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(small_icon.get()));
+    SendMessageW(hwnd_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(big_icon.get()));
+    icon_small_ = std::move(small_icon);
+    icon_big_ = std::move(big_icon);
     if (tray_added_) {
         NOTIFYICONDATAW nid{};
         nid.cbSize = sizeof nid;
@@ -581,7 +581,7 @@ std::vector<MainWindow::RowGeometry> MainWindow::row_geometry(HDC dc) const {
         std::vector<int> chip_w;
         chip_w.reserve(row.chips.size());
         for (const std::string& chip : row.chips) {
-            chip_w.push_back(Canvas::measure(dc, w(chip), fonts_.small.get(), false) + px(16));
+            chip_w.push_back(Canvas::measure(dc, w(chip), fonts_.caption.get(), false) + px(16));
         }
         std::size_t shown = chip_w.size();
         const auto chips_width = [&](std::size_t n) {
@@ -605,7 +605,7 @@ std::vector<MainWindow::RowGeometry> MainWindow::row_geometry(HDC dc) const {
         g.name = {text_start, name_top, text_end, name_top + px(20)};
         g.line2 = {text_start, name_top + px(20), text_end, name_top + px(38)};
         if (!row.address.empty() && is_openable_address(row.address)) {
-            const int aw = Canvas::measure(dc, w(row.address), fonts_.small.get(), false);
+            const int aw = Canvas::measure(dc, w(row.address), fonts_.caption.get(), false);
             g.address = {text_start, g.line2.top, std::min(text_end, text_start + aw), g.line2.bottom};
         }
         out.push_back(std::move(g));
@@ -1209,12 +1209,12 @@ void MainWindow::paint_list(Canvas& c, HDC /*dc*/, bool text_pass) const {
         c.text(g.name, w(row.name), fonts_.body_bold.get(), p.text, Align::Start, true);
         if (!row.address.empty()) {
             const bool openable = g.address.right > g.address.left;
-            c.text(g.line2, w(row.address), fonts_.small.get(), openable ? p.link : p.text_subtle, Align::Start, true);
+            c.text(g.line2, w(row.address), fonts_.caption.get(), openable ? p.link : p.text_subtle, Align::Start, true);
         } else {
-            c.text(g.line2, w(row.detail), fonts_.small.get(), p.text_subtle, Align::Start, false);
+            c.text(g.line2, w(row.detail), fonts_.caption.get(), p.text_subtle, Align::Start, false);
         }
         for (std::size_t k = 0; k < g.chips.size(); ++k) {
-            c.text(g.chips[k], w(row.chips[k]), fonts_.small.get(), p.chip_text, Align::Center, true);
+            c.text(g.chips[k], w(row.chips[k]), fonts_.caption.get(), p.chip_text, Align::Center, true);
         }
         c.text(g.state, w(text(lang_, state_label(row.state))), fonts_.small_bold.get(), sc.text, Align::Center,
                false);
@@ -1256,17 +1256,17 @@ void MainWindow::paint_footer(Canvas& c, HDC dc, bool text_pass) const {
     const FooterText& t = snap_.footer;
     int x = px(kPad) + px(8) + px(6);
     const std::wstring counts = w(t.counts);
-    const int counts_w = Canvas::measure(dc, counts, fonts_.small.get(), rtl_);
-    c.text({x, f.top, x + counts_w + px(2), f.bottom}, counts, fonts_.small.get(), p.text_subtle, Align::Start, false);
+    const int counts_w = Canvas::measure(dc, counts, fonts_.caption.get(), rtl_);
+    c.text({x, f.top, x + counts_w + px(2), f.bottom}, counts, fonts_.caption.get(), p.text_subtle, Align::Start, false);
     x += counts_w + px(16);
     const std::wstring memory = w(t.memory);
-    const int memory_w = Canvas::measure(dc, memory, fonts_.small.get(), rtl_);
+    const int memory_w = Canvas::measure(dc, memory, fonts_.caption.get(), rtl_);
     const int memory_left = f.right - px(kPad) - memory_w;
     if (!t.nginx.empty() && x < memory_left - px(16)) {
-        c.text({x, f.top, memory_left - px(16), f.bottom}, w(t.nginx), fonts_.small.get(), p.text_subtle,
+        c.text({x, f.top, memory_left - px(16), f.bottom}, w(t.nginx), fonts_.caption.get(), p.text_subtle,
                Align::Start, false);
     }
-    c.text({memory_left - px(2), f.top, f.right - px(kPad), f.bottom}, memory, fonts_.small.get(), p.text_subtle,
+    c.text({memory_left - px(2), f.top, f.right - px(kPad), f.bottom}, memory, fonts_.caption.get(), p.text_subtle,
            Align::End, false);
 }
 

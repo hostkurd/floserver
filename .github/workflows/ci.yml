@@ -184,7 +184,18 @@ jobs:
       - name: Build
         run: cmake --build build
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        shell: bash
+        run: |
+          set -o pipefail
+          ctest --test-dir build --output-on-failure 2>&1 | tee test.log
+      # Job logs can't be read from every place the team works; the
+      # failing lines become annotations on the run.
+      - name: Show failed tests as annotations
+        if: failure()
+        shell: bash
+        run: |
+          grep -E 'TEST CASE|ERROR|FATAL|values:|logged:|runtime error|Sanitizer|SUMMARY' test.log | head -40 |
+            while IFS= read -r line; do echo "::error title=floserver_tests::${line}"; done
 
   linux-release:
     name: Linux (GCC, release)
@@ -200,7 +211,18 @@ jobs:
       - name: Build
         run: cmake --build build
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        shell: bash
+        run: |
+          set -o pipefail
+          ctest --test-dir build --output-on-failure 2>&1 | tee test.log
+      # Job logs can't be read from every place the team works; the
+      # failing lines become annotations on the run.
+      - name: Show failed tests as annotations
+        if: failure()
+        shell: bash
+        run: |
+          grep -E 'TEST CASE|ERROR|FATAL|values:|logged:|runtime error|Sanitizer|SUMMARY' test.log | head -40 |
+            while IFS= read -r line; do echo "::error title=floserver_tests::${line}"; done
 
   clang-tidy:
     name: clang-tidy

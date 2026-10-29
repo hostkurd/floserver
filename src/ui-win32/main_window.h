@@ -55,7 +55,7 @@ private:
         win::UniqueFont title;
         win::UniqueFont body;
         win::UniqueFont body_bold;
-        win::UniqueFont small;
+        win::UniqueFont caption;  // not "small": the Windows headers #define small
         win::UniqueFont small_bold;
         win::UniqueFont button;
         win::UniqueFont button_bold;
