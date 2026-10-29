@@ -4,6 +4,7 @@
 #include "floserver/core/build_info.h"
 #include "floserver/core/encoding.h"
 #include "floserver/core/ipc.h"
+#include "floserver/core/mariadb.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/project_config.h"
 #include "floserver/core/version.h"
@@ -55,6 +56,8 @@ void print_help(std::ostream& out) {
         << "  add [folder] [--name <n>]  Add a folder as a project (this folder if none)\n"
         << "  remove <name>              Forget a project (its files are kept)\n"
         << "  use <php|node|mariadb> <v> Set a version in this project's floserver.json\n"
+        << "  db                         Show the databases and the projects using them\n"
+        << "  env [project] [--write]    A project's database settings as .env lines (--show: the password)\n"
         << "  trust                      Let your browsers trust FloServer's HTTPS certificates\n"
         << "  untrust                    Remove FloServer's certificate authority\n"
         << "  check [folder]             Check the floserver.json for a project\n"
@@ -520,6 +523,24 @@ int remove_cmd(const std::vector<std::string>& args) {
 
 // The registered project folder that holds `here`, when the service is
 // running and knows one. The CLI doesn't start the service just for this.
+// `here` is `dir` or inside it. Windows compares paths without regard to
+// case (c:\ and C:\ are the same folder).
+bool is_inside(const fs::path& here, const fs::path& dir) {
+#ifdef _WIN32
+    auto lower = [](const fs::path& p) {
+        std::wstring w = p.lexically_normal().native();
+        if (!w.empty()) {
+            CharLowerBuffW(w.data(), static_cast<DWORD>(w.size()));
+        }
+        return fs::path(w);
+    };
+    const fs::path inside = lower(here).lexically_relative(lower(dir));
+#else
+    const fs::path inside = here.lexically_relative(dir);
+#endif
+    return !inside.empty() && *inside.begin() != "..";
+}
+
 std::optional<fs::path> project_folder_for(const fs::path& here) {
     std::string error;
     auto client = floserver::core::ServiceClient::connect(floserver::core::ipc::default_instance(), error);
@@ -535,9 +556,7 @@ std::optional<fs::path> project_folder_for(const fs::path& here) {
     std::optional<fs::path> best;
     for (const auto& p : reply->result["projects"]) {
         const fs::path dir = floserver::core::path_from_utf8(text_of(p, "path"));
-        const fs::path inside = real_here.lexically_relative(dir);
-        if (!inside.empty() && *inside.begin() != ".." &&
-            (!best || dir.native().size() > best->native().size())) {
+        if (is_inside(real_here, dir) && (!best || dir.native().size() > best->native().size())) {
             best = dir;
         }
     }
@@ -730,6 +749,129 @@ int check(const fs::path& start) {
     return 0;
 }
 
+// flo db: the MariaDB servers and the projects using each.
+int db() {
+    auto client = connect_or_start(std::chrono::seconds(60));
+    if (!client) {
+        return 1;
+    }
+    const auto reply = client->call("databases.list");
+    if (!reply || !reply->ok) {
+        return print_refusal(reply);
+    }
+    const auto& servers = reply->result["servers"];
+    if (servers.empty()) {
+        std::cout << "No database is in use. A project asks for one in its floserver.json: flo use mariadb 11.4\n";
+        return 0;
+    }
+    for (const auto& s : servers) {
+        std::string projects;
+        for (const auto& p : s["projects"]) {
+            projects += (projects.empty() ? "" : ", ") + p.get<std::string>();
+        }
+        std::cout << "MariaDB " << text_of(s, "version") << "  127.0.0.1:" << s.value("port", 0) << "  "
+                  << text_of(s, "state") << (s.value("keep_running", false) ? " (keep running)" : "") << "  " << projects
+                  << "\n";
+        if (s.contains("error")) {
+            std::cout << "  " << text_of(s, "error") << "\n";
+        }
+    }
+    return 0;
+}
+
+// flo env [project] [--show] [--write]: a project's database settings as
+// .env lines (the password hidden unless --show), or written into its .env.
+int env(const std::vector<std::string>& args) {
+    std::string name;
+    bool show = false;
+    bool write = false;
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        if (args[i] == "--show") {
+            show = true;
+        } else if (args[i] == "--write") {
+            write = true;
+        } else if (name.empty() && !args[i].starts_with("-")) {
+            name = args[i];
+        } else {
+            std::cerr << "Usage: flo env [project] [--show] [--write]\n";
+            return 2;
+        }
+    }
+    auto client = connect_or_start(std::chrono::seconds(180));  // the first time, MariaDB sets up its data folder
+    if (!client) {
+        return 1;
+    }
+    if (name.empty()) {
+        const auto list = client->call("projects.list");
+        if (!list || !list->ok) {
+            return print_refusal(list);
+        }
+        std::error_code ec;
+        const fs::path here = fs::weakly_canonical(fs::current_path(), ec);
+        std::size_t best = 0;
+        for (const auto& p : list->result["projects"]) {
+            const fs::path dir = floserver::core::path_from_utf8(text_of(p, "path"));
+            if (is_inside(here, dir) && dir.native().size() > best) {
+                best = dir.native().size();
+                name = text_of(p, "name");
+            }
+        }
+        if (name.empty()) {
+            std::cerr << "This folder isn't in a project. Name one: flo env <project>\n";
+            return 2;
+        }
+    }
+    // The first time can take a while: MariaDB sets up its data folder.
+    const auto reply = client->call("databases.login", {{"name", name}});
+    if (!reply || !reply->ok) {
+        return print_refusal(reply);
+    }
+    const auto& r = reply->result;
+    if (!r.contains("env")) {
+        std::cerr << "The project's folder can't be found.\n";
+        return 1;
+    }
+    std::vector<std::pair<std::string, std::string>> values;
+    for (const auto& kv : r["env"]) {
+        values.emplace_back(kv[0].get<std::string>(), kv[1].get<std::string>());
+    }
+    if (write) {
+        const fs::path file = floserver::core::path_from_utf8(text_of(r, "env_file"));
+        std::error_code ec;
+        std::string text;
+        if (fs::exists(file, ec)) {
+            const auto old = floserver::core::read_small_file(file, std::size_t{1024} * 1024);
+            if (!old) {
+                std::cerr << "Can't read " << shown(file) << "\n";
+                return 1;
+            }
+            text = *old;
+        }
+        std::string error;
+        const bool existed = fs::exists(file, ec);
+        const auto perms = existed ? fs::status(file, ec).permissions() : fs::perms::none;
+        if (!floserver::core::write_file_atomically(file, floserver::core::update_env_text(text, values), error)) {
+            std::cerr << error << "\n";
+            return 1;
+        }
+#ifndef _WIN32
+        // The file keeps who may read it; a new one is the user's only (it
+        // holds a password). The project folder is left as it is.
+        fs::permissions(file, existed ? perms : (fs::perms::owner_read | fs::perms::owner_write),
+                        fs::perm_options::replace, ec);
+#else
+        (void)perms;
+#endif
+        std::cout << "Database settings written to " << shown(file) << "\n";
+        return 0;
+    }
+    for (const auto& [key, value] : values) {
+        std::cout << key << "=" << (key == "DB_PASSWORD" && !show ? std::string("********   (flo env --show)") : value)
+                  << "\n";
+    }
+    return 0;
+}
+
 int run_command(const std::vector<std::string>& args, const std::vector<fs::path>& paths) {
     if (args.empty() || args[0] == "help" || args[0] == "--help" || args[0] == "-h") {
         print_help(std::cout);
@@ -777,6 +919,12 @@ int run_command(const std::vector<std::string>& args, const std::vector<fs::path
     }
     if (args[0] == "untrust" && args.size() == 1) {
         return untrust();
+    }
+    if (args[0] == "db" && args.size() == 1) {
+        return db();
+    }
+    if (args[0] == "env") {
+        return env(args);
     }
     if (args[0] == "check") {
         return check(paths.size() > 1 ? paths[1] : fs::current_path());

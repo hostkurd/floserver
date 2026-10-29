@@ -20,6 +20,8 @@ add_library(floserver_core STATIC
     src/ipc_posix.cpp
     src/ipc_windows.cpp
     src/manifest.cpp
+    src/mariadb.cpp
+    src/database_service.cpp
     src/nginx_config.cpp
     src/paths.cpp
     src/ports.cpp
@@ -31,6 +33,7 @@ add_library(floserver_core STATIC
     src/protocol.cpp
     src/trust_store.cpp
     src/runtime_service.cpp
+    src/secret_store.cpp
     src/runtime_store.cpp
     src/service_client.cpp
     src/sha256.cpp
