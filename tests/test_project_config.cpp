@@ -165,6 +165,14 @@ TEST_CASE("unknown keys and duplicate extensions are warnings") {
     CHECK(r.config->extensions == std::vector<std::string>{"gd"});
 }
 
+TEST_CASE("python is a version like the others (D17)") {
+    const auto r = parse_project_config(R"({"python": "3.13"})");
+    REQUIRE(r.config.has_value());
+    CHECK(r.config->python == "3.13");
+    CHECK(r.warnings.empty());
+    CHECK_FALSE(parse_project_config(R"({"python": 3.13})").config.has_value());
+}
+
 TEST_CASE("a start command is one line of text") {
     const auto ok = parse_project_config(R"({"node": "22", "command": "npm run serve -- --port {port}"})");
     REQUIRE(ok.config.has_value());
@@ -188,6 +196,7 @@ TEST_CASE("writing and reading back gives the same config") {
     c.root = "public";
     c.extensions = {"intl", "pdo_mysql"};
     c.command = "php -S 127.0.0.1:{port}";
+    c.python = "3.13";
     const std::string text = write_project_config(c);
     CHECK(text.find("\"php\": \"8.4\"") != std::string::npos);
     CHECK(text.find("node") == std::string::npos);  // unset keys are left out

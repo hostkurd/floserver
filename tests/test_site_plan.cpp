@@ -48,6 +48,7 @@ ConfigReader reader(std::map<std::string, std::string> files) {
 const std::vector<InstalledRuntime> kInstalled = {
     runtime("php", "8.4.27"), runtime("php", "8.4.3"),  runtime("php", "8.5.12"), runtime("php", "8.3.36", "ts"),
     runtime("mariadb", "11.4.13"), runtime("node", "24.22.1"), runtime("nginx", "1.30.6"),
+    runtime("python", "3.13.18"),
 };
 
 }  // namespace
@@ -157,6 +158,25 @@ TEST_CASE("Node projects without PHP run their own server; with PHP, Node is onl
     plan.pools[0].ports = {9300, 9301, 9302, 9303};
     REQUIRE(assign_app_ports(plan, {{"web", 9301}}, [](Port) { return true; }));
     CHECK(plan.apps[0].port == 9304);
+}
+
+TEST_CASE("Python projects run their own server; Python serves when Node is named too (D17)") {
+    AppConfig config;
+    config.projects = {project("api"), project("full"), project("old"), project("tools")};
+    const auto plan = plan_sites(config,
+                                 reader({{"api", R"({"python": "3.13"})"},
+                                         {"full", R"({"python": "3.13", "node": "24"})"},
+                                         {"old", R"({"python": "3.12"})"},
+                                         {"tools", R"({"php": "8.5", "python": "3.13"})"}}),
+                                 kInstalled, std::nullopt);
+    REQUIRE(plan.apps.size() == 2);
+    CHECK(plan.apps[0].kind == AppKind::Python);
+    CHECK(plan.apps[0].version == "3.13.18");
+    CHECK(plan.apps[0].runtime_dir == kBase / "runtimes" / "python" / "3.13.18");
+    CHECK(plan.apps[1].kind == AppKind::Python);
+    CHECK(plan.sites[2].state == SiteState::NeedsDownload);
+    CHECK(plan.sites[2].missing == std::vector<std::string>{"python 3.12"});
+    CHECK(plan.sites[3].pool.has_value());  // PHP serves; Python is only a tool there
 }
 
 TEST_CASE("the nginx config forwards a Node project to its port, WebSockets too") {

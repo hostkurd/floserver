@@ -239,6 +239,27 @@ std::vector<std::pair<std::string, std::string>> env_values(EnvStyle style, cons
             {"DB_PASSWORD", login.password}};
 }
 
+std::string database_url(const DatabaseLogin& login) {
+    const auto encode = [](const std::string& s) {
+        static constexpr char kHex[] = "0123456789ABCDEF";  // NOLINT(modernize-avoid-c-arrays)
+        std::string out;
+        for (const char c : s) {
+            const auto u = static_cast<unsigned char>(c);
+            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.' ||
+                c == '_' || c == '~') {
+                out += c;
+            } else {
+                out += '%';
+                out += kHex[u >> 4U];
+                out += kHex[u & 0xFU];
+            }
+        }
+        return out;
+    };
+    return "mysql+pymysql://" + encode(login.user) + ":" + encode(login.password) + "@127.0.0.1:" +
+           std::to_string(login.port) + "/" + encode(login.database);
+}
+
 std::string update_env_text(const std::string& text, const std::vector<std::pair<std::string, std::string>>& values) {
     const std::string nl = text.find("\r\n") != std::string::npos ? "\r\n" : "\n";
     std::map<std::string, std::string> wanted(values.begin(), values.end());

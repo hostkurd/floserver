@@ -879,8 +879,18 @@ int env(const std::vector<std::string>& args) {
         return 0;
     }
     for (const auto& [key, value] : values) {
-        std::cout << key << "=" << (key == "DB_PASSWORD" && !show ? std::string("********   (flo env --show)") : value)
-                  << "\n";
+        std::string line = value;
+        if (!show && key == "DB_PASSWORD") {
+            line = "********   (flo env --show)";
+        } else if (!show && key == "DATABASE_URL") {
+            // mysql+pymysql://user:<password>@host...: the password hidden.
+            const auto colon = value.find(':', value.find("://") + 3);
+            const auto at = value.find('@');
+            if (colon != std::string::npos && at != std::string::npos && colon < at) {
+                line = value.substr(0, colon + 1) + "********" + value.substr(at);
+            }
+        }
+        std::cout << key << "=" << line << "\n";
     }
     return 0;
 }
