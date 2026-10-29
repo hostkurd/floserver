@@ -75,6 +75,10 @@ struct AppSpec {
     std::optional<std::string> command; // from floserver.json
     bool keep_running = false;
     Port port = 0;                      // held by the service; given by assign_app_ports()
+    // A Python app that names Node too: that Node is on its PATH (its
+    // build tools), as "24.22.1" in the status.
+    std::filesystem::path node_dir;
+    std::string node_version;
 };
 
 struct WebPlan {

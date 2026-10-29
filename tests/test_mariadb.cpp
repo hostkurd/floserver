@@ -63,8 +63,9 @@ TEST_CASE("SQL is quoted and a project's database is its own") {
 }
 
 TEST_CASE("Python projects get the database as one URL, encoded") {
-    DatabaseLogin login{3307, "my_shop", "my_shop", "a:b@c/d%e f"};
+    const DatabaseLogin login{3307, "my_shop", "my_shop", "a:b@c/d%e f"};
     CHECK(database_url(login) == "mysql+pymysql://my_shop:a%3Ab%40c%2Fd%25e%20f@127.0.0.1:3307/my_shop");
+    CHECK(database_url(login, true) == "mysql://my_shop:a%3Ab%40c%2Fd%25e%20f@127.0.0.1:3307/my_shop");
 }
 
 TEST_CASE(".env lines follow the project's style and keep its other lines") {

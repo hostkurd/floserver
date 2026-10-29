@@ -102,9 +102,10 @@ struct DatabaseLogin {
 [[nodiscard]] std::vector<std::pair<std::string, std::string>> env_values(EnvStyle style, const DatabaseLogin& login);
 
 // The database as one URL, for Python projects (D17): SQLAlchemy and most
-// frameworks read DATABASE_URL. "mysql+pymysql://user:password@127.0.0.1:3306/db",
-// with the user and password percent-encoded.
-[[nodiscard]] std::string database_url(const DatabaseLogin& login);
+// frameworks read DATABASE_URL. "mysql+pymysql://user:password@127.0.0.1:3306/db"
+// (SQLAlchemy's form), or "mysql://..." for Django, whose dj-database-url
+// knows only that one; the user and password percent-encoded.
+[[nodiscard]] std::string database_url(const DatabaseLogin& login, bool django = false);
 
 // A .env text with `values` set: a key's first line is replaced, later
 // lines with the same key are dropped (FloCMS's two readers disagree on

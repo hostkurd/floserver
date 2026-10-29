@@ -14,16 +14,19 @@
 // Setup: Node runs `npm install` when package.json lists packages and
 // node_modules is missing. Python makes .venv in the project with the
 // project's Python (`python -m venv .venv`, so editors find it) and installs
-// requirements.txt (or pyproject.toml with `pip install -e .`) into it, again
-// whenever that file changes. A .venv made with another Python version is
-// never replaced on its own: the page says to delete it.
+// requirements.txt (or, when it has a [build-system], pyproject.toml with
+// `pip install -e .`) into it, again whenever that file changes. A .venv
+// made with another Python version is never replaced on its own: the page
+// says to delete it; one made with another install of the same version (a
+// patch update) is moved over with `python -m venv --upgrade`. A .venv
+// whose making was cut short is removed, so the next start makes it again.
 //
 // How it starts: "command" from floserver.json, run by the system's shell
 // (for Python with .venv first on PATH); else, for Node, package.json's
 // "dev" script, else its "start" script, through the npm that comes with the
 // project's Node; for Python, Django (manage.py runserver), FastAPI (uvicorn
-// with --reload, the app in main.py or app/main.py) or Flask (flask run
-// --debug, the app in app.py or wsgi.py). The port to listen on is in PORT
+// with --reload, the app in main.py, app/main.py or app.py) or Flask (flask
+// run --debug, the app in app.py or wsgi.py). The port to listen on is in PORT
 // (HOST is 127.0.0.1); for dev servers known to ignore PORT (Vite, Next.js,
 // Nuxt, Astro, Angular) it's also passed as --port.
 
@@ -62,10 +65,12 @@ struct AppLaunch {
     std::string shown;     // the command as a person would type it, for the log and the status
 };
 
-// One thing to run before the app starts; `done` runs when it succeeded.
+// One thing to run before the app starts; `done` runs when it succeeded,
+// `failed` when it didn't (or was stopped).
 struct AppSetupStep {
     AppLaunch launch;
     std::function<void()> done;
+    std::function<void()> failed;
 };
 
 // What has to run before `app` starts, in order (often nothing). Nothing

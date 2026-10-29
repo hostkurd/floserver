@@ -174,7 +174,7 @@ TEST_CASE("a Python app starts as Django, FastAPI or Flask, from its .venv") {
     }
     SUBCASE("Django: manage.py runserver") {
         test_util::write_file(app.dir / "manage.py", "");
-        test_util::write_file(app.dir / "main.py", "FastAPI");  // manage.py wins
+        test_util::write_file(app.dir / "main.py", "app = FastAPI()");  // manage.py wins
         const auto l = app_launch(app, 9602, error);
         REQUIRE(l);
         CHECK(l->options.args == Args{"manage.py", "runserver", "127.0.0.1:9602"});
@@ -184,6 +184,21 @@ TEST_CASE("a Python app starts as Django, FastAPI or Flask, from its .venv") {
         const auto l = app_launch(app, 9603, error);
         REQUIRE(l);
         CHECK(l->options.args == Args{"-m", "flask", "--app", "app", "run", "--debug", "--host", "127.0.0.1", "--port", "9603"});
+    }
+    SUBCASE("FastAPI in app.py; a mention in a comment isn't an app") {
+        test_util::write_file(app.dir / "main.py", "# not a FastAPI app\n");
+        test_util::write_file(app.dir / "app.py", "from fastapi import FastAPI\napp = FastAPI()\n");
+        const auto l = app_launch(app, 9601, error);
+        REQUIRE(l);
+        CHECK(l->options.args[2] == "app:app");
+    }
+    SUBCASE("a Python app that names Node has that Node on PATH") {
+        test_util::write_file(app.dir / "manage.py", "");
+        app.node_dir = fake_node(app.dir.parent_path() / "node");
+        const auto l = app_launch(app, 9601, error);
+        REQUIRE(l);
+        CHECK(env_of(*l, "PATH").find(path_to_utf8(node_program(app.node_dir)->parent_path())) != std::string::npos);
+        CHECK(env_of(*l, "PYTHONUTF8") == "1");
     }
     SUBCASE("nothing to go on: a command is asked for") {
         test_util::write_file(app.dir / "script.py", "print(1)\n");
@@ -214,9 +229,15 @@ TEST_CASE("a Python app's setup: .venv, then its packages when the list changes"
     CHECK((*steps)[0].launch.shown == "python -m venv .venv");
     CHECK((*steps)[0].launch.options.program == *python_program(app.runtime_dir));
     CHECK((*steps)[0].launch.options.args == Args{"-m", "venv", ".venv"});
+    // Cut short: what it made goes, so the next start makes it again.
+    test_util::write_file(app.dir / ".venv" / "pyvenv.cfg", "version = 3.13.18\n");
+    REQUIRE((*steps)[0].failed);
+    (*steps)[0].failed();
+    CHECK_FALSE(fs::exists(app.dir / ".venv"));
 
     // A .venv made with this Python, and a requirements.txt: pip, once.
-    test_util::write_file(app.dir / ".venv" / "pyvenv.cfg", "home = /x\nversion = 3.13.17\n");
+    const std::string home = "home = " + path_to_utf8(python_program(app.runtime_dir)->parent_path()) + "\n";
+    test_util::write_file(app.dir / ".venv" / "pyvenv.cfg", home + "version = 3.13.17\n");
     test_util::write_file(venv_python(app.dir), "");
     test_util::write_file(app.dir / "requirements.txt", "fastapi\nuvicorn\n");
     steps = app_setup(app, 9601, error);
@@ -230,13 +251,25 @@ TEST_CASE("a Python app's setup: .venv, then its packages when the list changes"
     test_util::write_file(app.dir / "requirements.txt", "fastapi\nuvicorn\nsqlalchemy\n");
     CHECK(app_setup(app, 9601, error)->size() == 1);  // the list changed
 
-    // pyproject.toml when there's no requirements.txt.
+    // pyproject.toml when there's no requirements.txt, and only as a
+    // package: tool settings or an app without a build system aren't.
     fs::remove(app.dir / "requirements.txt");
-    test_util::write_file(app.dir / "pyproject.toml", "[project]\nname = 'api'\n");
+    test_util::write_file(app.dir / "pyproject.toml", "[project]\nname = 'api'\ndependencies = ['django']\n");
+    CHECK(app_setup(app, 9601, error)->empty());
+    test_util::write_file(app.dir / "pyproject.toml",
+                          "[build-system]\nrequires = ['setuptools']\n[project]\nname = 'api'\n");
     steps = app_setup(app, 9601, error);
     REQUIRE(steps);
     REQUIRE(steps->size() == 1);
     CHECK((*steps)[0].launch.shown == "pip install -e .");
+
+    // Made with another install of the same version (a patch update): moved over.
+    test_util::write_file(app.dir / ".venv" / "pyvenv.cfg", "home = " + path_to_utf8(tmp.path() / "python-old") +
+                                                                "\nversion = 3.13.17\n");
+    steps = app_setup(app, 9601, error);
+    REQUIRE(steps);
+    REQUIRE_FALSE(steps->empty());
+    CHECK((*steps)[0].launch.shown == "python -m venv --upgrade .venv");
 
     // Another Python's .venv is never replaced on its own.
     test_util::write_file(app.dir / ".venv" / "pyvenv.cfg", "version_info = 3.12.9\n");
@@ -567,7 +600,7 @@ TEST_CASE("a Python app gets its .venv and packages, then runs from it") {
     app.runtime_dir = runtime;
     app.port = free_port(19400);
     test_util::write_file(app.dir / "requirements.txt", "");
-    test_util::write_file(app.dir / "main.py", "# a FastAPI app\n");
+    test_util::write_file(app.dir / "main.py", "from fastapi import FastAPI\napp = FastAPI()\n");
     // Stands in for uvicorn: serves on the port it's given, says what it was asked.
     test_util::write_file(app.dir / "uvicorn" / "__init__.py", "");
     test_util::write_file(app.dir / "uvicorn" / "__main__.py", R"(
@@ -604,6 +637,7 @@ http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
         ++pips;
     }
     CHECK(pips == 1);
+    CHECK(log.find("--upgrade") == std::string::npos);  // the same install: nothing to move over
     runner->close();
 }
 

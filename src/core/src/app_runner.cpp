@@ -94,6 +94,9 @@ void set_environment(ChildOptions& o, const AppSpec& app, Port port) {
         if (const auto py = python_program(app.runtime_dir)) {
             first.push_back(path_to_utf8(py->parent_path()));
         }
+        if (const auto node = app.node_dir.empty() ? std::nullopt : node_program(app.node_dir)) {
+            first.push_back(path_to_utf8(node->parent_path()));
+        }
     } else if (const auto node = node_program(app.runtime_dir)) {
         first.push_back(path_to_utf8(node->parent_path()));
     }
@@ -113,6 +116,9 @@ void set_environment(ChildOptions& o, const AppSpec& app, Port port) {
     if (app.kind == AppKind::Python) {
         o.env.emplace_back("VIRTUAL_ENV", path_to_utf8(venv_dir(app)));
         o.env.emplace_back("PYTHONUNBUFFERED", "1");  // the log shows output as it comes
+        // UTF-8 in the log on Windows too, where a file would otherwise get
+        // the ANSI code page and Arabic or Kurdish output would fail.
+        o.env.emplace_back("PYTHONUTF8", "1");
         o.remove_env = {"PYTHONHOME", "PYTHONPATH", "PIP_REQUIRE_VIRTUALENV"};
     }
 }
@@ -124,9 +130,11 @@ std::string major_minor(const std::string& version) {
     return version.substr(0, second);
 }
 
-// The Python version a .venv was made with ("3.13.17"), from pyvenv.cfg.
-std::optional<std::string> venv_version(const fs::path& venv) {
-    const auto text = read_small_file(venv / "pyvenv.cfg", 64 * 1024);
+// A value from a .venv's pyvenv.cfg: "version" ("3.13.17"; "version_info"
+// in some Pythons) or "home" (the folder of the Python it was made with).
+std::optional<std::string> venv_setting(const fs::path& venv, std::initializer_list<std::string_view> keys) {
+    const fs::path cfg = venv / "pyvenv.cfg";
+    const auto text = is_file(cfg) ? read_small_file(cfg, std::size_t{64} * 1024) : std::nullopt;
     if (!text) {
         return std::nullopt;
     }
@@ -136,7 +144,7 @@ std::optional<std::string> venv_version(const fs::path& venv) {
         if (end == std::string::npos) {
             end = text->size();
         }
-        std::string line = text->substr(pos, end - pos);
+        const std::string line = text->substr(pos, end - pos);
         pos = end + 1;
         const auto eq = line.find('=');
         if (eq == std::string::npos) {
@@ -154,7 +162,7 @@ std::optional<std::string> venv_version(const fs::path& venv) {
         };
         trim(key);
         trim(value);
-        if (key == "version" || key == "version_info") {
+        if (std::find(keys.begin(), keys.end(), key) != keys.end()) {
             return value;
         }
     }
@@ -177,22 +185,23 @@ std::optional<AppLaunch> python_launch(const AppSpec& app, Port port, std::strin
         launch.shown = "python manage.py runserver 127.0.0.1:" + p;
         return launch;
     }
-    for (const auto& [file, module] : {std::pair{"main.py", "main:app"}, std::pair{"app/main.py", "app.main:app"}}) {
-        if (file_mentions(app.dir / path_from_utf8(file), "FastAPI")) {
+    for (const auto& [file, module] : {std::pair{"main.py", "main:app"}, std::pair{"app/main.py", "app.main:app"},
+                                       std::pair{"app.py", "app:app"}}) {
+        if (file_mentions(app.dir / path_from_utf8(file), "FastAPI(")) {
             launch.options.args = {"-m", "uvicorn", module, "--reload", "--host", "127.0.0.1", "--port", p};
             launch.shown = std::string("uvicorn ") + module + " --reload --host 127.0.0.1 --port " + p;
             return launch;
         }
     }
     for (const auto& [file, name] : {std::pair{"app.py", "app"}, std::pair{"wsgi.py", "wsgi"}}) {
-        if (file_mentions(app.dir / file, "Flask")) {
+        if (file_mentions(app.dir / file, "Flask(")) {
             launch.options.args = {"-m", "flask", "--app", name, "run", "--debug", "--host", "127.0.0.1", "--port", p};
             launch.shown = std::string("flask --app ") + name + " run --debug --host 127.0.0.1 --port " + p;
             return launch;
         }
     }
-    error = "FloServer can't tell how to start this Python project (no manage.py, no FastAPI app in main.py or "
-            "app/main.py, no Flask app in app.py or wsgi.py); add a \"command\" to floserver.json";
+    error = "FloServer can't tell how to start this Python project (no manage.py, no FastAPI app in main.py, "
+            "app/main.py or app.py, no Flask app in app.py or wsgi.py); add a \"command\" to floserver.json";
     return std::nullopt;
 }
 
@@ -328,7 +337,7 @@ std::optional<std::vector<AppSetupStep>> app_setup(const AppSpec& app, Port port
     }
     const fs::path venv = venv_dir(app);
     if (fs::exists(venv, ec)) {
-        const auto made_with = venv_version(venv);
+        const auto made_with = venv_setting(venv, {"version", "version_info"});
         if (!made_with || !is_file(venv_python(app.dir))) {
             error = "the project's .venv folder isn't a Python virtual environment FloServer can use; rename or "
                     "delete it, and the next request makes a new one";
@@ -340,12 +349,33 @@ std::optional<std::vector<AppSetupStep>> app_setup(const AppSpec& app, Port port
                     ".venv folder, and the next request makes a new one with Python " + major_minor(app.version) + ".";
             return std::nullopt;
         }
+        // Made with another install of the same version (a patch update
+        // replaced the folder): moved over to this one, packages kept.
+        const auto home = venv_setting(venv, {"home"});
+        const fs::path want = python->parent_path();
+        std::error_code e1;
+        std::error_code e2;
+        if (home && !fs::equivalent(path_from_utf8(*home), want, e1) &&
+            fs::weakly_canonical(path_from_utf8(*home), e1) != fs::weakly_canonical(want, e2)) {
+            AppSetupStep step;
+            set_environment(step.launch.options, app, port);
+            step.launch.options.program = *python;
+            step.launch.options.args = {"-m", "venv", "--upgrade", ".venv"};
+            step.launch.shown = "python -m venv --upgrade .venv";
+            steps.push_back(std::move(step));
+        }
     } else {
         AppSetupStep step;
         set_environment(step.launch.options, app, port);
         step.launch.options.program = *python;
         step.launch.options.args = {"-m", "venv", ".venv"};
         step.launch.shown = "python -m venv .venv";
+        // A .venv cut short (stopped, timed out) isn't left half made: the
+        // next start makes it again.
+        step.failed = [venv] {
+            std::error_code ignored;
+            fs::remove_all(venv, ignored);
+        };
         steps.push_back(std::move(step));
     }
     // Packages: installed again when the file that lists them changes.
@@ -359,9 +389,15 @@ std::optional<std::vector<AppSetupStep>> app_setup(const AppSpec& app, Port port
             error = std::string(name) + " can't be read (or is larger than 4 MB)";
             return std::nullopt;
         }
+        // pyproject.toml is installed only as a package (a [build-system]):
+        // one that only holds tool settings, or an app with no build
+        // system, can't be (pip install -e . fails on a flat layout).
+        if (std::string_view(name) == "pyproject.toml" && text->find("[build-system]") == std::string::npos) {
+            break;
+        }
         const std::string stamp = std::string(name) + " " + to_hex(sha256(*text)) + "\n";
         const fs::path marker = venv / ".floserver-installed";
-        if (read_small_file(marker, 1024) == stamp) {
+        if (is_file(marker) && read_small_file(marker, 1024) == stamp) {
             break;
         }
         AppSetupStep step;
@@ -729,6 +765,8 @@ std::unique_ptr<ChildProcess> AppRunner::start_server(const AppSpec& app, Port p
         append_line(log_, "--- FloServer: can't set up: " + error);
         return nullptr;
     }
+    // One budget for all of setup, inside nginx's wait for the first answer.
+    const auto setup_deadline = Clock::now() + config_.install_limit;
     for (AppSetupStep& step : *steps) {
         append_line(log_, "--- FloServer: " + step.launch.shown);
         step.launch.options.working_dir = app.dir;
@@ -737,8 +775,12 @@ std::unique_ptr<ChildProcess> AppRunner::start_server(const AppSpec& app, Port p
         if (!child) {
             return nullptr;
         }
-        const auto code = wait_for(*child, config_.install_limit);
+        const auto left = std::chrono::duration_cast<std::chrono::seconds>(setup_deadline - Clock::now());
+        const auto code = wait_for(*child, std::max(left, std::chrono::seconds(1)));
         if (code != 0) {
+            if (step.failed) {
+                step.failed();
+            }
             error = step.launch.shown + (code ? " failed:\n" + tail(log_) : std::string(" didn't finish"));
             return nullptr;
         }

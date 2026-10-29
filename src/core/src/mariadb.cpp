@@ -239,7 +239,7 @@ std::vector<std::pair<std::string, std::string>> env_values(EnvStyle style, cons
             {"DB_PASSWORD", login.password}};
 }
 
-std::string database_url(const DatabaseLogin& login) {
+std::string database_url(const DatabaseLogin& login, bool django) {
     const auto encode = [](const std::string& s) {
         static constexpr char kHex[] = "0123456789ABCDEF";  // NOLINT(modernize-avoid-c-arrays)
         std::string out;
@@ -256,7 +256,7 @@ std::string database_url(const DatabaseLogin& login) {
         }
         return out;
     };
-    return "mysql+pymysql://" + encode(login.user) + ":" + encode(login.password) + "@127.0.0.1:" +
+    return std::string(django ? "mysql://" : "mysql+pymysql://") + encode(login.user) + ":" + encode(login.password) + "@127.0.0.1:" +
            std::to_string(login.port) + "/" + encode(login.database);
 }
 

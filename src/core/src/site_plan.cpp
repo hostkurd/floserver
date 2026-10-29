@@ -149,9 +149,12 @@ WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
             const std::string wanted = pc.python ? *pc.python : *pc.node;
             const InstalledRuntime* runtime = best_installed(installed, runtime_name, wanted);
             if (runtime == nullptr) {
-                site.missing.push_back(runtime_name + " " + wanted);
+                site.missing.push_back(runtime_name);
+                site.missing.back().append(" ").append(wanted);
             }
-            if (pc.python && pc.node && best_installed(installed, "node", *pc.node) == nullptr) {
+            const InstalledRuntime* tools =
+                pc.python && pc.node ? best_installed(installed, "node", *pc.node) : nullptr;
+            if (pc.python && pc.node && tools == nullptr) {
                 site.missing.push_back("node " + *pc.node);
             }
             if (pc.database && best_installed(installed, pc.database->family, pc.database->version) == nullptr) {
@@ -163,7 +166,8 @@ WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
                 continue;
             }
             plan.apps.push_back({project.name, kind, project.dir, runtime->version, runtime->dir, pc.command,
-                                 project.keep_running, 0});
+                                 project.keep_running, 0, tools != nullptr ? tools->dir : fs::path(),
+                                 tools != nullptr ? tools->version : std::string()});
             site.app = plan.apps.size() - 1;
             site.state = SiteState::Ready;
             plan.sites.push_back(std::move(site));

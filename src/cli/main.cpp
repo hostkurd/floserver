@@ -883,12 +883,14 @@ int env(const std::vector<std::string>& args) {
         if (!show && key == "DB_PASSWORD") {
             line = "********   (flo env --show)";
         } else if (!show && key == "DATABASE_URL") {
-            // mysql+pymysql://user:<password>@host...: the password hidden.
-            const auto colon = value.find(':', value.find("://") + 3);
-            const auto at = value.find('@');
-            if (colon != std::string::npos && at != std::string::npos && colon < at) {
-                line = value.substr(0, colon + 1) + "********" + value.substr(at);
-            }
+            // mysql://user:<password>@host...: the password hidden, or all
+            // of it when it isn't in that shape.
+            const auto scheme = value.find("://");
+            const auto colon = scheme == std::string::npos ? scheme : value.find(':', scheme + 3);
+            const auto at = value.rfind('@');
+            line = colon != std::string::npos && at != std::string::npos && colon < at
+                       ? value.substr(0, colon + 1) + "********" + value.substr(at) + "   (flo env --show)"
+                       : "********   (flo env --show)";
         }
         std::cout << key << "=" << line << "\n";
     }
