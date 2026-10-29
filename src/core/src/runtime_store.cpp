@@ -3,6 +3,7 @@
 #include "floserver/core/encoding.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/version.h"
+#include "floserver/core/tar_extract.h"
 #include "floserver/core/zip_extract.h"
 
 #include <nlohmann/json.hpp>
@@ -234,8 +235,8 @@ InstallResult install_runtime(const RuntimeFile& entry, const fs::path& archive,
         return result;
     };
 
-    if (entry.archive == "zip") {
-        const ZipResult z = extract_zip(archive, staging);
+    if (entry.archive == "zip" || entry.archive == "tar.gz") {
+        const ZipResult z = entry.archive == "zip" ? extract_zip(archive, staging) : extract_tar_gz(archive, staging);
         if (!z.ok) {
             return fail("couldn't unpack " + entry.name + " " + entry.version + ": " + z.message);
         }
