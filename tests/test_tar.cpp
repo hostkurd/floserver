@@ -10,7 +10,6 @@
 
 #include <algorithm>
 #include <cstring>
-#include <fstream>
 
 using namespace floserver::core;
 namespace fs = std::filesystem;
@@ -113,10 +112,7 @@ fs::path write_archive(const fs::path& dir, const std::string& bytes) {
     return p;
 }
 
-std::string read(const fs::path& p) {
-    std::ifstream in(p, std::ios::binary);
-    return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
-}
+std::string read(const fs::path& p) { return read_small_file(p, std::size_t{16} * 1024 * 1024).value_or("<none>"); }
 
 std::string pax(const std::string& key, const std::string& value) {
     const std::string record = " " + key + "=" + value + "\n";
