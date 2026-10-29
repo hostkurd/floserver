@@ -169,15 +169,25 @@ struct Service {
 
     // integration.json for FloCMS Studio (D14): rewritten when what it says
     // changed (an install, a removal, a database port).
-    void refresh_integration() const {
+    // Never throws: it runs on its own thread, where an exception would end
+    // the service.
+    void refresh_integration() const noexcept {
         if (!data) {
             return;
         }
-        const std::string status = databases ? databases->status().dump() : std::string("{}");
-        std::string error;
-        (void)floserver::core::write_integration(
-            *data, floserver::core::integration_json(floserver::core::collect_integration(*data, status)), error);
+        try {
+            const json status = databases ? databases->status() : json::object();
+            std::string error;
+            (void)floserver::core::write_integration(
+                *data, floserver::core::integration_json(floserver::core::collect_integration(*data, status)),
+                error);
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): tried again in 5 s
+        }
     }
+
+    // Wakes the integration thread when the service quits.
+    std::mutex integration_mutex;
+    std::condition_variable integration_wake;
 
     // Adds what's running to a project's description: its address and
     // whether its PHP or its own server is running or asleep (and why it
@@ -471,6 +481,7 @@ int run() {
     }
 
     auto service = std::make_shared<Service>();
+    std::thread integration_thread;
     service->server = std::move(server);
     service->runtimes = make_runtimes();
     if (const auto data = floserver::core::data_dir()) {
@@ -487,18 +498,16 @@ int run() {
         service->data = *data;
         service->refresh_integration();
         try {
-            std::thread([service] {
-                while (!service->quitting.load()) {
-                    for (int i = 0; i < 25 && !service->quitting.load(); ++i) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(200));
-                    }
-                    if (!service->quitting.load()) {
-                        service->refresh_integration();
-                    }
+            integration_thread = std::thread([service] {
+                std::unique_lock lock(service->integration_mutex);
+                while (!service->integration_wake.wait_for(lock, std::chrono::seconds(5),
+                                                            [&] { return service->quitting.load(); })) {
+                    lock.unlock();
+                    service->refresh_integration();
+                    lock.lock();
                 }
-            }).detach();
-        } catch (const std::system_error&) {
-            // No thread: the file is still written at every start.
+            });
+        } catch (const std::system_error&) {  // NOLINT(bugprone-empty-catch): the file is still written at every start
         }
     }
 
@@ -514,6 +523,15 @@ int run() {
         } catch (const std::system_error&) {
             service->clients.remove();  // no thread for this client; keep serving
         }
+    }
+    // The integration thread ends before anything it reads stops.
+    {
+        const std::lock_guard lock(service->integration_mutex);
+        service->quitting.store(true);
+    }
+    service->integration_wake.notify_all();
+    if (integration_thread.joinable()) {
+        integration_thread.join();
     }
     // Give the client that asked us to quit time to read the reply.
     if (service->runtimes) {

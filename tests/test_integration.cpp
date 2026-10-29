@@ -30,21 +30,26 @@ void fake_runtime(const fs::path& data, const std::string& name, const std::stri
 }  // namespace
 
 TEST_CASE("integration.json: what Studio reads, and never a secret") {
-    test_util::TempDir tmp;
+    const test_util::TempDir tmp;
     const fs::path data = tmp.path() / "data";
     fake_runtime(data, "php", "8.4.27");
     fake_runtime(data, "php", "8.5.12");
     fake_runtime(data, "mariadb", "11.4.13");
 
-    const std::string status =
+    const json status = json::parse(
         R"({"servers":[{"series":"11.4","version":"11.4.13","port":3306,"internal_port":33100,"state":"asleep"},)"
-        R"({"series":"11.8","version":"11.8.9","port":0},{"series":"x","port":"3307"},"junk"]})";
+        R"({"series":"11.8","version":"11.8.9","port":0},{"series":"x","port":"3307"},{"series":1,"port":3308},)"
+        R"({"series":"11.6","version":7,"port":3309},"junk"]})");
     const IntegrationInfo info = collect_integration(data, status);
     CHECK(info.shims == shims_dir(data));
-    REQUIRE(info.databases.size() == 1);  // no port yet, or a port that isn't a number: left out
+    // No port yet, a port or series that isn't what it should be: left out. A
+    // version that isn't text: kept, without it.
+    REQUIRE(info.databases.size() == 2);
     CHECK(info.databases[0].series == "11.4");
     CHECK(info.databases[0].version == "11.4.13");
     CHECK(info.databases[0].port == 3306);
+    CHECK(info.databases[1].series == "11.6");
+    CHECK(info.databases[1].version.empty());
     CHECK(info.runtimes.size() == 3);
 
     const json doc = json::parse(integration_json(info));
@@ -64,13 +69,14 @@ TEST_CASE("integration.json: what Studio reads, and never a secret") {
     }
 
     // Bad status text: no databases, the rest still there.
-    CHECK(collect_integration(data, "not json").databases.empty());
-    CHECK(collect_integration(data, "{}").runtimes.size() == 3);
+    CHECK(collect_integration(data, json("not an object")).databases.empty());
+    CHECK(collect_integration(data, json::object()).runtimes.size() == 3);
+    CHECK(collect_integration(data, json{{"servers", 5}}).databases.empty());
 }
 
 TEST_CASE("integration.json: written when it changed, kept when it didn't") {
-    test_util::TempDir tmp;
-    const fs::path data = tmp.path();
+    const test_util::TempDir tmp;
+    const fs::path& data = tmp.path();
     std::string error;
     IntegrationInfo info;
     info.shims = shims_dir(data);
@@ -91,8 +97,8 @@ TEST_CASE("integration.json: written when it changed, kept when it didn't") {
 }
 
 TEST_CASE("A FloCMS project, by Studio's rule") {
-    test_util::TempDir tmp;
-    const fs::path dir = tmp.path();
+    const test_util::TempDir tmp;
+    const fs::path& dir = tmp.path();
     CHECK_FALSE(is_flocms_project(dir));  // no composer.json
 
     test_util::write_file(dir / "composer.json", R"({"name":"hostkurd/flocms"})");
@@ -117,20 +123,30 @@ TEST_CASE("A FloCMS project, by Studio's rule") {
 
 #if !defined(_WIN32) && !defined(__APPLE__)
 TEST_CASE("Studio on Linux: flocms-studio on the PATH") {
-    test_util::TempDir tmp;
-    const auto old_path = get_env("PATH");
+    const test_util::TempDir tmp;
+    // PATH is put back however the test ends.
+    struct RestorePath {
+        std::optional<std::string> old = get_env("PATH");
+        RestorePath() = default;
+        RestorePath(const RestorePath&) = delete;
+        RestorePath& operator=(const RestorePath&) = delete;
+        RestorePath(RestorePath&&) = delete;
+        RestorePath& operator=(RestorePath&&) = delete;
+        ~RestorePath() {
+            if (old) {
+                setenv("PATH", old->c_str(), 1);  // NOLINT(concurrency-mt-unsafe): tests run on one thread
+            } else {
+                unsetenv("PATH");  // NOLINT(concurrency-mt-unsafe): tests run on one thread
+            }
+        }
+    } const restore;
     const fs::path bin = tmp.path() / "bin";
     fs::create_directories(bin);
-    setenv("PATH", ("relative:" + bin.string()).c_str(), 1);
+    setenv("PATH", ("relative:" + bin.string()).c_str(), 1);  // NOLINT(concurrency-mt-unsafe): one thread
     CHECK_FALSE(find_studio().has_value());
     test_util::write_file(bin / "flocms-studio", "");
     const auto found = find_studio();
     REQUIRE(found.has_value());
     CHECK(*found == bin / "flocms-studio");
-    if (old_path) {
-        setenv("PATH", old_path->c_str(), 1);
-    } else {
-        unsetenv("PATH");
-    }
 }
 #endif

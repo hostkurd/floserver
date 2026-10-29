@@ -10,6 +10,7 @@
 
 #include <cwchar>
 #include <system_error>
+#include <utility>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -30,21 +31,22 @@ bool is_file(const fs::path& file) {
 }
 
 #ifdef _WIN32
-// The "Path" value under Software\HostKurd\FloCMS Studio in `root`.
-std::optional<fs::path> studio_from_registry(HKEY root) {
+// The "Path" value under Software\HostKurd\FloCMS Studio in `root`, in the
+// registry view `view` (KEY_WOW64_64KEY or KEY_WOW64_32KEY: a 32-bit
+// installer writes HKLM's 32-bit view). REG_EXPAND_SZ is expanded.
+std::optional<fs::path> studio_from_registry(HKEY root, REGSAM view) {
     HKEY key = nullptr;
-    if (RegOpenKeyExW(root, L"Software\\HostKurd\\FloCMS Studio", 0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) {
+    if (RegOpenKeyExW(root, L"Software\\HostKurd\\FloCMS Studio", 0, KEY_QUERY_VALUE | view, &key) != ERROR_SUCCESS) {
         return std::nullopt;
     }
-    DWORD type = 0;
+    constexpr DWORD kTypes = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ;
     DWORD size = 0;
     std::optional<fs::path> found;
-    if (RegQueryValueExW(key, L"Path", nullptr, &type, nullptr, &size) == ERROR_SUCCESS && type == REG_SZ &&
-        size > 0 && size < 64 * 1024) {
+    if (RegGetValueW(key, nullptr, L"Path", kTypes, nullptr, nullptr, &size) == ERROR_SUCCESS && size > 0 &&
+        size < 64 * 1024) {
         std::wstring buf(size / sizeof(wchar_t) + 1, L'\0');
-        if (RegQueryValueExW(key, L"Path", nullptr, &type, reinterpret_cast<BYTE*>(buf.data()), &size) ==
-                ERROR_SUCCESS &&
-            type == REG_SZ) {
+        DWORD got = static_cast<DWORD>(buf.size() * sizeof(wchar_t));
+        if (RegGetValueW(key, nullptr, L"Path", kTypes, nullptr, buf.data(), &got) == ERROR_SUCCESS) {
             buf.resize(wcsnlen(buf.c_str(), buf.size()));
             if (!buf.empty()) {
                 found = fs::path(buf);
@@ -90,7 +92,7 @@ bool write_integration(const fs::path& data, const std::string& text, std::strin
     return write_file_atomically(file, text, error);
 }
 
-IntegrationInfo collect_integration(const fs::path& data, const std::string& database_status_json) {
+IntegrationInfo collect_integration(const fs::path& data, const nlohmann::json& status) {
     IntegrationInfo info;
     if (const auto flo = sibling_program("flo"); flo && is_file(*flo)) {
         info.cli = *flo;
@@ -99,17 +101,18 @@ IntegrationInfo collect_integration(const fs::path& data, const std::string& dat
     for (const InstalledRuntime& r : list_installed(runtimes_dir(data))) {
         info.runtimes.push_back({r.name, r.version});
     }
-    const json status = json::parse(database_status_json, nullptr, false);
     if (status.is_object() && status.contains("servers") && status["servers"].is_array()) {
         for (const json& s : status["servers"]) {
             if (!s.is_object() || !s.contains("port") || !s["port"].is_number_integer()) {
                 continue;
             }
             const int port = s["port"].get<int>();
-            if (port <= 0) {
-                continue;  // not given a port yet
+            if (port <= 0 || !s.contains("series") || !s["series"].is_string()) {
+                continue;  // not given a port yet, or no series to name it by
             }
-            info.databases.push_back({s.value("series", std::string()), s.value("version", std::string()), port});
+            const std::string version =
+                s.contains("version") && s["version"].is_string() ? s["version"].get<std::string>() : std::string();
+            info.databases.push_back({s["series"].get<std::string>(), version, port});
         }
     }
     return info;
@@ -138,8 +141,11 @@ bool is_flocms_project(const fs::path& dir) {
 
 std::optional<fs::path> find_studio() {
 #ifdef _WIN32
-    for (HKEY root : {HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE}) {
-        if (const auto p = studio_from_registry(root); p && p->is_absolute() && is_file(*p)) {
+    const std::pair<HKEY, REGSAM> places[] = {{HKEY_CURRENT_USER, 0},
+                                               {HKEY_LOCAL_MACHINE, KEY_WOW64_64KEY},
+                                               {HKEY_LOCAL_MACHINE, KEY_WOW64_32KEY}};
+    for (const auto& [root, view] : places) {
+        if (auto p = studio_from_registry(root, view); p && p->is_absolute() && is_file(*p)) {
             return p;
         }
     }
@@ -150,7 +156,7 @@ std::optional<fs::path> find_studio() {
         places.push_back(fs::path(*home) / "Applications");
     }
     for (const fs::path& place : places) {
-        const fs::path program = place / "FloCMS Studio.app" / "Contents" / "MacOS" / "FloCMS Studio";
+        fs::path program = place / "FloCMS Studio.app" / "Contents" / "MacOS" / "FloCMS Studio";
         if (is_file(program)) {
             return program;
         }
@@ -166,7 +172,7 @@ std::optional<fs::path> find_studio() {
         const std::size_t end = path->find(':', start);
         const std::string dir = path->substr(start, end == std::string::npos ? std::string::npos : end - start);
         if (!dir.empty() && fs::path(dir).is_absolute()) {
-            const fs::path program = fs::path(dir) / "flocms-studio";
+            fs::path program = fs::path(dir) / "flocms-studio";
             if (is_file(program)) {
                 return program;
             }

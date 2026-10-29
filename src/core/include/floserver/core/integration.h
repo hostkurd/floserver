@@ -12,12 +12,19 @@
 //    "runtimes": [{"name": "php", "version": "8.5.12"}, ...],
 //    "databases": [{"series": "11.4", "version": "11.4.13", "port": 3306}]}
 //
+// The file stays when the service stops, so Studio can still find `flo`
+// (which starts the service). The ports are the last ones known: Studio asks
+// `flo` for anything current.
+//
 // The other way, FloServer opens a FloCMS project in Studio: Studio records
 // where its program is, and FloServer starts it with --open <folder>.
 //
-//   Windows  HKCU (then HKLM) \Software\HostKurd\FloCMS Studio, value "Path"
+//   Windows  HKCU (then HKLM, 64- and 32-bit views) \Software\HostKurd\FloCMS Studio,
+//            value "Path" (REG_SZ or REG_EXPAND_SZ)
 //   macOS    FloCMS Studio.app in /Applications or ~/Applications
 //   Linux    flocms-studio on the PATH
+
+#include <nlohmann/json.hpp>
 
 #include <filesystem>
 #include <optional>
@@ -57,10 +64,10 @@ struct IntegrationInfo {
 [[nodiscard]] bool write_integration(const std::filesystem::path& data, const std::string& text, std::string& error);
 
 // What FloServer has now: installed runtimes from the data folder, `flo` next
-// to this program, and the database servers from `database_status` (the
-// reply of DatabaseService::status()).
+// to this program, and the database servers from `database_status` (what
+// DatabaseService::status() returns). Never throws on odd status values.
 [[nodiscard]] IntegrationInfo collect_integration(const std::filesystem::path& data,
-                                                  const std::string& database_status_json);
+                                                  const nlohmann::json& database_status);
 
 // A FloCMS project, by the same rule as Studio: its composer.json is the
 // skeleton (hostkurd/flocms) or requires hostkurd/flocms-core.
