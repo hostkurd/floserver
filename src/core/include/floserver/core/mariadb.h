@@ -7,8 +7,9 @@
 //
 // One data folder per series ("11.4"): MariaDB can't go back a version on
 // the same data, and patch releases of a series share it.
-//   <data>/data/mariadb-<series>/   my.ini (my.cnf), data/, mariadbd.err,
-//                                   mariadbd.pid; data/mysqld.sock (not Windows)
+//   <data>/data/mariadb-<series>/   my.ini (my.cnf), installed (once set up), port,
+//                                   data/ with mariadbd.err, mariadbd.pid,
+//                                   mysqld.sock (not Windows), init.sql (briefly)
 //
 // Passwords are only ever given to MariaDB's programs in their environment
 // (MYSQL_PWD) or on their input, never as an argument. root's first
@@ -36,8 +37,10 @@ struct MariaDbFiles {
     std::filesystem::path folder;        // <data>/data/mariadb-<series>
     std::filesystem::path data_dir;      // folder/data
     std::filesystem::path config;        // folder/my.ini (Windows) or my.cnf
-    std::filesystem::path error_log;     // folder/mariadbd.err
-    std::filesystem::path pid_file;      // folder/mariadbd.pid
+    std::filesystem::path error_log;     // data_dir/mariadbd.err
+    std::filesystem::path pid_file;      // data_dir/mariadbd.pid
+    std::filesystem::path init_file;     // data_dir/init.sql: root's password, first start only
+    std::filesystem::path installed_marker;  // folder/installed: install-db finished
     std::filesystem::path socket;        // data_dir/mysqld.sock; empty on Windows
 };
 
@@ -51,12 +54,14 @@ struct MariaDbFiles {
                                          const std::filesystem::path& data);
 
 // The config: 127.0.0.1 only on `port` (the internal port the service
-// relays to), utf8mb4, a small buffer pool (a development server), paths
-// with forward slashes in quotes (MariaDB reads \ as an escape there).
-// `as_root`: the service runs as root (containers): user=root.
-[[nodiscard]] std::string mariadb_config(const MariaDbFiles& files, Port port, bool as_root);
+// relays to), utf8mb4, a small buffer pool (a development server). Paths
+// are relative (mariadbd runs in the series' folder), except basedir
+// outside Windows. `as_root`: the service runs as root (containers):
+// user=root. `with_init_file`: the first start, which sets root's password.
+[[nodiscard]] std::string mariadb_config(const MariaDbFiles& files, Port port, bool as_root, bool with_init_file);
 
-// The data folder has been set up (its mysql/ system database exists).
+// install-db finished: the system database exists, and the marker written
+// only after install-db succeeded. A half-set-up folder isn't.
 [[nodiscard]] bool mariadb_initialized(const MariaDbFiles& files);
 
 // SQL text: an identifier in backticks, a string in single quotes.
@@ -75,6 +80,10 @@ struct MariaDbFiles {
 // The database and user name for a project: its name with '-' as '_'
 // ("my-shop" -> "my_shop"), so tools that don't quote names cope.
 [[nodiscard]] std::string project_database_name(std::string_view project);
+
+// Names a project's database and user can't have: MariaDB's own accounts
+// and databases ("root" would take over the root account).
+[[nodiscard]] bool reserved_database_name(std::string_view name);
 
 // Which .env keys a project uses: FloCMS's (DB_TYPE, DB_NAME) or
 // Laravel's (DB_CONNECTION, DB_DATABASE), from the project's .env or

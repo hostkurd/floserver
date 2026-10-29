@@ -23,20 +23,34 @@ TEST_CASE("MariaDB series, files and config") {
     CHECK(f.install_db == tmp.path() / "inst" / "scripts" / "mariadb-install-db");  // the bintar's place
 #endif
     CHECK_FALSE(mariadb_initialized(f));
+    fs::create_directories(f.data_dir / "mysql");
+    CHECK_FALSE(mariadb_initialized(f));  // install-db didn't finish
+    test_util::write_file(f.installed_marker, "1\n");
+    CHECK(mariadb_initialized(f));
 
-    const std::string c = mariadb_config(f, 33100, false);
+    const std::string c = mariadb_config(f, 33100, false, false);
     CHECK(c.find("port=33100") != std::string::npos);
     CHECK(c.find("bind-address=127.0.0.1") != std::string::npos);
     CHECK(c.find("datadir=\"" + f.data_dir.generic_string() + "\"") != std::string::npos);
-    CHECK(c.find("user=root") == std::string::npos);
-    CHECK(mariadb_config(f, 33100, true).find("user=root") != std::string::npos);
     CHECK(c.find('\\') == std::string::npos);  // MariaDB reads \ as an escape
+    CHECK(c.find("pid-file=mariadbd.pid") != std::string::npos);
+    CHECK(c.find("init-file") == std::string::npos);
+    CHECK(mariadb_config(f, 33100, false, true).find("init-file=init.sql") != std::string::npos);
+#ifdef _WIN32
+    CHECK(c.find("basedir") == std::string::npos);
+#endif
+    CHECK(c.find("user=root") == std::string::npos);
+    CHECK(mariadb_config(f, 33100, true, false).find("user=root") != std::string::npos);
 }
 
 TEST_CASE("SQL is quoted and a project's database is its own") {
     CHECK(sql_identifier("my`db") == "`my``db`");
     CHECK(sql_string("it's \\ ok") == "'it''s \\\\ ok'");
     CHECK(project_database_name("my-shop") == "my_shop");
+    CHECK(reserved_database_name("root"));
+    CHECK(reserved_database_name(project_database_name("performance-schema")));
+    CHECK(reserved_database_name("mysql"));
+    CHECK_FALSE(reserved_database_name("shop"));
     const std::string sql = project_database_sql("my_shop", "my_shop", "Pw23");
     CHECK(sql.find("CREATE DATABASE IF NOT EXISTS `my_shop` CHARACTER SET utf8mb4") != std::string::npos);
     CHECK(sql.find("GRANT ALL PRIVILEGES ON `my_shop`.* TO 'my_shop'@'localhost';") != std::string::npos);
@@ -44,7 +58,8 @@ TEST_CASE("SQL is quoted and a project's database is its own") {
     CHECK(sql.find("*.*") == std::string::npos);  // never every database
     const std::string root = root_password_sql("Pw23");
     CHECK(root.find("ALTER USER IF EXISTS 'root'@'localhost' IDENTIFIED BY 'Pw23';") != std::string::npos);
-    CHECK(root.find("DROP USER IF EXISTS ''@'localhost';") != std::string::npos);
+    CHECK(root.find("User = ''") != std::string::npos);  // no anonymous logins
+    CHECK(root.find("Host NOT IN ('localhost', '127.0.0.1', '::1')") != std::string::npos);
 }
 
 TEST_CASE(".env lines follow the project's style and keep its other lines") {
@@ -67,6 +82,8 @@ TEST_CASE(".env lines follow the project's style and keep its other lines") {
           "APP_NAME=Shop\r\n# DB_NAME=old comment\r\nDB_HOST=127.0.0.1\r\nDB_NAME=shop\r\nAPP_KEY=x\r\n"
           "DB_TYPE=mysql\r\nDB_PORT=3307\r\nDB_USERNAME=shop\r\nDB_PASSWORD=Pw23\r\n");
     CHECK(update_env_text("", {{"A", "1"}}) == "A=1\n");
+    // Shell style lines are matched too, and replaced without "export".
+    CHECK(update_env_text("export DB_HOST=x\r\nA=1\r\n", {{"DB_HOST", "127.0.0.1"}}) == "DB_HOST=127.0.0.1\r\nA=1\r\n");
 }
 
 TEST_CASE("secrets are kept and passwords are random letters and digits") {

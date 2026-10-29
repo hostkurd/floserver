@@ -4,6 +4,7 @@
 #include "floserver/core/version.h"
 
 #include <algorithm>
+#include <array>
 #include <set>
 #include <sstream>
 #include <system_error>
@@ -54,7 +55,11 @@ std::string env_key(std::string_view line) {
         return {};
     }
     const auto eq = t.find('=');
-    return eq == std::string::npos ? std::string() : trimmed(std::string_view(t).substr(0, eq));
+    std::string key = eq == std::string::npos ? std::string() : trimmed(std::string_view(t).substr(0, eq));
+    if (key.starts_with("export ") || key.starts_with("export\t")) {
+        key = trimmed(std::string_view(key).substr(7));  // shell style: export KEY=value
+    }
+    return key;
 }
 
 }  // namespace
@@ -84,12 +89,14 @@ MariaDbFiles mariadb_files(const fs::path& install_dir, const std::string& versi
     f.config = f.folder / "my.cnf";
     f.socket = f.data_dir / "mysqld.sock";
 #endif
-    f.error_log = f.folder / "mariadbd.err";
-    f.pid_file = f.folder / "mariadbd.pid";
+    f.error_log = f.data_dir / "mariadbd.err";
+    f.pid_file = f.data_dir / "mariadbd.pid";
+    f.init_file = f.data_dir / "init.sql";
+    f.installed_marker = f.folder / "installed";
     return f;
 }
 
-std::string mariadb_config(const MariaDbFiles& files, Port port, bool as_root) {
+std::string mariadb_config(const MariaDbFiles& files, Port port, bool as_root, bool with_init_file) {
 #ifdef _WIN32
     const char* nl = "\r\n";
 #else
@@ -98,12 +105,22 @@ std::string mariadb_config(const MariaDbFiles& files, Port port, bool as_root) {
     std::ostringstream c;
     c << "# Written by FloServer for its MariaDB " << files.series << ". It is rewritten at every start." << nl
       << "[mysqld]" << nl
+#ifndef _WIN32
+      // On Windows mariadbd finds its own folder; a full path there would
+      // be read in the ANSI code page (a folder name in Arabic breaks).
       << "basedir=" << option_path(files.base_dir) << nl
+#endif
+      // A full path (a relative one is taken from basedir); the files
+      // below are relative to it. MariaDB 10.6+ on Windows runs with UTF-8
+      // as its code page, so a non-ASCII folder is read correctly.
       << "datadir=" << option_path(files.data_dir) << nl
       << "port=" << port << nl
       << "bind-address=127.0.0.1" << nl
-      << "pid-file=" << option_path(files.pid_file) << nl
-      << "log-error=" << option_path(files.error_log) << nl;
+      << "pid-file=" << path_to_utf8(files.pid_file.filename()) << nl
+      << "log-error=" << path_to_utf8(files.error_log.filename()) << nl;
+    if (with_init_file) {
+        c << "init-file=" << path_to_utf8(files.init_file.filename()) << nl;
+    }
     if (!files.socket.empty()) {
         // Relative: mariadbd resolves it in its data folder. A full path
         // longer than 107 bytes (a long home folder) stops it from starting.
@@ -123,7 +140,7 @@ std::string mariadb_config(const MariaDbFiles& files, Port port, bool as_root) {
 
 bool mariadb_initialized(const MariaDbFiles& files) {
     std::error_code ec;
-    return fs::is_directory(files.data_dir / "mysql", ec);
+    return fs::is_directory(files.data_dir / "mysql", ec) && fs::exists(files.installed_marker, ec);
 }
 
 std::string sql_identifier(std::string_view name) {
@@ -157,8 +174,11 @@ std::string root_password_sql(const std::string& password) {
     for (const char* host : {"localhost", "127.0.0.1", "::1"}) {
         sql += "ALTER USER IF EXISTS 'root'@'" + std::string(host) + "' IDENTIFIED BY " + value + ";\n";
     }
-    // Never anonymous logins (an empty user matches before a named one).
-    sql += "DROP USER IF EXISTS ''@'localhost';\n";
+    // Only those three root accounts (install-db also makes one for this
+    // computer's name), and never anonymous logins (an empty user matches
+    // before a named one).
+    sql += "DELETE FROM mysql.global_priv WHERE (User = 'root' AND Host NOT IN ('localhost', '127.0.0.1', '::1')) OR User = '';\n";
+    sql += "DELETE FROM mysql.db WHERE User = '';\n";
     return sql + "FLUSH PRIVILEGES;\n";
 }
 
@@ -179,6 +199,12 @@ std::string project_database_name(std::string_view project) {
     std::string out(project);
     std::replace(out.begin(), out.end(), '-', '_');
     return out;
+}
+
+bool reserved_database_name(std::string_view name) {
+    static constexpr std::array<std::string_view, 8> kReserved = {
+        "root", "mysql", "sys", "performance_schema", "information_schema", "test", "mariadb_sys", "public"};
+    return std::find(kReserved.begin(), kReserved.end(), name) != kReserved.end();
 }
 
 EnvStyle env_style(const fs::path& project_dir) {

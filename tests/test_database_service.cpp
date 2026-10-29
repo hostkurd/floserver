@@ -103,12 +103,17 @@ TEST_CASE("a project's database runs on the real MariaDB, sleeps when idle and w
     test_util::write_file(shop / "floserver.json", R"({"php": "8.3", "database": "mariadb-10.11"})");
     const fs::path plain = tmp.path() / "plain";
     test_util::write_file(plain / "index.php", "<?php echo 1;");
+    // "root" would be MariaDB's root account.
+    const fs::path root_project = tmp.path() / "root";
+    test_util::write_file(root_project / "floserver.json", R"({"php": "8.3", "database": "mariadb-10.11"})");
     AppConfig app;
     std::string error;
     REQUIRE(add_project(app, shop, "", error));
     REQUIRE(add_project(app, plain, "", error));
-    app.projects[0].on = true;
-    app.projects[1].on = true;
+    REQUIRE(add_project(app, root_project, "", error));
+    for (Project& p : app.projects) {
+        p.on = true;
+    }
     REQUIRE(save_app_config(app_config_file(data), app, error));
 
     const SecretStore secrets(data);
@@ -125,7 +130,8 @@ TEST_CASE("a project's database runs on the real MariaDB, sleeps when idle and w
     REQUIRE(s.is_object());
     CHECK(s["series"] == "10.11");
     CHECK(s["state"] == "sleeping");
-    CHECK(s["projects"] == nlohmann::json{"my-shop"});
+    CHECK(s["projects"] == nlohmann::json{"my-shop", "root"});
+    const fs::path folder = data / "data" / "mariadb-10.11";
     const Port port = s["port"].get<Port>();
     CHECK(port != 3306);
 
@@ -135,6 +141,8 @@ TEST_CASE("a project's database runs on the real MariaDB, sleeps when idle and w
         CHECK(refusal.code == "no_database");
         CHECK_FALSE(db.project_login("nobody", refusal));
         CHECK(refusal.code == "unknown_project");
+        CHECK_FALSE(db.project_login("root", refusal));
+        CHECK(refusal.code == "reserved_name");
 
         const auto login = db.project_login("my-shop", refusal);
         REQUIRE_MESSAGE(login, refusal.message);
@@ -158,7 +166,8 @@ TEST_CASE("a project's database runs on the real MariaDB, sleeps when idle and w
         // Only its own database.
         CHECK(query(port, "my_shop", login->password, "CREATE DATABASE other").starts_with("ERROR"));
         // The init file with root's password is gone.
-        CHECK_FALSE(fs::exists(data / "data" / "mariadb-10.11" / "init.sql"));
+        CHECK_FALSE(fs::exists(folder / "data" / "init.sql"));
+        CHECK(fs::exists(folder / "installed"));
 
         // Asking again gives the same login (the password is kept).
         const auto again = db.project_login("my-shop", refusal);
@@ -174,13 +183,63 @@ TEST_CASE("a project's database runs on the real MariaDB, sleeps when idle and w
         const auto pid2 = s["pid"].get<std::uint32_t>();
         CHECK(pid2 != pid);
 
-        // Turning the project off: the server goes.
+        // Turning the projects off: the server goes, and a connection
+        // doesn't bring it back.
         app.projects[0].on = false;
+        app.projects[2].on = false;
         REQUIRE(save_app_config(app_config_file(data), app, error));
         CHECK(db.reload()["servers"].empty());
         CHECK(eventually([&] { return ::kill(static_cast<pid_t>(pid2), 0) != 0; }, 10s));
+        CHECK(query(port, "my_shop", login->password, "SELECT 1").starts_with("ERROR"));
         CHECK_FALSE(db.project_login("my-shop", refusal));
         CHECK(refusal.code == "database_off");
+        std::this_thread::sleep_for(1s);
+        CHECK(server_status(db).is_null());  // still off: nothing started again
+
+        // On again: the same port (.env files have it).
+        app.projects[0].on = true;
+        REQUIRE(save_app_config(app_config_file(data), app, error));
+        CHECK(eventually([&] { return server_status(db).is_object(); }, 15s));
+        CHECK(server_status(db)["port"] == port);
+        CHECK(query(port, "my_shop", login->password, "USE my_shop; SHOW TABLES") == "t");
+    }
+
+    SUBCASE("a lost root password is replaced") {
+        ServiceRefusal refusal;
+        const auto login = db.project_login("my-shop", refusal);
+        REQUIRE_MESSAGE(login, refusal.message);
+        db.stop();
+        REQUIRE(secrets.remove("mariadb-10.11/root"));
+        DatabaseService again(cfg, secrets);
+        again.start();
+        CHECK(server_status(again)["port"] == port);  // kept
+        const auto login2 = again.project_login("my-shop", refusal);
+        REQUIRE_MESSAGE(login2, refusal.message);
+        CHECK(login2->password == login->password);
+        const auto root = secrets.read("mariadb-10.11/root");
+        REQUIRE(root);
+        CHECK(query(port, "root", *root, "SELECT 1") == "1");
+        // A wrong saved password is replaced too.
+        again.stop();
+        std::string err;
+        REQUIRE(secrets.save("mariadb-10.11/root", "wrong", err));
+        DatabaseService third(cfg, secrets);
+        third.start();
+        REQUIRE_MESSAGE(third.project_login("my-shop", refusal), refusal.message);
+        CHECK(secrets.read("mariadb-10.11/root") != std::optional<std::string>("wrong"));
+    }
+
+    SUBCASE("a half-set-up data folder is moved aside and set up again") {
+        fs::create_directories(folder / "data" / "mysql");
+        test_util::write_file(folder / "data" / "leftover", "x");
+        ServiceRefusal refusal;
+        REQUIRE_MESSAGE(db.project_login("my-shop", refusal), refusal.message);
+        bool aside = false;
+        for (const auto& e : fs::directory_iterator(folder)) {
+            aside = aside || (path_to_utf8(e.path().filename()).starts_with("data.failed-") &&
+                              fs::exists(e.path() / "leftover"));
+        }
+        CHECK(aside);
     }
 
     SUBCASE("stop ends mariadbd") {

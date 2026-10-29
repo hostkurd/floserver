@@ -1,6 +1,5 @@
 #include "floserver/core/database_service.h"
 
-#include "floserver/core/crypto.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/project_registry.h"
 #include "floserver/core/runtime_store.h"
@@ -9,6 +8,7 @@
 
 #include <algorithm>
 #include <condition_variable>
+#include <fstream>
 #include <random>
 #include <set>
 #include <system_error>
@@ -45,6 +45,11 @@ std::string tail(const fs::path& file, std::size_t max = 1500) {
     return text.size() > max ? "..." + text.substr(text.size() - max) : text;
 }
 
+std::string random_suffix() {
+    std::random_device rd;
+    return std::to_string(rd());
+}
+
 // The newest installed MariaDB matching `version` ("11.4").
 const InstalledRuntime* best_mariadb(const std::vector<InstalledRuntime>& installed, const std::string& version) {
     const auto want = Version::parse(version);
@@ -60,45 +65,113 @@ const InstalledRuntime* best_mariadb(const std::vector<InstalledRuntime>& instal
     return best;
 }
 
-// Overwrites a file holding a secret before removing it.
+// Removes a file that held a secret, overwriting it in place first (best
+// effort: an SSD or a copy-on-write file system may keep the old blocks).
 void remove_secret_file(const fs::path& file) {
     std::error_code ec;
     const auto size = fs::file_size(file, ec);
     if (!ec && size > 0) {
-        const std::string zeros(static_cast<std::size_t>(size), '\0');
-        std::string ignored;
-        (void)write_private_file_atomically(file, zeros, ignored);
+        std::fstream f(file, std::ios::in | std::ios::out | std::ios::binary);
+        if (f) {
+            const std::string zeros(static_cast<std::size_t>(size), '\0');
+            f.write(zeros.data(), static_cast<std::streamsize>(zeros.size()));
+            f.flush();
+        }
     }
     fs::remove(file, ec);
 }
 
+// The public port kept for a series, so .env files stay right.
+std::optional<Port> saved_port(const fs::path& folder) {
+    const auto text = read_small_file(folder / "port", 32);
+    if (!text) {
+        return std::nullopt;
+    }
+    try {
+        const auto n = std::stoul(*text);
+        return n > 0 && n < 65536 ? std::optional<Port>(static_cast<Port>(n)) : std::nullopt;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+// Runs `f` when the scope ends.
+template <class F>
+class AtExit {
+public:
+    explicit AtExit(F f) : f_(std::move(f)) {}
+    AtExit(const AtExit&) = delete;
+    AtExit& operator=(const AtExit&) = delete;
+    AtExit(AtExit&&) = delete;
+    AtExit& operator=(AtExit&&) = delete;
+    ~AtExit() { f_(); }
+
+private:
+    F f_;
+};
+
 }  // namespace
+
+// The internal ports in use or chosen, across servers.
+struct DatabaseService::InternalPorts {
+    std::mutex mutex;
+    std::set<Port> ports;
+
+    // A port from 33100 up that nothing listens on and no other server has.
+    std::optional<Port> pick(std::optional<Port> current, Port public_port, const PortProbe& probe) {
+        const std::lock_guard lock(mutex);
+        if (current) {
+            ports.erase(*current);
+        }
+        std::set<Port> taken = ports;
+        taken.insert(public_port);
+        const auto port = pick_port_from(kFirstInternalDatabasePort, taken, probe);
+        if (port) {
+            ports.insert(*port);
+        }
+        return port;
+    }
+    void release(Port port) {
+        const std::lock_guard lock(mutex);
+        ports.erase(port);
+    }
+};
 
 // ------------------------------------------------------------------ server
 
 class DatabaseService::Server {
 public:
-    enum class State : std::uint8_t { Sleeping, Starting, Running, Failed };
+    enum class State : std::uint8_t { Sleeping, Starting, Running, Stopping, Failed };
 
     Server(MariaDbFiles files, std::string version, Port port, Port internal, std::unique_ptr<LoopbackListener> listener,
-           const SecretStore& secrets, std::chrono::seconds start_limit)
+           SecretStore secrets, std::shared_ptr<InternalPorts> internal_ports, PortProbe probe,
+           std::chrono::seconds start_limit)
         : files_(std::move(files)),
           version_(std::move(version)),
           port_(port),
           internal_(internal),
           listener_(std::move(listener)),
-          secrets_(secrets),
-          start_limit_(start_limit) {}
+          secrets_(std::move(secrets)),
+          internal_ports_(std::move(internal_ports)),
+          probe_(std::move(probe)),
+          start_limit_(start_limit) {
+        sweep_secret_files();
+    }
     Server(const Server&) = delete;
     Server& operator=(const Server&) = delete;
     Server(Server&&) = delete;
     Server& operator=(Server&&) = delete;
-    ~Server() { stop(); }
+    ~Server() {
+        stop(true);
+        internal_ports_->release(internal_);
+    }
 
     [[nodiscard]] const MariaDbFiles& files() const { return files_; }
+    [[nodiscard]] const std::string& version() const { return version_; }
     [[nodiscard]] Port port() const { return port_; }
     [[nodiscard]] Port internal_port() const { return internal_; }
     [[nodiscard]] const LoopbackListener& listener() const { return *listener_; }
+    [[nodiscard]] std::mutex& login_mutex() { return login_mutex_; }
     void set_projects(std::vector<std::string> projects, bool keep_running) {
         const std::lock_guard lock(mutex_);
         projects_ = std::move(projects);
@@ -106,11 +179,17 @@ public:
     }
 
     // Starts mariadbd unless it runs; waits for it. False (with `error`)
-    // when it can't run.
+    // when it can't run, or the server has been retired.
     bool ensure_running(std::string& error) {
         std::unique_lock lock(mutex_);
-        changed_.wait(lock, [this] { return state_ != State::Starting; });
+        changed_.wait(lock, [this] { return state_ != State::Starting && state_ != State::Stopping; });
+        if (retired_) {
+            error = "this database server was turned off";
+            return false;
+        }
         if (state_ == State::Running && process_ && process_->running()) {
+            lock.unlock();
+            touch();
             return true;
         }
         if (state_ == State::Failed && Clock::now() < retry_after_) {
@@ -120,12 +199,19 @@ public:
         state_ = State::Starting;
         lock.unlock();
         std::string why;
-        auto process = start_server(why);
+        bool wrong_root = false;
+        auto process = start_server(false, wrong_root, why);
+        if (!process && wrong_root) {
+            // root's saved password doesn't work (the saved copy was lost or
+            // replaced): set a new one through the init file, once.
+            why.clear();
+            process = start_server(true, wrong_root, why);
+        }
+        touch();
         lock.lock();
         if (process) {
             process_ = std::move(process);
             state_ = State::Running;
-            last_activity_ = Clock::now();
             error_.clear();
         } else {
             state_ = State::Failed;
@@ -137,25 +223,28 @@ public:
         return state_ == State::Running;
     }
 
-    // A clean shutdown, then the process ends for sure.
-    void stop() {
+    // A clean shutdown; the process ends for sure. `retire`: for good (it
+    // won't start again). Waits for a start or stop under way.
+    void stop(bool retire) {
         std::unique_lock lock(mutex_);
-        changed_.wait(lock, [this] { return state_ != State::Starting; });
+        if (retire) {
+            retired_ = true;
+        }
+        changed_.wait(lock, [this] { return state_ != State::Starting && state_ != State::Stopping; });
         if (!process_) {
             if (state_ == State::Running) {
                 state_ = State::Sleeping;
             }
             return;
         }
-        if (process_->running()) {
-            if (const auto root = secrets_.read(root_name())) {
-                std::string ignored;
-                (void)run_tool(files_.admin, {"shutdown"}, *root, {}, 30s, ignored);
-            }
-            (void)process_->wait(30s);
-        }
-        process_.reset();  // ends it if the shutdown didn't
+        auto process = std::move(process_);
+        state_ = State::Stopping;
+        lock.unlock();
+        shut_down(*process);
+        process.reset();
+        lock.lock();
         state_ = State::Sleeping;
+        changed_.notify_all();
     }
 
     // SQL as root on the running server.
@@ -165,8 +254,7 @@ public:
             error = "root's password for MariaDB " + files_.series + " is missing from the secure store";
             return false;
         }
-        std::random_device rd;
-        const fs::path file = files_.folder / ("query-" + std::to_string(rd()) + ".sql");
+        const fs::path file = files_.folder / ("query-" + random_suffix() + ".sql");
         if (!write_private_file_atomically(file, sql, error)) {
             return false;
         }
@@ -180,8 +268,8 @@ public:
         touch();
     }
     void connection_closed() {
-        --active_;
         touch();
+        --active_;
     }
     void touch() {
         const std::lock_guard lock(activity_mutex_);
@@ -189,37 +277,54 @@ public:
     }
     [[nodiscard]] int active() const { return active_; }
 
-    // Shuts down after the idle time with no connection open.
-    void tick(std::chrono::seconds idle_after) {
-        {
-            const std::lock_guard lock(mutex_);
-            if (state_ == State::Running && process_ && !process_->running()) {
-                error_ = "mariadbd stopped: " + tail(files_.error_log, 600);
-                process_.reset();
-                state_ = State::Sleeping;  // the next connection starts it again
-                return;
-            }
-            if (state_ != State::Running || keep_running_ || active_ > 0) {
-                return;
-            }
-        }
+    // Due to sleep: true (and "stopping") when it has run with no
+    // connection for the idle time; the caller then calls finish_stop().
+    // A server that ended on its own is noted and sleeps.
+    bool begin_idle_stop(std::chrono::seconds idle_after) {
         Clock::time_point last;
         {
             const std::lock_guard lock(activity_mutex_);
             last = last_activity_;
         }
-        if (Clock::now() - last >= idle_after) {
-            stop();
+        const std::lock_guard lock(mutex_);
+        if (state_ != State::Running || !process_) {
+            return false;
         }
+        if (!process_->running()) {
+            error_ = "mariadbd stopped: " + tail(files_.error_log, 600);
+            process_.reset();
+            state_ = State::Sleeping;  // the next connection starts it again
+            return false;
+        }
+        if (keep_running_ || active_ > 0 || Clock::now() - last < idle_after) {
+            return false;
+        }
+        state_ = State::Stopping;
+        stopping_process_ = std::move(process_);
+        return true;
+    }
+    void finish_stop() {
+        std::unique_ptr<ChildProcess> process;
+        {
+            const std::lock_guard lock(mutex_);
+            process = std::move(stopping_process_);
+        }
+        if (process) {
+            shut_down(*process);
+            process.reset();
+        }
+        const std::lock_guard lock(mutex_);
+        state_ = State::Sleeping;
+        changed_.notify_all();
     }
 
     [[nodiscard]] json describe() const {
         const std::lock_guard lock(mutex_);
-        static constexpr const char* kStates[] = {"sleeping", "starting", "running", "failed"};  // NOLINT
+        static constexpr const char* kStates[] = {"sleeping", "starting", "running", "stopping", "failed"};  // NOLINT
         json j = {{"series", files_.series},
                   {"version", version_},
                   {"port", port_},
-                  {"internal_port", internal_},
+                  {"internal_port", internal_.load()},
                   {"state", kStates[static_cast<int>(state_)]},
                   {"connections", active_.load()},
                   {"projects", projects_},
@@ -236,38 +341,64 @@ public:
     [[nodiscard]] std::string root_name() const { return "mariadb-" + files_.series + "/root"; }
 
 private:
+    void shut_down(ChildProcess& process) const {
+        if (process.running()) {
+            if (const auto root = secrets_.read(root_name())) {
+                std::string ignored;
+                (void)run_tool(files_.admin, {"shutdown"}, *root, {}, 30s, ignored);
+            }
+            (void)process.wait(30s);
+        }
+        process.kill();  // if the shutdown didn't end it
+    }
+
+    // Secrets a crash may have left: the init file, query files.
+    void sweep_secret_files() const {
+        std::error_code ec;
+        remove_secret_file(files_.init_file);
+        for (fs::directory_iterator it(files_.folder, ec), end; !ec && it != end; it.increment(ec)) {
+            const std::string name = path_to_utf8(it->path().filename());
+            if (name.ends_with(".sql") && (name.starts_with("query-") || name.starts_with("probe"))) {
+                remove_secret_file(it->path());
+            }
+        }
+    }
+
     // One of MariaDB's programs as a client of this server: TCP to the
     // internal port, as root, the password in MYSQL_PWD only.
-    bool run_tool(const fs::path& program, std::vector<std::string> extra, const std::string& password,
+    bool run_tool(const fs::path& program, const std::vector<std::string>& extra, const std::string& password,
                   const fs::path& input, std::chrono::seconds limit, std::string& error) const {
         ChildOptions o;
         o.program = program;
-        o.args = {"--no-defaults", "--protocol=TCP", "--host=127.0.0.1", "--port=" + std::to_string(internal_), "--user=root"};
+        o.args = {"--no-defaults", "--protocol=TCP", "--host=127.0.0.1", "--port=" + std::to_string(internal_.load()),
+                  "--user=root"};
         o.args.insert(o.args.end(), extra.begin(), extra.end());
         o.working_dir = files_.folder;
         o.env = {{"MYSQL_PWD", password}};
         o.remove_env = {"MYSQL_HOST", "MYSQL_TCP_PORT", "MYSQL_UNIX_PORT"};
         o.stdin_file = input;
-        const fs::path log = files_.folder / "client.log";
-        std::error_code ec;
-        fs::remove(log, ec);
-        o.output_log = log;
+        o.output_log = files_.folder / ("client-" + random_suffix() + ".log");  // one per run: runs may overlap
         auto child = ChildProcess::start(o, error);
-        if (!child) {
-            return false;
+        bool ok = false;
+        if (child) {
+            const auto code = child->wait(limit);
+            ok = code == 0;
+            if (!ok) {
+                error = path_to_utf8(program.filename()) + ": " +
+                        (code ? tail(o.output_log, 600) : std::string("didn't finish in time"));
+            }
         }
-        const auto code = child->wait(limit);
-        if (code == 0) {
-            return true;
-        }
-        error = path_to_utf8(program.filename()) + ": " +
-                (code ? tail(log, 600) : std::string("didn't finish in time"));
-        return false;
+        std::error_code ec;
+        fs::remove(o.output_log, ec);
+        return ok;
     }
 
     // Setting up the data folder (the first time), the config, and
-    // mariadbd, waiting until it answers and its pid file names it.
-    std::unique_ptr<ChildProcess> start_server(std::string& error) {
+    // mariadbd, waiting until root can log in. `reset_root`: a new password
+    // for root through the init file. `wrong_root` is set when root's saved
+    // password was refused.
+    std::unique_ptr<ChildProcess> start_server(bool reset_root, bool& wrong_root, std::string& error) {
+        wrong_root = false;
         std::error_code ec;
         fs::create_directories(files_.folder, ec);
 #ifndef _WIN32
@@ -277,38 +408,50 @@ private:
             error = "mariadbd is missing from " + path_to_utf8(files_.base_dir);
             return nullptr;
         }
-        auto root = secrets_.read(root_name());
         const fs::path marker = files_.folder / "root-password-set";
         if (!mariadb_initialized(files_)) {
-            if (!root) {
-                root = generate_password();
-                if (!root || !secrets_.save(root_name(), *root, error)) {
-                    error = "can't keep root's password: " + error;
-                    return nullptr;
-                }
-            }
             if (!set_up(error)) {
                 return nullptr;
             }
             fs::remove(marker, ec);
         }
+        auto root = reset_root ? std::nullopt : secrets_.read(root_name());
         if (!root) {
-            error = "root's password for MariaDB " + files_.series + " is missing from the secure store";
-            return nullptr;
-        }
-        const bool first = !fs::exists(marker, ec);
-        // The first start sets root's password from an init file, read
-        // before the server takes any connection.
-        const fs::path init = files_.folder / "init.sql";
-        std::string config = mariadb_config(files_, internal_, running_as_root());
-        if (first) {
-            if (!write_private_file_atomically(init, root_password_sql(*root), error)) {
+            // A new password (the first start, or the saved one is gone).
+            root = generate_password();
+            if (!root || !secrets_.save(root_name(), *root, error)) {
+                error = "can't keep root's password: " + error;
                 return nullptr;
             }
-            const std::u8string u = init.generic_u8string();
-            config.insert(config.find("character-set-server"), "init-file=\"" + std::string(u.begin(), u.end()) + "\"\n");
+            fs::remove(marker, ec);
         }
-        if (!write_file_atomically(files_.config, config, error)) {
+        const bool first = !fs::exists(marker, ec);
+
+        // The internal port may have been taken since it was chosen.
+        if (!probe_(internal_)) {
+            const auto port = internal_ports_->pick(internal_.load(), port_, probe_);
+            if (!port) {
+                error = "no free port for MariaDB " + files_.series;
+                return nullptr;
+            }
+            internal_ = *port;
+        }
+
+        // The first start sets root's password from an init file, read
+        // before the server takes any connection. It goes as soon as root
+        // can log in, and on every way out of here.
+        const AtExit remove_init([this, first] {
+            if (first) {
+                remove_secret_file(files_.init_file);
+            }
+        });
+        if (first) {
+            fs::create_directories(files_.data_dir, ec);
+            if (!write_private_file_atomically(files_.init_file, root_password_sql(*root), error)) {
+                return nullptr;
+            }
+        }
+        if (!write_file_atomically(files_.config, mariadb_config(files_, internal_, running_as_root(), first), error)) {
             return nullptr;
         }
         fs::remove(files_.pid_file, ec);
@@ -321,16 +464,12 @@ private:
         o.output_log = files_.folder / "mariadbd.out";
         auto process = ChildProcess::start(o, error);
         if (!process) {
-            if (first) {
-                remove_secret_file(init);
-            }
             return nullptr;
         }
         // Ready: its pid file names our process (not another server that
         // took the port meanwhile) and root can log in. The port alone isn't
-        // enough: MariaDB listens before it has read the init file, so that
-        // file must stay until a login with the new password works.
-        const fs::path probe = files_.folder / "probe.sql";
+        // enough: MariaDB listens before it has read the init file.
+        const fs::path probe = files_.folder / ("probe-" + random_suffix() + ".sql");
         if (!write_private_file_atomically(probe, "SELECT 1;\n", error)) {
             return nullptr;
         }
@@ -349,6 +488,7 @@ private:
                     }
                     // Not first: a wrong password won't put itself right.
                     if (!first && login_error.find("1045") != std::string::npos) {
+                        wrong_root = true;
                         break;
                     }
                 }
@@ -357,17 +497,18 @@ private:
         }
         fs::remove(probe, ec);
         if (first) {
-            remove_secret_file(init);
             // Next starts without the init file.
             std::string ignored;
-            (void)write_file_atomically(files_.config, mariadb_config(files_, internal_, running_as_root()), ignored);
+            (void)write_file_atomically(files_.config, mariadb_config(files_, internal_, running_as_root(), false),
+                                        ignored);
         }
         if (!ready) {
             if (!login_error.empty() && process->running()) {
                 error = "root can't log in to MariaDB " + files_.series + ": " + login_error;
-                return nullptr;  // ends it
+            } else {
+                error = "mariadbd didn't start: " + start_errors(log_from, o.output_log);
             }
-            error = "mariadbd didn't start: " + start_errors(log_from, o.output_log);
+            shut_down(*process);
             return nullptr;
         }
         if (first) {
@@ -398,13 +539,14 @@ private:
     }
 
     // mariadb-install-db, once. A folder left half-way is moved aside,
-    // never deleted: it may hold someone's databases.
+    // never deleted: it may hold someone's databases. The marker is only
+    // written once install-db has finished.
     bool set_up(std::string& error) {
         std::error_code ec;
+        fs::remove(files_.installed_marker, ec);
         if (fs::exists(files_.data_dir, ec)) {
-            const auto stamp = std::chrono::system_clock::now().time_since_epoch().count();
             fs::path aside = files_.data_dir;
-            aside += ".failed-" + std::to_string(stamp);
+            aside += ".failed-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
             fs::rename(files_.data_dir, aside, ec);
             if (ec) {
                 error = "can't move the unfinished data folder aside: " + error_text(ec);
@@ -416,7 +558,7 @@ private:
 #ifdef _WIN32
         // Relative to its folder: Windows programs read arguments in the
         // ANSI code page. No password here (root gets it from the init file).
-        o.args = {"--datadir=data"};
+        o.args = {"--datadir=" + path_to_utf8(files_.data_dir.filename())};
 #else
         o.args = {"--no-defaults", "--basedir=" + path_to_utf8(files_.base_dir), "--datadir=" + path_to_utf8(files_.data_dir),
                   "--auth-root-authentication-method=normal", "--skip-test-db", "--force"};
@@ -431,25 +573,30 @@ private:
             return false;
         }
         const auto code = child->wait(start_limit_);
-        if (code != 0 || !mariadb_initialized(files_)) {
+        if (code != 0 || !fs::is_directory(files_.data_dir / "mysql", ec)) {
+            child.reset();
             error = "setting up MariaDB " + files_.series + " failed: " + tail(o.output_log, 800);
             return false;
         }
-        return true;
+        return write_file_atomically(files_.installed_marker, "1\n", error);
     }
 
-    MariaDbFiles files_;
-    std::string version_;
-    Port port_;
-    Port internal_;
-    std::unique_ptr<LoopbackListener> listener_;
-    const SecretStore& secrets_;
-    std::chrono::seconds start_limit_;
+    const MariaDbFiles files_;
+    const std::string version_;
+    const Port port_;
+    std::atomic<Port> internal_;
+    const std::unique_ptr<LoopbackListener> listener_;
+    const SecretStore secrets_;
+    const std::shared_ptr<InternalPorts> internal_ports_;
+    const PortProbe probe_;
+    const std::chrono::seconds start_limit_;
 
     mutable std::mutex mutex_;
     std::condition_variable changed_;
     State state_ = State::Sleeping;
+    bool retired_ = false;
     std::unique_ptr<ChildProcess> process_;
+    std::unique_ptr<ChildProcess> stopping_process_;
     std::string error_;
     Clock::time_point retry_after_;
     std::vector<std::string> projects_;
@@ -457,13 +604,14 @@ private:
 
     std::atomic<int> active_{0};
     std::mutex activity_mutex_;
-    Clock::time_point last_activity_;
+    Clock::time_point last_activity_ = Clock::now();
+    std::mutex login_mutex_;
 };
 
 // ------------------------------------------------------------------ service
 
-DatabaseService::DatabaseService(DatabaseServiceConfig config, const SecretStore& secrets)
-    : config_(std::move(config)), secrets_(secrets) {
+DatabaseService::DatabaseService(DatabaseServiceConfig config, SecretStore secrets)
+    : config_(std::move(config)), secrets_(std::move(secrets)), internal_ports_(std::make_shared<InternalPorts>()) {
     if (!config_.probe) {
         config_.probe = can_listen_on_loopback;
     }
@@ -491,16 +639,71 @@ void DatabaseService::stop() {
         servers.swap(servers_);
     }
     for (auto& [series, server] : servers) {
-        server->stop();
+        server->stop(true);
+    }
+    reap_stoppers(true);
+}
+
+void DatabaseService::stop_later(std::shared_ptr<Server> server, bool retire) {
+    auto done = std::make_shared<std::atomic<bool>>(false);
+    const std::lock_guard lock(stoppers_mutex_);
+    try {
+        stoppers_.push_back({std::thread([server = std::move(server), retire, done] {
+                                 if (retire) {
+                                     server->stop(true);
+                                 } else {
+                                     server->finish_stop();
+                                 }
+                                 *done = true;
+                             }),
+                             done});
+    } catch (const std::system_error&) {
+        // No thread: stop it here (slower, but it stops).
+        if (retire) {
+            server->stop(true);
+        } else {
+            server->finish_stop();
+        }
+    }
+}
+
+void DatabaseService::retire_later(std::shared_ptr<Server> server) {
+    retired_.push_back(server);
+    stop_later(std::move(server), true);
+}
+
+void DatabaseService::reap_stoppers(bool all) {
+    std::vector<Stopper> finished;
+    {
+        const std::lock_guard lock(stoppers_mutex_);
+        for (auto it = stoppers_.begin(); it != stoppers_.end();) {
+            if (all || *it->done) {
+                finished.push_back(std::move(*it));
+                it = stoppers_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    for (Stopper& s : finished) {
+        if (s.thread.joinable()) {
+            s.thread.join();
+        }
     }
 }
 
 json DatabaseService::reload() {
-    const std::lock_guard lock(mutex_);
-    reload_locked();
+    std::vector<std::shared_ptr<Server>> servers;
+    {
+        const std::lock_guard lock(mutex_);
+        reload_locked();
+        for (const auto& [series, server] : servers_) {
+            servers.push_back(server);
+        }
+    }
     json list = json::array();
-    for (const auto& [series, server] : servers_) {
-        list.push_back(server->describe());
+    for (const auto& s : servers) {
+        list.push_back(s->describe());
     }
     return {{"servers", list}};
 }
@@ -557,44 +760,73 @@ void DatabaseService::reload_locked() {
         }
     }
 
-    // Servers no longer wanted are shut down cleanly (outside the lock's
-    // hot path: the supervisor holds its own reference while relaying).
+    // Servers no longer wanted, or whose series has a newer patch release
+    // installed, are shut down in the background. One is made again for
+    // the new release once the old one has let go of its port.
     for (auto it = servers_.begin(); it != servers_.end();) {
-        if (!wanted.contains(it->first)) {
-            it->second->stop();
+        const auto want = wanted.find(it->first);
+        if (want == wanted.end() || want->second.runtime->version != it->second->version()) {
+            retire_later(it->second);
             it = servers_.erase(it);
         } else {
             ++it;
         }
     }
+    std::erase_if(retired_, [](const std::weak_ptr<Server>& w) { return w.expired(); });
     std::set<Port> taken;
+    std::set<Port> retiring;
     for (const auto& [series, server] : servers_) {
         taken.insert(server->port());
+    }
+    for (const auto& w : retired_) {
+        if (const auto s = w.lock()) {
+            retiring.insert(s->port());
+        }
     }
     for (auto& [series, want] : wanted) {
         if (const auto it = servers_.find(series); it != servers_.end()) {
             it->second->set_projects(want.projects, want.keep_running);
             continue;
         }
-        // D12: 3306 when free, else 3307, 3308... never another stack's.
-        const auto port = pick_port_from(kFirstDatabasePort, taken, config_.probe);
-        if (!port) {
-            continue;
+        MariaDbFiles files = mariadb_files(want.runtime->dir, want.runtime->version, config_.data_dir);
+        // The series keeps its port (.env files have it). D12: the first
+        // time 3306 when free, else 3307, 3308... never another stack's.
+        std::optional<Port> port = saved_port(files.folder);
+        if (port && retiring.contains(*port)) {
+            continue;  // our old server still holds it: next time
         }
-        std::set<Port> internal_taken = taken;
-        internal_taken.insert(*port);
-        const auto internal = pick_port_from(kFirstInternalDatabasePort, internal_taken, config_.probe);
+        // The saved port is opened directly: the probe can read it as taken
+        // while connections our relay closed are still in TIME_WAIT. Opening
+        // fails if another program really listens there.
+        std::unique_ptr<LoopbackListener> listener;
+        if (port && !taken.contains(*port)) {
+            listener = LoopbackListener::open(*port, error);
+        }
+        if (!listener) {
+            std::set<Port> avoid = taken;
+            avoid.insert(retiring.begin(), retiring.end());
+            if (port) {
+                avoid.insert(*port);
+            }
+            port = pick_port_from(kFirstDatabasePort, avoid, config_.probe);
+            if (!port) {
+                continue;
+            }
+            listener = LoopbackListener::open(*port, error);
+            if (!listener) {
+                continue;
+            }
+        }
+        const auto internal = internal_ports_->pick(std::nullopt, *port, config_.probe);
         if (!internal) {
             continue;
         }
-        auto listener = LoopbackListener::open(*port, error);
-        if (!listener) {
-            continue;
-        }
+        std::error_code ec;
+        fs::create_directories(files.folder, ec);
+        (void)write_file_atomically(files.folder / "port", std::to_string(*port) + "\n", error);
         taken.insert(*port);
-        taken.insert(*internal);
-        auto server = std::make_shared<Server>(mariadb_files(want.runtime->dir, want.runtime->version, config_.data_dir),
-                                               want.runtime->version, *port, *internal, std::move(listener), secrets_,
+        auto server = std::make_shared<Server>(std::move(files), want.runtime->version, *port, *internal,
+                                               std::move(listener), secrets_, internal_ports_, config_.probe,
                                                config_.start_limit);
         server->set_projects(want.projects, want.keep_running);
         servers_[series] = std::move(server);
@@ -616,6 +848,9 @@ void DatabaseService::supervise() {
         listeners.reserve(servers.size());
         for (const auto& s : servers) {
             listeners.push_back(&s->listener());
+        }
+        if (listeners.empty()) {
+            std::this_thread::sleep_for(200ms);
         }
         for (const std::size_t i : waiting_connections(listeners, 200ms)) {
             auto client = servers[i]->listener().accept_connection();
@@ -655,8 +890,11 @@ void DatabaseService::supervise() {
         if (now - last_tick >= 1s) {
             last_tick = now;
             for (const auto& s : servers) {
-                s->tick(config_.idle_after);
+                if (s->begin_idle_stop(config_.idle_after)) {
+                    stop_later(s, false);
+                }
             }
+            reap_stoppers(false);
         }
         if (now - last_reload >= config_.reload_every) {
             last_reload = now;
@@ -679,6 +917,14 @@ std::optional<DatabaseLogin> DatabaseService::project_login(const std::string& p
         refusal = {"no_database", project + " has no database in its floserver.json (add one with: flo use mariadb 11.4)"};
         return std::nullopt;
     }
+    DatabaseLogin login;
+    login.database = project_database_name(project);
+    login.user = login.database;
+    if (reserved_database_name(login.database)) {
+        refusal = {"reserved_name", "\"" + login.database + "\" is one of MariaDB's own names; rename the project "
+                                    "(flo remove " + project + ", then flo add --name <other name>)"};
+        return std::nullopt;
+    }
     std::shared_ptr<Server> server;
     if (p->on) {
         const auto installed = list_installed(runtimes_dir(config_.data_dir));
@@ -695,15 +941,16 @@ std::optional<DatabaseLogin> DatabaseService::project_login(const std::string& p
         refusal = {"database_off", project + "'s database runs while the project is on: flo start " + project};
         return std::nullopt;
     }
+    // Counts as a connection: the server doesn't go to sleep meanwhile.
+    server->connection_opened();
+    const AtExit closed([&server] { server->connection_closed(); });
     if (!server->ensure_running(error)) {
         refusal = {"database_failed", error};
         return std::nullopt;
     }
-    server->touch();
-    DatabaseLogin login;
+    // One at a time per server: the saved password and the live one match.
+    const std::lock_guard lock(server->login_mutex());
     login.port = server->port();
-    login.database = project_database_name(project);
-    login.user = login.database;
     const std::string secret = "mariadb-" + server->files().series + "/" + login.database;
     auto password = secrets_.read(secret);
     if (!password) {

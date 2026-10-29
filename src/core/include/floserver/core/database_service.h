@@ -31,6 +31,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace floserver::core {
 
@@ -46,7 +47,8 @@ inline constexpr Port kFirstInternalDatabasePort = 33100;
 
 class DatabaseService {
 public:
-    DatabaseService(DatabaseServiceConfig config, const SecretStore& secrets);
+    // `secrets` is copied: servers may outlive a reference.
+    DatabaseService(DatabaseServiceConfig config, SecretStore secrets);
     DatabaseService(const DatabaseService&) = delete;
     DatabaseService& operator=(const DatabaseService&) = delete;
     DatabaseService(DatabaseService&&) = delete;
@@ -58,10 +60,11 @@ public:
     void stop();
 
     // Brings the servers in line with the project list; the status after.
+    // Servers no longer needed are shut down in the background.
     nlohmann::json reload();
 
     //   {"servers": [{"series", "version", "port", "internal_port",
-    //                 "state": "sleeping"|"starting"|"running"|"failed",
+    //                 "state": "sleeping"|"starting"|"running"|"stopping"|"failed",
     //                 "pid"?, "connections", "projects", "keep_running", "error"?}]}
     [[nodiscard]] nlohmann::json status() const;
 
@@ -70,18 +73,32 @@ public:
     [[nodiscard]] std::optional<DatabaseLogin> project_login(const std::string& project, ServiceRefusal& refusal);
 
     class Server;
+    struct InternalPorts;
 
 private:
     void supervise();
     void reload_locked();
+    // Shuts `server` down for good on a thread of its own.
+    void retire_later(std::shared_ptr<Server> server);
+    void stop_later(std::shared_ptr<Server> server, bool retire);
+    void reap_stoppers(bool all);
 
     DatabaseServiceConfig config_;
-    const SecretStore& secrets_;
+    SecretStore secrets_;
+    std::shared_ptr<InternalPorts> internal_ports_;
     mutable std::mutex mutex_;
     std::map<std::string, std::shared_ptr<Server>> servers_;  // by series
+    std::vector<std::weak_ptr<Server>> retired_;              // may still hold their port
     std::atomic<bool> stopping_{false};
     bool stopped_ = false;
     std::thread thread_;
+
+    struct Stopper {
+        std::thread thread;
+        std::shared_ptr<std::atomic<bool>> done;
+    };
+    std::mutex stoppers_mutex_;
+    std::vector<Stopper> stoppers_;
 };
 
 }  // namespace floserver::core
