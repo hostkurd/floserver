@@ -45,7 +45,10 @@ std::vector<std::wstring> entries(const std::wstring& path) {
 std::wstring joined(const std::vector<std::wstring>& parts) {
     std::wstring out;
     for (const std::wstring& p : parts) {
-        out += (out.empty() ? L"" : L";") + p;
+        if (!out.empty()) {
+            out += L';';
+        }
+        out += p;
     }
     return out;
 }
@@ -110,9 +113,9 @@ std::wstring path_with(const std::wstring& path, const std::wstring& dir) {
     if (path_has(path, dir)) {
         return path;
     }
-    std::vector<std::wstring> parts = entries(path);
-    parts.insert(parts.begin(), dir);  // first: the shims before any other php or node
-    return joined(parts);
+    // First: the shims before any other php or node.
+    const std::wstring rest = joined(entries(path));
+    return rest.empty() ? dir : dir + L";" + rest;
 }
 
 std::wstring path_without(const std::wstring& path, const std::wstring& dir) {
