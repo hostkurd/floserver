@@ -125,7 +125,15 @@ void WebService::stop() {
 void WebService::stop_locked() {
     stop_nginx_locked();
     pools_.clear();
-    replace_apps_locked({});
+    // All at once, then wait: each may take a few seconds to shut down.
+    const auto apps = std::move(apps_);
+    apps_.clear();
+    for (const auto& [name, runner] : apps) {
+        runner->close_soon();
+    }
+    for (const auto& [name, runner] : apps) {
+        runner->close();
+    }
     sites_.clear();
 }
 
@@ -133,7 +141,7 @@ void WebService::replace_apps_locked(std::map<std::string, std::shared_ptr<AppRu
     for (const auto& [name, runner] : apps_) {
         const auto it = apps.find(name);
         if (it == apps.end() || it->second != runner) {
-            runner->close();
+            runner->close_soon();
         }
     }
     apps_ = std::move(apps);

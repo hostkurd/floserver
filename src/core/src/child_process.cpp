@@ -151,11 +151,12 @@ std::optional<std::uintptr_t> LoopbackListener::accept_connection() const {
     return static_cast<std::uintptr_t>(c);
 }
 
-std::optional<std::uintptr_t> connect_loopback(Port port) {
+std::optional<std::uintptr_t> connect_loopback(Port port, bool ipv6) {
     if (!winsock_started()) {
         return std::nullopt;
     }
-    const SOCKET s = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, nullptr, 0, WSA_FLAG_NO_HANDLE_INHERIT);
+    const SOCKET s = WSASocketW(ipv6 ? AF_INET6 : AF_INET, SOCK_STREAM, IPPROTO_TCP, nullptr, 0,
+                                WSA_FLAG_NO_HANDLE_INHERIT);
     if (s == INVALID_SOCKET) {
         return std::nullopt;
     }
@@ -163,7 +164,13 @@ std::optional<std::uintptr_t> connect_loopback(Port port) {
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (connect(s, reinterpret_cast<const sockaddr*>(&addr), static_cast<int>(sizeof addr)) != 0) {
+    sockaddr_in6 addr6{};
+    addr6.sin6_family = AF_INET6;
+    addr6.sin6_port = htons(port);
+    addr6.sin6_addr = in6addr_loopback;
+    const int failed = ipv6 ? connect(s, reinterpret_cast<const sockaddr*>(&addr6), static_cast<int>(sizeof addr6))
+                            : connect(s, reinterpret_cast<const sockaddr*>(&addr), static_cast<int>(sizeof addr));
+    if (failed != 0) {
         closesocket(s);
         return std::nullopt;
     }
@@ -392,8 +399,8 @@ std::optional<std::uintptr_t> LoopbackListener::accept_connection() const {
     return static_cast<std::uintptr_t>(c);
 }
 
-std::optional<std::uintptr_t> connect_loopback(Port port) {
-    const int s = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_TCP);
+std::optional<std::uintptr_t> connect_loopback(Port port, bool ipv6) {
+    const int s = socket(ipv6 ? AF_INET6 : AF_INET, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_TCP);
     if (s < 0) {
         return std::nullopt;
     }
@@ -401,7 +408,13 @@ std::optional<std::uintptr_t> connect_loopback(Port port) {
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (connect(s, reinterpret_cast<const sockaddr*>(&addr), sizeof addr) != 0) {
+    sockaddr_in6 addr6{};
+    addr6.sin6_family = AF_INET6;
+    addr6.sin6_port = htons(port);
+    addr6.sin6_addr = in6addr_loopback;
+    const int failed = ipv6 ? connect(s, reinterpret_cast<const sockaddr*>(&addr6), sizeof addr6)
+                            : connect(s, reinterpret_cast<const sockaddr*>(&addr), sizeof addr);
+    if (failed != 0) {
         close(s);
         return std::nullopt;
     }

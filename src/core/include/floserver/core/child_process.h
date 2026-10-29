@@ -64,9 +64,10 @@ private:
 // idle, even if no request has finished lately.
 [[nodiscard]] bool has_open_connections(Port port);
 
-// A TCP connection to 127.0.0.1:port, or nothing. The caller closes it
-// with close_socket(). Only for FloServer's own servers.
-[[nodiscard]] std::optional<std::uintptr_t> connect_loopback(Port port);
+// A TCP connection to 127.0.0.1:port ([::1]:port with `ipv6`), or nothing.
+// The caller closes it with close_socket(). Only for FloServer's own
+// servers and the projects' dev servers.
+[[nodiscard]] std::optional<std::uintptr_t> connect_loopback(Port port, bool ipv6 = false);
 void close_socket(std::uintptr_t socket);
 
 // Copies bytes both ways between two connected sockets until either side

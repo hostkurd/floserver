@@ -176,6 +176,8 @@ TEST_CASE("the nginx config forwards a Node project to its port, WebSockets too"
     CHECK(text->find("map $http_upgrade $floserver_connection") != std::string::npos);
     CHECK(text->find("proxy_pass http://floserver_app_9300;") != std::string::npos);
     CHECK(text->find("proxy_set_header Connection $floserver_connection;") != std::string::npos);
+    CHECK(text->find("proxy_set_header Host $http_host;") != std::string::npos);  // keeps :8080
+    CHECK(text->find("proxy_set_header X-Forwarded-Port $server_port;") != std::string::npos);
     CHECK(text->find("server_name web.localhost;") != std::string::npos);
     // The app serves everything itself: no document root, no dot-file rule.
     CHECK(text->find("root \"") == std::string::npos);

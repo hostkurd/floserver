@@ -151,7 +151,7 @@ std::vector<std::string> port_arguments(const std::string& script, Port port) {
     // npm adds arguments at the end of the script, so they reach its last
     // command: "tsc && vite" → vite.
     std::string_view last(script);
-    for (const std::string_view sep : {"&&", "||", ";", "|"}) {
+    for (const std::string_view sep : {"&&", "||", ";", "|", "&"}) {
         if (const auto at = last.rfind(sep); at != std::string_view::npos) {
             last = last.substr(at + sep.size());
         }
@@ -165,7 +165,8 @@ std::vector<std::string> port_arguments(const std::string& script, Port port) {
     // The command's name, after any VAR=value and cross-env.
     std::string name;
     for (const std::string& s : w) {
-        if (s.find('=') != std::string::npos || s == "cross-env" || s == "env" || s == "npx") {
+        if (s.find('=') != std::string::npos || s == "cross-env" || s == "env" || s == "npx" || s == "pnpm" ||
+            s == "pnpx" || s == "yarn" || s == "bunx" || s == "exec" || s == "dlx") {
             continue;
         }
         name = s.substr(s.find_last_of('/') + 1);
@@ -313,7 +314,9 @@ void AppRunner::set_app(const AppSpec& app) {
     app_ = app;
     if (other) {
         error_.clear();
-        if (state_ == AppState::Running || state_ == AppState::Failed) {
+        if (state_ == AppState::Starting) {
+            stale_ = true;  // the start under way is thrown away when it ends
+        } else if (state_ == AppState::Running || state_ == AppState::Failed) {
             stop_process(lock);
         }
     }
@@ -321,16 +324,33 @@ void AppRunner::set_app(const AppSpec& app) {
 
 void AppRunner::stop_process(std::unique_lock<std::mutex>& lock) {
     (void)lock;  // held by the caller
-    if (process_) {
-        process_->kill();
-        process_.reset();
-    }
-    if (internal_) {
-        config_.internal_ports->give_back(*internal_);
-        internal_.reset();
-    }
+    std::shared_ptr<ChildProcess> process(std::move(process_));
+    const auto port = internal_;
+    internal_.reset();
     state_ = AppState::Sleeping;
     changed_.notify_all();
+    if (!process && !port) {
+        return;
+    }
+    // The port is given back once the server has let go of it.
+    const auto finish = [process, port, ports = config_.internal_ports] {
+        if (process) {
+            process->kill();
+        }
+        if (port) {
+            ports->give_back(*port);
+        }
+    };
+    ++threads_;
+    try {
+        std::thread([self = shared_from_this(), finish] {
+            finish();
+            --self->threads_;
+        }).detach();
+    } catch (const std::system_error&) {
+        --threads_;
+        finish();
+    }
 }
 
 void AppRunner::accept_waiting() {
@@ -363,12 +383,14 @@ void AppRunner::serve(std::uintptr_t client) {
     std::string error;
     std::optional<std::uintptr_t> upstream;
     std::optional<Port> port;
+    bool ipv6 = false;
     if (ensure_running(error)) {
         {
             const std::lock_guard lock(mutex_);
             port = internal_;
+            ipv6 = internal_ipv6_;
         }
-        upstream = port ? connect_loopback(*port) : std::nullopt;
+        upstream = port ? connect_loopback(*port, ipv6) : std::nullopt;
         if (!upstream) {
             error = "the server isn't answering on port " + (port ? std::to_string(*port) : std::string("?"));
         }
@@ -419,23 +441,41 @@ bool AppRunner::ensure_running(std::string& error) {
         stop_process(lock);  // it ended; tick() hasn't noticed yet
     }
     state_ = AppState::Starting;
+    stale_ = false;
     const AppSpec app = app_;
     lock.unlock();
 
     std::string shown;
     std::string why;
+    bool ipv6 = false;
     std::unique_ptr<ChildProcess> process;
     const auto port = config_.internal_ports->take(kFirstAppInternalPort, config_.probe);
     if (!port) {
         why = "there's no free port from " + std::to_string(kFirstAppInternalPort) + " upwards";
     } else {
-        process = start_server(app, *port, shown, why);
+        process = start_server(app, *port, shown, ipv6, why);
     }
 
     lock.lock();
+    if (stale_ && !closed_) {
+        // The command or runtime changed meanwhile: this one isn't wanted,
+        // and the next connection starts the new one.
+        if (process) {
+            process->kill();
+        }
+        if (port) {
+            config_.internal_ports->give_back(*port);
+        }
+        stale_ = false;
+        state_ = AppState::Sleeping;
+        changed_.notify_all();
+        error = "the project's settings changed while it was starting; reload the page";
+        return false;
+    }
     if (process && !closed_) {
         process_ = std::move(process);
         internal_ = port;
+        internal_ipv6_ = ipv6;
         shown_ = shown;
         state_ = AppState::Running;
         started_ = Clock::now();
@@ -456,12 +496,13 @@ bool AppRunner::ensure_running(std::string& error) {
     return state_ == AppState::Running;
 }
 
-std::unique_ptr<ChildProcess> AppRunner::start_server(const AppSpec& app, Port port, std::string& shown,
+std::unique_ptr<ChildProcess> AppRunner::start_server(const AppSpec& app, Port port, std::string& shown, bool& ipv6,
                                                       std::string& error) {
     std::error_code ec;
     if (fs::file_size(log_, ec) > kMaxLogBytes && !ec) {
         fs::remove(log_, ec);
     }
+    ipv6 = false;
     const auto is_closing = [this] {
         const std::lock_guard lock(mutex_);
         return closed_;
@@ -530,9 +571,14 @@ std::unique_ptr<ChildProcess> AppRunner::start_server(const AppSpec& app, Port p
                     std::to_string(port) + ":\n" + tail(log_);
             return nullptr;
         }
-        if (const auto s = connect_loopback(port)) {
-            close_socket(*s);
-            return child;
+        // 127.0.0.1, or [::1] for a server that listens on "localhost"
+        // where that means IPv6 first (Node 17+ on Windows).
+        for (const bool v6 : {false, true}) {
+            if (const auto s = connect_loopback(port, v6)) {
+                close_socket(*s);
+                ipv6 = v6;
+                return child;
+            }
         }
         if (Clock::now() >= deadline) {
             child->kill();
@@ -560,6 +606,12 @@ void AppRunner::tick(Clock::time_point now, std::chrono::seconds idle_after) {
         }
         return;
     }
+    // A server kept running for days: its log is cut short (the server's
+    // own handle writes on at the new end).
+    std::error_code ec;
+    if (state_ == AppState::Running && fs::file_size(log_, ec) > kMaxLogBytes && !ec) {
+        fs::resize_file(log_, 0, ec);
+    }
     const Clock::time_point last{Clock::duration(last_activity_.load())};
     if (state_ == AppState::Running && !app_.keep_running && connections_ == 0 && now - last >= idle_after) {
         stop_process(lock);
@@ -571,12 +623,14 @@ void AppRunner::tick(Clock::time_point now, std::chrono::seconds idle_after) {
     }
 }
 
+void AppRunner::close_soon() {
+    std::unique_lock lock(mutex_);
+    closed_ = true;
+    stop_process(lock);  // its connections end with it
+}
+
 void AppRunner::close() {
-    {
-        std::unique_lock lock(mutex_);
-        closed_ = true;
-        stop_process(lock);  // its connections end with it
-    }
+    close_soon();
     // Connections waiting for a start see closed_ and end; a start under
     // way notices within a moment.
     const auto deadline = Clock::now() + 10s;
@@ -596,6 +650,7 @@ std::string AppRunner::failure_page(const std::string& error) const {
     return "HTTP/1.1 502 Bad Gateway\r\n"
            "Content-Type: text/plain; charset=utf-8\r\n"
            "Cache-Control: no-store\r\n"
+           "X-Content-Type-Options: nosniff\r\n"
            "Connection: close\r\n"
            "Content-Length: " +
            std::to_string(body.size()) + "\r\n\r\n" + body;

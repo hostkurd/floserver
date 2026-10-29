@@ -331,6 +331,56 @@ TEST_CASE("an app that can't start answers why, and Keep running starts it witho
     CHECK(runner->state() == AppState::Sleeping);
 }
 
+TEST_CASE("settings changed while starting: the old start is thrown away") {
+    if (!on_path("python3")) {
+        MESSAGE("python3 isn't installed here; skipped");
+        return;
+    }
+    test_util::TempDir tmp;
+    AppSpec app;
+    app.name = "web";
+    app.dir = tmp.path() / "web";
+    app.runtime_dir = fake_node(tmp.path() / "node");
+    test_util::write_file(app.dir / "a" / "x.txt", "old");
+    test_util::write_file(app.dir / "b" / "x.txt", "new");
+    app.command = "sleep 1; exec python3 -m http.server {port} --bind 127.0.0.1 --directory a";
+    app.port = free_port(19360);
+    std::string error;
+    auto runner = AppRunner::open(app, {tmp.path() / "work", nullptr, nullptr}, error);
+    REQUIRE(runner);
+    Pump pump(runner);
+    std::string first;
+    std::thread t([&] { first = get(app.port, "/x.txt"); });
+    REQUIRE(eventually([&] { return runner->state() == AppState::Starting; }, 5s));
+    app.command = "exec python3 -m http.server {port} --bind 127.0.0.1 --directory b";
+    runner->set_app(app);
+    t.join();
+    CHECK(first.find("settings changed") != std::string::npos);
+    CHECK(get(app.port, "/x.txt") == "200 new");
+    runner->close();
+}
+
+TEST_CASE("a server that listens on [::1] only is found there") {
+    if (!on_path("python3") || !loopback_ipv6_available()) {
+        MESSAGE("python3 or IPv6 isn't available here; skipped");
+        return;
+    }
+    test_util::TempDir tmp;
+    AppSpec app;
+    app.name = "web";
+    app.dir = tmp.path() / "web";
+    app.runtime_dir = fake_node(tmp.path() / "node");
+    test_util::write_file(app.dir / "x.txt", "six");
+    app.command = "exec python3 -m http.server {port} --bind ::1";
+    app.port = free_port(19380);
+    std::string error;
+    auto runner = AppRunner::open(app, {tmp.path() / "work", nullptr, nullptr}, error);
+    REQUIRE(runner);
+    Pump pump(runner);
+    CHECK(get(app.port, "/x.txt") == "200 six");
+    runner->close();
+}
+
 TEST_CASE("a Node app runs its dev script through the project's own npm") {
     const auto node = on_path("node");
     if (!node || !npm_script(node->parent_path().parent_path())) {

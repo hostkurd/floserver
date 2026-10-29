@@ -105,7 +105,10 @@ public:
     void wake();
     // Housekeeping, about once a second: a server that ended, idle time.
     void tick(Clock::time_point now, std::chrono::seconds idle_after);
-    // Stops the server and every connection, and starts nothing again.
+    // Stops the server (its connections end with it) and starts nothing
+    // again; the stopping happens in the background.
+    void close_soon();
+    // close_soon(), then waits (a few seconds at most) until it's done.
     void close();
 
     //   {"state", "port", "internal_port"?, "pid"?, "connections", "command"?, "log", "error"?}
@@ -116,8 +119,11 @@ private:
     AppRunner(const AppSpec& app, AppRunnerConfig config, std::unique_ptr<LoopbackListener> listener);
     // Starts it unless it runs, and waits. False (with `error`) when it can't.
     bool ensure_running(std::string& error);
-    std::unique_ptr<ChildProcess> start_server(const AppSpec& app, Port port, std::string& shown, std::string& error);
+    std::unique_ptr<ChildProcess> start_server(const AppSpec& app, Port port, std::string& shown, bool& ipv6,
+                                               std::string& error);
     void serve(std::uintptr_t client);
+    // Takes the server out (state Sleeping); it's stopped on a thread of
+    // its own, so a slow shutdown holds up nothing else.
     void stop_process(std::unique_lock<std::mutex>& lock);
     [[nodiscard]] std::string failure_page(const std::string& error) const;
 
@@ -136,7 +142,8 @@ private:
     Clock::time_point started_;
     Clock::time_point retry_after_;
     bool closed_ = false;
-    std::set<std::uintptr_t> clients_;  // open relays, ended by close()
+    bool internal_ipv6_ = false;   // the server took connections on [::1], not 127.0.0.1
+    bool stale_ = false;           // the app changed while it was starting
 
     std::atomic<int> connections_{0};
     std::atomic<Clock::rep> last_activity_{0};

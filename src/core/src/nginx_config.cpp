@@ -206,17 +206,21 @@ private:
             out_ << "        location / {\n"
                  << "            proxy_pass http://" << app_upstream_name(*site.app_port) << ";\n"
                  << "            proxy_http_version 1.1;\n"
-                 << "            proxy_set_header Host $host;\n"
+                 // With the port: the app builds absolute links from it,
+                 // and the web ports may be 8080/8443 (Q4).
+                 << "            proxy_set_header Host $http_host;\n"
                  << "            proxy_set_header Upgrade $http_upgrade;\n"
                  << "            proxy_set_header Connection $floserver_connection;\n"
                  << "            proxy_set_header X-Forwarded-For $remote_addr;\n"
                  << "            proxy_set_header X-Forwarded-Proto $scheme;\n"
-                 << "            proxy_set_header X-Forwarded-Host $host;\n"
+                 << "            proxy_set_header X-Forwarded-Host $http_host;\n"
+                 << "            proxy_set_header X-Forwarded-Port $server_port;\n"
                  // Server-sent events and streamed pages arrive as they're sent.
                  << "            proxy_buffering off;\n"
-                 // The first request may wait for the app to install and start.
-                 << "            proxy_read_timeout 300s;\n"
-                 << "            proxy_send_timeout 300s;\n"
+                 // The first request may wait for npm install (up to 10
+                 // minutes) and the start.
+                 << "            proxy_read_timeout 900s;\n"
+                 << "            proxy_send_timeout 900s;\n"
                  << "        }\n"
                  << "    }\n";
             return true;
