@@ -18,6 +18,7 @@
 #include "floserver/core/trust_store.h"
 #include "floserver/core/web_service.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -95,8 +96,9 @@ std::unique_ptr<floserver::core::RuntimeService> make_runtimes() {
     return std::make_unique<core::RuntimeService>(std::move(config), core::make_system_transport());
 }
 
-// FLOSERVER_WEB_PORTS ("18080,18443") and FLOSERVER_IDLE_SECONDS replace the
-// usual ports and idle time, for tests and dev copies.
+// FLOSERVER_WEB_PORTS ("18080,18443"), FLOSERVER_IDLE_SECONDS and
+// FLOSERVER_PHP_WORKERS replace the usual ports, idle time and PHP workers
+// per pool, for tests and dev copies.
 floserver::core::WebServiceConfig web_config(const std::filesystem::path& data) {
     namespace core = floserver::core;
     core::WebServiceConfig config;
@@ -110,6 +112,12 @@ floserver::core::WebServiceConfig web_config(const std::filesystem::path& data) 
                 config.fixed_ports = core::WebPorts{static_cast<core::Port>(http), static_cast<core::Port>(https), true};
             }
         } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): ignored, the usual ports are used
+        }
+    }
+    if (const auto workers = core::get_env("FLOSERVER_PHP_WORKERS")) {
+        try {
+            config.php_workers = std::clamp<std::size_t>(std::stoul(*workers), 1, 16);
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): ignored, the usual count is used
         }
     }
     if (const auto idle = core::get_env("FLOSERVER_IDLE_SECONDS")) {

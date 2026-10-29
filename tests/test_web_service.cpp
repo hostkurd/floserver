@@ -22,6 +22,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <thread>
 
@@ -182,6 +183,24 @@ TEST_CASE("projects run with real nginx and php-cgi, sleep when idle and wake on
         REQUIRE(eventually([&] { return web.status()["pools"][0]["state"] == "running"; }));
         const auto php_pid = web.status()["pools"][0]["pid"].get<std::uint32_t>();
 
+        // Every request to a running pool is answered, whichever worker takes
+        // it (on Windows, php-cgi's own workers left 3 in 4 unanswered).
+        CHECK(web.status()["pools"][0]["pids"].size() == 4);
+        CHECK(web.status()["pools"][0]["ports"].size() == 4);
+        int answered = 0;
+        for (int i = 0; i < 20; ++i) {
+            answered += get(http, "shop.localhost", "/n" + std::to_string(i)) == "200 shop /n" + std::to_string(i) ? 1 : 0;
+        }
+        CHECK(answered == 20);
+
+        // A worker that ends is replaced; the others keep serving.
+        ::kill(static_cast<pid_t>(php_pid), SIGKILL);
+        CHECK(eventually([&] {
+            const auto pids = web.status()["pools"][0]["pids"];
+            return pids.size() == 4 && std::find(pids.begin(), pids.end(), php_pid) == pids.end();
+        }, 5s));
+        CHECK(get(http, "shop.localhost", "/after") == "200 shop /after");
+
         // No PHP request for the idle time: php-cgi is stopped, the port stays.
         REQUIRE(eventually([&] { return web.status()["pools"][0]["state"] == "sleeping"; }, 8s));
         CHECK(eventually([&] { return !alive(php_pid); }, 3s));
@@ -256,8 +275,10 @@ TEST_CASE("projects run with real nginx and php-cgi, sleep when idle and wake on
     std::vector<std::uint32_t> pids = {nginx_pid};
     const auto final_status = web.status();
     for (const auto& p : final_status["pools"]) {
-        if (p.contains("pid")) {
-            pids.push_back(p["pid"].get<std::uint32_t>());
+        if (p.contains("pids")) {
+            for (const auto& pid : p["pids"]) {
+                pids.push_back(pid.get<std::uint32_t>());
+            }
         }
     }
     web.stop();

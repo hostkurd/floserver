@@ -3,6 +3,7 @@
 #include "floserver/core/project_registry.h"
 
 #include <algorithm>
+#include <set>
 #include <sstream>
 
 namespace floserver::core {
@@ -15,6 +16,9 @@ bool is_unsafe(char c) {
     const auto u = static_cast<unsigned char>(c);
     return u < 0x20 || u == 0x7F || c == '"' || c == '$' || c == '\\';
 }
+
+// The upstream for a pool, named by its first port (unique among pools).
+std::string upstream_name(const std::vector<Port>& ports) { return "floserver_php_" + std::to_string(ports.front()); }
 
 std::string port_suffix(Port port, Port usual) {
     return port == usual ? std::string() : ":" + std::to_string(port);
@@ -66,6 +70,21 @@ public:
 
         const bool any_tls = std::any_of(spec_.sites.begin(), spec_.sites.end(),
                                          [](const NginxSite& s) { return s.tls.has_value(); });
+        // One upstream per pool: a php-cgi worker on each port, requests
+        // spread over them. A worker that sleeps still has its port held by
+        // the service, so a connection never fails; max_fails=0 keeps nginx
+        // from setting one aside.
+        std::set<Port> written;
+        for (const NginxSite& site : spec_.sites) {
+            if (site.php_ports.empty() || !written.insert(site.php_ports.front()).second) {
+                continue;
+            }
+            out_ << "\n    upstream " << upstream_name(site.php_ports) << " {\n";
+            for (const Port p : site.php_ports) {
+                out_ << "        server 127.0.0.1:" << p << " max_fails=0;\n";
+            }
+            out_ << "    }\n";
+        }
         out_ << "\n    # Addresses that aren't a project.\n"
              << "    server {\n";
         listen(spec_.ports.http, " default_server");
@@ -132,7 +151,7 @@ private:
             }
         }
         std::optional<std::string> idle_log;
-        if (site.php_port != 0 && !site.php_access_log.empty()) {
+        if (!site.php_ports.empty() && !site.php_access_log.empty()) {
             idle_log = path(site.php_access_log);
             if (!idle_log) {
                 return false;
@@ -166,7 +185,7 @@ private:
             return 404;
         }
 )";
-        if (site.php_port == 0) {
+        if (site.php_ports.empty()) {
             out_ << "        index index.html index.htm;\n"
                  << "        location / {\n"
                  << "            try_files $uri $uri/ =404;\n"
@@ -190,7 +209,7 @@ private:
             if (site.tls) {
                 out_ << "            fastcgi_param HTTPS on;\n";
             }
-            out_ << "            fastcgi_pass 127.0.0.1:" << site.php_port << ";\n"
+            out_ << "            fastcgi_pass " << upstream_name(site.php_ports) << ";\n"
                  << "            fastcgi_read_timeout 300s;\n";
             if (idle_log) {
                 out_ << "            access_log " << *idle_log << " floserver_idle;\n";

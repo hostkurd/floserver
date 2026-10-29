@@ -273,11 +273,11 @@ void WebService::reload_locked() {
     nginx_version_ = nginx != nullptr ? nginx->version : std::string();
 
     // Ports: pools keep theirs; new pools get free ones.
-    std::map<std::string, Port> previous;
+    std::map<std::string, std::vector<Port>> previous;
     for (const auto& [key, runner] : pools_) {
-        previous[key] = runner->pool().port;
+        previous[key] = runner->pool().ports;
     }
-    if (!assign_pool_ports(plan, previous, config_.probe)) {
+    if (!assign_pool_ports(plan, previous, config_.probe, config_.php_workers)) {
         error_ = "there's no free port for PHP from 9100 upwards";
         return;
     }
@@ -341,7 +341,7 @@ void WebService::reload_locked() {
             continue;
         }
         const auto& runner = pools.at(pool.key);
-        NginxSite ns{p.name, p.doc_root, pool.port, runner->access_log(), std::nullopt};
+        NginxSite ns{p.name, p.doc_root, pool.ports, runner->access_log(), std::nullopt};
         if (tls_) {
             std::string cert_error;
             if (const auto cert = certs_.ensure_site(p.name, cert_error)) {
@@ -490,9 +490,12 @@ void WebService::supervise() {
             }
         }
         std::vector<const LoopbackListener*> listeners;
-        listeners.reserve(watched.size());
-        for (const auto& r : watched) {
-            listeners.push_back(&r->listener());
+        std::vector<std::size_t> owner;  // listener -> index in watched
+        for (std::size_t w = 0; w < watched.size(); ++w) {
+            for (const LoopbackListener* l : watched[w]->listeners()) {
+                listeners.push_back(l);
+                owner.push_back(w);
+            }
         }
         const auto ready = waiting_connections(listeners, 200ms);
         if (stopping_) {
@@ -501,15 +504,15 @@ void WebService::supervise() {
         const auto now = Clock::now();
         const std::lock_guard lock(mutex_);
         for (const std::size_t i : ready) {
-            const auto& r = watched[i];
+            const auto& r = watched[owner[i]];
             const auto current = pools_.find(r->pool().key);
             if (current == pools_.end() || current->second != r || r->state() == PoolState::Running) {
                 continue;  // dropped by a reload meanwhile, or already woken
             }
             if (r->wants_wake_on_connection(now)) {
-                r->wake(now);
+                r->wake(now);  // every worker: nginx spreads requests over all of them
             } else {
-                r->listener().drop_waiting_connection();
+                listeners[i]->drop_waiting_connection();
             }
         }
         if (now - last_tick >= 1s) {
@@ -540,12 +543,13 @@ json WebService::status_locked() const {
     for (const auto& [key, r] : pools_) {
         json p = {{"key", key},
                   {"version", r->pool().version},
-                  {"port", r->pool().port},
+                  {"ports", r->pool().ports},
                   {"state", pool_state_name(r->state())},
                   {"sites", r->pool().sites},
                   {"keep_running", r->pool().keep_running}};
         if (const auto pid = r->pid()) {
             p["pid"] = *pid;
+            p["pids"] = r->pids();
         }
         if (const auto last = r->last_request(); last && r->state() == PoolState::Running) {
             p["idle_s"] = std::chrono::duration_cast<std::chrono::seconds>(Clock::now() - *last).count();

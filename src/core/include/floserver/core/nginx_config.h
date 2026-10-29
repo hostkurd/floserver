@@ -29,7 +29,7 @@ struct NginxTls {
 struct NginxSite {
     std::string name;                   // checked: project_name_problem()
     std::filesystem::path doc_root;
-    Port php_port = 0;                  // 0: no PHP, static files only
+    std::vector<Port> php_ports;        // the pool's workers; empty: static files only
     std::filesystem::path php_access_log;  // the pool's idle log; empty for none
     std::optional<NginxTls> tls;
 };

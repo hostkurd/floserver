@@ -45,6 +45,7 @@ struct WebServiceConfig {
     // Fixed web ports (tests and dev copies, FLOSERVER_WEB_PORTS); else Q4.
     std::optional<WebPorts> fixed_ports;
     std::chrono::seconds idle_after{600};
+    std::size_t php_workers = kPhpWorkers;  // php-cgi processes per pool, one port each
     std::chrono::seconds reload_every{5};
     PortProbe probe;  // empty: can_listen_on_loopback
 };
@@ -74,7 +75,8 @@ public:
 
     //   {"nginx": {"running", "pid", "version", "http_port", "https_port", "tls", "error"?},
     //    "pools": [{"key", "version", "port", "state": "sleeping"|"running"|"failed",
-    //               "pid"?, "sites", "keep_running", "idle_s"?, "error"?}],
+    //   {"key", "version", "ports", "state", "pid"?, "pids"? (every worker), "sites",
+    //    "keep_running", "idle_s"?, "error"?}],
     //    "sites": {"<name>": {"address", "pool"?, "run": "sleeping"|"running"|"failed",
     //              "state"?, "missing"?, "problem"?}},
     //    "error"?: "..."}

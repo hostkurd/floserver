@@ -54,7 +54,10 @@ struct PhpPool {
     std::vector<std::string> extensions;   // sorted, no duplicates
     std::vector<std::string> sites;        // project names, in list order
     bool keep_running = false;             // any of its projects has Keep running on
-    Port port = 0;                         // given by assign_pool_ports()
+    // One port per php-cgi worker, given by assign_pool_ports(). One process
+    // per socket: on Windows, several processes accepting on one shared
+    // socket lose connections (found on a real PC, 29 Oct).
+    std::vector<Port> ports;
 };
 
 struct WebPlan {
@@ -76,14 +79,15 @@ using ConfigReader = std::function<ConfigResult(const Project&)>;
                                  const std::vector<InstalledRuntime>& installed,
                                  const std::optional<std::string>& default_php);
 
-// Gives each pool a loopback port from 9100 upwards. A pool listed in
-// `previous` (key -> port) keeps its port without a check, because the
+inline constexpr Port kFirstPoolPort = 9100;
+inline constexpr std::size_t kPhpWorkers = 4;  // one slow request doesn't hold up the rest
+
+// Gives each pool `workers` loopback ports from 9100 upwards. A pool listed
+// in `previous` (key -> ports) keeps its ports without a check, because the
 // service itself holds that socket (D11); a reload never moves a pool that
 // didn't change. New pools get the first port that `probe` says is free and
 // no other pool uses. False when ports run out.
-[[nodiscard]] bool assign_pool_ports(WebPlan& plan, const std::map<std::string, Port>& previous,
-                                     const PortProbe& probe);
-
-inline constexpr Port kFirstPoolPort = 9100;
+[[nodiscard]] bool assign_pool_ports(WebPlan& plan, const std::map<std::string, std::vector<Port>>& previous,
+                                     const PortProbe& probe, std::size_t workers = kPhpWorkers);
 
 }  // namespace floserver::core

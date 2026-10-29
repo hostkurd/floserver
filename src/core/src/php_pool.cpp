@@ -1,6 +1,7 @@
 #include "floserver/core/php_pool.h"
 
 #include "floserver/core/paths.h"
+#include "floserver/core/process.h"
 
 #include <algorithm>
 #include <sstream>
@@ -110,8 +111,9 @@ PhpIniResult make_php_ini(const fs::path& php_dir, const std::vector<std::string
     return result;
 }
 
-PhpPoolRunner::PhpPoolRunner(PhpPool pool, std::unique_ptr<LoopbackListener> listener, fs::path ini, fs::path access_log)
-    : pool_(std::move(pool)), listener_(std::move(listener)), ini_(std::move(ini)), access_log_(std::move(access_log)) {
+PhpPoolRunner::PhpPoolRunner(PhpPool pool, std::vector<std::unique_ptr<LoopbackListener>> listeners, fs::path ini,
+                             fs::path access_log)
+    : pool_(std::move(pool)), listeners_(std::move(listeners)), ini_(std::move(ini)), access_log_(std::move(access_log)) {
     std::error_code ec;
     log_size_ = fs::exists(access_log_, ec) ? fs::file_size(access_log_, ec) : 0;
 }
@@ -137,38 +139,65 @@ std::unique_ptr<PhpPoolRunner> PhpPoolRunner::open(const PhpPool& pool, const fs
     if (!write_file_atomically(dir / "php.ini", ini.text, error)) {
         return nullptr;
     }
-    auto listener = LoopbackListener::open(pool.port, error);
-    if (!listener) {
+    if (pool.ports.empty()) {
+        error = "PHP " + pool.version + " has no port";
         return nullptr;
     }
-    return std::unique_ptr<PhpPoolRunner>(new PhpPoolRunner(pool, std::move(listener), dir / "php.ini",
+    std::vector<std::unique_ptr<LoopbackListener>> listeners;
+    for (const Port port : pool.ports) {
+        auto listener = LoopbackListener::open(port, error);
+        if (!listener) {
+            return nullptr;
+        }
+        listeners.push_back(std::move(listener));
+    }
+    return std::unique_ptr<PhpPoolRunner>(new PhpPoolRunner(pool, std::move(listeners), dir / "php.ini",
                                                             logs / path_from_utf8(pool.key + ".access.log")));
 }
 
+std::vector<const LoopbackListener*> PhpPoolRunner::listeners() const {
+    std::vector<const LoopbackListener*> out;
+    out.reserve(listeners_.size());
+    for (const auto& l : listeners_) {
+        out.push_back(l.get());
+    }
+    return out;
+}
+
 std::optional<std::uint32_t> PhpPoolRunner::pid() const {
-    if (child_) {
-        return child_->pid();
+    if (!workers_.empty()) {
+        return workers_.front().process->pid();
     }
     return std::nullopt;
+}
+
+std::vector<std::uint32_t> PhpPoolRunner::pids() const {
+    std::vector<std::uint32_t> out;
+    out.reserve(workers_.size());
+    for (const Worker& w : workers_) {
+        out.push_back(w.process->pid());
+    }
+    return out;
 }
 
 bool PhpPoolRunner::wants_wake_on_connection(Clock::time_point now) const {
     return state_ != PoolState::Running && now >= retry_after_;
 }
 
-void PhpPoolRunner::wake(Clock::time_point now) {
-    if (child_ && child_->running()) {
-        return;
-    }
-    if (now < retry_after_) {
-        return;
-    }
+// One php-cgi worker on one of the pool's sockets.
+//
+// Each worker is a php-cgi of its own with a socket of its own as standard
+// input and PHP_FCGI_CHILDREN=0. On Windows, several processes accepting on
+// one shared socket (php-cgi's own PHP_FCGI_CHILDREN workers, or several
+// php-cgi given the same socket) lose connections: they're taken and never
+// answered. One process per socket answers every one (found on a real
+// Windows PC, 29 Oct). The same scheme runs everywhere, so the Linux tests
+// cover it.
+bool PhpPoolRunner::start_worker(std::size_t socket, Clock::time_point now, std::string& error) {
     const auto program = php_cgi_program(pool_.php_dir);
     if (!program) {
-        state_ = PoolState::Failed;
-        last_error_ = "php-cgi is missing from " + path_to_utf8(pool_.php_dir);
-        retry_after_ = now + kFailedRetry;
-        return;
+        error = "php-cgi is missing from " + path_to_utf8(pool_.php_dir);
+        return false;
     }
     ChildOptions o;
     o.program = *program;
@@ -179,24 +208,42 @@ void PhpPoolRunner::wake(Clock::time_point now) {
     // The user's own PHP settings (a global XAMPP or Laragon install) must
     // not load other ini files or extensions into FloServer's pools.
     o.remove_env = {"PHPRC", "PHP_INI_SCAN_DIR"};
-    // A few worker processes, so one slow request doesn't hold up the rest.
-    o.env = {{"PHP_FCGI_CHILDREN", "4"}, {"PHP_FCGI_MAX_REQUESTS", "500"}};
-    o.stdin_socket = listener_.get();
-    std::string error;
-    child_ = ChildProcess::start(o, error);
-    if (!child_) {
-        state_ = PoolState::Failed;
-        last_error_ = error;
-        retry_after_ = now + kFailedRetry;
+    // php-cgi ends itself after this many requests; FloServer starts a fresh one.
+    o.env = {{"PHP_FCGI_CHILDREN", "0"}, {"PHP_FCGI_MAX_REQUESTS", "500"}};
+    o.stdin_socket = listeners_.at(socket).get();
+    auto process = ChildProcess::start(o, error);
+    if (!process) {
+        return false;
+    }
+    workers_.push_back({socket, std::move(process), now});
+    return true;
+}
+
+void PhpPoolRunner::fail(Clock::time_point now, std::string message) {
+    workers_.clear();
+    state_ = PoolState::Failed;
+    last_error_ = std::move(message);
+    retry_after_ = now + kFailedRetry;
+    quick_exits_.clear();
+}
+
+void PhpPoolRunner::wake(Clock::time_point now) {
+    if (state_ == PoolState::Running || now < retry_after_) {
         return;
     }
+    std::string error;
+    for (std::size_t i = 0; i < listeners_.size(); ++i) {
+        if (!start_worker(i, now, error)) {
+            fail(now, error);
+            return;
+        }
+    }
     state_ = PoolState::Running;
-    started_ = now;
     last_request_ = now;  // idle time counts from the wake
 }
 
 void PhpPoolRunner::sleep() {
-    child_.reset();  // ends php-cgi and its children; the socket stays
+    workers_.clear();  // ends every php-cgi; the socket stays
     if (state_ == PoolState::Running) {
         state_ = PoolState::Sleeping;
     }
@@ -214,28 +261,39 @@ void PhpPoolRunner::tick(Clock::time_point now, std::chrono::seconds idle_after)
         }
     }
 
-    if (child_ && !child_->running()) {
-        const auto code = child_->wait(0ms);
-        child_.reset();
-        if (now - started_ < kQuickExit) {
-            quick_exits_.push_back(now);
-            std::erase_if(quick_exits_, [now](Clock::time_point t) { return now - t > kQuickExitWindow; });
+    // Workers that ended: one that ran a while (php-cgi ends itself after
+    // PHP_FCGI_MAX_REQUESTS) is replaced; several ending right after they
+    // started means this PHP can't run (a broken php.ini or extension).
+    std::optional<int> last_code;
+    std::erase_if(workers_, [&](Worker& w) {
+        if (w.process->running()) {
+            return false;
         }
-        if (quick_exits_.size() >= kQuickExitsToFail) {
-            state_ = PoolState::Failed;
-            last_error_ = "php-cgi stops right after starting (exit " + std::to_string(code.value_or(-1)) +
-                          "); see " + pool_.key + ".php-errors.log";
-            retry_after_ = now + kFailedRetry;
-            quick_exits_.clear();
-        } else {
-            state_ = PoolState::Sleeping;  // the next request starts it again
+        last_code = w.process->wait(0ms);
+        if (now - w.started < kQuickExit) {
+            quick_exits_.push_back(now);
+        }
+        return true;
+    });
+    std::erase_if(quick_exits_, [now](Clock::time_point t) { return now - t > kQuickExitWindow; });
+    if (quick_exits_.size() >= kQuickExitsToFail) {
+        fail(now, "php-cgi stops right after starting (exit " + std::to_string(last_code.value_or(-1)) + "); see " +
+                      pool_.key + ".php-errors.log");
+    } else if (state_ == PoolState::Running) {
+        // Every socket has its worker again.
+        std::string error;
+        for (std::size_t i = 0; i < listeners_.size() && state_ == PoolState::Running; ++i) {
+            const bool served = std::any_of(workers_.begin(), workers_.end(), [i](const Worker& w) { return w.socket == i; });
+            if (!served && !start_worker(i, now, error)) {
+                fail(now, error);
+            }
         }
     }
 
     if (state_ == PoolState::Running && !pool_.keep_running && last_request_ && now - *last_request_ >= idle_after) {
         // The log has a line per finished request; a request still running
         // (or one just arriving) shows as an open connection instead.
-        if (has_open_connections(pool_.port)) {
+        if (std::any_of(pool_.ports.begin(), pool_.ports.end(), has_open_connections)) {
             last_request_ = now;
         } else {
             sleep();

@@ -61,10 +61,12 @@ public:
 
     [[nodiscard]] const PhpPool& pool() const { return pool_; }
     void set_pool(const PhpPool& pool) { pool_ = pool; }  // same key: sites and Keep running may change
-    [[nodiscard]] const LoopbackListener& listener() const { return *listener_; }
+    // One socket per worker, in the order of pool().ports.
+    [[nodiscard]] std::vector<const LoopbackListener*> listeners() const;
     [[nodiscard]] const std::filesystem::path& access_log() const { return access_log_; }
     [[nodiscard]] PoolState state() const { return state_; }
-    [[nodiscard]] std::optional<std::uint32_t> pid() const;
+    [[nodiscard]] std::optional<std::uint32_t> pid() const;  // the first worker's
+    [[nodiscard]] std::vector<std::uint32_t> pids() const;
     [[nodiscard]] const std::string& last_error() const { return last_error_; }
     [[nodiscard]] std::optional<Clock::time_point> last_request() const { return last_request_; }
 
@@ -81,19 +83,26 @@ public:
     [[nodiscard]] bool wants_wake_on_connection(Clock::time_point now) const;
 
 private:
-    PhpPoolRunner(PhpPool pool, std::unique_ptr<LoopbackListener> listener, std::filesystem::path ini,
+    PhpPoolRunner(PhpPool pool, std::vector<std::unique_ptr<LoopbackListener>> listeners, std::filesystem::path ini,
                   std::filesystem::path access_log);
 
     PhpPool pool_;
-    std::unique_ptr<LoopbackListener> listener_;
+    std::vector<std::unique_ptr<LoopbackListener>> listeners_;
     std::filesystem::path ini_;
     std::filesystem::path access_log_;
-    std::unique_ptr<ChildProcess> child_;
+    struct Worker {
+        std::size_t socket = 0;  // index into listeners_
+        std::unique_ptr<ChildProcess> process;
+        Clock::time_point started;
+    };
+    [[nodiscard]] bool start_worker(std::size_t socket, Clock::time_point now, std::string& error);
+    void fail(Clock::time_point now, std::string message);
+
+    std::vector<Worker> workers_;
     PoolState state_ = PoolState::Sleeping;
     std::string last_error_;
     std::uintmax_t log_size_ = 0;
     std::optional<Clock::time_point> last_request_;
-    Clock::time_point started_;
     std::vector<Clock::time_point> quick_exits_;
     Clock::time_point retry_after_;
 };
