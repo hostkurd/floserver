@@ -111,6 +111,7 @@ jobs:
           }
           # Logs can't be read from outside, so every failure becomes an annotation.
           function Fail([string]$what, [string]$output) {
+            $what = ($what -replace "`r?`n", " | ").Trim()
             $flat = ($output -replace "`r?`n", " | ").Trim()
             if ($flat.Length -gt 3000) { $flat = $flat.Substring(0, 3000) }
             Write-Host "::error title=live install::$what :: $flat"
