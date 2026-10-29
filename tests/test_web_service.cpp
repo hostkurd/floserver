@@ -446,6 +446,10 @@ TEST_CASE("an Apache project is served by the shared Apache behind nginx, .htacc
     test_util::write_file(wp / "index.php", "<?php echo 'wp ', $_SERVER['REQUEST_URI'], ' ', $_SERVER['SCRIPT_NAME'], ' ',"
                                             " $_SERVER['PATH_INFO'] ?? '-', ' ', $_SERVER['HTTPS'] ?? 'off';");
     test_util::write_file(wp / "readme.txt", "plain file");
+    // A second Apache project: the same Apache, its own host.
+    const fs::path blog = tmp.path() / "blog";
+    test_util::write_file(blog / "floserver.json", R"({"web": "apache", "php": "8.3"})");
+    test_util::write_file(blog / "index.php", "<?php echo 'blog';");
     test_util::write_file(wp / ".env", "SECRET=1");
     // Apache's workers may run as nobody here (root in a container).
     for (const auto& e : fs::recursive_directory_iterator(tmp.path())) {
@@ -456,7 +460,10 @@ TEST_CASE("an Apache project is served by the shared Apache behind nginx, .htacc
     AppConfig app;
     std::string error;
     REQUIRE(add_project(app, wp, "", error));
-    app.projects[0].on = true;
+    REQUIRE(add_project(app, blog, "", error));
+    for (Project& p : app.projects) {
+        p.on = true;
+    }
     REQUIRE(save_app_config(app_config_file(data), app, error));
 
     const auto ports = pick_web_ports([](Port p) { return p > 1024 && can_listen_on_loopback(p); });
@@ -484,6 +491,7 @@ TEST_CASE("an Apache project is served by the shared Apache behind nginx, .htacc
     CHECK(service.status()["sites"]["wp"]["run"] == "running");
     CHECK(get(http, "wp.localhost", "/index.php/a/b") == "200 wp /index.php/a/b /index.php /a/b off");
     CHECK(get(http, "wp.localhost", "/readme.txt") == "200 plain file");
+    CHECK(get(http, "blog.localhost") == "200 blog");
     CHECK(get(http, "wp.localhost", "/.env").starts_with("404 "));
     CHECK(get(http, "wp.localhost", "/.htaccess").starts_with("404 "));
     // Apache and its pool sleep; the next request wakes both.
@@ -491,7 +499,9 @@ TEST_CASE("an Apache project is served by the shared Apache behind nginx, .htacc
     CHECK(eventually([&] { return service.status()["pools"][0]["state"] == "sleeping"; }, 10s));
     CHECK(get(http, "wp.localhost", "/again") == "200 wp /again /index.php - off");
 
-    app.projects[0].on = false;
+    for (Project& p : app.projects) {
+        p.on = false;
+    }
     REQUIRE(save_app_config(app_config_file(data), app, error));
     st = service.reload();
     CHECK_FALSE(st["apps"].contains("_apache"));

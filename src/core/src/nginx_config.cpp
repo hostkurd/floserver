@@ -92,8 +92,9 @@ public:
         // soon after use, so an idle app can sleep), and the Connection
         // header passed on only for WebSocket upgrades.
         bool any_app = false;
+        std::set<Port> app_ports;  // Apache projects share one
         for (const NginxSite& site : spec_.sites) {
-            if (site.app_port) {
+            if (site.app_port && app_ports.insert(*site.app_port).second) {
                 any_app = true;
                 out_ << "\n    upstream " << app_upstream_name(*site.app_port) << " {\n"
                      << "        server 127.0.0.1:" << *site.app_port << " max_fails=0;\n"
