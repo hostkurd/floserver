@@ -101,6 +101,7 @@ jobs:
           FLOSERVER_INSTANCE: ci
           FLOSERVER_WEB_PORTS: "18080,18443"
           FLOSERVER_IDLE_SECONDS: "3"
+          FLOSERVER_APACHE_TRACE: "1"
         run: |
           $bin = "build/bin/Release"
           # Native programs write to stderr (nginx -v does); that isn't an error here.
@@ -125,7 +126,7 @@ jobs:
               $tail = (Get-Content $_.FullName -Tail 5 -ErrorAction SilentlyContinue) -join " / "
               if ($tail) { $out += " || $($_.Name): $tail" }
             }
-            $procs = (Get-Process nginx, php-cgi, node, python -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Name):$($_.Id)" }) -join ","
+            $procs = (Get-Process nginx, php-cgi, node, python, httpd -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Name):$($_.Id)" }) -join ","
             return "$out || processes: $procs"
           }
           function Run([string]$what, [scriptblock]$block) {
@@ -261,11 +262,65 @@ jobs:
           if ($apiBody -ne "python 3.13 /again venv=True") { Fail "Python project after sleeping (got '$apiBody')" (Diagnostics) }
           $pips = @(Select-String -Path "$env:FLOSERVER_DATA_DIR\web\apps\ci-api.log" -Pattern "--- FloServer: pip install" -SimpleMatch).Count
           if ($pips -ne 1) { Fail "Python project: pip ran $pips times" (Diagnostics) }
+          # An Apache project (D6): WordPress's .htaccess, PHP from the pools,
+          # Apache Lounge from the CDN behind nginx; asleep when idle.
+          Run "flo install apache" { & "$bin/flo.exe" install apache } | Out-Null
+          $wp = "$env:RUNNER_TEMP\ci-wp"
+          New-Item -ItemType Directory -Force $wp | Out-Null
+          Set-Content "$wp\floserver.json" '{ "web": "apache", "php": "8.5" }'
+          Set-Content "$wp\.htaccess" @'
+          RewriteEngine On
+          RewriteBase /
+          RewriteRule ^index\.php$ - [L]
+          RewriteCond %{REQUEST_FILENAME} !-f
+          RewriteCond %{REQUEST_FILENAME} !-d
+          RewriteRule . /index.php [L]
+          '@
+          Set-Content "$wp\index.php" '<?php echo "wp ", $_SERVER["REQUEST_URI"], " ", $_SERVER["SCRIPT_NAME"], " ", $_SERVER["PATH_INFO"] ?? "-";'
+          Set-Content "$wp\.env" 'SECRET=1'
+          Run "flo add wp" { & "$bin/flo.exe" add $wp } | Out-Null
+          Run "flo start wp" { & "$bin/flo.exe" start ci-wp } | Out-Null
+          $wpResolve = "ci-wp.localhost:18080:127.0.0.1"
+          $wpBody = (& curl.exe -sS --max-time 60 --resolve $wpResolve "http://ci-wp.localhost:18080/2026/10/hello/" 2>&1 | Out-String).Trim()
+          if ($wpBody -ne "wp /2026/10/hello/ /index.php -") {
+            $log = (Get-Content "$env:FLOSERVER_DATA_DIR\web\apps\_apache.log" -Tail 20 -ErrorAction SilentlyContinue) -join " / "
+            $err = (Select-String -Path "$env:FLOSERVER_DATA_DIR\web\logs\apache-error.log" -Pattern "sending env var|AH0" -ErrorAction SilentlyContinue | Select-Object -Last 40 | ForEach-Object { $_.Line -replace '^.*\] ', '' }) -join " / "
+            Fail "Apache project (got '$wpBody')" "$(Diagnostics) || runner log: $log || apache-error.log: $err"
+          }
+          $wpInfo = (& curl.exe -sS --max-time 30 --resolve $wpResolve "http://ci-wp.localhost:18080/index.php/a/b" 2>&1 | Out-String).Trim()
+          $wpEnv = (& curl.exe -s -o NUL -w "%{http_code}" --max-time 30 --resolve $wpResolve "http://ci-wp.localhost:18080/.env" 2>&1 | Out-String).Trim()
+          if ($wpInfo -ne "wp /index.php/a/b /index.php /a/b" -or $wpEnv -ne "404") {
+            Fail "Apache project: path info '$wpInfo', .env status $wpEnv" (Diagnostics)
+          }
+          $slept = $false
+          for ($i = 0; $i -lt 30 -and -not $slept; $i++) {
+            Start-Sleep -Seconds 1
+            $slept = @(Get-Process httpd -ErrorAction SilentlyContinue).Count -eq 0
+          }
+          if (-not $slept) { Fail "Apache didn't sleep" (Diagnostics) }
+          $wpBody = (& curl.exe -sS --max-time 60 --resolve $wpResolve "http://ci-wp.localhost:18080/again" 2>&1 | Out-String).Trim()
+          if ($wpBody -ne "wp /again /index.php -") { Fail "Apache project after sleeping (got '$wpBody')" (Diagnostics) }
+          # A folder with a space and non-ASCII letters, as C:\Users\Jörg Müller\... is:
+          # a PHP project on nginx and one on Apache.
+          $uni = "$env:RUNNER_TEMP\Jörg Müller"
+          New-Item -ItemType Directory -Force "$uni\ci-uni", "$uni\ci-wpu" | Out-Null
+          Set-Content "$uni\ci-uni\index.php" '<?php echo "uni ", basename(__DIR__);'
+          Set-Content "$uni\ci-uni\floserver.json" '{ "php": "8.5" }'
+          Copy-Item "$wp\.htaccess", "$wp\index.php", "$wp\floserver.json" "$uni\ci-wpu\"
+          Run "flo add uni" { & "$bin/flo.exe" add "$uni\ci-uni" } | Out-Null
+          Run "flo add wpu" { & "$bin/flo.exe" add "$uni\ci-wpu" } | Out-Null
+          Run "flo start uni" { & "$bin/flo.exe" start ci-uni } | Out-Null
+          Run "flo start wpu" { & "$bin/flo.exe" start ci-wpu } | Out-Null
+          $uniBody = (& curl.exe -sS --max-time 60 --resolve "ci-uni.localhost:18080:127.0.0.1" "http://ci-uni.localhost:18080/" 2>&1 | Out-String).Trim()
+          $wpuBody = (& curl.exe -sS --max-time 60 --resolve "ci-wpu.localhost:18080:127.0.0.1" "http://ci-wpu.localhost:18080/x/" 2>&1 | Out-String).Trim()
+          if ($uniBody -ne "uni ci-uni" -or $wpuBody -ne "wp /x/ /index.php -") {
+            Fail "non-ASCII folder: nginx PHP project got '$uniBody', Apache project got '$wpuBody'" (Diagnostics)
+          }
           Run "flo stop" { & "$bin/flo.exe" stop } | Out-Null
           Start-Sleep -Seconds 1
-          $left = @(Get-Process nginx, php-cgi, node, python -ErrorAction SilentlyContinue).Count
+          $left = @(Get-Process nginx, php-cgi, node, python, httpd -ErrorAction SilentlyContinue).Count
           if ($left -ne 0) { Fail "processes left after flo stop" (Diagnostics) }
-          "::notice title=live install::nginx, Composer, PHP and Node installed from the CDN; a project served, slept and woke for 20 requests at once; a second pool added with a reload; a Node project served, slept and woke; a Python project got its .venv and packages, served, slept and woke"
+          "::notice title=live install::nginx, Composer, PHP and Node installed from the CDN; a project served, slept and woke for 20 requests at once; a second pool added with a reload; a Node project served, slept and woke; a Python project got its .venv and packages, served, slept and woke; an Apache project served with .htaccess rewrites, slept and woke"
           exit 0
       # The build, for trying on a real PC: download it from the run's page.
       - name: Upload the Windows build
@@ -284,7 +339,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install tools
-        run: sudo apt-get update && sudo apt-get install -y ninja-build clang-18 libclang-rt-18-dev libssl-dev nginx-core php-cgi mariadb-server && (sudo systemctl stop mariadb || true)
+        run: sudo apt-get update && sudo apt-get install -y ninja-build clang-18 libclang-rt-18-dev libssl-dev nginx-core php-cgi apache2 mariadb-server && (sudo systemctl stop mariadb apache2 || true)
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18 -DFLOSERVER_SANITIZE=ON
       - name: Build
@@ -300,7 +355,7 @@ jobs:
         if: failure()
         shell: bash
         run: |
-          grep -E 'TEST CASE|ERROR|FATAL|values:|logged:|runtime error|Sanitizer|SUMMARY' test.log | head -40 |
+          grep -E 'TEST CASE|ERROR|FATAL|values:|logged:|runtime error|Sanitizer|SUMMARY|AH[0-9]{5}|--- FloServer' test.log | head -60 |
             while IFS= read -r line; do echo "::error title=floserver_tests::${line}"; done
 
   linux-release:
@@ -310,7 +365,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install tools
-        run: sudo apt-get update && sudo apt-get install -y ninja-build libssl-dev nginx-core php-cgi mariadb-server && (sudo systemctl stop mariadb || true)
+        run: sudo apt-get update && sudo apt-get install -y ninja-build libssl-dev nginx-core php-cgi apache2 mariadb-server && (sudo systemctl stop mariadb apache2 || true)
       # Optimised builds turn on warnings the debug builds don't (FORTIFY).
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -327,7 +382,7 @@ jobs:
         if: failure()
         shell: bash
         run: |
-          grep -E 'TEST CASE|ERROR|FATAL|values:|logged:|runtime error|Sanitizer|SUMMARY' test.log | head -40 |
+          grep -E 'TEST CASE|ERROR|FATAL|values:|logged:|runtime error|Sanitizer|SUMMARY|AH[0-9]{5}|--- FloServer' test.log | head -60 |
             while IFS= read -r line; do echo "::error title=floserver_tests::${line}"; done
 
   clang-tidy:

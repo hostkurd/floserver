@@ -133,17 +133,20 @@ WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
             continue;
         }
 
-        // Not served by this build yet: Apache projects (D6).
-        if (pc.web == WebServer::Apache) {
+        // Apache projects (D6) are PHP projects served by the shared Apache:
+        // the same pools, Apache for .htaccess. Apache reads [ ] * ? in a
+        // folder path as a pattern, and | can't go into its regex.
+        const bool apache = pc.web == WebServer::Apache;
+        if (apache && path_to_utf8(site.doc_root).find_first_of("[]*?|") != std::string::npos) {
             site.state = SiteState::Problem;
-            site.problem = "Apache projects can't run in this FloServer build yet";
+            site.problem = "the folder path has one of [ ] * ? | in it, which Apache can't use; rename the folder";
             plan.sites.push_back(std::move(site));
             continue;
         }
         // Python or Node without PHP: the project's own server, forwarded to
         // (D11, D17). Python serves when both are named (a Django app with a
         // Vite front end); with PHP, they're only there for their tools.
-        if ((pc.node || pc.python) && !pc.php) {
+        if ((pc.node || pc.python) && !pc.php && !apache) {
             const AppKind kind = pc.python ? AppKind::Python : AppKind::Node;
             const std::string runtime_name = pc.python ? "python" : "node";
             const std::string wanted = pc.python ? *pc.python : *pc.node;
@@ -167,7 +170,7 @@ WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
             }
             plan.apps.push_back({project.name, kind, project.dir, runtime->version, runtime->dir, pc.command,
                                  project.keep_running, 0, tools != nullptr ? tools->dir : fs::path(),
-                                 tools != nullptr ? tools->version : std::string()});
+                                 tools != nullptr ? tools->version : std::string(), {}});
             site.app = plan.apps.size() - 1;
             site.state = SiteState::Ready;
             plan.sites.push_back(std::move(site));
@@ -184,6 +187,10 @@ WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
         }
         if (pc.python && best_installed(installed, "python", *pc.python) == nullptr) {
             site.missing.push_back("python " + *pc.python);
+        }
+        const InstalledRuntime* apache_runtime = apache ? best_installed(installed, "apache", "") : nullptr;
+        if (apache && apache_runtime == nullptr) {
+            site.missing.emplace_back("apache");
         }
         if (pc.database && best_installed(installed, pc.database->family, pc.database->version) == nullptr) {
             site.missing.push_back(pc.database->family + " " + pc.database->version);
@@ -207,6 +214,11 @@ WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
         it->keep_running = it->keep_running || project.keep_running;
         site.pool = static_cast<std::size_t>(it - plan.pools.begin());
         site.state = SiteState::Ready;
+        if (apache) {
+            site.apache = true;
+            plan.apache_dir = apache_runtime->dir;
+            plan.apache_version = apache_runtime->version;
+        }
         plan.sites.push_back(std::move(site));
     }
     return plan;

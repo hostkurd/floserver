@@ -43,6 +43,9 @@
 
 namespace floserver::core {
 
+// The shared Apache's name among the apps; project names can't have '_'.
+inline constexpr std::string_view kApacheAppName = "_apache";
+
 struct WebServiceConfig {
     std::filesystem::path data_dir;
     // Fixed web ports (tests and dev copies, FLOSERVER_WEB_PORTS); else Q4.
@@ -92,7 +95,8 @@ private:
         std::string address;
         std::optional<std::string> pool_key;
         bool app = false;                // its own server, in apps_ by the same name
-        std::string app_kind;            // "node" or "python"
+        std::string app_kind;            // "node", "python" or "apache"
+        std::string app_name;            // its runner in apps_: the project's name, or the shared Apache's
         std::string state_override;      // "needs_download" / "problem" set here
         std::vector<std::string> missing;
         std::string problem;

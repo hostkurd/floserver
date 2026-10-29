@@ -92,8 +92,9 @@ public:
         // soon after use, so an idle app can sleep), and the Connection
         // header passed on only for WebSocket upgrades.
         bool any_app = false;
+        std::set<Port> app_ports;  // Apache projects share one
         for (const NginxSite& site : spec_.sites) {
-            if (site.app_port) {
+            if (site.app_port && app_ports.insert(*site.app_port).second) {
                 any_app = true;
                 out_ << "\n    upstream " << app_upstream_name(*site.app_port) << " {\n"
                      << "        server 127.0.0.1:" << *site.app_port << " max_fails=0;\n"
@@ -220,8 +221,16 @@ private:
                  // The first request may wait for npm install (up to 10
                  // minutes) and the start.
                  << "            proxy_read_timeout 900s;\n"
-                 << "            proxy_send_timeout 900s;\n"
-                 << "        }\n"
+                 << "            proxy_send_timeout 900s;\n";
+            // Apache projects: every request counts for their PHP pool's idle time.
+            if (!site.php_access_log.empty()) {
+                const auto idle = path(site.php_access_log);
+                if (!idle) {
+                    return false;
+                }
+                out_ << "            access_log " << *idle << " floserver_idle;\n";
+            }
+            out_ << "        }\n"
                  << "    }\n";
             return true;
         }

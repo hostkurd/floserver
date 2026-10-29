@@ -1,5 +1,6 @@
 #include "floserver/core/web_service.h"
 
+#include "floserver/core/apache_config.h"
 #include "floserver/core/nginx_config.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/process.h"
@@ -300,6 +301,50 @@ void WebService::reload_locked() {
         error_ = "there's no free port for PHP from 9100 upwards";
         return;
     }
+    // HTTPS once the local CA exists and isn't known to be untrusted.
+    const auto ca = certs_.load_ca(error);
+    const bool tls = ca.has_value() && ca_trust_state(ca->der) != TrustState::NotTrusted;
+
+    // The shared Apache (D6), for the projects that ask for it: one more
+    // app, under a name no project can have, PHP from the same pools.
+    std::string apache_error;
+    {
+        ApacheSpec as;
+        bool keep = false;
+        for (const PlannedSite& p : plan.sites) {
+            if (p.state == SiteState::Ready && p.apache) {
+                as.sites.push_back({p.name, p.doc_root, plan.pools.at(*p.pool).ports, tls});
+                const Project* project = find_project(*app, p.name);
+                keep = keep || (project != nullptr && project->keep_running);
+            }
+        }
+        if (!as.sites.empty()) {
+            as.server_root = apache_server_root(plan.apache_dir);
+            as.modules_dir = as.server_root / "modules";
+            as.work_dir = work_;
+            if (get_env("FLOSERVER_APACHE_TRACE") == "1") {
+                as.log_level = "warn proxy_fcgi:trace8";
+            }
+#ifndef _WIN32
+            as.posix = true;
+#endif
+            auto text = make_apache_config(as, apache_error);
+            if (text) {
+                if (running_as_root()) {
+                    *text += "User #65534\nGroup #65534\n";  // Apache won't serve as root (containers)
+                }
+                AppSpec spec;
+                spec.name = std::string(kApacheAppName);
+                spec.kind = AppKind::Apache;
+                spec.dir = work_ / "apache";
+                spec.version = plan.apache_version;
+                spec.runtime_dir = plan.apache_dir;
+                spec.keep_running = keep;
+                spec.server_config = std::move(*text);
+                plan.apps.push_back(std::move(spec));
+            }
+        }
+    }
     std::map<std::string, Port> previous_apps;
     for (const auto& [name, runner] : apps_) {
         previous_apps[name] = runner->listener().port();
@@ -366,8 +411,7 @@ void WebService::reload_locked() {
     };
 
     std::vector<NginxSite> serve;
-    const auto ca = certs_.load_ca(error);
-    tls_ = ca.has_value() && ca_trust_state(ca->der) != TrustState::NotTrusted;
+    tls_ = tls;
     for (const PlannedSite& p : plan.sites) {
         if (p.state != SiteState::Ready) {
             continue;
@@ -388,6 +432,41 @@ void WebService::reload_locked() {
                 error_ = "no certificate for " + p.name + ": " + cert_error;
             }
         }
+        if (p.apache) {
+            const auto spec = std::find_if(plan.apps.begin(), plan.apps.end(),
+                                           [](const AppSpec& a) { return a.name == kApacheAppName; });
+            const PhpPool& pool = plan.pools.at(*p.pool);
+            std::string why = apache_error;
+            if (why.empty() && spec != plan.apps.end()) {
+                if (const auto e = app_errors.find(spec->name); e != app_errors.end()) {
+                    why = e->second;
+                }
+            }
+            if (const auto e = pool_errors.find(pool.key); why.empty() && e != pool_errors.end()) {
+                why = e->second;
+            }
+            if (!why.empty() || spec == plan.apps.end()) {
+                site.state_override = "problem";
+                site.problem = why.empty() ? std::string("Apache can't be set up") : why;
+                sites[p.name] = site;
+                continue;
+            }
+            // nginx forwards everything to Apache and logs each request to the
+            // pool's idle log, so the pool doesn't sleep while Apache uses it.
+            NginxSite ns;
+            ns.name = p.name;
+            ns.doc_root = p.doc_root;
+            ns.app_port = spec->port;
+            ns.php_access_log = pools.at(pool.key)->access_log();
+            ns.tls = site_tls;
+            site.app = true;
+            site.app_kind = "apache";
+            site.app_name = spec->name;
+            site.address = ns.tls ? "https" : "http";
+            serve.push_back(std::move(ns));
+            sites[p.name] = site;
+            continue;
+        }
         if (p.app) {
             const AppSpec& spec = plan.apps.at(*p.app);
             if (const auto e = app_errors.find(spec.name); e != app_errors.end()) {
@@ -403,6 +482,7 @@ void WebService::reload_locked() {
             ns.tls = site_tls;
             site.app = true;
             site.app_kind = spec.kind == AppKind::Python ? "python" : "node";
+            site.app_name = spec.name;
             site.address = ns.tls ? "https" : "http";
             serve.push_back(std::move(ns));
             sites[p.name] = site;
@@ -666,10 +746,10 @@ json WebService::status_locked() const {
         }
         if (s.app) {
             j["app"] = s.app_kind;
-            if (apps.contains(name)) {
-                j["run"] = apps[name]["state"];
-                if (apps[name].contains("error")) {
-                    j["error"] = apps[name]["error"];
+            if (apps.contains(s.app_name)) {
+                j["run"] = apps[s.app_name]["state"];
+                if (apps[s.app_name].contains("error")) {
+                    j["error"] = apps[s.app_name]["error"];
                 }
             } else {
                 j["run"] = "sleeping";

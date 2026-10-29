@@ -43,6 +43,7 @@ struct PlannedSite {
     SiteState state = SiteState::Off;
     std::optional<std::size_t> pool;    // index into WebPlan::pools; set when Ready (PHP)
     std::optional<std::size_t> app;     // index into WebPlan::apps; set when Ready (own server)
+    bool apache = false;                // served by the shared Apache (D6), PHP from `pool`
     std::vector<std::string> missing;   // "php 8.2", "mariadb 11.4"
     std::string problem;                // plain English, when state is Problem
     std::optional<DatabaseSpec> database;
@@ -61,7 +62,7 @@ struct PhpPool {
     std::vector<Port> ports;
 };
 
-enum class AppKind : std::uint8_t { Node, Python };
+enum class AppKind : std::uint8_t { Node, Python, Apache };
 
 // A project that runs its own server, which nginx forwards to: a Python
 // project (one that asks for Python and not PHP, D17) or a Node project (one
@@ -79,12 +80,18 @@ struct AppSpec {
     // build tools), as "24.22.1" in the status.
     std::filesystem::path node_dir;
     std::string node_version;
+    // The shared Apache: its config, with kApachePortPlaceholder for the
+    // port it's started on (apache_config.h); written to dir/httpd.conf.
+    std::string server_config;
 };
 
 struct WebPlan {
     std::vector<PlannedSite> sites;  // same order as the project list
     std::vector<PhpPool> pools;      // in order of first use
     std::vector<AppSpec> apps;       // in list order
+    // The newest installed Apache, when a project needs it.
+    std::filesystem::path apache_dir;
+    std::string apache_version;
 };
 
 // The floserver.json result for a project. A project without the file reads
