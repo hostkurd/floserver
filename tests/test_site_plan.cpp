@@ -115,11 +115,74 @@ TEST_CASE("missing databases, bad files and not-yet-supported projects are repor
     CHECK(plan.sites[1].state == SiteState::Problem);
     CHECK(plan.sites[1].problem.starts_with("php "));  // the file reader adds "floserver.json: "
     CHECK(plan.sites[2].state == SiteState::Problem);
-    CHECK(plan.sites[3].state == SiteState::Problem);
+    CHECK(plan.sites[3].state == SiteState::Ready);  // a Node app (D11)
     CHECK(plan.sites[4].state == SiteState::NeedsDownload);
     CHECK(plan.sites[4].missing == std::vector<std::string>{"node 22"});
     CHECK(plan.sites[4].database == DatabaseSpec{"mariadb", "11.4"});
     CHECK(plan.pools.empty());
+}
+
+TEST_CASE("Node projects without PHP run their own server; with PHP, Node is only a requirement") {
+    AppConfig config;
+    config.projects = {project("web", true, true), project("old"), project("mixed"), project("api")};
+    auto plan = plan_sites(config,
+                           reader({{"web", R"({"node": "24", "command": "node server.js"})"},
+                                   {"old", R"({"node": "18"})"},
+                                   {"mixed", R"({"php": "8.5", "node": "24"})"},
+                                   {"api", R"({"node": "24", "database": "mariadb-11.8"})"}}),
+                           kInstalled, std::nullopt);
+    REQUIRE(plan.apps.size() == 1);
+    const AppSpec& web = plan.apps[0];
+    CHECK(web.name == "web");
+    CHECK(web.version == "24.22.1");
+    CHECK(web.runtime_dir == kBase / "runtimes" / "node" / "24.22.1");
+    CHECK(web.dir == kBase / "projects" / "web");
+    CHECK(web.command == "node server.js");
+    CHECK(web.keep_running);
+    CHECK(plan.sites[0].state == SiteState::Ready);
+    CHECK(plan.sites[0].app == std::optional<std::size_t>(0));
+    CHECK_FALSE(plan.sites[0].pool);
+    CHECK(plan.sites[1].state == SiteState::NeedsDownload);
+    CHECK(plan.sites[1].missing == std::vector<std::string>{"node 18"});
+    CHECK(plan.sites[2].pool.has_value());  // PHP serves it
+    CHECK_FALSE(plan.sites[2].app);
+    CHECK(plan.sites[3].missing == std::vector<std::string>{"mariadb 11.8"});
+
+    // Ports from 9300, kept by name, never one a pool or another app has.
+    REQUIRE(assign_pool_ports(plan, {}, [](Port) { return true; }));
+    REQUIRE(assign_app_ports(plan, {}, [](Port p) { return p != 9300; }));
+    CHECK(plan.apps[0].port == 9301);
+    REQUIRE(assign_app_ports(plan, {{"web", 9310}, {"gone", 9302}}, [](Port) { return true; }));
+    CHECK(plan.apps[0].port == 9310);
+    plan.pools[0].ports = {9300, 9301, 9302, 9303};
+    REQUIRE(assign_app_ports(plan, {{"web", 9301}}, [](Port) { return true; }));
+    CHECK(plan.apps[0].port == 9304);
+}
+
+TEST_CASE("the nginx config forwards a Node project to its port, WebSockets too") {
+    NginxSpec spec;
+    spec.nginx_dir = kBase / "runtimes" / "nginx" / "1.30.6";
+    spec.work_dir = kBase / "web";
+    spec.ports = {80, 443, false};
+    NginxSite app;
+    app.name = "web";
+    app.doc_root = kBase / "projects" / "web";
+    app.app_port = 9300;
+    spec.sites = {app};
+    std::string error;
+    const auto text = make_nginx_config(spec, error);
+    REQUIRE(text);
+    CHECK(text->find("upstream floserver_app_9300 {\n        server 127.0.0.1:9300 max_fails=0;") != std::string::npos);
+    CHECK(text->find("map $http_upgrade $floserver_connection") != std::string::npos);
+    CHECK(text->find("proxy_pass http://floserver_app_9300;") != std::string::npos);
+    CHECK(text->find("proxy_set_header Connection $floserver_connection;") != std::string::npos);
+    CHECK(text->find("proxy_set_header Host $http_host;") != std::string::npos);  // keeps :8080
+    CHECK(text->find("proxy_set_header X-Forwarded-Port $server_port;") != std::string::npos);
+    CHECK(text->find("server_name web.localhost;") != std::string::npos);
+    // The app serves everything itself: no document root, no dot-file rule.
+    CHECK(text->find("root \"") == std::string::npos);
+    CHECK(text->find("location ~* /\\.") == std::string::npos);
+    CHECK(text->find("fastcgi_pass") == std::string::npos);
 }
 
 TEST_CASE("keep running on any project keeps its shared pool awake") {
@@ -241,8 +304,8 @@ TEST_CASE("the nginx config serves PHP and static sites on loopback") {
     spec.ports = {80, 443, false};
     spec.ipv6 = true;
     spec.sites = {{"shop", kBase / "projects" / "shop" / "public", {9101, 9102}, kBase / "web" / "logs" / "php-8.4.27.log",
-                   NginxTls{kBase / "certs" / "shop.pem", kBase / "certs" / "shop.key"}},
-                  {"docs", kBase / "projects" / "docs", {}, {}, std::nullopt}};
+                   NginxTls{kBase / "certs" / "shop.pem", kBase / "certs" / "shop.key"}, std::nullopt},
+                  {"docs", kBase / "projects" / "docs", {}, {}, std::nullopt, std::nullopt}};
     std::string error;
     const auto text = make_nginx_config(spec, error);
     REQUIRE(text);

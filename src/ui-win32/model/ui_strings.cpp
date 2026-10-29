@@ -37,6 +37,8 @@ constexpr std::array kTable{
     Entry{Str::StateProblem, "Problem", "مشكلة", "کێشە"},
     Entry{Str::PhpCantStart, "PHP can't start", "تعذّر تشغيل " FLO_LRI "PHP" FLO_PDI,
           FLO_LRI "PHP" FLO_PDI " دەست پێ ناکات"},
+    Entry{Str::ServerCantStart, "The project's server can't start", "تعذّر تشغيل خادم المشروع",
+          "سێرڤەری پڕۆژەکە دەست پێ ناکات"},
     Entry{Str::Needs, "Needs {0}", "يحتاج {0}", "پێویستی بە {0} هەیە"},
     Entry{Str::Connecting, "Connecting to FloServer…", "جارٍ الاتصال بـ " FLO_LRI "FloServer" FLO_PDI "…",
           "پەیوەندی بە " FLO_LRI "FloServer" FLO_PDI " دەکرێت…"},

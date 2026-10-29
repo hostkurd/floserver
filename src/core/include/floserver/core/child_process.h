@@ -21,6 +21,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -63,14 +64,20 @@ private:
 // idle, even if no request has finished lately.
 [[nodiscard]] bool has_open_connections(Port port);
 
-// A TCP connection to 127.0.0.1:port, or nothing. The caller closes it
-// with close_socket(). Only for FloServer's own servers.
-[[nodiscard]] std::optional<std::uintptr_t> connect_loopback(Port port);
+// A TCP connection to 127.0.0.1:port ([::1]:port with `ipv6`), or nothing.
+// The caller closes it with close_socket(). Only for FloServer's own
+// servers and the projects' dev servers.
+[[nodiscard]] std::optional<std::uintptr_t> connect_loopback(Port port, bool ipv6 = false);
 void close_socket(std::uintptr_t socket);
 
 // Copies bytes both ways between two connected sockets until either side
 // ends, then closes both. `activity` is called whenever data passes.
 void relay_sockets(std::uintptr_t a, std::uintptr_t b, const std::function<void()>& activity);
+
+// Sends `data` (a whole HTTP response) on a connection, reads what the other
+// side still sends for a moment so it sees the answer and not a reset, then
+// closes it. For telling the browser why a project's server isn't running.
+void answer_and_close(std::uintptr_t socket, std::string_view data);
 
 // Which of `listeners` have a connection waiting, waiting at most `limit`.
 // Indexes into `listeners`; empty when none did in time.
@@ -80,6 +87,9 @@ void relay_sockets(std::uintptr_t a, std::uintptr_t b, const std::function<void(
 struct ChildOptions {
     std::filesystem::path program;  // absolute
     std::vector<std::string> args;
+    // Windows only, instead of `args`: the rest of the command line, as is.
+    // cmd.exe /s /c "..." reads quotes its own way, not as programs do.
+    std::string windows_raw_args;
     std::filesystem::path working_dir;
     // Added to (or replacing) this process's environment.
     std::vector<std::pair<std::string, std::string>> env;

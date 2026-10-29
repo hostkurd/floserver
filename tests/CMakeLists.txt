@@ -1,4 +1,5 @@
 add_executable(floserver_tests
+    test_app_runner.cpp
     test_builtin.cpp
     test_certificates.cpp
     test_downloader.cpp

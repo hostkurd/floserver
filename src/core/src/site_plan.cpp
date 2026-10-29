@@ -133,17 +133,32 @@ WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
             continue;
         }
 
-        // Not served by this build yet: Apache projects (D6) and Node-only
-        // projects, which nginx will proxy to their dev server (D11).
+        // Not served by this build yet: Apache projects (D6).
         if (pc.web == WebServer::Apache) {
             site.state = SiteState::Problem;
             site.problem = "Apache projects can't run in this FloServer build yet";
             plan.sites.push_back(std::move(site));
             continue;
         }
+        // Node without PHP: the project's own server, forwarded to (D11).
+        // With PHP, Node is only there for its build tools.
         if (pc.node && !pc.php) {
-            site.state = SiteState::Problem;
-            site.problem = "Node projects can't run in this FloServer build yet";
+            const InstalledRuntime* node = best_installed(installed, "node", *pc.node);
+            if (node == nullptr) {
+                site.missing.push_back("node " + *pc.node);
+            }
+            if (pc.database && best_installed(installed, pc.database->family, pc.database->version) == nullptr) {
+                site.missing.push_back(pc.database->family + " " + pc.database->version);
+            }
+            if (!site.missing.empty() || node == nullptr) {
+                site.state = SiteState::NeedsDownload;
+                plan.sites.push_back(std::move(site));
+                continue;
+            }
+            plan.apps.push_back({project.name, AppKind::Node, project.dir, node->version, node->dir, pc.command,
+                                 project.keep_running, 0});
+            site.app = plan.apps.size() - 1;
+            site.state = SiteState::Ready;
             plan.sites.push_back(std::move(site));
             continue;
         }
@@ -209,6 +224,37 @@ bool assign_pool_ports(WebPlan& plan, const std::map<std::string, std::vector<Po
                 return false;
             }
             pool.ports.push_back(*port);
+            used.insert(*port);
+        }
+    }
+    return true;
+}
+
+bool assign_app_ports(WebPlan& plan, const std::map<std::string, Port>& previous, const PortProbe& probe) {
+    std::set<Port> used;
+    for (const PhpPool& pool : plan.pools) {
+        used.insert(pool.ports.begin(), pool.ports.end());
+    }
+    for (AppSpec& app : plan.apps) {
+        app.port = 0;
+        const auto it = previous.find(app.name);
+        if (it != previous.end() && !used.contains(it->second)) {
+            app.port = it->second;
+            used.insert(it->second);
+        }
+    }
+    // As with pools: a port an app held before isn't handed to another one
+    // in the same reload.
+    for (const auto& [name, port] : previous) {
+        used.insert(port);
+    }
+    for (AppSpec& app : plan.apps) {
+        if (app.port == 0) {
+            const auto port = pick_port_from(kFirstAppPort, used, probe);
+            if (!port) {
+                return false;
+            }
+            app.port = *port;
             used.insert(*port);
         }
     }

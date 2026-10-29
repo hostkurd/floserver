@@ -340,7 +340,15 @@ std::string state_line(const nlohmann::json& p) {
     const std::string missing = missing_list(p);
     if (state == "ready") {
         const std::string run = text_of(p, "run");
-        return run == "running" ? "on, running" : run == "failed" ? "on, PHP can't start" : run.empty() ? "on" : "on, asleep";
+        if (run == "failed") {
+            // One line of it, printable: the rest is in the app's log.
+            std::string why = text_of(p, "error");
+            why = why.substr(0, why.find('\n'));
+            std::erase_if(why, [](char c) { return static_cast<unsigned char>(c) < 0x20 || c == 0x7F; });
+            return text_of(p, "node").empty() ? "on, PHP can't start"
+                                              : "on, its server can't start" + (why.empty() ? "" : ": " + why);
+        }
+        return run == "running" ? "on, running" : run == "starting" ? "on, starting" : run.empty() ? "on" : "on, asleep";
     }
     if (state == "off") {
         return missing.empty() ? "off" : "off (needs " + missing + ")";
@@ -367,8 +375,9 @@ int projects() {
     }
     for (const auto& p : list) {
         const std::string php = text_of(p, "php");
-        std::cout << std::left << std::setw(22) << text_of(p, "name") << std::setw(12)
-                  << (php.empty() ? std::string("-") : "php " + php)
+        const std::string node = text_of(p, "node");
+        std::cout << std::left << std::setw(22) << text_of(p, "name") << std::setw(14)
+                  << (!php.empty() ? "php " + php : !node.empty() ? "node " + node : std::string("-"))
                   << (p.value("keep_running", false) ? "keep running  " : "") << state_line(p) << "\n";
         if (!text_of(p, "address").empty()) {
             std::cout << "  " << text_of(p, "address") << "\n";

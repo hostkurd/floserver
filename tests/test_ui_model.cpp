@@ -110,6 +110,20 @@ TEST_CASE("rows follow the service's state and run fields") {
     CHECK(rows[5].address.empty());
 }
 
+TEST_CASE("Node projects show their version and a server that can't start") {
+    const auto rows = rows_from_list(
+        json{{"projects", json::array({{{"name", "web"}, {"on", true}, {"state", "ready"}, {"run", "starting"},
+                                        {"address", "http://web.localhost"}, {"node", "24.22.1"}},
+                                       {{"name", "bad"}, {"on", true}, {"state", "ready"}, {"run", "failed"},
+                                        {"node", "24.22.1"}, {"error", "npm run dev ended (exit 1)"}}})}},
+        Lang::En);
+    REQUIRE(rows.size() == 2);
+    CHECK(rows[0].state == RowState::On);  // starting shows as On
+    CHECK(rows[0].chips == std::vector<std::string>{"Node 24.22.1"});
+    CHECK(rows[1].state == RowState::Problem);
+    CHECK(rows[1].detail == "The project's server can't start");
+}
+
 TEST_CASE("an On project that isn't served yet shows its folder") {
     const auto rows = rows_from_list(one({{"name", "new"}, {"on", true}, {"state", "ready"}, {"path", "D:/new"}}),
                                      Lang::Ar);

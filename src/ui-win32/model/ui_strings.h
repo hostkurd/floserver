@@ -39,6 +39,7 @@ enum class Str : std::uint8_t {
     StateNeedsDownload,
     StateProblem,
     PhpCantStart,
+    ServerCantStart,
     Needs,             // {0}: what's missing, "php 8.2, mariadb 11.4"
     Connecting,
     StartingService,

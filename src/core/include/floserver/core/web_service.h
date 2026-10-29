@@ -1,7 +1,8 @@
 #pragma once
 
-// Running the projects (D6, D7, D10, D11): the one shared nginx and the PHP
-// pools, kept in line with the project list.
+// Running the projects (D6, D7, D10, D11): the one shared nginx, the PHP
+// pools and the projects' own servers (Node), kept in line with the project
+// list.
 //
 // reload() reads config.json, every project's floserver.json and the
 // installed runtimes, plans the sites (site_plan.h), opens or closes pools,
@@ -12,12 +13,14 @@
 // picked up too.
 //
 // A supervisor thread wakes a sleeping pool when a connection waits on its
-// socket, puts idle pools to sleep, and restarts an nginx that ended.
+// socket, takes every connection to an app's port (app_runner.h), puts idle
+// pools and apps to sleep, and restarts an nginx that ended.
 //
 // HTTPS: sites get certificates when the local CA exists and isn't known to
 // be untrusted (on Windows, after `flo trust`); before that they're served
 // on plain http, so the browser shows no warnings in the meantime.
 
+#include "floserver/core/app_runner.h"
 #include "floserver/core/certificates.h"
 #include "floserver/core/child_process.h"
 #include "floserver/core/php_pool.h"
@@ -77,8 +80,10 @@ public:
     //    "pools": [{"key", "version", "port", "state": "sleeping"|"running"|"failed",
     //   {"key", "version", "ports", "state", "pid"?, "pids"? (every worker), "sites",
     //    "keep_running", "idle_s"?, "error"?}],
-    //    "sites": {"<name>": {"address", "pool"?, "run": "sleeping"|"running"|"failed",
-    //              "state"?, "missing"?, "problem"?}},
+    //    "apps": {"<name>": {"state", "port", "internal_port"?, "pid"?, "connections", "command"?,
+    //             "log", "error"?}},
+    //    "sites": {"<name>": {"address", "pool"? | "app"?, "run": "sleeping"|"starting"|"running"|"failed",
+    //              "state"?, "missing"?, "problem"?, "error"?}},
     //    "error"?: "..."}
     [[nodiscard]] nlohmann::json status() const;
 
@@ -86,12 +91,15 @@ private:
     struct Site {
         std::string address;
         std::optional<std::string> pool_key;
+        bool app = false;                // its own server, in apps_ by the same name
         std::string state_override;      // "needs_download" / "problem" set here
         std::vector<std::string> missing;
         std::string problem;
     };
 
     void reload_locked();
+    // The apps a reload settles on; those it drops are stopped.
+    void replace_apps_locked(std::map<std::string, std::shared_ptr<AppRunner>> apps);
     void stop_locked();
     void supervise();
     [[nodiscard]] bool start_nginx_locked(std::string& error);
@@ -110,6 +118,8 @@ private:
     // By key. Shared with the supervisor while it waits on their sockets, so
     // a pool dropped by a reload ends once nothing uses it any more.
     std::map<std::string, std::shared_ptr<PhpPoolRunner>> pools_;
+    std::map<std::string, std::shared_ptr<AppRunner>> apps_;        // by project name
+    std::shared_ptr<PortSet> app_internal_ports_ = std::make_shared<PortSet>();
     std::map<std::string, Site> sites_;                             // served or held back, by name
     std::unique_ptr<ChildProcess> nginx_;
     std::filesystem::path nginx_dir_;

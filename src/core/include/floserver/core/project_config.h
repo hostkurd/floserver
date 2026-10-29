@@ -8,7 +8,8 @@
 //     "database": "mariadb-11.4",
 //     "web": "nginx",
 //     "root": "public",
-//     "extensions": ["intl", "gd"]
+//     "extensions": ["intl", "gd"],
+//     "command": "npm run serve -- --port {port}"
 //   }
 //
 // Every key is optional. Unknown keys are kept as warnings, not errors, so a
@@ -38,6 +39,10 @@ struct ProjectConfig {
     WebServer web = WebServer::Nginx;
     std::string root = ".";                // document root, relative to the project
     std::vector<std::string> extensions;   // PHP extensions to enable
+    // How a Node project starts its own server (D11), instead of the
+    // package.json script FloServer would pick; {port} is replaced by the
+    // port to listen on, which is also in the PORT variable.
+    std::optional<std::string> command;
 
     bool operator==(const ProjectConfig&) const = default;
 };

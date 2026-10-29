@@ -20,6 +20,9 @@ bool is_unsafe(char c) {
 // The upstream for a pool, named by its first port (unique among pools).
 std::string upstream_name(const std::vector<Port>& ports) { return "floserver_php_" + std::to_string(ports.front()); }
 
+// The upstream for a project's own server.
+std::string app_upstream_name(Port port) { return "floserver_app_" + std::to_string(port); }
+
 std::string port_suffix(Port port, Port usual) {
     return port == usual ? std::string() : ":" + std::to_string(port);
 }
@@ -84,6 +87,26 @@ public:
                 out_ << "        server 127.0.0.1:" << p << " max_fails=0;\n";
             }
             out_ << "    }\n";
+        }
+        // Projects with their own server: kept-alive connections (closed
+        // soon after use, so an idle app can sleep), and the Connection
+        // header passed on only for WebSocket upgrades.
+        bool any_app = false;
+        for (const NginxSite& site : spec_.sites) {
+            if (site.app_port) {
+                any_app = true;
+                out_ << "\n    upstream " << app_upstream_name(*site.app_port) << " {\n"
+                     << "        server 127.0.0.1:" << *site.app_port << " max_fails=0;\n"
+                     << "        keepalive 8;\n"
+                     << "        keepalive_timeout 10s;\n"
+                     << "    }\n";
+            }
+        }
+        if (any_app) {
+            out_ << "\n    map $http_upgrade $floserver_connection {\n"
+                 << "        default upgrade;\n"
+                 << "        \"\" \"\";\n"
+                 << "    }\n";
         }
         out_ << "\n    # Addresses that aren't a project.\n"
              << "    server {\n";
@@ -176,8 +199,33 @@ private:
         } else {
             listen(spec_.ports.http, "");
         }
-        out_ << "        server_name " << host << ";\n"
-             << "        root " << *root << ";\n";
+        out_ << "        server_name " << host << ";\n";
+        if (site.app_port) {
+            // The app decides what it serves, dot paths included (Vite
+            // serves /node_modules/.vite/).
+            out_ << "        location / {\n"
+                 << "            proxy_pass http://" << app_upstream_name(*site.app_port) << ";\n"
+                 << "            proxy_http_version 1.1;\n"
+                 // With the port: the app builds absolute links from it,
+                 // and the web ports may be 8080/8443 (Q4).
+                 << "            proxy_set_header Host $http_host;\n"
+                 << "            proxy_set_header Upgrade $http_upgrade;\n"
+                 << "            proxy_set_header Connection $floserver_connection;\n"
+                 << "            proxy_set_header X-Forwarded-For $remote_addr;\n"
+                 << "            proxy_set_header X-Forwarded-Proto $scheme;\n"
+                 << "            proxy_set_header X-Forwarded-Host $http_host;\n"
+                 << "            proxy_set_header X-Forwarded-Port $server_port;\n"
+                 // Server-sent events and streamed pages arrive as they're sent.
+                 << "            proxy_buffering off;\n"
+                 // The first request may wait for npm install (up to 10
+                 // minutes) and the start.
+                 << "            proxy_read_timeout 900s;\n"
+                 << "            proxy_send_timeout 900s;\n"
+                 << "        }\n"
+                 << "    }\n";
+            return true;
+        }
+        out_ << "        root " << *root << ";\n";
         // Hidden files and folders (.env, .git) are never served. Locations
         // are caseless (~*): on a disk that ignores case, /x.PHP is x.php and
         // must run, never be sent as source.

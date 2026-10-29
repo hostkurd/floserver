@@ -151,11 +151,12 @@ std::optional<std::uintptr_t> LoopbackListener::accept_connection() const {
     return static_cast<std::uintptr_t>(c);
 }
 
-std::optional<std::uintptr_t> connect_loopback(Port port) {
+std::optional<std::uintptr_t> connect_loopback(Port port, bool ipv6) {
     if (!winsock_started()) {
         return std::nullopt;
     }
-    const SOCKET s = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, nullptr, 0, WSA_FLAG_NO_HANDLE_INHERIT);
+    const SOCKET s = WSASocketW(ipv6 ? AF_INET6 : AF_INET, SOCK_STREAM, IPPROTO_TCP, nullptr, 0,
+                                WSA_FLAG_NO_HANDLE_INHERIT);
     if (s == INVALID_SOCKET) {
         return std::nullopt;
     }
@@ -163,7 +164,13 @@ std::optional<std::uintptr_t> connect_loopback(Port port) {
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (connect(s, reinterpret_cast<const sockaddr*>(&addr), static_cast<int>(sizeof addr)) != 0) {
+    sockaddr_in6 addr6{};
+    addr6.sin6_family = AF_INET6;
+    addr6.sin6_port = htons(port);
+    addr6.sin6_addr = in6addr_loopback;
+    const int failed = ipv6 ? connect(s, reinterpret_cast<const sockaddr*>(&addr6), static_cast<int>(sizeof addr6))
+                            : connect(s, reinterpret_cast<const sockaddr*>(&addr), static_cast<int>(sizeof addr));
+    if (failed != 0) {
         closesocket(s);
         return std::nullopt;
     }
@@ -209,6 +216,32 @@ void relay_sockets(std::uintptr_t a, std::uintptr_t b, const std::function<void(
     shutdown(sb, SD_BOTH);
     closesocket(sa);
     closesocket(sb);
+}
+
+void answer_and_close(std::uintptr_t socket, std::string_view data) {
+    const SOCKET s = static_cast<SOCKET>(socket);
+    for (std::size_t sent = 0; sent < data.size();) {
+        const int chunk = static_cast<int>(std::min<std::size_t>(data.size() - sent, 65536));
+        const int w = send(s, data.data() + sent, chunk, 0);
+        if (w <= 0) {
+            break;
+        }
+        sent += static_cast<std::size_t>(w);
+    }
+    shutdown(s, SD_SEND);
+    std::array<char, 4096> buf{};
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < deadline) {
+        fd_set set;
+        FD_ZERO(&set);
+        FD_SET(s, &set);
+        timeval wait{0, 200000};
+        if (select(0, &set, nullptr, nullptr, &wait) < 0 ||
+            (FD_ISSET(s, &set) && recv(s, buf.data(), static_cast<int>(buf.size()), 0) <= 0)) {
+            break;
+        }
+    }
+    closesocket(s);
 }
 
 LoopbackListener::~LoopbackListener() { closesocket(static_cast<SOCKET>(socket_)); }
@@ -366,8 +399,8 @@ std::optional<std::uintptr_t> LoopbackListener::accept_connection() const {
     return static_cast<std::uintptr_t>(c);
 }
 
-std::optional<std::uintptr_t> connect_loopback(Port port) {
-    const int s = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_TCP);
+std::optional<std::uintptr_t> connect_loopback(Port port, bool ipv6) {
+    const int s = socket(ipv6 ? AF_INET6 : AF_INET, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_TCP);
     if (s < 0) {
         return std::nullopt;
     }
@@ -375,7 +408,13 @@ std::optional<std::uintptr_t> connect_loopback(Port port) {
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (connect(s, reinterpret_cast<const sockaddr*>(&addr), sizeof addr) != 0) {
+    sockaddr_in6 addr6{};
+    addr6.sin6_family = AF_INET6;
+    addr6.sin6_port = htons(port);
+    addr6.sin6_addr = in6addr_loopback;
+    const int failed = ipv6 ? connect(s, reinterpret_cast<const sockaddr*>(&addr6), sizeof addr6)
+                            : connect(s, reinterpret_cast<const sockaddr*>(&addr), sizeof addr);
+    if (failed != 0) {
         close(s);
         return std::nullopt;
     }
@@ -420,6 +459,28 @@ void relay_sockets(std::uintptr_t a, std::uintptr_t b, const std::function<void(
     shutdown(sb, SHUT_RDWR);
     close(sa);
     close(sb);
+}
+
+void answer_and_close(std::uintptr_t socket, std::string_view data) {
+    const int s = static_cast<int>(socket);
+    for (std::size_t sent = 0; sent < data.size();) {
+        const ssize_t w = send(s, data.data() + sent, data.size() - sent, MSG_NOSIGNAL);
+        if (w <= 0) {
+            break;
+        }
+        sent += static_cast<std::size_t>(w);
+    }
+    shutdown(s, SHUT_WR);
+    std::array<char, 4096> buf{};
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < deadline) {
+        pollfd fd{s, POLLIN, 0};
+        const int ready = poll(&fd, 1, 200);
+        if (ready < 0 || (ready > 0 && recv(s, buf.data(), buf.size(), 0) <= 0)) {
+            break;
+        }
+    }
+    close(s);
 }
 
 LoopbackListener::~LoopbackListener() { close(static_cast<int>(socket_)); }
@@ -618,6 +679,9 @@ std::unique_ptr<ChildProcess> ChildProcess::start(const ChildOptions& o, std::st
     std::wstring command = win::quote(o.program.wstring());
     for (const std::string& a : o.args) {
         command += L" " + win::quote(win::widen(a));
+    }
+    if (!o.windows_raw_args.empty()) {
+        command += L" " + win::widen(o.windows_raw_args);
     }
     std::wstring env = environment_block(o.env, o.remove_env);
     const std::wstring dir = o.working_dir.empty() ? o.program.parent_path().wstring() : o.working_dir.wstring();

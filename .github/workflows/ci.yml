@@ -124,7 +124,7 @@ jobs:
               $tail = (Get-Content $_.FullName -Tail 5 -ErrorAction SilentlyContinue) -join " / "
               if ($tail) { $out += " || $($_.Name): $tail" }
             }
-            $procs = (Get-Process nginx, php-cgi -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Name):$($_.Id)" }) -join ","
+            $procs = (Get-Process nginx, php-cgi, node -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Name):$($_.Id)" }) -join ","
             return "$out || processes: $procs"
           }
           function Run([string]$what, [scriptblock]$block) {
@@ -190,11 +190,38 @@ jobs:
           if ($blogBody -ne "blog intl" -or $shopBody -notlike "shop 8.5.* /again*") {
             Fail "after a reload (blog '$blogBody', shop '$shopBody' curl exit $shopExit)" (Diagnostics)
           }
+          # A Node project (D11): its own server, started by the first
+          # request through nginx and the service's relay, asleep when idle.
+          Run "flo install node 24" { & "$bin/flo.exe" install node 24 } | Out-Null
+          $web = "$env:RUNNER_TEMP\ci-web"
+          New-Item -ItemType Directory -Force $web | Out-Null
+          Set-Content "$web\package.json" '{ "name": "ci-web", "private": true, "scripts": { "dev": "node server.js" } }'
+          Set-Content "$web\server.js" 'require("http").createServer((q, r) => r.end("node " + process.version + " " + q.url)).listen(Number(process.env.PORT), process.env.HOST);'
+          Set-Content "$web\floserver.json" '{ "node": "24" }'
+          Run "flo add web" { & "$bin/flo.exe" add $web } | Out-Null
+          Run "flo start web" { & "$bin/flo.exe" start ci-web } | Out-Null
+          $webResolve = "ci-web.localhost:18080:127.0.0.1"
+          $webBody = (& curl.exe -sS --max-time 60 --resolve $webResolve "http://ci-web.localhost:18080/hello" 2>&1 | Out-String).Trim()
+          if ($webBody -notlike "node v24.* /hello") {
+            $log = (Get-Content "$env:FLOSERVER_DATA_DIR\web\apps\ci-web.log" -Tail 20 -ErrorAction SilentlyContinue) -join " / "
+            Fail "Node project (got '$webBody')" "$(Diagnostics) || app log: $log"
+          }
+          # nginx lets its kept-alive connections go after 10 s; then the idle time (3 s).
+          $slept = $false
+          for ($i = 0; $i -lt 30 -and -not $slept; $i++) {
+            Start-Sleep -Seconds 1
+            $slept = (& "$bin/flo.exe" projects | Out-String) -match "ci-web\s+node 24\S*\s+on, asleep"
+          }
+          if (-not $slept -or @(Get-Process node -ErrorAction SilentlyContinue).Count -ne 0) {
+            Fail "Node project didn't sleep" (Diagnostics)
+          }
+          $webBody = (& curl.exe -sS --max-time 60 --resolve $webResolve "http://ci-web.localhost:18080/again" 2>&1 | Out-String).Trim()
+          if ($webBody -notlike "node v24.* /again") { Fail "Node project after sleeping (got '$webBody')" (Diagnostics) }
           Run "flo stop" { & "$bin/flo.exe" stop } | Out-Null
           Start-Sleep -Seconds 1
-          $left = @(Get-Process nginx, php-cgi -ErrorAction SilentlyContinue).Count
+          $left = @(Get-Process nginx, php-cgi, node -ErrorAction SilentlyContinue).Count
           if ($left -ne 0) { Fail "processes left after flo stop" (Diagnostics) }
-          "::notice title=live install::nginx, Composer and PHP installed from the CDN; a project served, slept and woke for 20 requests at once; a second pool added with a reload"
+          "::notice title=live install::nginx, Composer, PHP and Node installed from the CDN; a project served, slept and woke for 20 requests at once; a second pool added with a reload; a Node project served, slept and woke"
           exit 0
       # The build, for trying on a real PC: download it from the run's page.
       - name: Upload the Windows build
@@ -288,8 +315,15 @@ jobs:
         run: |
           mkdir -p "$FLOSERVER_CLANG_TIDY_CACHE_DIR"
           find "$FLOSERVER_CLANG_TIDY_CACHE_DIR" -type f -mtime +14 -delete
-          cmake --build build
+          set -o pipefail
+          cmake --build build 2>&1 | tee build.log
           echo "clang-tidy cache: $(find "$FLOSERVER_CLANG_TIDY_CACHE_DIR" -type f | wc -l) passing files"
+      - name: Show clang-tidy findings as annotations
+        if: failure()
+        shell: bash
+        run: |
+          grep -E 'error:|FAILED:' build.log | sort -u | head -30 |
+            while IFS= read -r line; do echo "::error title=clang-tidy::${line}"; done
       # Saved after a failure too: a marker only ever means "passed".
       - name: Save clang-tidy passes
         if: always()

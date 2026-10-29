@@ -78,6 +78,25 @@ std::string get(Port port, const std::string& host, const std::string& path = "/
     return resp.substr(sp + 1, 3) + " " + resp.substr(body + 4);
 }
 
+// This machine's nginx as an installed runtime.
+void install_test_nginx(const fs::path& data, const fs::path& nginx) {
+    fake_runtime(data, "nginx", "1.24.0", "");
+    const fs::path nginx_dir = runtimes_dir(data) / "nginx" / "1.24.0";
+    fs::create_directories(nginx_dir / "conf");
+    fs::create_symlink(nginx, nginx_dir / "nginx");
+    for (const char* f : {"mime.types", "fastcgi_params"}) {
+        std::error_code ec;
+        fs::copy_file(fs::path("/etc/nginx") / f, nginx_dir / "conf" / f, ec);
+        if (ec) {
+            test_util::write_file(nginx_dir / "conf" / f, std::string(f) == "mime.types" ? "types { text/html html; }\n"
+                                  : "fastcgi_param QUERY_STRING $query_string;\nfastcgi_param REQUEST_METHOD $request_method;\n"
+                                    "fastcgi_param CONTENT_TYPE $content_type;\nfastcgi_param CONTENT_LENGTH $content_length;\n"
+                                    "fastcgi_param SCRIPT_NAME $fastcgi_script_name;\nfastcgi_param REQUEST_URI $request_uri;\n"
+                                    "fastcgi_param SERVER_PROTOCOL $server_protocol;\nfastcgi_param REDIRECT_STATUS 200;\n");
+        }
+    }
+}
+
 bool alive(std::uint32_t pid) { return ::kill(static_cast<pid_t>(pid), 0) == 0; }
 
 template <class F>
@@ -118,22 +137,9 @@ TEST_CASE("projects run with real nginx and php-cgi, sleep when idle and wake on
     }
     const test_util::TempDir tmp;
     const fs::path data = tmp.path() / "data";
-    fake_runtime(data, "nginx", "1.24.0", "");
-    fake_runtime(data, "php", "8.3.6", "nts");
+    install_test_nginx(data, *nginx);
     const fs::path nginx_dir = runtimes_dir(data) / "nginx" / "1.24.0";
-    fs::create_directories(nginx_dir / "conf");
-    fs::create_symlink(*nginx, nginx_dir / "nginx");
-    for (const char* f : {"mime.types", "fastcgi_params"}) {
-        std::error_code ec;
-        fs::copy_file(fs::path("/etc/nginx") / f, nginx_dir / "conf" / f, ec);
-        if (ec) {
-            test_util::write_file(nginx_dir / "conf" / f, std::string(f) == "mime.types" ? "types { text/html html; }\n"
-                                  : "fastcgi_param QUERY_STRING $query_string;\nfastcgi_param REQUEST_METHOD $request_method;\n"
-                                    "fastcgi_param CONTENT_TYPE $content_type;\nfastcgi_param CONTENT_LENGTH $content_length;\n"
-                                    "fastcgi_param SCRIPT_NAME $fastcgi_script_name;\nfastcgi_param REQUEST_URI $request_uri;\n"
-                                    "fastcgi_param SERVER_PROTOCOL $server_protocol;\nfastcgi_param REDIRECT_STATUS 200;\n");
-        }
-    }
+    fake_runtime(data, "php", "8.3.6", "nts");
     fs::create_symlink(*php, runtimes_dir(data) / "php" / "8.3.6" / "php-cgi");
 
     const fs::path shop = tmp.path() / "shop";
@@ -294,6 +300,114 @@ TEST_CASE("projects run with real nginx and php-cgi, sleep when idle and wake on
     CHECK(st["nginx"]["running"] == false);
     CHECK(st["pools"].empty());
     CHECK(get(http, "api.localhost").empty());
+}
+
+TEST_CASE("a Node project is forwarded to its own server, WebSockets included, and sleeps when idle") {
+    const auto nginx = tool("FLOSERVER_TEST_NGINX", "/usr/sbin/nginx");
+    std::optional<fs::path> node;
+    for (const char* dir : {"/usr/local/bin", "/usr/bin", "/opt/node22/bin"}) {
+        if (!node) {
+            node = tool("FLOSERVER_TEST_NODE", (std::string(dir) + "/node").c_str());
+        }
+    }
+    if (!nginx || !node) {
+        MESSAGE("nginx or node isn't installed here; skipped");
+        return;
+    }
+    const test_util::TempDir tmp;
+    const fs::path data = tmp.path() / "data";
+    install_test_nginx(data, *nginx);
+    fake_runtime(data, "node", "22.0.0", "");
+    fs::create_directories(runtimes_dir(data) / "node" / "22.0.0" / "bin");
+    fs::create_symlink(fs::canonical(*node), runtimes_dir(data) / "node" / "22.0.0" / "bin" / "node");
+
+    // A server that answers with the URL and Host, and echoes on a WebSocket-style upgrade.
+    const fs::path web = tmp.path() / "web";
+    test_util::write_file(web / "floserver.json", R"({"node": "22", "command": "exec node server.js"})");
+    test_util::write_file(web / "server.js", R"(
+        const server = require("http").createServer((req, res) => {
+            res.end("node " + req.url + " " + req.headers.host + " " + req.headers["x-forwarded-proto"]);
+        });
+        server.on("upgrade", (req, socket) => {
+            socket.write("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n");
+            socket.on("data", (d) => socket.write("echo:" + d));
+        });
+        server.listen(Number(process.env.PORT), process.env.HOST);
+    )");
+    AppConfig app;
+    std::string error;
+    REQUIRE(add_project(app, web, "", error));
+    app.projects[0].on = true;
+    REQUIRE(save_app_config(app_config_file(data), app, error));
+
+    const auto ports = pick_web_ports([](Port p) { return p > 1024 && can_listen_on_loopback(p); });
+    REQUIRE(ports);
+    CertStore certs(data);
+    WebServiceConfig config;
+    config.data_dir = data;
+    config.fixed_ports = WebPorts{static_cast<Port>(ports->http + 21000), static_cast<Port>(ports->https + 21000), true};
+    config.idle_after = 2s;
+    config.reload_every = 1s;
+    WebService service(config, certs);
+    service.start();
+    const Port http = config.fixed_ports->http;
+
+    auto st = service.status();
+    INFO(st.dump(2));
+    REQUIRE(st["nginx"]["running"] == true);
+    CHECK(st["sites"]["web"]["app"] == "node");
+    CHECK(st["sites"]["web"]["run"] == "sleeping");
+    CHECK(st["pools"].empty());
+
+    CHECK(get(http, "web.localhost", "/cart?x=1") == "200 node /cart?x=1 web.localhost http");
+    CHECK(service.status()["sites"]["web"]["run"] == "running");
+    const auto pid = service.status()["apps"]["web"]["pid"].get<std::uint32_t>();
+
+    // An upgraded connection passes both ways through nginx and the relay.
+    {
+        const int s = socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(http);
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        timeval tv{10, 0};
+        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+        REQUIRE(connect(s, reinterpret_cast<const sockaddr*>(&addr), sizeof addr) == 0);
+        const std::string req = "GET /hmr HTTP/1.1\r\nHost: web.localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n";
+        (void)send(s, req.data(), req.size(), 0);
+        std::string got;
+        char buf[1024];  // NOLINT(modernize-avoid-c-arrays)
+        while (got.find("\r\n\r\n") == std::string::npos) {
+            const ssize_t n = recv(s, buf, sizeof buf, 0);
+            if (n <= 0) {
+                break;
+            }
+            got.append(buf, static_cast<std::size_t>(n));
+        }
+        CHECK(got.starts_with("HTTP/1.1 101"));
+        (void)send(s, "ping", 4, 0);
+        const ssize_t n = recv(s, buf, sizeof buf, 0);
+        CHECK(std::string(buf, static_cast<std::size_t>(std::max<ssize_t>(n, 0))) == "echo:ping");
+        // While it's open the app doesn't sleep.
+        std::this_thread::sleep_for(3s);
+        CHECK(service.status()["sites"]["web"]["run"] == "running");
+        close(s);
+    }
+
+    // Idle: nginx lets its kept-alive connections go after 10 s, then the
+    // idle time (2 s) runs out.
+    REQUIRE(eventually([&] { return service.status()["sites"]["web"]["run"] == "sleeping"; }, 25s));
+    CHECK(eventually([&] { return !alive(pid); }, 3s));
+    CHECK(get(http, "web.localhost", "/again") == "200 node /again web.localhost http");
+
+    // Turned off: the server stops, the address is gone.
+    const auto pid2 = service.status()["apps"]["web"]["pid"].get<std::uint32_t>();
+    app.projects[0].on = false;
+    REQUIRE(save_app_config(app_config_file(data), app, error));
+    st = service.reload();
+    CHECK_FALSE(st["apps"].contains("web"));
+    CHECK(eventually([&] { return !alive(pid2); }, 3s));
+    service.stop();
 }
 
 #endif

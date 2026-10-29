@@ -11,6 +11,10 @@
 // PHP requests go to the project's pool (site_plan.h) and are logged to that
 // pool's access log, one line per request, which is how the service measures
 // idle time (D11). Static files aren't logged.
+//
+// A project that runs its own server (a Node dev server) is forwarded as a
+// whole to its port, which the service holds (app_runner.h); WebSocket
+// upgrades pass through, so hot reload works.
 
 #include "floserver/core/ports.h"
 
@@ -32,6 +36,7 @@ struct NginxSite {
     std::vector<Port> php_ports;        // the pool's workers; empty: static files only
     std::filesystem::path php_access_log;  // the pool's idle log; empty for none
     std::optional<NginxTls> tls;
+    std::optional<Port> app_port;       // set: everything goes to this server instead
 };
 
 struct NginxSpec {

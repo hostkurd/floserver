@@ -163,14 +163,15 @@ struct Service {
     std::unique_ptr<floserver::core::DatabaseService> databases;
 
     // Adds what's running to a project's description: its address and
-    // whether its PHP is running or asleep.
+    // whether its PHP or its own server is running or asleep (and why it
+    // failed).
     void add_run_state(json& project, const json& sites) const {
         const std::string name = project.value("name", std::string());
         if (!sites.contains(name)) {
             return;
         }
         const json& s = sites[name];
-        for (const char* key : {"address", "run"}) {
+        for (const char* key : {"address", "run", "error"}) {
             if (s.contains(key)) {
                 project[key] = s[key];
             }
