@@ -119,7 +119,7 @@ std::string read(const fs::path& p) {
 }
 
 std::string pax(const std::string& key, const std::string& value) {
-    std::string record = " " + key + "=" + value + "\n";
+    const std::string record = " " + key + "=" + value + "\n";
     std::size_t len = record.size() + 1;
     while (std::to_string(len).size() + record.size() != len) {
         ++len;
@@ -130,7 +130,7 @@ std::string pax(const std::string& key, const std::string& value) {
 }  // namespace
 
 TEST_CASE("a tar.gz unpacks into its folder, without the top folder") {
-    test_util::TempDir tmp;
+    const test_util::TempDir tmp;
     const std::string big(200'000, 'x');
     const std::string long_name = "python/Lib/" + std::string(120, 'a') + ".py";
     const auto archive = write_archive(
@@ -198,7 +198,7 @@ TEST_CASE("unsafe or damaged tar.gz archives are refused") {
 }
 
 TEST_CASE("tar.gz limits and an existing target") {
-    test_util::TempDir tmp;
+    const test_util::TempDir tmp;
     const auto archive = write_archive(tmp.path(), gzip(make_tar({{"a", "1234"}, {"b", "5678"}})));
     ZipLimits few;
     few.max_entries = 1;
