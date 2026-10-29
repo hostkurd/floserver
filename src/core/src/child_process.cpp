@@ -211,6 +211,32 @@ void relay_sockets(std::uintptr_t a, std::uintptr_t b, const std::function<void(
     closesocket(sb);
 }
 
+void answer_and_close(std::uintptr_t socket, std::string_view data) {
+    const SOCKET s = static_cast<SOCKET>(socket);
+    for (std::size_t sent = 0; sent < data.size();) {
+        const int chunk = static_cast<int>(std::min<std::size_t>(data.size() - sent, 65536));
+        const int w = send(s, data.data() + sent, chunk, 0);
+        if (w <= 0) {
+            break;
+        }
+        sent += static_cast<std::size_t>(w);
+    }
+    shutdown(s, SD_SEND);
+    std::array<char, 4096> buf{};
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < deadline) {
+        fd_set set;
+        FD_ZERO(&set);
+        FD_SET(s, &set);
+        timeval wait{0, 200000};
+        if (select(0, &set, nullptr, nullptr, &wait) < 0 ||
+            (FD_ISSET(s, &set) && recv(s, buf.data(), static_cast<int>(buf.size()), 0) <= 0)) {
+            break;
+        }
+    }
+    closesocket(s);
+}
+
 LoopbackListener::~LoopbackListener() { closesocket(static_cast<SOCKET>(socket_)); }
 
 void LoopbackListener::drop_waiting_connection() const {
@@ -422,6 +448,28 @@ void relay_sockets(std::uintptr_t a, std::uintptr_t b, const std::function<void(
     close(sb);
 }
 
+void answer_and_close(std::uintptr_t socket, std::string_view data) {
+    const int s = static_cast<int>(socket);
+    for (std::size_t sent = 0; sent < data.size();) {
+        const ssize_t w = send(s, data.data() + sent, data.size() - sent, MSG_NOSIGNAL);
+        if (w <= 0) {
+            break;
+        }
+        sent += static_cast<std::size_t>(w);
+    }
+    shutdown(s, SHUT_WR);
+    std::array<char, 4096> buf{};
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < deadline) {
+        pollfd fd{s, POLLIN, 0};
+        const int ready = poll(&fd, 1, 200);
+        if (ready < 0 || (ready > 0 && recv(s, buf.data(), buf.size(), 0) <= 0)) {
+            break;
+        }
+    }
+    close(s);
+}
+
 LoopbackListener::~LoopbackListener() { close(static_cast<int>(socket_)); }
 
 void LoopbackListener::drop_waiting_connection() const {
@@ -618,6 +666,9 @@ std::unique_ptr<ChildProcess> ChildProcess::start(const ChildOptions& o, std::st
     std::wstring command = win::quote(o.program.wstring());
     for (const std::string& a : o.args) {
         command += L" " + win::quote(win::widen(a));
+    }
+    if (!o.windows_raw_args.empty()) {
+        command += L" " + win::widen(o.windows_raw_args);
     }
     std::wstring env = environment_block(o.env, o.remove_env);
     const std::wstring dir = o.working_dir.empty() ? o.program.parent_path().wstring() : o.working_dir.wstring();

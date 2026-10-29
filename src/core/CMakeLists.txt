@@ -7,6 +7,7 @@ add_library(floserver_core STATIC
     src/der.cpp
     src/child_process.cpp
     src/php_pool.cpp
+    src/app_runner.cpp
     src/web_service.cpp
     src/crypto_common.cpp
     src/crypto_windows.cpp

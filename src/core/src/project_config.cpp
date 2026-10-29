@@ -15,6 +15,7 @@ namespace {
 using nlohmann::json;
 
 constexpr std::size_t kMaxExtensionLength = 32;
+constexpr std::size_t kMaxCommandLength = 1000;
 
 bool is_extension_name(std::string_view name) {
     if (name.empty() || name.size() > kMaxExtensionLength) {
@@ -199,6 +200,25 @@ void read_extensions(const json& doc, ProjectConfig& config, ConfigResult& resul
     }
 }
 
+// A command to start the project's own server (D11), run by the system's
+// shell in the project folder. One line, so a file can't hide a second
+// command on a line the user doesn't see.
+void read_command(const json& doc, ProjectConfig& config, ConfigResult& result) {
+    const auto it = doc.find("command");
+    if (it == doc.end() || it->is_null()) {
+        return;
+    }
+    const auto bad = [](const std::string& s) {
+        return std::any_of(s.begin(), s.end(), [](char c) { return static_cast<unsigned char>(c) < 0x20; });
+    };
+    if (!it->is_string() || it->get_ref<const std::string&>().empty() ||
+        it->get_ref<const std::string&>().size() > kMaxCommandLength || bad(it->get_ref<const std::string&>())) {
+        result.errors.push_back({"command", R"(must be one line of text, such as "npm run serve -- --port {port}")"});
+        return;
+    }
+    config.command = it->get_ref<const std::string&>();
+}
+
 }  // namespace
 
 ConfigResult parse_project_config(std::string_view json_text) {
@@ -215,8 +235,8 @@ ConfigResult parse_project_config(std::string_view json_text) {
         return result;
     }
 
-    static const std::set<std::string, std::less<>> known = {"php",  "node", "database",
-                                                             "web",  "root", "extensions"};
+    static const std::set<std::string, std::less<>> known = {"php", "node", "database", "web",
+                                                             "root", "extensions", "command"};
     for (const auto& item : doc.items()) {
         if (!known.contains(item.key())) {
             result.warnings.push_back({item.key(), "is not a FloServer setting and is ignored"});
@@ -230,6 +250,7 @@ ConfigResult parse_project_config(std::string_view json_text) {
     read_web(doc, config, result);
     read_root(doc, config, result);
     read_extensions(doc, config, result);
+    read_command(doc, config, result);
 
     if (result.errors.empty()) {
         result.config = std::move(config);
@@ -256,6 +277,9 @@ std::string write_project_config(const ProjectConfig& config) {
     }
     if (!config.extensions.empty()) {
         doc["extensions"] = config.extensions;
+    }
+    if (config.command) {
+        doc["command"] = *config.command;
     }
     return doc.dump(2) + "\n";
 }

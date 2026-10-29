@@ -165,6 +165,21 @@ TEST_CASE("unknown keys and duplicate extensions are warnings") {
     CHECK(r.config->extensions == std::vector<std::string>{"gd"});
 }
 
+TEST_CASE("a start command is one line of text") {
+    const auto ok = parse_project_config(R"({"node": "22", "command": "npm run serve -- --port {port}"})");
+    REQUIRE(ok.config.has_value());
+    CHECK(ok.config->command == "npm run serve -- --port {port}");
+    for (const char* bad : {R"({"command": ""})", R"({"command": ["npm"]})", R"({"command": "a\nb"})",
+                            R"({"command": "a\rb"})"}) {
+        CAPTURE(bad);
+        const auto r = parse_project_config(bad);
+        CHECK_FALSE(r.config.has_value());
+        REQUIRE(r.errors.size() == 1);
+        CHECK(r.errors[0].key == "command");
+    }
+    CHECK_FALSE(parse_project_config(R"({"command": ")" + std::string(1001, 'x') + R"("})").config.has_value());
+}
+
 TEST_CASE("writing and reading back gives the same config") {
     ProjectConfig c;
     c.php = "8.4";
@@ -172,6 +187,7 @@ TEST_CASE("writing and reading back gives the same config") {
     c.web = WebServer::Apache;
     c.root = "public";
     c.extensions = {"intl", "pdo_mysql"};
+    c.command = "php -S 127.0.0.1:{port}";
     const std::string text = write_project_config(c);
     CHECK(text.find("\"php\": \"8.4\"") != std::string::npos);
     CHECK(text.find("node") == std::string::npos);  // unset keys are left out

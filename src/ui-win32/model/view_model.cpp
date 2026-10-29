@@ -87,7 +87,7 @@ ProjectRow row_from(const json& p, Lang lang) {
     if (state == "ready") {
         if (run == "failed") {
             row.state = RowState::Problem;
-            row.detail = std::string(text(lang, Str::PhpCantStart));
+            row.detail = std::string(text(lang, text_of(p, "node").empty() ? Str::PhpCantStart : Str::ServerCantStart));
         } else {
             row.state = run == "sleeping" ? RowState::Asleep : RowState::On;
         }
@@ -115,6 +115,10 @@ ProjectRow row_from(const json& p, Lang lang) {
     const std::string php = text_of(p, "php");
     if (!php.empty()) {
         row.chips.push_back("PHP " + php);
+    }
+    const std::string node = text_of(p, "node");
+    if (!node.empty()) {
+        row.chips.push_back("Node " + node);
     }
     const std::string database = text_of(p, "database");
     if (!database.empty()) {

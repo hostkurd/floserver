@@ -41,7 +41,8 @@ struct PlannedSite {
     std::filesystem::path dir;
     std::filesystem::path doc_root;     // dir / root from floserver.json
     SiteState state = SiteState::Off;
-    std::optional<std::size_t> pool;    // index into WebPlan::pools; set when Ready
+    std::optional<std::size_t> pool;    // index into WebPlan::pools; set when Ready (PHP)
+    std::optional<std::size_t> app;     // index into WebPlan::apps; set when Ready (own server)
     std::vector<std::string> missing;   // "php 8.2", "mariadb 11.4"
     std::string problem;                // plain English, when state is Problem
     std::optional<DatabaseSpec> database;
@@ -60,9 +61,25 @@ struct PhpPool {
     std::vector<Port> ports;
 };
 
+enum class AppKind : std::uint8_t { Node };
+
+// A project that runs its own server, which nginx forwards to (D11): a Node
+// project (one that asks for Node and not PHP).
+struct AppSpec {
+    std::string name;                   // the project's
+    AppKind kind = AppKind::Node;
+    std::filesystem::path dir;          // the project folder
+    std::string version;                // the runtime's: "22.23.4"
+    std::filesystem::path runtime_dir;  // its install folder
+    std::optional<std::string> command; // from floserver.json
+    bool keep_running = false;
+    Port port = 0;                      // held by the service; given by assign_app_ports()
+};
+
 struct WebPlan {
     std::vector<PlannedSite> sites;  // same order as the project list
     std::vector<PhpPool> pools;      // in order of first use
+    std::vector<AppSpec> apps;       // in list order
 };
 
 // The floserver.json result for a project. A project without the file reads
@@ -89,5 +106,12 @@ inline constexpr std::size_t kPhpWorkers = 4;  // one slow request doesn't hold 
 // no other pool uses. False when ports run out.
 [[nodiscard]] bool assign_pool_ports(WebPlan& plan, const std::map<std::string, std::vector<Port>>& previous,
                                      const PortProbe& probe, std::size_t workers = kPhpWorkers);
+
+inline constexpr Port kFirstAppPort = 9300;
+
+// Gives each app a port from 9300 upwards, after assign_pool_ports(): an app
+// in `previous` (project name -> port) keeps its port, new ones get the first
+// that `probe` says is free and no pool or app uses. False when ports run out.
+[[nodiscard]] bool assign_app_ports(WebPlan& plan, const std::map<std::string, Port>& previous, const PortProbe& probe);
 
 }  // namespace floserver::core

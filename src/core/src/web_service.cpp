@@ -125,7 +125,18 @@ void WebService::stop() {
 void WebService::stop_locked() {
     stop_nginx_locked();
     pools_.clear();
+    replace_apps_locked({});
     sites_.clear();
+}
+
+void WebService::replace_apps_locked(std::map<std::string, std::shared_ptr<AppRunner>> apps) {
+    for (const auto& [name, runner] : apps_) {
+        const auto it = apps.find(name);
+        if (it == apps.end() || it->second != runner) {
+            runner->close();
+        }
+    }
+    apps_ = std::move(apps);
 }
 
 json WebService::reload() {
@@ -281,6 +292,14 @@ void WebService::reload_locked() {
         error_ = "there's no free port for PHP from 9100 upwards";
         return;
     }
+    std::map<std::string, Port> previous_apps;
+    for (const auto& [name, runner] : apps_) {
+        previous_apps[name] = runner->listener().port();
+    }
+    if (!assign_app_ports(plan, previous_apps, config_.probe)) {
+        error_ = "there's no free port for projects' own servers from 9300 upwards";
+        return;
+    }
 
     // The new pools and sites are built aside. They replace the current ones
     // only once nginx runs a config that uses them: until then the running
@@ -305,11 +324,30 @@ void WebService::reload_locked() {
         }
         pools[pool.key] = std::move(runner);
     }
+    std::map<std::string, std::string> app_errors;
+    std::map<std::string, std::shared_ptr<AppRunner>> apps;
+    for (const AppSpec& spec : plan.apps) {
+        if (const auto it = apps_.find(spec.name); it != apps_.end() && it->second->listener().port() == spec.port) {
+            it->second->set_app(spec);
+            apps[spec.name] = it->second;
+            continue;
+        }
+        std::string why;
+        auto runner = AppRunner::open(spec, {work_, app_internal_ports_, config_.probe}, why);
+        if (!runner) {
+            app_errors[spec.name] = why;
+            continue;
+        }
+        apps[spec.name] = std::move(runner);
+    }
     // On any failure below: keep every pool (old and new) and, while nginx
     // runs, the sites it serves; new sites get no address yet.
-    const auto keep_both = [this, &pools, &sites] {
+    const auto keep_both = [this, &pools, &apps, &sites] {
         for (auto& [key, runner] : pools) {
             pools_.try_emplace(key, runner);
+        }
+        for (auto& [name, runner] : apps) {
+            apps_.try_emplace(name, runner);
         }
         if (!nginx_) {
             for (auto& [name, site] : sites) {
@@ -327,13 +365,41 @@ void WebService::reload_locked() {
             continue;
         }
         Site site;
-        const PhpPool& pool = plan.pools.at(*p.pool);
         if (nginx == nullptr) {
             site.state_override = "needs_download";
             site.missing = {"nginx"};
             sites[p.name] = site;
             continue;
         }
+        std::optional<NginxTls> site_tls;
+        if (tls_) {
+            std::string cert_error;
+            if (const auto cert = certs_.ensure_site(p.name, cert_error)) {
+                site_tls = NginxTls{cert->certificate, cert->key};
+            } else {
+                error_ = "no certificate for " + p.name + ": " + cert_error;
+            }
+        }
+        if (p.app) {
+            const AppSpec& spec = plan.apps.at(*p.app);
+            if (const auto e = app_errors.find(spec.name); e != app_errors.end()) {
+                site.state_override = "problem";
+                site.problem = e->second;
+                sites[p.name] = site;
+                continue;
+            }
+            NginxSite ns;
+            ns.name = p.name;
+            ns.doc_root = p.doc_root;
+            ns.app_port = spec.port;
+            ns.tls = site_tls;
+            site.app = true;
+            site.address = ns.tls ? "https" : "http";
+            serve.push_back(std::move(ns));
+            sites[p.name] = site;
+            continue;
+        }
+        const PhpPool& pool = plan.pools.at(*p.pool);
         if (const auto e = pool_errors.find(pool.key); e != pool_errors.end()) {
             site.state_override = "problem";
             site.problem = e->second;
@@ -341,15 +407,12 @@ void WebService::reload_locked() {
             continue;
         }
         const auto& runner = pools.at(pool.key);
-        NginxSite ns{p.name, p.doc_root, pool.ports, runner->access_log(), std::nullopt};
-        if (tls_) {
-            std::string cert_error;
-            if (const auto cert = certs_.ensure_site(p.name, cert_error)) {
-                ns.tls = NginxTls{cert->certificate, cert->key};
-            } else {
-                error_ = "no certificate for " + p.name + ": " + cert_error;
-            }
-        }
+        NginxSite ns;
+        ns.name = p.name;
+        ns.doc_root = p.doc_root;
+        ns.php_ports = pool.ports;
+        ns.php_access_log = runner->access_log();
+        ns.tls = site_tls;
         site.pool_key = pool.key;
         site.address = ns.tls ? "https" : "http";  // filled in with the port below
         serve.push_back(std::move(ns));
@@ -359,6 +422,7 @@ void WebService::reload_locked() {
     if (serve.empty()) {
         stop_nginx_locked();  // nothing to serve: free the ports and the memory
         pools_ = std::move(pools);
+        replace_apps_locked(std::move(apps));
         sites_ = std::move(sites);
         return;
     }
@@ -408,6 +472,7 @@ void WebService::reload_locked() {
     }
     if (*text == config_text_ && nginx_) {
         pools_ = std::move(pools);  // nothing changed for nginx
+        replace_apps_locked(std::move(apps));
         sites_ = std::move(sites);
         return;
     }
@@ -471,6 +536,7 @@ void WebService::reload_locked() {
     }
     config_text_ = std::move(*text);
     pools_ = std::move(pools);  // pools the new config no longer uses end here
+    replace_apps_locked(std::move(apps));
     sites_ = std::move(sites);
 }
 
@@ -480,13 +546,18 @@ void WebService::supervise() {
     while (!stopping_) {
         // Pools with no php-cgi running: a waiting connection wakes them (or,
         // for a pool that can't run, is refused at once).
+        // Apps: every connection is taken here and relayed.
         std::vector<std::shared_ptr<PhpPoolRunner>> watched;
+        std::vector<std::shared_ptr<AppRunner>> apps;
         {
             const std::lock_guard lock(mutex_);
             for (const auto& [key, runner] : pools_) {
                 if (runner->state() != PoolState::Running) {
                     watched.push_back(runner);
                 }
+            }
+            for (const auto& [name, runner] : apps_) {
+                apps.push_back(runner);
             }
         }
         std::vector<const LoopbackListener*> listeners;
@@ -497,13 +568,25 @@ void WebService::supervise() {
                 owner.push_back(w);
             }
         }
+        const std::size_t first_app = listeners.size();
+        for (const auto& a : apps) {
+            listeners.push_back(&a->listener());
+        }
         const auto ready = waiting_connections(listeners, 200ms);
         if (stopping_) {
             break;
         }
+        for (const std::size_t i : ready) {
+            if (i >= first_app) {
+                apps[i - first_app]->accept_waiting();  // a closed app answers that it's off
+            }
+        }
         const auto now = Clock::now();
         const std::lock_guard lock(mutex_);
         for (const std::size_t i : ready) {
+            if (i >= first_app) {
+                continue;
+            }
             const auto& r = watched[owner[i]];
             const auto current = pools_.find(r->pool().key);
             if (current == pools_.end() || current->second != r || r->state() == PoolState::Running) {
@@ -518,6 +601,9 @@ void WebService::supervise() {
         if (now - last_tick >= 1s) {
             last_tick = now;
             for (const auto& [key, runner] : pools_) {
+                runner->tick(now, config_.idle_after);
+            }
+            for (const auto& [name, runner] : apps_) {
                 runner->tick(now, config_.idle_after);
             }
             if (nginx_ && !nginx_->running()) {
@@ -559,11 +645,26 @@ json WebService::status_locked() const {
         }
         pools.push_back(std::move(p));
     }
+    json apps = json::object();
+    for (const auto& [name, r] : apps_) {
+        apps[name] = r->describe();
+    }
     json sites = json::object();
     for (const auto& [name, s] : sites_) {
         json j = json::object();
         if (!s.address.empty()) {
             j["address"] = s.address;
+        }
+        if (s.app) {
+            j["app"] = "node";
+            if (apps.contains(name)) {
+                j["run"] = apps[name]["state"];
+                if (apps[name].contains("error")) {
+                    j["error"] = apps[name]["error"];
+                }
+            } else {
+                j["run"] = "sleeping";
+            }
         }
         if (s.pool_key) {
             j["pool"] = *s.pool_key;
@@ -592,7 +693,7 @@ json WebService::status_locked() const {
     if (!nginx_error_.empty()) {
         nginx["error"] = nginx_error_;
     }
-    json out = {{"nginx", nginx}, {"pools", pools}, {"sites", sites}};
+    json out = {{"nginx", nginx}, {"pools", pools}, {"apps", apps}, {"sites", sites}};
     if (!error_.empty()) {
         out["error"] = error_;
     }
