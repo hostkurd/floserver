@@ -18,13 +18,14 @@ add_executable(floserver_tests
     test_service.cpp
     test_sha256.cpp
     test_site_plan.cpp
+    test_ui_model.cpp
     test_web_service.cpp
     test_version.cpp
     test_zip.cpp)
 # test_service.cpp runs the real floserverd.
 add_dependencies(floserver_tests floserverd)
 target_compile_definitions(floserver_tests PRIVATE FLOSERVER_TEST_BIN_DIR="$<TARGET_FILE_DIR:floserverd>")
-target_link_libraries(floserver_tests PRIVATE floserver_core floserver_third_party floserver_monocypher floserver_miniz)
+target_link_libraries(floserver_tests PRIVATE floserver_core floserver_ui_model floserver_third_party floserver_monocypher floserver_miniz)
 if(WIN32)
     target_link_libraries(floserver_tests PRIVATE ws2_32 crypt32)
 else()

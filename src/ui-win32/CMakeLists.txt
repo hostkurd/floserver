@@ -1,8 +1,30 @@
+# The window's model: words in three languages, rows, colours. No Windows
+# code, so it's built and tested on every platform.
+add_library(floserver_ui_model STATIC
+    model/theme.cpp
+    model/ui_strings.cpp
+    model/view_model.cpp)
+target_include_directories(floserver_ui_model PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(floserver_ui_model PUBLIC floserver_third_party)
+floserver_code_rules(floserver_ui_model)
+
+if(NOT WIN32)
+    return()
+endif()
+
 enable_language(RC)
 
-add_executable(floserver_ui WIN32 main.cpp FloServer.rc)
+add_executable(floserver_ui WIN32
+    main.cpp
+    main_window.cpp
+    canvas.cpp
+    service_worker.cpp
+    FloServer.rc)
 set_target_properties(floserver_ui PROPERTIES OUTPUT_NAME FloServer)
-target_link_libraries(floserver_ui PRIVATE floserver_core)
+target_link_libraries(floserver_ui PRIVATE floserver_core floserver_ui_model
+    comctl32 dwmapi gdiplus shell32 ole32 advapi32 user32 gdi32)
+# The window starts floserverd the way the CLI does; build it alongside.
+add_dependencies(floserver_ui floserverd)
 if(MINGW)
     target_link_options(floserver_ui PRIVATE -municode)  # entry point is wWinMain
 endif()
