@@ -22,7 +22,7 @@ add_executable(floserver_ui WIN32
     FloServer.rc)
 set_target_properties(floserver_ui PROPERTIES OUTPUT_NAME FloServer)
 target_link_libraries(floserver_ui PRIVATE floserver_core floserver_ui_model
-    comctl32 dwmapi gdiplus shell32 advapi32 user32 gdi32)
+    comctl32 dwmapi gdiplus shell32 ole32 advapi32 user32 gdi32)
 # The window starts floserverd the way the CLI does; build it alongside.
 add_dependencies(floserver_ui floserverd)
 if(MINGW)

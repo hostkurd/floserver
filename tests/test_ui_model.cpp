@@ -187,7 +187,7 @@ TEST_CASE("the footer shows only what the service gave") {
     const json status = {{"memory_bytes", 24536678}};
     const json web = {{"nginx", {{"running", true}, {"http_port", 80}, {"https_port", 443}}}};
     auto f = footer_text(rows, &status, &web, Lang::En);
-    CHECK(f.counts == "1 running · 1 asleep");
+    CHECK(f.counts == "1 running · 1 sleeping");
     CHECK(f.nginx == "nginx on ports 80 and 443");
     CHECK(f.memory == "Service memory: 23.4 MB");
     CHECK(f.any_running);
@@ -201,7 +201,7 @@ TEST_CASE("the footer shows only what the service gave") {
     f = footer_text({}, nullptr, &stopped, Lang::En);
     CHECK(f.nginx.empty());
     CHECK(f.memory.empty());
-    CHECK(f.counts == "0 running · 0 asleep");
+    CHECK(f.counts == "0 running · 0 sleeping");
     CHECK_FALSE(f.any_running);
 
     f = footer_text(rows, &status, &web, Lang::Ar);

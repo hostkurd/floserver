@@ -37,10 +37,12 @@ private:
     enum class Part : std::uint8_t { None, Row, Switch, Address, NewProject, Settings, Banner };
     struct Hit {
         Part part = Part::None;
-        int row = -1;  // index into visible_
+        int row = -1;         // index into visible_ when it was hit
+        std::string project;  // the row's project: the list may change before the click ends
         bool operator==(const Hit&) const = default;
     };
     struct RowGeometry {
+        std::string project;
         RECT row{};
         RECT toggle{};
         RECT name{};
@@ -65,6 +67,8 @@ private:
     };
 
     static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
+    // The row of `project` in visible_, or -1.
+    [[nodiscard]] int visible_index(const std::string& project) const;
     // The search box's placeholder, in the theme's colour.
     void paint_search_cue(HWND edit) const;
     static LRESULT CALLBACK search_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, UINT_PTR id,
@@ -146,6 +150,7 @@ private:
     std::unique_ptr<ServiceWorker> worker_;
     Snapshot snap_;
     std::map<std::string, bool> pending_;  // switches flipped, waiting for the service
+    std::map<std::string, int> outstanding_;  // On/Off commands not yet finished, per project
     std::string change_error_;
     std::string query_;
     std::vector<std::size_t> visible_;  // indexes into snap_.rows that match query_

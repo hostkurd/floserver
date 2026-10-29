@@ -9,9 +9,11 @@
 #include "win_util.h"
 
 #include "floserver/core/ipc.h"
+#include "floserver/core/process.h"
 
 #include <windows.h>
 #include <commctrl.h>
+#include <objbase.h>
 
 #include <cstdlib>
 #include <string>
@@ -37,6 +39,24 @@ bool hand_over_to_running_window(const std::wstring& class_name) {
     return false;
 }
 
+// COM for this thread, for as long as the window lives.
+class ComSession {
+public:
+    ComSession() : ok_(SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE))) {}
+    ComSession(const ComSession&) = delete;
+    ComSession& operator=(const ComSession&) = delete;
+    ComSession(ComSession&&) = delete;
+    ComSession& operator=(ComSession&&) = delete;
+    ~ComSession() {
+        if (ok_) {
+            CoUninitialize();
+        }
+    }
+
+private:
+    bool ok_;
+};
+
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE /*prev*/, PWSTR /*cmd*/, int show) {
@@ -49,6 +69,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE /*prev*/, PWSTR /*cmd*/, int s
         return hand_over_to_running_window(class_name) ? 0 : 1;
     }
 
+    // Opening an address goes through the shell, which may use COM.
+    const ComSession com;
+
     INITCOMMONCONTROLSEX icc{};
     icc.dwSize = sizeof icc;
     icc.dwICC = ICC_WIN95_CLASSES | ICC_STANDARD_CLASSES;
@@ -60,8 +83,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE /*prev*/, PWSTR /*cmd*/, int s
     }
 
     // The language setting moves to the service later; for now FLOSERVER_LANG (en, ar, ku).
-    const char* lang_setting = std::getenv("FLOSERVER_LANG");  // NOLINT(concurrency-mt-unsafe): before any thread
-    floserver::ui::MainWindow window(instance, floserver::ui::lang_from_setting(lang_setting), class_name);
+    const auto lang_setting = floserver::core::get_env("FLOSERVER_LANG");
+    floserver::ui::MainWindow window(instance, floserver::ui::lang_from_setting(lang_setting ? lang_setting->c_str() : nullptr),
+                                     class_name);
     if (!window.create(show)) {
         return 1;
     }

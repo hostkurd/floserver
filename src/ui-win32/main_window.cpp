@@ -11,6 +11,7 @@
 #include <cwchar>
 #include <iterator>
 #include <string_view>
+#include <utility>
 
 namespace floserver::ui {
 
@@ -263,6 +264,10 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             scroll_to(scroll_ - GET_WHEEL_DELTA_WPARAM(wparam) * px(kRowH) / WHEEL_DELTA);
             return 0;
         case WM_KEYDOWN:
+            // A held Space would queue a command per repeat.
+            if (wparam == VK_SPACE && (static_cast<std::uintptr_t>(lparam) & (1U << 30U)) != 0) {
+                return 0;
+            }
             on_key(wparam);
             return 0;
         case WM_SETFOCUS:
@@ -352,8 +357,12 @@ void MainWindow::on_snapshot() {
         return;
     }
     Snapshot s = worker_->take();
+    // A switch shows the user's choice until its last command has finished.
     for (const std::string& name : s.settled) {
-        pending_.erase(name);
+        if (const auto it = outstanding_.find(name); it != outstanding_.end() && --it->second <= 0) {
+            outstanding_.erase(it);
+            pending_.erase(name);
+        }
     }
     if (!s.change_error.empty()) {
         change_error_ = s.change_error;
@@ -361,8 +370,18 @@ void MainWindow::on_snapshot() {
     }
     const bool quit_done = s.quit_done;
     const std::string quit_error = s.quit_error;
+    // Keyboard focus stays on the same project when the list changes.
+    std::string focused;
+    if (focus_ >= 0 && focus_ < static_cast<int>(visible_.size())) {
+        focused = snap_.rows[visible_[static_cast<std::size_t>(focus_)]].name;
+    }
     snap_ = std::move(s);
     update_visible();
+    if (!focused.empty()) {
+        if (const int again = visible_index(focused); again >= 0) {
+            focus_ = again;
+        }
+    }
     layout();
     update_tray_tip();
     InvalidateRect(hwnd_, nullptr, FALSE);
@@ -546,6 +565,7 @@ std::vector<MainWindow::RowGeometry> MainWindow::row_geometry(HDC dc) const {
     for (std::size_t i = 0; i < visible_.size(); ++i) {
         const ProjectRow& row = snap_.rows[visible_[i]];
         RowGeometry g;
+        g.project = row.name;
         const int top = list.top + static_cast<int>(i) * row_h - scroll_;
         g.row = {list.left, top, list.right, top + row_h};
         const int mid = top + row_h / 2;
@@ -692,13 +712,13 @@ bool MainWindow::switch_value(const ProjectRow& row) const {
 
 MainWindow::Hit MainWindow::hit_test(int x, int y) const {
     if (contains(new_project_button(), x, y)) {
-        return {Part::NewProject, -1};
+        return {Part::NewProject, -1, {}};
     }
     if (contains(settings_button(), x, y)) {
-        return {Part::Settings, -1};
+        return {Part::Settings, -1, {}};
     }
     if (contains(banner_rect(), x, y)) {
-        return {Part::Banner, -1};
+        return {Part::Banner, -1, {}};
     }
     if (!contains(list_rect(), x, y)) {
         return {};
@@ -707,13 +727,13 @@ MainWindow::Hit MainWindow::hit_test(int x, int y) const {
         const RowGeometry& g = geometry_[i];
         const int row = static_cast<int>(i);
         if (contains(g.toggle, x, y)) {
-            return {Part::Switch, row};
+            return {Part::Switch, row, g.project};
         }
         if (contains(g.address, x, y)) {
-            return {Part::Address, row};
+            return {Part::Address, row, g.project};
         }
         if (contains(g.row, x, y)) {
-            return {Part::Row, row};
+            return {Part::Row, row, g.project};
         }
     }
     return {};
@@ -736,7 +756,25 @@ void MainWindow::on_mouse_move(int x, int y) {
     }
 }
 
-void MainWindow::on_click(const Hit& hit) {
+int MainWindow::visible_index(const std::string& project) const {
+    for (std::size_t i = 0; i < visible_.size(); ++i) {
+        if (snap_.rows[visible_[i]].name == project) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+void MainWindow::on_click(const Hit& clicked) {
+    // The row is found again by its project: a new list may have arrived
+    // since the screen the user clicked on was painted.
+    Hit hit = clicked;
+    if (!hit.project.empty()) {
+        hit.row = visible_index(hit.project);
+        if (hit.row < 0) {
+            return;
+        }
+    }
     switch (hit.part) {
         case Part::Switch:
             focus_ = hit.row;
@@ -801,7 +839,10 @@ void MainWindow::on_key(WPARAM key) {
             SetFocus(search_);
             return;
         case VK_F5:
-            if (worker_) {
+            // Also the keyboard's way to start a stopped service (the banner).
+            if (worker_ && banner().clickable) {
+                worker_->start_service();
+            } else if (worker_) {
                 worker_->refresh();
             }
             return;
@@ -896,6 +937,7 @@ void MainWindow::toggle(int visible_row) {
     const ProjectRow& row = snap_.rows[visible_[static_cast<std::size_t>(visible_row)]];
     const bool value = !switch_value(row);
     pending_[row.name] = value;
+    ++outstanding_[row.name];
     change_error_.clear();
     worker_->set_on(row.name, value);
     InvalidateRect(hwnd_, nullptr, FALSE);

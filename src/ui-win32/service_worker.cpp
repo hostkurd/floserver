@@ -141,19 +141,29 @@ void ServiceWorker::run(const std::stop_token& stop) {
 
         std::vector<std::string> settled;
         std::string change_error;
+        // "Couldn't change <project>: <reason>". The project name keeps its
+        // own direction; the service's reason is English (left to right).
+        auto change_failed = [this](const std::string& project, const std::string& reason, bool english) {
+            const bool rtl = is_rtl(lang_);
+            return fill_pattern(text(lang_, Str::ChangeFailed), false,
+                                {rtl ? isolate_auto(project) : project, rtl && english ? isolate_ltr(reason) : reason});
+        };
         for (const Command& c : batch) {
             if (c.kind != Command::Kind::SetOn) {
                 continue;
             }
             settled.push_back(c.project);
             if (!client) {
+                // Never sent: the switch goes back, and the user is told why.
+                change_error = change_failed(c.project, std::string(text(lang_, Str::ConnectionLost)), false);
                 continue;
             }
             const auto reply = client->call("projects.set", {{"name", c.project}, {"on", c.on}});
             if (!reply) {
                 client.reset();
+                change_error = change_failed(c.project, std::string(text(lang_, Str::ConnectionLost)), false);
             } else if (!reply->ok) {
-                change_error = fill(lang_, Str::ChangeFailed, {c.project, reply->error_message});
+                change_error = change_failed(c.project, reply->error_message, true);
             }
         }
 
