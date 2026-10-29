@@ -8,7 +8,7 @@
 # Run in PowerShell:
 #   powershell -ExecutionPolicy Bypass -File .\check-floserver-cdn.ps1 -Bucket <bucket-name> -Region <region>
 #
-# It downloads about 750 MB into a temporary folder and deletes it at the end.
+# It downloads about 800 MB into a temporary folder and deletes it at the end.
 # Two reports are saved next to this script:
 #   floserver-cdn-report.txt   to read
 #   floserver-cdn-report.json  for: floserver-manifest build floserver-cdn-report.json --sequence N
@@ -43,7 +43,15 @@ $files = @(
     @{ Path = "node/22.23.4/node-v22.23.4-win-x64.zip";         Sums = "https://nodejs.org/dist/v22.23.4/SHASUMS256.txt" },
     @{ Path = "composer/2.10.3/composer.phar";                  Sums = "https://getcomposer.org/download/2.10.3/composer.phar.sha256sum" },
     @{ Path = "nginx/1.30.6/nginx-1.30.6.zip";                  Orig = "https://nginx.org/download/nginx-1.30.6.zip" },
-    @{ Path = "apache/2.4.69/httpd-2.4.69-261002-Win64-VS18.zip"; Orig = "https://www.apachelounge.com/download/VS18/binaries/httpd-2.4.69-261002-Win64-VS18.zip" }
+    @{ Path = "apache/2.4.69/httpd-2.4.69-261002-Win64-VS18.zip"; Orig = "https://www.apachelounge.com/download/VS18/binaries/httpd-2.4.69-261002-Win64-VS18.zip" },
+    # python-build-standalone names its files with "+"; on the CDN it is "-" (S3 may read "+" in a URL as a space).
+    # Name = the file name in the official checksum list.
+    @{ Path = "python/3.13.18/cpython-3.13.18-20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz";
+       Name = "cpython-3.13.18+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz";
+       Sums = "https://github.com/astral-sh/python-build-standalone/releases/download/20261026/SHA256SUMS" },
+    @{ Path = "python/3.12.16/cpython-3.12.16-20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz";
+       Name = "cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz";
+       Sums = "https://github.com/astral-sh/python-build-standalone/releases/download/20261026/SHA256SUMS" }
 )
 
 $temp = Join-Path ([IO.Path]::GetTempPath()) ("floserver-cdn-check-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
@@ -104,7 +112,9 @@ foreach ($f in $files) {
     $official = $null
     $source = ""
     if ($f.Sums) {
-        $official = Find-OfficialHash $f.Sums $name
+        $sumsName = $name
+        if ($f.Name) { $sumsName = $f.Name }
+        $official = Find-OfficialHash $f.Sums $sumsName
         $source = "checksum list"
     } elseif ($f.Orig) {
         $orig = Join-Path $temp ("original-" + $name)
