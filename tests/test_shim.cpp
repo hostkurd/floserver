@@ -173,11 +173,22 @@ TEST_CASE("outside a project, with none of FloServer's, a shim runs the one that
     const auto elsewhere = resolve_shim("python3", tmp.path(), data, error);
     test_util::write_file(tmp.path() / "proj" / "floserver.json", R"({"python": "3.13"})");
     const auto in_project = resolve_shim("python3", tmp.path() / "proj", data, error);
+    CHECK(error.find("flo install python 3.13") != std::string::npos);
+    // A link elsewhere to a shim isn't "the one that was there".
+    const fs::path links = tmp.path() / "links";
+    fs::create_directories(links);
+    fs::create_symlink(shims_dir(data) / "python3", links / "python3");
+    fs::create_hard_link(shims_dir(data) / "python3", links / "pip3");
+    ::setenv("PATH", (path_to_utf8(links) + ":" + path_to_utf8(bin)).c_str(), 1);  // NOLINT(concurrency-mt-unsafe)
+    const auto past_link = resolve_shim("python3", tmp.path(), data, error);
+    const auto past_hard_link = resolve_shim("pip3", tmp.path(), data, error);
     ::setenv("PATH", old_path.c_str(), 1);  // NOLINT(concurrency-mt-unsafe)
+    REQUIRE(past_link);
+    CHECK(past_link->program == bin / "python3");
+    CHECK_FALSE(past_hard_link);  // nothing else called pip3 here
     REQUIRE(elsewhere);
     CHECK(elsewhere->program == bin / "python3");
     CHECK_FALSE(in_project);  // a project's own version is never swapped for another
-    CHECK(error.find("flo install python 3.13") != std::string::npos);
 }
 
 TEST_CASE("a shim never runs another shim") {

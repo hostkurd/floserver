@@ -155,9 +155,35 @@ fs::path shims_dir(const fs::path& data) { return data / "shims"; }
 namespace {
 
 // The program `name` further along this process's PATH, past the shims.
+// Never a shim reached another way (a link to one, or this very program),
+// which would start itself again without end.
 std::optional<fs::path> next_on_path(const std::string& name, const fs::path& data_dir) {
     std::error_code ec;
     const fs::path shims = fs::weakly_canonical(shims_dir(data_dir), ec);
+    if (ec || shims.empty()) {
+        return std::nullopt;
+    }
+    // Every name in the folder is a link to one program; any of them will do.
+    std::vector<fs::path> ours;
+    for (const std::string& n : shim_names()) {
+        ours.push_back(shims / path_from_utf8(n));
+#ifdef _WIN32
+        ours.back() += ".exe";
+#endif
+    }
+    if (const auto self = executable_path()) {
+        ours.push_back(*self);
+    }
+    const auto is_shim = [&](const fs::path& p) {
+        std::error_code e;
+        if (fs::weakly_canonical(p, e).parent_path() == shims || e) {
+            return true;
+        }
+        return std::any_of(ours.begin(), ours.end(), [&p](const fs::path& o) {
+            std::error_code e2;
+            return fs::equivalent(p, o, e2);
+        });
+    };
     const std::string path = get_env("PATH").value_or("");
 #ifdef _WIN32
     const char sep = ';';
@@ -172,7 +198,7 @@ std::optional<fs::path> next_on_path(const std::string& name, const fs::path& da
         const std::string dir = path.substr(start, end == std::string::npos ? std::string::npos : end - start);
         if (!dir.empty() && fs::weakly_canonical(path_from_utf8(dir), ec) != shims) {
             fs::path p = path_from_utf8(dir) / file;
-            if (is_file(p)) {
+            if (is_file(p) && !is_shim(p)) {
                 return p;
             }
         }
