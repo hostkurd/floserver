@@ -16,6 +16,9 @@
 #include "floserver/core/protocol.h"
 #include "floserver/core/runtime_service.h"
 #include "floserver/core/trust_store.h"
+#include "floserver/core/database_service.h"
+#include "floserver/core/mariadb.h"
+#include "floserver/core/secret_store.h"
 #include "floserver/core/web_service.h"
 
 #include <algorithm>
@@ -156,6 +159,8 @@ struct Service {
     std::unique_ptr<floserver::core::ProjectService> projects;
     std::unique_ptr<floserver::core::CertStore> certs;
     std::unique_ptr<floserver::core::WebService> web;
+    std::unique_ptr<floserver::core::SecretStore> secrets;
+    std::unique_ptr<floserver::core::DatabaseService> databases;
 
     // Adds what's running to a project's description: its address and
     // whether its PHP is running or asleep.
@@ -257,6 +262,9 @@ struct Service {
                 add_run_state(*result, sites);
             }
         }
+        if (result && databases) {
+            (void)databases->reload();
+        }
         return result ? protocol::make_result(r.id, *result) : protocol::make_error(r.id, refusal.code, refusal.message);
     }
 
@@ -324,6 +332,46 @@ struct Service {
         return protocol::make_result(r.id, r.method == "web.reload" ? web->reload() : web->status());
     }
 
+    // databases.list: the servers; databases.login {"name"}: a project's
+    // database login (made the first time) and its .env lines.
+    [[nodiscard]] std::string database_request(const protocol::Request& r) const {
+        namespace core = floserver::core;
+        if (!databases) {
+            return protocol::make_error(r.id, "no_data_folder",
+                                        "FloServer can't find a folder to keep its settings in (LOCALAPPDATA or HOME)");
+        }
+        if (r.method == "databases.list") {
+            return protocol::make_result(r.id, databases->status());
+        }
+        const std::string name = string_param(r.params, "name");
+        core::ServiceRefusal refusal;
+        const auto login = databases->project_login(name, refusal);
+        if (!login) {
+            return protocol::make_error(r.id, refusal.code, refusal.message);
+        }
+        json result = {{"host", "127.0.0.1"},
+                       {"port", login->port},
+                       {"database", login->database},
+                       {"user", login->user},
+                       {"password", login->password}};
+        if (const auto list = projects->list(refusal)) {
+            for (const json& p : (*list)["projects"]) {
+                if (p.value("name", std::string()) == name && p.contains("path")) {
+                    const auto dir = core::path_from_utf8(p["path"].get<std::string>());
+                    const bool laravel = core::env_style(dir) == core::EnvStyle::Laravel;
+                    json env = json::array();
+                    for (const auto& [key, value] : core::env_values(laravel ? core::EnvStyle::Laravel : core::EnvStyle::FloCms, *login)) {
+                        env.push_back({key, value});
+                    }
+                    result["env_style"] = laravel ? "laravel" : "flocms";
+                    result["env"] = env;
+                    result["env_file"] = core::path_to_utf8(dir / ".env");
+                }
+            }
+        }
+        return protocol::make_result(r.id, result);
+    }
+
     [[nodiscard]] json status() const {
         const auto memory = floserver::core::memory_in_use();
         return {{"version", floserver::core::kVersion},
@@ -363,6 +411,8 @@ struct Service {
                 reply = cert_request(*request);
             } else if (request->method == "web.status" || request->method == "web.reload") {
                 reply = web_request(*request);
+            } else if (request->method == "databases.list" || request->method == "databases.login") {
+                reply = database_request(*request);
             } else if (request->method == "quit") {
                 reply = protocol::make_result(request->id, json::object());
                 quit = true;
@@ -403,6 +453,12 @@ int run() {
         service->certs = std::make_unique<floserver::core::CertStore>(*data);
         service->web = std::make_unique<floserver::core::WebService>(web_config(*data), *service->certs);
         service->web->start();
+        service->secrets = std::make_unique<floserver::core::SecretStore>(*data);
+        floserver::core::DatabaseServiceConfig db;
+        db.data_dir = *data;
+        db.idle_after = web_config(*data).idle_after;
+        service->databases = std::make_unique<floserver::core::DatabaseService>(db, *service->secrets);
+        service->databases->start();
     }
 
     while (auto connection = service->server->accept()) {
@@ -425,6 +481,9 @@ int run() {
     // nginx and php-cgi end with the service ("quit stops everything").
     if (service->web) {
         service->web->stop();
+    }
+    if (service->databases) {
+        service->databases->stop();  // a clean shutdown of each MariaDB
     }
     if (!service->clients.wait_until_idle(std::chrono::seconds(2))) {
         // A client thread is still busy and holds the service, so it can't be
