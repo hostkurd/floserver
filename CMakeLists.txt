@@ -27,6 +27,7 @@ add_subdirectory(third_party/miniz)
 add_subdirectory(src/core)
 add_subdirectory(src/daemon)
 add_subdirectory(src/cli)
+add_subdirectory(src/shim)
 # The window's model is built (and tested) everywhere; the window itself only on Windows.
 add_subdirectory(src/ui-win32)
 

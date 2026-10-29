@@ -37,6 +37,8 @@ add_library(floserver_core STATIC
     src/runtime_service.cpp
     src/secret_store.cpp
     src/runtime_store.cpp
+    src/shim.cpp
+    src/user_path.cpp
     src/service_client.cpp
     src/sha256.cpp
     src/version.cpp

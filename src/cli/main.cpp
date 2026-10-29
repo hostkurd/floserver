@@ -7,6 +7,9 @@
 #include "floserver/core/mariadb.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/project_config.h"
+#include "floserver/core/process.h"
+#include "floserver/core/shim.h"
+#include "floserver/core/user_path.h"
 #include "floserver/core/version.h"
 #include "floserver/core/service_client.h"
 #include "floserver/core/trust_store.h"
@@ -61,6 +64,7 @@ void print_help(std::ostream& out) {
         << "  trust                      Let your browsers trust FloServer's HTTPS certificates\n"
         << "  untrust                    Remove FloServer's certificate authority\n"
         << "  check [folder]             Check the floserver.json for a project\n"
+        << "  shims [install|remove]     php, node, npm, composer, python... in your terminal, at each project's version\n"
         << "  version                    Show the version\n"
         << "  help                       Show this help\n";
 }
@@ -731,6 +735,87 @@ int untrust() {
     return 0;
 }
 
+// The terminal shims (D10): the folder, its programs, and the user's PATH.
+int shims(const std::vector<std::string>& args) {
+    namespace core = floserver::core;
+    const auto data = core::data_dir();
+    if (!data) {
+        std::cerr << "FloServer can't find its folder (LOCALAPPDATA or HOME).\n";
+        return 1;
+    }
+    const fs::path dir = core::shims_dir(*data);
+    std::error_code ec;
+    std::string error;
+    const std::string action = args.size() > 1 ? args[1] : "";
+    if (action == "install") {
+        const auto shim = core::sibling_program("floserver-shim");
+        if (!shim || !fs::is_regular_file(*shim, ec)) {
+            std::cerr << "floserver-shim is missing next to this program.\n";
+            return 1;
+        }
+        // One copy of the program in the folder; each name a hard link to
+        // it (or a copy where links aren't possible): no extra disk space.
+        fs::create_directories(dir, ec);
+        const fs::path base = dir / core::path_from_utf8("floserver-shim" + shim->extension().string());
+        fs::remove(base, ec);
+        fs::copy_file(*shim, base, fs::copy_options::overwrite_existing, ec);
+        for (const std::string& name : core::shim_names()) {
+            const fs::path to = dir / core::path_from_utf8(name + shim->extension().string());
+            fs::remove(to, ec);
+            ec.clear();
+            fs::create_hard_link(base, to, ec);
+            if (ec) {
+                ec.clear();
+                fs::copy_file(base, to, fs::copy_options::overwrite_existing, ec);
+            }
+            if (ec) {
+                std::cerr << "Can't write " << shown(to) << ": " << core::error_text(ec) << "\n";
+                return 1;
+            }
+        }
+        const auto change = core::add_to_user_path(dir, error);
+        if (change == core::PathChange::Failed) {
+            std::cerr << error << "\n";
+            return 1;
+        }
+        std::cout << "Shims for php, node, npm, npx, composer, python and pip are in " << shown(dir) << "\n";
+        if (change == core::PathChange::Unsupported) {
+            std::cout << "Add this line to your shell's profile (~/.zshrc, ~/.bashrc):\n  export PATH=\""
+                      << core::path_to_utf8(dir) << ":$PATH\"\n";
+        } else {
+            std::cout << (change == core::PathChange::Done ? "Added to your Path. " : "Already on your Path. ")
+                      << "New terminals use them; one open now needs restarting.\n";
+        }
+        return 0;
+    }
+    if (action == "remove") {
+        const auto change = core::remove_from_user_path(dir, error);
+        if (change == core::PathChange::Failed) {
+            std::cerr << error << "\n";
+            return 1;
+        }
+        fs::remove_all(dir, ec);
+        std::cout << "The shims are removed" << (change == core::PathChange::Done ? ", and taken off your Path" : "")
+                  << ".\n";
+        return 0;
+    }
+    if (!action.empty()) {
+        std::cerr << "Usage: flo shims [install|remove]\n";
+        return 2;
+    }
+    // What `php` (and the rest) would run here.
+    std::cout << "Shims folder: " << shown(dir) << (core::on_user_path(dir) ? "  (on your Path)" : "  (not on your Path: flo shims install)")
+              << "\n";
+    for (const std::string& name : core::shim_names()) {
+        const auto target = core::resolve_shim(name, fs::current_path(ec), *data, error);
+        std::cout << "  " << std::left << std::setw(10) << name
+                  << (target ? core::path_to_utf8(target->program) + (target->version.empty() ? "" : "  (" + target->version + ")")
+                             : "-  " + error)
+                  << "\n";
+    }
+    return 0;
+}
+
 int check(const fs::path& start) {
     const auto file = floserver::core::find_project_config(start);
     if (!file) {
@@ -953,6 +1038,9 @@ int run_command(const std::vector<std::string>& args, const std::vector<fs::path
     }
     if (args[0] == "env") {
         return env(args);
+    }
+    if (args[0] == "shims") {
+        return shims(args);
     }
     if (args[0] == "check") {
         return check(paths.size() > 1 ? paths[1] : fs::current_path());
