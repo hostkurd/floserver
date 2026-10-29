@@ -39,6 +39,11 @@ struct NginxSpec {
     std::filesystem::path work_dir;   // our folder: logs/, temp/, the pid file
     WebPorts ports{};
     bool ipv6 = false;                // also listen on [::1]: set from loopback_ipv6_available()
+    // nginx before 1.25.1 has no "http2 on;" and takes "listen ... http2".
+    bool http2_directive = true;
+    // Only when the service itself runs as root (containers): nginx then
+    // needs to be told to keep that user for its workers.
+    std::string user;
     std::vector<NginxSite> sites;
 };
 

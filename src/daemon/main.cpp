@@ -1,8 +1,8 @@
 // floserverd: the background service in the user's session (D2).
 //
-// So far: one service per user, the private channel, status and quit, the
-// runtimes (the signed list, installs as jobs, removal) and the project list.
-// Running nginx and the PHP pools, and idle timers, come next.
+// The private channel, the runtimes (the signed list, installs as jobs,
+// removal), the project list, the local certificate authority, and running
+// the projects: nginx and the PHP pools that sleep when idle.
 
 #include "floserver/core/build_info.h"
 #include "floserver/core/builtin.h"
@@ -16,6 +16,7 @@
 #include "floserver/core/protocol.h"
 #include "floserver/core/runtime_service.h"
 #include "floserver/core/trust_store.h"
+#include "floserver/core/web_service.h"
 
 #include <atomic>
 #include <chrono>
@@ -94,6 +95,32 @@ std::unique_ptr<floserver::core::RuntimeService> make_runtimes() {
     return std::make_unique<core::RuntimeService>(std::move(config), core::make_system_transport());
 }
 
+// FLOSERVER_WEB_PORTS ("18080,18443") and FLOSERVER_IDLE_SECONDS replace the
+// usual ports and idle time, for tests and dev copies.
+floserver::core::WebServiceConfig web_config(const std::filesystem::path& data) {
+    namespace core = floserver::core;
+    core::WebServiceConfig config;
+    config.data_dir = data;
+    if (const auto ports = core::get_env("FLOSERVER_WEB_PORTS")) {
+        const auto comma = ports->find(',');
+        try {
+            const auto http = std::stoul(ports->substr(0, comma));
+            const auto https = comma == std::string::npos ? http + 363 : std::stoul(ports->substr(comma + 1));
+            if (http > 0 && http < 65536 && https > 0 && https < 65536) {
+                config.fixed_ports = core::WebPorts{static_cast<core::Port>(http), static_cast<core::Port>(https), true};
+            }
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): ignored, the usual ports are used
+        }
+    }
+    if (const auto idle = core::get_env("FLOSERVER_IDLE_SECONDS")) {
+        try {
+            config.idle_after = std::chrono::seconds(std::max(1L, std::stol(*idle)));
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): ignored, the usual idle time is used
+        }
+    }
+    return config;
+}
+
 std::optional<std::int64_t> job_id(const json& params) {
     if (params.contains("id") && params["id"].is_number_integer()) {
         return params["id"].get<std::int64_t>();
@@ -120,6 +147,29 @@ struct Service {
     std::unique_ptr<floserver::core::RuntimeService> runtimes;
     std::unique_ptr<floserver::core::ProjectService> projects;
     std::unique_ptr<floserver::core::CertStore> certs;
+    std::unique_ptr<floserver::core::WebService> web;
+
+    // Adds what's running to a project's description: its address and
+    // whether its PHP is running or asleep.
+    void add_run_state(json& project, const json& sites) const {
+        const std::string name = project.value("name", std::string());
+        if (!sites.contains(name)) {
+            return;
+        }
+        const json& s = sites[name];
+        for (const char* key : {"address", "run"}) {
+            if (s.contains(key)) {
+                project[key] = s[key];
+            }
+        }
+        // Held back by what the service found (nginx missing, a pool that
+        // can't open): that wins over the plan's "ready".
+        for (const char* key : {"state", "missing", "problem"}) {
+            if (s.contains(key)) {
+                project[key] = s[key];
+            }
+        }
+    }
     Clock::time_point started = Clock::now();
     ActiveClients clients;
     std::atomic<bool> quitting{false};
@@ -171,7 +221,15 @@ struct Service {
         const std::string name = string_param(r.params, "name");
         if (r.method == "projects.list") {
             result = projects->list(refusal);
-        } else if (r.method == "projects.add") {
+            if (result && web) {
+                const json sites = web->status()["sites"];
+                for (json& p : (*result)["projects"]) {
+                    add_run_state(p, sites);
+                }
+            }
+            return result ? protocol::make_result(r.id, *result) : protocol::make_error(r.id, refusal.code, refusal.message);
+        }
+        if (r.method == "projects.add") {
             const std::filesystem::path dir = core::path_from_utf8(string_param(r.params, "path"));
             if (!dir.is_absolute()) {
                 return protocol::make_error(r.id, "bad_params", "the project folder must be a full path");
@@ -183,6 +241,13 @@ struct Service {
             }
         } else {  // projects.set
             result = projects->set(name, bool_param(r.params, "on"), bool_param(r.params, "keep_running"), refusal);
+        }
+        // Every change takes effect at once.
+        if (result && web) {
+            const json sites = web->reload()["sites"];
+            if (result->contains("name")) {
+                add_run_state(*result, sites);
+            }
         }
         return result ? protocol::make_result(r.id, *result) : protocol::make_error(r.id, refusal.code, refusal.message);
     }
@@ -231,9 +296,24 @@ struct Service {
             return ca ? protocol::make_result(r.id, {{"ca", ca_json(*ca)}})
                       : protocol::make_error(r.id, "ca_failed", error);
         }
-        // certs.remove
-        return certs->remove_all(error) ? protocol::make_result(r.id, json::object())
-                                        : protocol::make_error(r.id, "remove_failed", error);
+        // certs.remove: sites go back to plain http.
+        if (!certs->remove_all(error)) {
+            return protocol::make_error(r.id, "remove_failed", error);
+        }
+        if (web) {
+            (void)web->reload();
+        }
+        return protocol::make_result(r.id, json::object());
+    }
+
+    // web.status, web.reload: what runs, or bring it in line now (after
+    // `flo trust`, say).
+    [[nodiscard]] std::string web_request(const protocol::Request& r) const {
+        if (!web) {
+            return protocol::make_error(r.id, "no_data_folder",
+                                        "FloServer can't find a folder to keep its settings in (LOCALAPPDATA or HOME)");
+        }
+        return protocol::make_result(r.id, r.method == "web.reload" ? web->reload() : web->status());
     }
 
     [[nodiscard]] json status() const {
@@ -273,6 +353,8 @@ struct Service {
             } else if (request->method == "certs.status" || request->method == "certs.ensure_ca" ||
                        request->method == "certs.remove") {
                 reply = cert_request(*request);
+            } else if (request->method == "web.status" || request->method == "web.reload") {
+                reply = web_request(*request);
             } else if (request->method == "quit") {
                 reply = protocol::make_result(request->id, json::object());
                 quit = true;
@@ -311,6 +393,8 @@ int run() {
     if (const auto data = floserver::core::data_dir()) {
         service->projects = std::make_unique<floserver::core::ProjectService>(*data);
         service->certs = std::make_unique<floserver::core::CertStore>(*data);
+        service->web = std::make_unique<floserver::core::WebService>(web_config(*data), *service->certs);
+        service->web->start();
     }
 
     while (auto connection = service->server->accept()) {
@@ -329,6 +413,10 @@ int run() {
     // Give the client that asked us to quit time to read the reply.
     if (service->runtimes) {
         service->runtimes->stop();
+    }
+    // nginx and php-cgi end with the service ("quit stops everything").
+    if (service->web) {
+        service->web->stop();
     }
     if (!service->clients.wait_until_idle(std::chrono::seconds(2))) {
         // A client thread is still busy and holds the service, so it can't be

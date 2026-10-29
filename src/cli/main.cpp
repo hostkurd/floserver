@@ -46,6 +46,8 @@ void print_help(std::ostream& out) {
         << "  status                     Show whether FloServer is running\n"
         << "  service start              Start FloServer in the background\n"
         << "  service stop               Stop FloServer and everything it runs\n"
+        << "  start [project]            Start FloServer, or turn a project on and show its address\n"
+        << "  stop [project]             Turn a project off, or stop FloServer and everything it runs\n"
         << "  runtimes [--refresh]       List installed runtimes and the ones you can install\n"
         << "  install <name> [version]   Install a runtime: flo install php 8.5\n"
         << "  uninstall <name> <version> Remove an installed runtime: flo uninstall php 8.5.12\n"
@@ -334,7 +336,8 @@ std::string state_line(const nlohmann::json& p) {
     const std::string state = text_of(p, "state");
     const std::string missing = missing_list(p);
     if (state == "ready") {
-        return "ready";
+        const std::string run = text_of(p, "run");
+        return run == "running" ? "on, running" : run == "failed" ? "on, PHP can't start" : run.empty() ? "on" : "on, asleep";
     }
     if (state == "off") {
         return missing.empty() ? "off" : "off (needs " + missing + ")";
@@ -363,9 +366,99 @@ int projects() {
         const std::string php = text_of(p, "php");
         std::cout << std::left << std::setw(22) << text_of(p, "name") << std::setw(12)
                   << (php.empty() ? std::string("-") : "php " + php)
-                  << (p.value("keep_running", false) ? "keep running  " : "") << state_line(p) << "\n"
-                  << "  " << text_of(p, "path") << "\n";
+                  << (p.value("keep_running", false) ? "keep running  " : "") << state_line(p) << "\n";
+        if (!text_of(p, "address").empty()) {
+            std::cout << "  " << text_of(p, "address") << "\n";
+        }
+        std::cout << "  " << text_of(p, "path") << "\n";
     }
+    return 0;
+}
+
+// One line per On project: its address, or what keeps it from running.
+void print_served(const nlohmann::json& p) {
+    const std::string address = text_of(p, "address");
+    if (!address.empty()) {
+        std::cout << "  " << std::left << std::setw(20) << text_of(p, "name") << address << "\n";
+    } else {
+        std::cout << "  " << std::left << std::setw(20) << text_of(p, "name") << state_line(p) << "\n";
+    }
+}
+
+// What the web server says when something is wrong, and the HTTPS hint.
+void print_web_notes(floserver::core::ServiceClient& client) {
+    const auto web = client.call("web.status");
+    if (!web || !web->ok) {
+        return;
+    }
+    const auto& w = web->result;
+    if (w.contains("error") && w["error"].is_string()) {
+        std::cout << "Note: " << w["error"].get<std::string>() << "\n";
+    }
+    if (w["nginx"].contains("error") && w["nginx"]["error"].is_string()) {
+        std::cout << "nginx: " << w["nginx"]["error"].get<std::string>() << "\n";
+    }
+    if (w["nginx"].value("running", false) && !w["nginx"].value("tls", false)) {
+        std::cout << "For https addresses, run: flo trust\n";
+    }
+}
+
+// flo start [name]: FloServer and every project that's On, or turns one on.
+int start(const std::vector<std::string>& args) {
+    if (args.size() > 2) {
+        std::cerr << "Usage: flo start [project]\n";
+        return 2;
+    }
+    auto client = connect_or_start(std::chrono::seconds(60));
+    if (!client) {
+        return 1;
+    }
+    if (args.size() == 2) {
+        const auto reply = client->call("projects.set", {{"name", args[1]}, {"on", true}});
+        if (!reply || !reply->ok) {
+            return print_refusal(reply);
+        }
+        print_served(reply->result);
+        print_web_notes(*client);
+        return text_of(reply->result, "address").empty() ? 1 : 0;
+    }
+    (void)client->call("web.reload");
+    const auto list = client->call("projects.list");
+    if (!list || !list->ok) {
+        return print_refusal(list);
+    }
+    bool any = false;
+    for (const auto& p : list->result["projects"]) {
+        if (p.value("on", false)) {
+            any = true;
+            print_served(p);
+        }
+    }
+    if (!any) {
+        std::cout << "FloServer is running. No project is on yet: flo start <project>\n";
+    }
+    print_web_notes(*client);
+    return 0;
+}
+
+// flo stop [name]: turns one project off, or stops everything.
+int stop(const std::vector<std::string>& args) {
+    if (args.size() > 2) {
+        std::cerr << "Usage: flo stop [project]\n";
+        return 2;
+    }
+    if (args.size() == 1) {
+        return service({"service", "stop"});
+    }
+    auto client = connect_or_start(std::chrono::seconds(60));
+    if (!client) {
+        return 1;
+    }
+    const auto reply = client->call("projects.set", {{"name", args[1]}, {"on", false}});
+    if (!reply || !reply->ok) {
+        return print_refusal(reply);
+    }
+    std::cout << args[1] << " is off.\n";
     return 0;
 }
 
@@ -554,6 +647,7 @@ int trust() {
                                 : "Not added: " + error + "\n");
         return 1;
     }
+    (void)client->call("web.reload");  // projects switch to https now
     std::cout << "Done. Browsers accept https://<project>.localhost now (restart a browser that was open).\n"
               << "Firefox: if it still warns, open about:config and set security.enterprise_roots.enabled to true.\n";
     return 0;
@@ -647,6 +741,12 @@ int run_command(const std::vector<std::string>& args, const std::vector<fs::path
     }
     if (args[0] == "status") {
         return status();
+    }
+    if (args[0] == "start") {
+        return start(args);
+    }
+    if (args[0] == "stop") {
+        return stop(args);
     }
     if (args[0] == "service") {
         return service(args);

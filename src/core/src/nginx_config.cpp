@@ -41,6 +41,7 @@ public:
         fastcgi_params_ = *fastcgi_params;
 
         out_ << "# Written by FloServer. It is replaced whenever projects change, so edits here are lost.\n"
+             << (spec_.user.empty() ? std::string() : "user " + spec_.user + ";\n")
              << "worker_processes 1;\n"
              << "pid " << *pid << ";\n"
              << "error_log " << *error_log << " warn;\n\n"
@@ -142,8 +143,8 @@ private:
         }
         out_ << "    server {\n";
         if (site.tls) {
-            listen(spec_.ports.https, " ssl");
-            out_ << "        http2 on;\n"
+            listen(spec_.ports.https, spec_.http2_directive ? " ssl" : " ssl http2");
+            out_ << (spec_.http2_directive ? "        http2 on;\n" : "")
                  << "        ssl_certificate " << *cert << ";\n"
                  << "        ssl_certificate_key " << *key << ";\n";
         } else {

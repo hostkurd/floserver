@@ -5,6 +5,9 @@ configure_file(build_info.h.in ${CMAKE_CURRENT_BINARY_DIR}/generated/floserver/c
 add_library(floserver_core STATIC
     src/builtin.cpp
     src/der.cpp
+    src/child_process.cpp
+    src/php_pool.cpp
+    src/web_service.cpp
     src/crypto_common.cpp
     src/crypto_windows.cpp
     src/crypto_openssl.cpp

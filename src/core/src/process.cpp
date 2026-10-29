@@ -1,5 +1,9 @@
 #include "floserver/core/process.h"
 
+#ifdef _WIN32
+#include "win_text.h"
+#endif
+
 #include <array>
 #include <cstdlib>
 #include <fstream>
@@ -146,49 +150,11 @@ std::optional<fs::path> sibling_program(const std::string& name) {
 
 #ifdef _WIN32
 
-namespace {
-
-// Quotes one argument the way CommandLineToArgvW reads it back.
-std::wstring quote(const std::wstring& arg) {
-    if (!arg.empty() && arg.find_first_of(L" \t\n\v\"") == std::wstring::npos) {
-        return arg;
-    }
-    std::wstring out = L"\"";
-    std::size_t backslashes = 0;
-    for (const wchar_t c : arg) {
-        if (c == L'\\') {
-            ++backslashes;
-            continue;
-        }
-        if (c == L'"') {
-            out.append(backslashes * 2 + 1, L'\\');
-        } else {
-            out.append(backslashes, L'\\');
-        }
-        backslashes = 0;
-        out += c;
-    }
-    out.append(backslashes * 2, L'\\');
-    out += L'"';
-    return out;
-}
-
-std::wstring widen(const std::string& s) {
-    if (s.empty()) {
-        return {};
-    }
-    const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
-    std::wstring w(static_cast<std::size_t>(n), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), w.data(), n);
-    return w;
-}
-
-}  // namespace
 
 bool spawn_detached(const fs::path& program, const std::vector<std::string>& args, std::string& error) {
-    std::wstring command = quote(program.wstring());
+    std::wstring command = win::quote(program.wstring());
     for (const std::string& a : args) {
-        command += L" " + quote(widen(a));
+        command += L" " + win::quote(win::widen(a));
     }
     STARTUPINFOW startup{};
     startup.cb = sizeof startup;
@@ -212,9 +178,9 @@ bool spawn_detached(const fs::path& program, const std::vector<std::string>& arg
 
 std::optional<int> run_and_wait(const fs::path& program, const std::vector<std::string>& args,
                                 std::chrono::milliseconds limit, std::string& error) {
-    std::wstring command = quote(program.wstring());
+    std::wstring command = win::quote(program.wstring());
     for (const std::string& a : args) {
-        command += L" " + quote(widen(a));
+        command += L" " + win::quote(win::widen(a));
     }
     STARTUPINFOW startup{};
     startup.cb = sizeof startup;
