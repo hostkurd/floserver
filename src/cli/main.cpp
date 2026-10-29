@@ -3,6 +3,7 @@
 
 #include "floserver/core/build_info.h"
 #include "floserver/core/encoding.h"
+#include "floserver/core/integration.h"
 #include "floserver/core/ipc.h"
 #include "floserver/core/mariadb.h"
 #include "floserver/core/paths.h"
@@ -55,8 +56,8 @@ void print_help(std::ostream& out) {
         << "  runtimes [--refresh]       List installed runtimes and the ones you can install\n"
         << "  install <name> [version]   Install a runtime: flo install php 8.5\n"
         << "  uninstall <name> <version> Remove an installed runtime: flo uninstall php 8.5.12\n"
-        << "  projects                   List your projects and what each one needs\n"
-        << "  add [folder] [--name <n>]  Add a folder as a project (this folder if none)\n"
+        << "  projects [--json]          List your projects and what each one needs\n"
+        << "  add [folder] [--name <n>] [--json]  Add a folder as a project (this folder if none)\n"
         << "  remove <name>              Forget a project (its files are kept)\n"
         << "  use <php|node|python|mariadb> <v> Set a version in this project's floserver.json\n"
         << "  db                         Show the databases and the projects using them\n"
@@ -64,6 +65,7 @@ void print_help(std::ostream& out) {
         << "  trust                      Let your browsers trust FloServer's HTTPS certificates\n"
         << "  untrust                    Remove FloServer's certificate authority\n"
         << "  check [folder]             Check the floserver.json for a project\n"
+        << "  studio [project|folder]    Open a FloCMS project in FloCMS Studio\n"
         << "  shims [install|remove]     php, node, npm, composer, python... in your terminal, at each project's version\n"
         << "  version                    Show the version\n"
         << "  help                       Show this help\n";
@@ -366,7 +368,12 @@ std::string state_line(const nlohmann::json& p) {
     return "problem: " + text_of(p, "problem");
 }
 
-int projects() {
+int projects(const std::vector<std::string>& args) {
+    const bool as_json = args.size() == 2 && args[1] == "--json";
+    if (args.size() > 1 && !as_json) {
+        std::cerr << "Usage: flo projects [--json]\n";
+        return 2;
+    }
     auto client = connect_or_start(std::chrono::seconds(15));
     if (!client) {
         return 1;
@@ -376,6 +383,12 @@ int projects() {
         return print_refusal(reply);
     }
     const auto& list = reply->result["projects"];
+    if (as_json) {
+        // For FloCMS Studio and scripts (D14): the service's own description.
+        std::cout << nlohmann::json{{"projects", list}}.dump(2, ' ', false, nlohmann::json::error_handler_t::replace)
+                  << "\n";
+        return 0;
+    }
     if (list.empty()) {
         std::cout << "No projects yet. Add a folder with: flo add <folder>\n";
         return 0;
@@ -488,13 +501,16 @@ int stop(const std::vector<std::string>& args) {
 int add(const std::vector<std::string>& args, const std::vector<fs::path>& paths) {
     std::optional<fs::path> folder;
     std::string name;
+    bool as_json = false;
     for (std::size_t i = 1; i < args.size(); ++i) {
         if (args[i] == "--name" && i + 1 < args.size()) {
             name = args[++i];
+        } else if (args[i] == "--json") {
+            as_json = true;
         } else if (!folder && !args[i].starts_with("--")) {
             folder = paths[i];
         } else {
-            std::cerr << "Usage: flo add [folder] [--name <name>]\n";
+            std::cerr << "Usage: flo add [folder] [--name <name>] [--json]\n";
             return 2;
         }
     }
@@ -515,6 +531,10 @@ int add(const std::vector<std::string>& args, const std::vector<fs::path>& paths
     const auto reply = client->call("projects.add", params);
     if (!reply || !reply->ok) {
         return print_refusal(reply);
+    }
+    if (as_json) {
+        std::cout << reply->result.dump(2, ' ', false, nlohmann::json::error_handler_t::replace) << "\n";
+        return 0;
     }
     std::cout << "Added " << text_of(reply->result, "name") << " (" << shown(dir) << ").\n";
     const std::string missing = missing_list(reply->result);
@@ -1045,6 +1065,71 @@ int env(const std::vector<std::string>& args) {
     return 0;
 }
 
+// flo studio [project|folder]: opens a FloCMS project in FloCMS Studio (D14).
+// A name is a project's; anything else is a folder; nothing is the project
+// this folder is in, else this folder.
+int studio(const std::vector<std::string>& args, const std::vector<fs::path>& paths) {
+    if (args.size() > 2) {
+        std::cerr << "Usage: flo studio [project|folder]\n";
+        return 2;
+    }
+    std::error_code ec;
+    std::optional<fs::path> folder;
+    if (args.size() == 2) {
+        const fs::path given = fs::absolute(paths[1], ec).lexically_normal();
+        if (!ec && fs::is_directory(given, ec)) {
+            folder = given;
+        }
+    }
+    if (!folder) {
+        // A project name (the service is started for it), or the project
+        // this folder is in (asked only when the service already runs).
+        std::string connect_error;
+        auto client = args.size() == 2
+                          ? connect_or_start(std::chrono::seconds(15))
+                          : floserver::core::ServiceClient::connect(floserver::core::ipc::default_instance(),
+                                                                    connect_error);
+        if (client) {
+            if (const auto list = client->call("projects.list"); list && list->ok) {
+                const fs::path here = fs::weakly_canonical(fs::current_path(), ec);
+                std::size_t best = 0;
+                for (const auto& p : list->result["projects"]) {
+                    const fs::path dir = floserver::core::path_from_utf8(text_of(p, "path"));
+                    if (args.size() == 2 ? text_of(p, "name") == args[1]
+                                         : is_inside(here, dir) && dir.native().size() > best) {
+                        best = dir.native().size();
+                        folder = dir;
+                    }
+                }
+            }
+        }
+    }
+    if (!folder && args.size() == 2) {
+        std::cerr << args[1] << " isn't a project or a folder. See your projects with: flo projects\n";
+        return 2;
+    }
+    if (!folder) {
+        folder = fs::current_path(ec);
+    }
+    const std::string label = folder->filename().empty() ? shown(*folder) : shown(folder->filename());
+    if (!floserver::core::is_flocms_project(*folder)) {
+        std::cerr << label << " isn't a FloCMS project, so Studio can't open it.\n";
+        return 1;
+    }
+    const auto program = floserver::core::find_studio();
+    if (!program) {
+        std::cerr << "FloCMS Studio isn't installed on this computer.\n";
+        return 1;
+    }
+    std::string error;
+    if (!floserver::core::open_in_studio(*program, *folder, error)) {
+        std::cerr << "Couldn't open FloCMS Studio: " << error << "\n";
+        return 1;
+    }
+    std::cout << "Opened " << label << " in FloCMS Studio.\n";
+    return 0;
+}
+
 int run_command(const std::vector<std::string>& args, const std::vector<fs::path>& paths) {
     if (args.empty() || args[0] == "help" || args[0] == "--help" || args[0] == "-h") {
         print_help(std::cout);
@@ -1076,7 +1161,10 @@ int run_command(const std::vector<std::string>& args, const std::vector<fs::path
         return uninstall(args);
     }
     if (args[0] == "projects") {
-        return projects();
+        return projects(args);
+    }
+    if (args[0] == "studio") {
+        return studio(args, paths);
     }
     if (args[0] == "add") {
         return add(args, paths);

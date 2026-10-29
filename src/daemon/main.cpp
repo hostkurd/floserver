@@ -9,6 +9,7 @@
 #include "floserver/core/certificates.h"
 #include "floserver/core/encoding.h"
 #include "floserver/core/http.h"
+#include "floserver/core/integration.h"
 #include "floserver/core/ipc.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/process.h"
@@ -28,6 +29,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -163,6 +165,29 @@ struct Service {
     std::unique_ptr<floserver::core::WebService> web;
     std::unique_ptr<floserver::core::SecretStore> secrets;
     std::unique_ptr<floserver::core::DatabaseService> databases;
+    std::optional<std::filesystem::path> data;
+
+    // integration.json for FloCMS Studio (D14): rewritten when what it says
+    // changed (an install, a removal, a database port).
+    // Never throws: it runs on its own thread, where an exception would end
+    // the service.
+    void refresh_integration() const noexcept {
+        if (!data) {
+            return;
+        }
+        try {
+            const json status = databases ? databases->status() : json::object();
+            std::string error;
+            (void)floserver::core::write_integration(
+                *data, floserver::core::integration_json(floserver::core::collect_integration(*data, status)),
+                error);
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): tried again in 5 s
+        }
+    }
+
+    // Wakes the integration thread when the service quits.
+    std::mutex integration_mutex;
+    std::condition_variable integration_wake;
 
     // Adds what's running to a project's description: its address and
     // whether its PHP or its own server is running or asleep (and why it
@@ -456,6 +481,7 @@ int run() {
     }
 
     auto service = std::make_shared<Service>();
+    std::thread integration_thread;
     service->server = std::move(server);
     service->runtimes = make_runtimes();
     if (const auto data = floserver::core::data_dir()) {
@@ -469,6 +495,20 @@ int run() {
         db.idle_after = web_config(*data).idle_after;
         service->databases = std::make_unique<floserver::core::DatabaseService>(db, *service->secrets);
         service->databases->start();
+        service->data = *data;
+        service->refresh_integration();
+        try {
+            integration_thread = std::thread([service] {
+                std::unique_lock lock(service->integration_mutex);
+                while (!service->integration_wake.wait_for(lock, std::chrono::seconds(5),
+                                                            [&] { return service->quitting.load(); })) {
+                    lock.unlock();
+                    service->refresh_integration();
+                    lock.lock();
+                }
+            });
+        } catch (const std::system_error&) {  // NOLINT(bugprone-empty-catch): the file is still written at every start
+        }
     }
 
     while (auto connection = service->server->accept()) {
@@ -483,6 +523,15 @@ int run() {
         } catch (const std::system_error&) {
             service->clients.remove();  // no thread for this client; keep serving
         }
+    }
+    // The integration thread ends before anything it reads stops.
+    {
+        const std::lock_guard lock(service->integration_mutex);
+        service->quitting.store(true);
+    }
+    service->integration_wake.notify_all();
+    if (integration_thread.joinable()) {
+        integration_thread.join();
     }
     // Give the client that asked us to quit time to read the reply.
     if (service->runtimes) {
