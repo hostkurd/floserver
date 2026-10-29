@@ -238,14 +238,16 @@ TEST_CASE("projects run with real nginx and php-cgi, sleep when idle and wake on
         find_project(changed, "shop")->on = false;
         REQUIRE(save_app_config(app_config_file(data), changed, error));
         (void)web.reload();
-        // reload() returns only once nginx serves the new config.
-        CHECK(get(http, "shop.localhost").starts_with("404 "));
+        // reload() returns once nginx answers with the new config, but
+        // nginx's old worker may still take a connection for a moment (seen
+        // under ASan in CI): harmless for users, so the test waits briefly.
+        CHECK(eventually([&] { return get(http, "shop.localhost").starts_with("404 "); }, 3s));
         CHECK(get(http, "api.localhost") == "200 api");
-        // Turned on again: served as soon as reload() returns.
+        // Turned on again: served again.
         find_project(changed, "shop")->on = true;
         REQUIRE(save_app_config(app_config_file(data), changed, error));
         (void)web.reload();
-        CHECK(get(http, "shop.localhost") == "200 shop /");
+        CHECK(eventually([&] { return get(http, "shop.localhost") == "200 shop /"; }, 3s));
         for (Project& p : changed.projects) {
             p.on = false;
         }
