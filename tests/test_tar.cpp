@@ -213,3 +213,79 @@ TEST_CASE("tar.gz limits and an existing target") {
     REQUIRE(ok.ok);
     CHECK(read(tmp.path() / "w" / "a") == "1234");  // two top-level files: nothing dropped
 }
+
+TEST_CASE("tar.gz: repeated names, pax rules and what follows the end") {
+    const test_util::TempDir tmp;
+    int n = 0;
+    const auto run = [&](const std::string& bytes, const ZipLimits& limits = {}) {
+        const fs::path dir = tmp.path() / std::to_string(++n);
+        fs::create_directories(dir);
+        return std::pair{extract_tar_gz(write_archive(dir, bytes), dir / "out", limits), dir / "out"};
+    };
+    // The same name twice, also differing only in case (one file on
+    // Windows), is refused before anything is written; a folder listed
+    // again is fine.
+    auto [r1, out1] = run(gzip(make_tar({{"p/A.txt", "1"}, {"p/a.txt", "2"}})));
+    CHECK(r1.message.find("same file twice") != std::string::npos);
+    CHECK_FALSE(fs::exists(out1));
+    auto [r2, out2] = run(gzip(make_tar({{"p/d/", "", '5'}, {"p/d/x", "1"}, {"p/d", "", '5'}})));
+    CHECK(r2.ok);
+    auto [r3, out3] = run(gzip(make_tar({{"p/d/", "", '5'}, {"p/d", "file"}})));
+    CHECK(r3.message.find("same file twice") != std::string::npos);
+    // An old-style folder: no type, a trailing '/'.
+    auto [r4, out4] = run(gzip(make_tar({{"p/old/", "", '\0'}, {"p/f", "1"}})));
+    REQUIRE(r4.ok);
+    CHECK(fs::is_directory(out4 / "old"));
+
+    // pax: the last record wins, a malformed one is an error, sparse files are refused.
+    auto [r5, out5] =
+        run(gzip(make_tar({{"PaxHeader", pax("path", "p/first.txt") + pax("path", "p/second.txt"), 'x'}, {"x", "1"}})));
+    REQUIRE(r5.ok);
+    CHECK(fs::exists(out5 / "second.txt"));
+    auto [r6, out6] = run(gzip(make_tar({{"PaxHeader", "9 path=p/x\n", 'x'}, {"p/y", "1"}})));
+    CHECK(r6.message.find("damaged extended header") != std::string::npos);
+    auto [r7, out7] = run(gzip(make_tar({{"PaxHeader", pax("size", "1junk"), 'x'}, {"p/y", "1"}})));
+    CHECK(r7.message.find("unreadable size") != std::string::npos);
+    auto [r8, out8] = run(gzip(make_tar({{"PaxHeader", pax("GNU.sparse.major", "1"), 'x'}, {"p/y", "1"}})));
+    CHECK(r8.message.find("sparse") != std::string::npos);
+    // pax wins over a GNU long name.
+    auto [r9, out9] = run(gzip(make_tar(
+        {{"PaxHeader", pax("path", "p/pax.txt"), 'x'}, {"././@LongLink", "p/gnu.txt", 'L'}, {"x", "1"}, {"p/z", "2"}})));
+    REQUIRE(r9.ok);
+    CHECK(fs::exists(out9 / "pax.txt"));
+
+    // After the end only zeros: a second tar after a lone zero block is refused.
+    const std::string one = make_tar({{"p/a", "1"}});
+    auto [r10, out10] = run(gzip(one.substr(0, one.size() - 512) + make_tar({{"p/hidden", "2"}})));
+    CHECK(r10.message.find("more after its end") != std::string::npos);
+    // Extended headers count towards what may be unpacked.
+    std::vector<TarItem> many;
+    many.reserve(41);
+    for (int i = 0; i < 40; ++i) {
+        many.emplace_back("GlobalHead", std::string(100'000, 'g'), 'g');
+    }
+    many.emplace_back("p/a", "1");
+    ZipLimits small;
+    small.max_total_bytes = 10;
+    CHECK(extract_tar_gz(write_archive(tmp.path(), gzip(make_tar(many))), tmp.path() / "many", small).ok);  // 4 MB
+    many.insert(many.begin(), 700, TarItem("GlobalHead", std::string(100'000, 'g'), 'g'));  // 74 MB
+    CHECK(extract_tar_gz(write_archive(tmp.path() / "m2", gzip(make_tar(many))), tmp.path() / "many2").message ==
+          "the archive has extended headers that are too long");
+    // Messages show names printable and short.
+    auto [r11, out11] = run(gzip(make_tar({{"PaxHeader", pax("path", "p/\x1b[31m" + std::string(500, 'n')), 'x'},
+                                           {"x", "1", '2', 0777, "t"}})));
+    CHECK(r11.message.find('\x1b') == std::string::npos);
+    CHECK(r11.message.size() < 300);
+}
+
+TEST_CASE("tar.gz: the bytes unpacked are the bytes whose SHA-256 was checked") {
+    const test_util::TempDir tmp;
+    const std::string bytes = gzip(make_tar({{"p/a", "1"}}));
+    const auto archive = write_archive(tmp.path(), bytes);
+    CHECK(extract_tar_gz(archive, tmp.path() / "ok", {}, sha256(bytes)).ok);
+    auto wrong = sha256(bytes);
+    wrong[0] ^= 1U;
+    const ZipResult r = extract_tar_gz(archive, tmp.path() / "bad", {}, wrong);
+    CHECK_FALSE(r.ok);
+    CHECK(r.message == "the archive changed while it was unpacked");
+}
