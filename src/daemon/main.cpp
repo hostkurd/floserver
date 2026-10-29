@@ -6,6 +6,8 @@
 
 #include "floserver/core/build_info.h"
 #include "floserver/core/builtin.h"
+#include "floserver/core/certificates.h"
+#include "floserver/core/encoding.h"
 #include "floserver/core/http.h"
 #include "floserver/core/ipc.h"
 #include "floserver/core/paths.h"
@@ -13,6 +15,7 @@
 #include "floserver/core/project_service.h"
 #include "floserver/core/protocol.h"
 #include "floserver/core/runtime_service.h"
+#include "floserver/core/trust_store.h"
 
 #include <atomic>
 #include <chrono>
@@ -116,6 +119,7 @@ struct Service {
     std::shared_ptr<ipc::Server> server;
     std::unique_ptr<floserver::core::RuntimeService> runtimes;
     std::unique_ptr<floserver::core::ProjectService> projects;
+    std::unique_ptr<floserver::core::CertStore> certs;
     Clock::time_point started = Clock::now();
     ActiveClients clients;
     std::atomic<bool> quitting{false};
@@ -183,6 +187,55 @@ struct Service {
         return result ? protocol::make_result(r.id, *result) : protocol::make_error(r.id, refusal.code, refusal.message);
     }
 
+    static json ca_json(const floserver::core::CaInfo& ca) {
+        namespace core = floserver::core;
+        const char* trust = "unsupported";
+        switch (core::ca_trust_state(ca.der)) {
+            case core::TrustState::Trusted:
+                trust = "yes";
+                break;
+            case core::TrustState::NotTrusted:
+                trust = "no";
+                break;
+            case core::TrustState::Unsupported:
+                break;
+        }
+        return {{"common_name", ca.common_name},
+                {"fingerprint", ca.fingerprint},
+                {"not_after", ca.not_after.time_since_epoch().count()},
+                // The CA is never replaced on its own (the user trusted it); the
+                // window warns ahead and `flo untrust` + `flo trust` replace it.
+                {"expires_soon", ca.not_after - std::chrono::system_clock::now() < core::kRenewBefore},
+                {"path", core::path_to_utf8(ca.certificate)},
+                {"der", core::to_base64(ca.der)},
+                {"trusted", trust}};
+    }
+
+    // The reply to one certs.* request. Trusting the CA is the caller's job
+    // (Windows shows a prompt for it), so the service only makes and removes.
+    [[nodiscard]] std::string cert_request(const protocol::Request& r) const {
+        if (!certs) {
+            return protocol::make_error(r.id, "no_data_folder",
+                                        "FloServer can't find a folder to keep certificates in (LOCALAPPDATA or HOME)");
+        }
+        std::string error;
+        if (r.method == "certs.status") {
+            const auto ca = certs->load_ca(error);
+            if (!error.empty()) {
+                return protocol::make_error(r.id, "ca_damaged", error);
+            }
+            return protocol::make_result(r.id, {{"ca", ca ? ca_json(*ca) : json(nullptr)}});
+        }
+        if (r.method == "certs.ensure_ca") {
+            const auto ca = certs->ensure_ca(error);
+            return ca ? protocol::make_result(r.id, {{"ca", ca_json(*ca)}})
+                      : protocol::make_error(r.id, "ca_failed", error);
+        }
+        // certs.remove
+        return certs->remove_all(error) ? protocol::make_result(r.id, json::object())
+                                        : protocol::make_error(r.id, "remove_failed", error);
+    }
+
     [[nodiscard]] json status() const {
         const auto memory = floserver::core::memory_in_use();
         return {{"version", floserver::core::kVersion},
@@ -217,6 +270,9 @@ struct Service {
             } else if (request->method == "projects.list" || request->method == "projects.add" ||
                        request->method == "projects.remove" || request->method == "projects.set") {
                 reply = project_request(*request);
+            } else if (request->method == "certs.status" || request->method == "certs.ensure_ca" ||
+                       request->method == "certs.remove") {
+                reply = cert_request(*request);
             } else if (request->method == "quit") {
                 reply = protocol::make_result(request->id, json::object());
                 quit = true;
@@ -254,6 +310,7 @@ int run() {
     service->runtimes = make_runtimes();
     if (const auto data = floserver::core::data_dir()) {
         service->projects = std::make_unique<floserver::core::ProjectService>(*data);
+        service->certs = std::make_unique<floserver::core::CertStore>(*data);
     }
 
     while (auto connection = service->server->accept()) {
