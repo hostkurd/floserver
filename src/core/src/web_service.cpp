@@ -322,6 +322,9 @@ void WebService::reload_locked() {
             as.server_root = apache_server_root(plan.apache_dir);
             as.modules_dir = as.server_root / "modules";
             as.work_dir = work_;
+            if (get_env("FLOSERVER_APACHE_TRACE") == "1") {
+                as.log_level = "warn proxy_fcgi:trace8";
+            }
 #ifndef _WIN32
             as.posix = true;
 #endif

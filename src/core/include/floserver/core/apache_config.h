@@ -35,6 +35,9 @@ struct ApacheSpec {
     std::filesystem::path work_dir;     // our folder: the pid file, the error log
     // Linux and macOS builds need an MPM and unixd loaded; Windows has its own built in.
     bool posix = false;
+    // What Apache logs to its error log: "warn", or with
+    // "proxy_fcgi:trace8" the values it sends PHP (FLOSERVER_APACHE_TRACE).
+    std::string log_level = "warn";
     std::vector<ApacheSite> sites;
 };
 

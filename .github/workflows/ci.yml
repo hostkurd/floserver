@@ -101,6 +101,7 @@ jobs:
           FLOSERVER_INSTANCE: ci
           FLOSERVER_WEB_PORTS: "18080,18443"
           FLOSERVER_IDLE_SECONDS: "3"
+          FLOSERVER_APACHE_TRACE: "1"
         run: |
           $bin = "build/bin/Release"
           # Native programs write to stderr (nginx -v does); that isn't an error here.
@@ -283,7 +284,7 @@ jobs:
           $wpBody = (& curl.exe -sS --max-time 60 --resolve $wpResolve "http://ci-wp.localhost:18080/2026/10/hello/" 2>&1 | Out-String).Trim()
           if ($wpBody -ne "wp /2026/10/hello/ /index.php -") {
             $log = (Get-Content "$env:FLOSERVER_DATA_DIR\web\apps\_apache.log" -Tail 20 -ErrorAction SilentlyContinue) -join " / "
-            $err = (Get-Content "$env:FLOSERVER_DATA_DIR\web\logs\apache-error.log" -Tail 20 -ErrorAction SilentlyContinue) -join " / "
+            $err = (Select-String -Path "$env:FLOSERVER_DATA_DIR\web\logs\apache-error.log" -Pattern "sending env var|AH0" -ErrorAction SilentlyContinue | Select-Object -Last 40 | ForEach-Object { $_.Line -replace '^.*\] ', '' }) -join " / "
             Fail "Apache project (got '$wpBody')" "$(Diagnostics) || runner log: $log || apache-error.log: $err"
           }
           $wpInfo = (& curl.exe -sS --max-time 30 --resolve $wpResolve "http://ci-wp.localhost:18080/index.php/a/b" 2>&1 | Out-String).Trim()

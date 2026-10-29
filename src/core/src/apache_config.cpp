@@ -86,7 +86,7 @@ public:
              // Locks and the balancer's shared memory: ours, not a system folder.
              << "DefaultRuntimeDir " << *runtime << "\n"
              << "ErrorLog " << *log << "\n"
-             << "LogLevel warn\n";
+             << "LogLevel " << spec_.log_level << "\n";
         if (spec_.posix) {
             if (!load("mpm_event_module", "mod_mpm_event.so") || !load("unixd_module", "mod_unixd.so")) {
                 return std::nullopt;
@@ -224,6 +224,8 @@ private:
                  // "redirect:...", PATH_INFO the script's own path,
                  // SCRIPT_NAME empty or with the path info in it.
                  << "    ProxyFCGIBackendType GENERIC\n"
+                 // On Windows the script's path may come as "/D:/...".
+                 << R"x(    ProxyFCGISetEnvIf "reqenv('SCRIPT_FILENAME') =~ m#^/([A-Za-z]:/.*)$#" SCRIPT_FILENAME "$1")x" << "\n"
                  << R"x(    ProxyFCGISetEnvIf "true" !PATH_TRANSLATED)x" << "\n"
                  // php-cgi moves PATH_INFO aside when REDIRECT_URL is set
                  // (rewrites to index.php/$1); nginx doesn't send it either.
