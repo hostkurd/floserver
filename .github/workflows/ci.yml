@@ -315,8 +315,15 @@ jobs:
         run: |
           mkdir -p "$FLOSERVER_CLANG_TIDY_CACHE_DIR"
           find "$FLOSERVER_CLANG_TIDY_CACHE_DIR" -type f -mtime +14 -delete
-          cmake --build build
+          set -o pipefail
+          cmake --build build 2>&1 | tee build.log
           echo "clang-tidy cache: $(find "$FLOSERVER_CLANG_TIDY_CACHE_DIR" -type f | wc -l) passing files"
+      - name: Show clang-tidy findings as annotations
+        if: failure()
+        shell: bash
+        run: |
+          grep -E 'error:|FAILED:' build.log | sort -u | head -30 |
+            while IFS= read -r line; do echo "::error title=clang-tidy::${line}"; done
       # Saved after a failure too: a marker only ever means "passed".
       - name: Save clang-tidy passes
         if: always()
