@@ -16,6 +16,7 @@ add_executable(floserver_tests
     test_service.cpp
     test_sha256.cpp
     test_site_plan.cpp
+    test_web_service.cpp
     test_version.cpp
     test_zip.cpp)
 # test_service.cpp runs the real floserverd.

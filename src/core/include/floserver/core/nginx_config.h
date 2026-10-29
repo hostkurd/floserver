@@ -29,7 +29,7 @@ struct NginxTls {
 struct NginxSite {
     std::string name;                   // checked: project_name_problem()
     std::filesystem::path doc_root;
-    Port php_port = 0;                  // 0: no PHP, static files only
+    std::vector<Port> php_ports;        // the pool's workers; empty: static files only
     std::filesystem::path php_access_log;  // the pool's idle log; empty for none
     std::optional<NginxTls> tls;
 };
@@ -39,6 +39,14 @@ struct NginxSpec {
     std::filesystem::path work_dir;   // our folder: logs/, temp/, the pid file
     WebPorts ports{};
     bool ipv6 = false;                // also listen on [::1]: set from loopback_ipv6_available()
+    // nginx before 1.25.1 has no "http2 on;" and takes "listen ... http2".
+    bool http2_directive = true;
+    // Only when the service itself runs as root (containers): nginx then
+    // needs to be told to keep that user for its workers.
+    std::string user;
+    // Answered at /.floserver/config-id by the default http server, so the
+    // service can tell when nginx serves this config after a reload.
+    std::string config_id;
     std::vector<NginxSite> sites;
 };
 

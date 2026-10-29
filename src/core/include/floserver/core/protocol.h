@@ -26,6 +26,10 @@
 //                                          "expires_soon": bool}}
 //   certs.ensure_ca  {} -> {"ca": {...}}   makes the CA when there's none
 //   certs.remove     {} -> {}              deletes the CA and project certificates
+//   web.status       {} -> web_service.h, WebService::status()
+//   web.reload       {} -> the same, after bringing everything in line now
+// projects.list and the projects.* changes also carry each project's
+// "address" and "run" ("sleeping" | "running" | "failed") once it's served.
 
 #include <nlohmann/json.hpp>
 

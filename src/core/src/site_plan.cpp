@@ -171,7 +171,7 @@ WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
         const std::string key = pool_key(php->version, extensions);
         auto it = std::find_if(plan.pools.begin(), plan.pools.end(), [&key](const PhpPool& p) { return p.key == key; });
         if (it == plan.pools.end()) {
-            plan.pools.push_back({key, php->version, php->dir, extensions, {}, false, 0});
+            plan.pools.push_back({key, php->version, php->dir, extensions, {}, false, {}});
             it = std::prev(plan.pools.end());
         }
         it->sites.push_back(project.name);
@@ -183,31 +183,34 @@ WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
     return plan;
 }
 
-bool assign_pool_ports(WebPlan& plan, const std::map<std::string, Port>& previous, const PortProbe& probe) {
+bool assign_pool_ports(WebPlan& plan, const std::map<std::string, std::vector<Port>>& previous,
+                       const PortProbe& probe, std::size_t workers) {
     std::set<Port> used;
     for (PhpPool& pool : plan.pools) {
-        if (const auto it = previous.find(pool.key); it != previous.end() && !used.contains(it->second)) {
-            pool.port = it->second;
-            used.insert(it->second);
-        } else {
-            pool.port = 0;
+        pool.ports.clear();
+        const auto it = previous.find(pool.key);
+        if (it == previous.end() || it->second.size() != workers) {
+            continue;
+        }
+        if (std::none_of(it->second.begin(), it->second.end(), [&used](Port p) { return used.contains(p); })) {
+            pool.ports = it->second;
+            used.insert(it->second.begin(), it->second.end());
         }
     }
     // Ports other pools held before stay out of reach for new pools, so an
     // old pool being retired can't hand its port to a new one mid-reload.
-    for (const auto& [key, port] : previous) {
-        used.insert(port);
+    for (const auto& [key, ports] : previous) {
+        used.insert(ports.begin(), ports.end());
     }
     for (PhpPool& pool : plan.pools) {
-        if (pool.port != 0) {
-            continue;
+        while (pool.ports.size() < workers) {
+            const auto port = pick_port_from(kFirstPoolPort, used, probe);
+            if (!port) {
+                return false;
+            }
+            pool.ports.push_back(*port);
+            used.insert(*port);
         }
-        const auto port = pick_port_from(kFirstPoolPort, used, probe);
-        if (!port) {
-            return false;
-        }
-        pool.port = *port;
-        used.insert(*port);
     }
     return true;
 }

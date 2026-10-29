@@ -184,28 +184,36 @@ TEST_CASE("a root that leads outside the project through a link is refused") {
 }
 #endif
 
-TEST_CASE("pool ports start at 9100, avoid taken ports and stay put across reloads") {
+TEST_CASE("pools get one port per worker from 9100, avoid taken ports and stay put across reloads") {
+    const auto pool = [](const char* key) { return PhpPool{key, "", {}, {}, {}, false, {}}; };
     WebPlan plan;
-    plan.pools = {{"php-8.4.27", "8.4.27", {}, {}, {}, false, 0}, {"php-8.5.12", "8.5.12", {}, {}, {}, false, 0}};
+    plan.pools = {pool("php-8.4.27"), pool("php-8.5.12")};
     const auto probe = [](Port p) { return p != 9100; };  // 9100 is someone else's
-    REQUIRE(assign_pool_ports(plan, {}, probe));
-    CHECK(plan.pools[0].port == 9101);
-    CHECK(plan.pools[1].port == 9102);
+    REQUIRE(assign_pool_ports(plan, {}, probe, 2));
+    CHECK(plan.pools[0].ports == std::vector<Port>{9101, 9102});
+    CHECK(plan.pools[1].ports == std::vector<Port>{9103, 9104});
 
-    // Next reload: 8.4 gone, a new pool appears. 8.5 keeps 9102 even though
-    // the probe would now say it's taken (the service holds it), and the new
-    // pool doesn't take 9101 while the old pool may still be winding down.
-    const std::map<std::string, Port> previous = {{"php-8.4.27", 9101}, {"php-8.5.12", 9102}};
+    // Next reload: 8.4 gone, a new pool appears. 8.5 keeps its ports even
+    // though the probe would now say they're taken (the service holds them),
+    // and the new pool doesn't take 8.4's while it may still be winding down.
+    const std::map<std::string, std::vector<Port>> previous = {{"php-8.4.27", {9101, 9102}},
+                                                               {"php-8.5.12", {9103, 9104}}};
     WebPlan next;
-    next.pools = {{"php-8.5.12", "8.5.12", {}, {}, {}, false, 0}, {"php-8.3.36", "8.3.36", {}, {}, {}, false, 0}};
-    const auto busy = [](Port p) { return p != 9100 && p != 9102; };
-    REQUIRE(assign_pool_ports(next, previous, busy));
-    CHECK(next.pools[0].port == 9102);
-    CHECK(next.pools[1].port == 9103);
+    next.pools = {pool("php-8.5.12"), pool("php-8.3.36")};
+    const auto busy = [](Port p) { return p < 9100 || p > 9104; };
+    REQUIRE(assign_pool_ports(next, previous, busy, 2));
+    CHECK(next.pools[0].ports == std::vector<Port>{9103, 9104});
+    CHECK(next.pools[1].ports == std::vector<Port>{9105, 9106});
+
+    // A different worker count gives fresh ports.
+    WebPlan more;
+    more.pools = {pool("php-8.5.12")};
+    REQUIRE(assign_pool_ports(more, previous, busy, 3));
+    CHECK(more.pools[0].ports == std::vector<Port>{9105, 9106, 9107});
 
     WebPlan full;
-    full.pools = {{"php-8.4.27", "8.4.27", {}, {}, {}, false, 0}};
-    CHECK_FALSE(assign_pool_ports(full, {}, [](Port) { return false; }));
+    full.pools = {pool("php-8.4.27")};
+    CHECK_FALSE(assign_pool_ports(full, {}, [](Port) { return false; }, 2));
 }
 
 TEST_CASE("addresses show the port only when it isn't the usual one") {
@@ -232,9 +240,9 @@ TEST_CASE("the nginx config serves PHP and static sites on loopback") {
     spec.work_dir = kBase / "web";
     spec.ports = {80, 443, false};
     spec.ipv6 = true;
-    spec.sites = {{"shop", kBase / "projects" / "shop" / "public", 9101, kBase / "web" / "logs" / "php-8.4.27.log",
+    spec.sites = {{"shop", kBase / "projects" / "shop" / "public", {9101, 9102}, kBase / "web" / "logs" / "php-8.4.27.log",
                    NginxTls{kBase / "certs" / "shop.pem", kBase / "certs" / "shop.key"}},
-                  {"docs", kBase / "projects" / "docs", 0, {}, std::nullopt}};
+                  {"docs", kBase / "projects" / "docs", {}, {}, std::nullopt}};
     std::string error;
     const auto text = make_nginx_config(spec, error);
     REQUIRE(text);
@@ -246,7 +254,8 @@ TEST_CASE("the nginx config serves PHP and static sites on loopback") {
     CHECK(has("server_name shop.localhost;"));
     CHECK(has("return 301 https://shop.localhost$request_uri;"));
     CHECK(has("listen 127.0.0.1:443 ssl;"));
-    CHECK(has("fastcgi_pass 127.0.0.1:9101;"));
+    CHECK(has("upstream floserver_php_9101 {\n        server 127.0.0.1:9101 max_fails=0;\n        server 127.0.0.1:9102 max_fails=0;\n    }"));
+    CHECK(has("fastcgi_pass floserver_php_9101;"));
     CHECK(has("fastcgi_param HTTPS on;"));
     CHECK(has("access_log \"" + kBase.generic_string() + "/web/logs/php-8.4.27.log\" floserver_idle;"));
     CHECK(has("root \"" + kBase.generic_string() + "/projects/shop/public\";"));
@@ -257,6 +266,7 @@ TEST_CASE("the nginx config serves PHP and static sites on loopback") {
     CHECK_FALSE(has("location ~ "));
     CHECK_FALSE(has("0.0.0.0"));
     CHECK_FALSE(has("listen 80"));
+    CHECK_FALSE(has("config-id"));  // only when the spec has one
     // The static site has no PHP location and no https.
     const auto docs = text->find("# Project docs");
     REQUIRE(docs != std::string::npos);

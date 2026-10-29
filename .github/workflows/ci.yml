@@ -57,13 +57,15 @@ jobs:
           Get-ChildItem build/bin/Release/vcruntime | ForEach-Object { "  {0,-28} {1,10:N0} bytes" -f $_.Name, $_.Length }
       # Real downloads from cdn.floserver.org through WinHTTP, into a
       # throwaway data folder: the signed list, then nginx (a zip that needs
-      # the VC++ DLLs, so `nginx -v` proves they were added) and Composer (a
-      # plain file).
-      - name: Install runtimes from the live CDN
+      # the VC++ DLLs, so `nginx -v` proves they were added), Composer (a
+      # plain file) and PHP, then a project run end to end.
+      - name: Install runtimes and run a project from the live CDN
         shell: pwsh
         env:
           FLOSERVER_DATA_DIR: ${{ runner.temp }}\floserver-data
           FLOSERVER_INSTANCE: ci
+          FLOSERVER_WEB_PORTS: "18080,18443"
+          FLOSERVER_IDLE_SECONDS: "3"
         run: |
           $bin = "build/bin/Release"
           # Native programs write to stderr (nginx -v does); that isn't an error here.
@@ -75,9 +77,20 @@ jobs:
           # Logs can't be read from outside, so every failure becomes an annotation.
           function Fail([string]$what, [string]$output) {
             $flat = ($output -replace "`r?`n", " | ").Trim()
-            if ($flat.Length -gt 600) { $flat = $flat.Substring(0, 600) }
+            if ($flat.Length -gt 3000) { $flat = $flat.Substring(0, 3000) }
             Write-Host "::error title=live install::$what :: $flat"
             exit 1
+          }
+          # What the service, nginx and PHP say, for a failure annotation.
+          function Diagnostics() {
+            $logs = "$env:FLOSERVER_DATA_DIR\web\logs"
+            $out = (& "$bin/flo.exe" projects 2>&1 | Out-String)
+            Get-ChildItem $logs -File -ErrorAction SilentlyContinue | ForEach-Object {
+              $tail = (Get-Content $_.FullName -Tail 5 -ErrorAction SilentlyContinue) -join " / "
+              if ($tail) { $out += " || $($_.Name): $tail" }
+            }
+            $procs = (Get-Process nginx, php-cgi -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Name):$($_.Id)" }) -join ","
+            return "$out || processes: $procs"
           }
           function Run([string]$what, [scriptblock]$block) {
             $out = & $block 2>&1 | Out-String
@@ -99,8 +112,54 @@ jobs:
           }
           Run "flo runtimes" { & "$bin/flo.exe" runtimes } | Out-Null
           Run "flo uninstall" { & "$bin/flo.exe" uninstall composer $phar.Directory.Name } | Out-Null
-          Run "flo service stop" { & "$bin/flo.exe" service stop } | Out-Null
-          "::notice title=live install::nginx and Composer installed from the CDN; nginx -v ran"
+
+          # A project served by the real nginx and php-cgi from the CDN:
+          # serve, fall asleep, wake on a burst (Q1 on Windows: php-cgi gets
+          # the held socket as stdin, and only that handle).
+          Run "flo install php 8.5" { & "$bin/flo.exe" install php 8.5 } | Out-Null
+          $site = "$env:RUNNER_TEMP\ci-shop"
+          New-Item -ItemType Directory -Force "$site\public" | Out-Null
+          Set-Content "$site\public\index.php" '<?php echo "shop ", PHP_VERSION, " ", $_SERVER["REQUEST_URI"];'
+          Set-Content "$site\floserver.json" '{ "php": "8.5", "root": "public", "extensions": ["intl"] }'
+          Run "flo add" { & "$bin/flo.exe" add $site } | Out-Null
+          Run "flo start shop" { & "$bin/flo.exe" start ci-shop } | Out-Null
+          $url = "http://ci-shop.localhost:18080"
+          $resolve = "ci-shop.localhost:18080:127.0.0.1"
+          $body = (& curl.exe -s --max-time 20 --resolve $resolve "$url/cart?x=1" | Out-String).Trim()
+          if ($body -notlike "shop 8.5.* /cart?x=1") {
+            Fail "first request (got '$body')" (Diagnostics)
+          }
+          $awake = (& "$bin/flo.exe" projects | Out-String)
+          if ($awake -notmatch "on, running") { Fail "pool not running after a request" $awake }
+          Start-Sleep -Seconds 8   # FLOSERVER_IDLE_SECONDS is 3
+          $asleep = (& "$bin/flo.exe" projects | Out-String)
+          $phpLeft = @(Get-Process php-cgi -ErrorAction SilentlyContinue).Count
+          if ($asleep -notmatch "on, asleep" -or $phpLeft -ne 0) { Fail "pool didn't sleep ($phpLeft php-cgi left)" (Diagnostics) }
+          # 20 requests at once while it wakes: every one is served.
+          # -o applies to one URL each, so every URL gets its own.
+          $targets = 1..20 | ForEach-Object { "-o"; "NUL"; "$url/burst/$_" }
+          $codes = & curl.exe -s --max-time 30 --parallel --parallel-immediate --parallel-max 20 -w "%{http_code}`n" --resolve $resolve $targets
+          $good = @($codes | Where-Object { $_ -eq "200" }).Count
+          if ($good -ne 20) { Fail "burst while waking: $good of 20 OK ($($codes -join " "))" (Diagnostics) }
+          # A second project with its own pool, added while the first runs:
+          # nginx reloads (-s reload) and both are served.
+          $blog = "$env:RUNNER_TEMP\\ci-blog"
+          New-Item -ItemType Directory -Force $blog | Out-Null
+          Set-Content "$blog\\index.php" '<?php echo "blog ", extension_loaded("intl") ? "intl" : "no-intl";'
+          Set-Content "$blog\\floserver.json" '{ "php": "8.5" }'
+          Run "flo add blog" { & "$bin/flo.exe" add $blog } | Out-Null
+          Run "flo start blog" { & "$bin/flo.exe" start ci-blog } | Out-Null
+          $blogBody = (& curl.exe -s --max-time 20 --resolve "ci-blog.localhost:18080:127.0.0.1" "http://ci-blog.localhost:18080/" | Out-String).Trim()
+          $shopBody = (& curl.exe -sS --max-time 20 -w " [status %{http_code}]" --resolve $resolve "$url/again" 2>&1 | Out-String).Trim()
+          $shopExit = $LASTEXITCODE
+          if ($blogBody -ne "blog intl" -or $shopBody -notlike "shop 8.5.* /again*") {
+            Fail "after a reload (blog '$blogBody', shop '$shopBody' curl exit $shopExit)" (Diagnostics)
+          }
+          Run "flo stop" { & "$bin/flo.exe" stop } | Out-Null
+          Start-Sleep -Seconds 1
+          $left = @(Get-Process nginx, php-cgi -ErrorAction SilentlyContinue).Count
+          if ($left -ne 0) { Fail "processes left after flo stop" (Diagnostics) }
+          "::notice title=live install::nginx, Composer and PHP installed from the CDN; a project served, slept and woke for 20 requests at once; a second pool added with a reload"
           exit 0
       # The build, for trying on a real PC: download it from the run's page.
       - name: Upload the Windows build
@@ -119,7 +178,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install tools
-        run: sudo apt-get update && sudo apt-get install -y ninja-build clang-18 libclang-rt-18-dev libssl-dev
+        run: sudo apt-get update && sudo apt-get install -y ninja-build clang-18 libclang-rt-18-dev libssl-dev nginx-core php-cgi
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18 -DFLOSERVER_SANITIZE=ON
       - name: Build
@@ -134,7 +193,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install tools
-        run: sudo apt-get update && sudo apt-get install -y ninja-build libssl-dev
+        run: sudo apt-get update && sudo apt-get install -y ninja-build libssl-dev nginx-core php-cgi
       # Optimised builds turn on warnings the debug builds don't (FORTIFY).
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
