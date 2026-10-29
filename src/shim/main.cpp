@@ -2,10 +2,11 @@
 // composer, python and pip into the shims folder on the user's PATH. It runs
 // the version the nearest floserver.json asks for (shim.h).
 //
-// The tool is the program's own name. On Windows the rest of the command
-// line is passed on exactly as typed (the target reads its own quoting), the
-// shim waits and returns the target's exit code, and Ctrl+C is left to the
-// target. Elsewhere the shim replaces itself with the target (exec).
+// The tool is the program's own file name. On Windows the rest of the
+// command line is passed on exactly as typed (the target reads its own
+// quoting), the shim waits and returns the target's exit code, Ctrl+C is
+// left to the target, and a killed shim takes the target with it. Elsewhere
+// the shim replaces itself with the target (exec).
 
 #include "floserver/core/paths.h"
 #include "floserver/core/shim.h"
@@ -78,20 +79,17 @@ std::wstring quote(const std::wstring& arg) {
     return out;
 }
 
-// The command line after the program's own name, exactly as typed.
+// The command line after the program's own name, exactly as typed. The
+// name is read as the C runtime reads argv[0]: quotes toggle, no escapes,
+// it ends at the first space or tab outside quotes.
 std::wstring rest_of_command_line() {
     const wchar_t* p = GetCommandLineW();
-    if (*p == L'"') {
-        ++p;
-        while (*p != L'\0' && *p != L'"') {
-            ++p;
-        }
+    bool quoted = false;
+    for (; *p != L'\0'; ++p) {
         if (*p == L'"') {
-            ++p;
-        }
-    } else {
-        while (*p != L'\0' && *p != L' ' && *p != L'\t') {
-            ++p;
+            quoted = !quoted;
+        } else if (!quoted && (*p == L' ' || *p == L'\t')) {
+            break;
         }
     }
     while (*p == L' ' || *p == L'\t') {
@@ -100,10 +98,24 @@ std::wstring rest_of_command_line() {
     return p;
 }
 
+// The shim itself doesn't stop on Ctrl+C; the target decides. A handler,
+// not SetConsoleCtrlHandler(nullptr, TRUE): that flag is inherited and would
+// make the target ignore Ctrl+C too.
+BOOL WINAPI ignore_ctrl(DWORD /*event*/) { return TRUE; }
+
 }  // namespace
 
-int wmain(int /*argc*/, wchar_t** argv) {
-    const fs::path self = argv[0];
+int wmain(int /*argc*/, wchar_t** /*argv*/) {
+    // The real file, not argv[0], which whoever starts us chooses.
+    std::wstring self(MAX_PATH, L'\0');
+    for (;;) {
+        const DWORD n = GetModuleFileNameW(nullptr, self.data(), static_cast<DWORD>(self.size()));
+        if (n < self.size()) {
+            self.resize(n);
+            break;
+        }
+        self.resize(self.size() * 2);
+    }
     const std::string tool = tool_name(self);
     const auto data = core::data_dir();
     if (!data) {
@@ -125,21 +137,44 @@ int wmain(int /*argc*/, wchar_t** argv) {
     for (const auto& [name, value] : target->env) {
         SetEnvironmentVariableW(widen(name).c_str(), widen(value).c_str());
     }
-    // Ctrl+C reaches every process on the console; the target decides.
-    SetConsoleCtrlHandler(nullptr, TRUE);
+    SetConsoleCtrlHandler(ignore_ctrl, TRUE);
+
+    // If the shim is killed (a tool stopping "npm run dev" kills only the
+    // process it started), the target goes with it. On a normal exit that
+    // is lifted first, so daemons the target started on purpose live on.
+    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+    if (job != nullptr && SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof limits) == FALSE) {
+        CloseHandle(job);
+        job = nullptr;
+    }
+
+    // As we were started: window settings and the C runtime's extra handles
+    // (Node passes its IPC channel that way).
     STARTUPINFOW si{};
+    GetStartupInfoW(&si);
     si.cb = sizeof si;
     PROCESS_INFORMATION pi{};
-    if (CreateProcessW(target->program.c_str(), command.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si,
-                       &pi) == FALSE) {
+    if (CreateProcessW(target->program.c_str(), command.data(), nullptr, nullptr, TRUE, CREATE_SUSPENDED, nullptr,
+                       nullptr, &si, &pi) == FALSE) {
         return fail(tool, "can't start " + core::path_to_utf8(target->program) + " (" +
                               std::to_string(GetLastError()) + ")");
     }
+    if (job != nullptr) {
+        (void)AssignProcessToJobObject(job, pi.hProcess);  // fails only inside a job that forbids it
+    }
+    ResumeThread(pi.hThread);
     CloseHandle(pi.hThread);
     WaitForSingleObject(pi.hProcess, INFINITE);
     DWORD code = 1;
     GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hProcess);
+    if (job != nullptr) {
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+        SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof limits);
+        CloseHandle(job);
+    }
     return static_cast<int>(code);
 }
 

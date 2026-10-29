@@ -139,12 +139,42 @@ TEST_CASE("each shim runs the version the nearest floserver.json asks for") {
     python = resolve_shim("python", api / "sub", data, error);
     REQUIRE(python);
     CHECK(python->program == venv_python(api));
-    CHECK(python->env == std::vector<std::pair<std::string, std::string>>{{"VIRTUAL_ENV", path_to_utf8(api / ".venv")}});
+    REQUIRE(python->env.size() == 2);
+    CHECK(python->env[0] == std::pair<std::string, std::string>{"VIRTUAL_ENV", path_to_utf8(api / ".venv")});
+    CHECK(python->env[1].first == "PATH");  // the venv's scripts first
+    CHECK(python->env[1].second.starts_with(path_to_utf8(venv_python(api).parent_path())));
     const auto pip = resolve_shim("pip", api, data, error);
     REQUIRE(pip);
     CHECK(pip->program == venv_python(api));
     CHECK(pip->args == Args{"-m", "pip"});
+#ifndef _WIN32
+    const auto pip3 = resolve_shim("pip3", api, data, error);
+    REQUIRE(pip3);
+    CHECK(pip3->args == Args{"-m", "pip"});
+    CHECK(resolve_shim("python3", api, data, error)->program == venv_python(api));
+#endif
+
+    // PHP started again by the program gets the same php.ini.
+    REQUIRE(!php->env.empty());
+    CHECK(php->env[0] == std::pair<std::string, std::string>{"PHPRC", php->args[1]});
 }
+
+#ifndef _WIN32
+TEST_CASE("a shim never runs another shim") {
+    const test_util::TempDir tmp;
+    const fs::path data = tmp.path() / "data";
+    // A broken install whose bin folder is the shims folder.
+    fake_runtime(data, "node", "22.0.0");
+    fs::create_directories(shims_dir(data));
+    test_util::write_file(shims_dir(data) / "node", "");
+    fs::create_directory_symlink(shims_dir(data), runtimes_dir(data) / "node" / "22.0.0" / "bin");
+    const fs::path project = tmp.path() / "p";
+    fs::create_directories(project);
+    std::string error;
+    CHECK_FALSE(resolve_shim("node", project, data, error));
+    CHECK(error.find("is a FloServer shim itself") != std::string::npos);
+}
+#endif
 
 TEST_CASE("a shim says what to install or fix") {
     const test_util::TempDir tmp;

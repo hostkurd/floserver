@@ -735,6 +735,21 @@ int untrust() {
     return 0;
 }
 
+// Names a new terminal finds somewhere else first (on Windows the machine's
+// Path comes before the user's: a Node installed for all users wins).
+void print_shadowed(const fs::path& dir) {
+    namespace core = floserver::core;
+    std::error_code ec;
+    const fs::path real = fs::weakly_canonical(dir, ec);
+    for (const std::string& name : core::shim_names()) {
+        const auto found = core::first_on_path(name);
+        if (found && fs::weakly_canonical(found->parent_path(), ec) != real) {
+            std::cout << "  Note: " << name << " in a new terminal runs " << shown(*found)
+                      << ", which comes first on the Path; FloServer's " << name << " is used only where that's removed.\n";
+        }
+    }
+}
+
 // The terminal shims (D10): the folder, its programs, and the user's PATH.
 int shims(const std::vector<std::string>& args) {
     namespace core = floserver::core;
@@ -755,13 +770,39 @@ int shims(const std::vector<std::string>& args) {
         }
         // One copy of the program in the folder; each name a hard link to
         // it (or a copy where links aren't possible): no extra disk space.
+        // Files of a shim that's running can't be replaced on Windows, but
+        // can be renamed: the old ones are put aside and removed next time.
         fs::create_directories(dir, ec);
-        const fs::path base = dir / core::path_from_utf8("floserver-shim" + shim->extension().string());
-        fs::remove(base, ec);
+        for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+            if (it->path().filename().string().find(".old-") != std::string::npos) {
+                std::error_code ignored;
+                fs::remove(it->path(), ignored);
+            }
+        }
+        ec.clear();
+        const std::string suffix = ".old-" + std::to_string(core::current_pid());
+        const auto put_aside = [&suffix](const fs::path& p) {
+            std::error_code e;
+            if (fs::exists(fs::symlink_status(p, e))) {
+                fs::path aside = p;
+                aside += suffix;
+                fs::rename(p, aside, e);
+                if (e) {
+                    fs::remove(p, e);
+                }
+            }
+        };
+        const std::string exe = shim->extension().string();
+        const fs::path base = dir / core::path_from_utf8("floserver-shim" + exe);
+        put_aside(base);
         fs::copy_file(*shim, base, fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+            std::cerr << "Can't write " << shown(base) << ": " << core::error_text(ec) << "\n";
+            return 1;
+        }
         for (const std::string& name : core::shim_names()) {
-            const fs::path to = dir / core::path_from_utf8(name + shim->extension().string());
-            fs::remove(to, ec);
+            const fs::path to = dir / core::path_from_utf8(name + exe);
+            put_aside(to);
             ec.clear();
             fs::create_hard_link(base, to, ec);
             if (ec) {
@@ -773,6 +814,16 @@ int shims(const std::vector<std::string>& args) {
                 return 1;
             }
         }
+#ifdef _WIN32
+        // Some Node tools look for npm.cmd and npx.cmd by name.
+        for (const char* name : {"npm", "npx"}) {
+            if (!core::write_file_atomically(dir / (std::string(name) + ".cmd"),
+                                             std::string("@\"%~dp0") + name + ".exe\" %*\r\n", error)) {
+                std::cerr << error << "\n";
+                return 1;
+            }
+        }
+#endif
         const auto change = core::add_to_user_path(dir, error);
         if (change == core::PathChange::Failed) {
             std::cerr << error << "\n";
@@ -785,6 +836,7 @@ int shims(const std::vector<std::string>& args) {
         } else {
             std::cout << (change == core::PathChange::Done ? "Added to your Path. " : "Already on your Path. ")
                       << "New terminals use them; one open now needs restarting.\n";
+            print_shadowed(dir);
         }
         return 0;
     }
@@ -795,6 +847,11 @@ int shims(const std::vector<std::string>& args) {
             return 1;
         }
         fs::remove_all(dir, ec);
+        if (ec) {
+            std::cerr << "Taken off your Path, but " << shown(dir) << " can't be removed (" << core::error_text(ec)
+                      << "; is a shim still running?).\n";
+            return 1;
+        }
         std::cout << "The shims are removed" << (change == core::PathChange::Done ? ", and taken off your Path" : "")
                   << ".\n";
         return 0;
@@ -806,6 +863,7 @@ int shims(const std::vector<std::string>& args) {
     // What `php` (and the rest) would run here.
     std::cout << "Shims folder: " << shown(dir) << (core::on_user_path(dir) ? "  (on your Path)" : "  (not on your Path: flo shims install)")
               << "\n";
+    print_shadowed(dir);
     for (const std::string& name : core::shim_names()) {
         const auto target = core::resolve_shim(name, fs::current_path(ec), *data, error);
         std::cout << "  " << std::left << std::setw(10) << name

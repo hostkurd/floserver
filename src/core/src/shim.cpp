@@ -3,6 +3,7 @@
 #include "floserver/core/app_runner.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/php_pool.h"
+#include "floserver/core/process.h"
 #include "floserver/core/project_config.h"
 #include "floserver/core/runtime_store.h"
 #include "floserver/core/version.h"
@@ -114,13 +115,22 @@ std::optional<ShimTarget> php_target(const InstalledRuntime& php, const std::vec
     if (read_small_file(ini, std::size_t{256} * 1024) != made.text) {
         std::error_code ec;
         fs::create_directories(folder, ec);
-        if (!write_file_atomically(ini, made.text, error)) {
+        // Another shim may be writing (or php reading) it at the same moment:
+        // fine if what's there now is right.
+        if (!write_file_atomically(ini, made.text, error) && read_small_file(ini, std::size_t{256} * 1024) != made.text) {
             return std::nullopt;
         }
+        error.clear();
     }
     ShimTarget t;
     t.program = *program;
     t.args = {"-c", path_to_utf8(ini)};
+    // PHP started again by the program (artisan serve, PHPUnit, Composer's
+    // @php) gets the same php.ini through PHPRC.
+    t.env = {{"PHPRC", path_to_utf8(ini)}};
+#ifdef _WIN32
+    t.env.emplace_back("PHP_INI_SCAN_DIR", "");  // and no other ini from a system-wide PHP
+#endif
     t.version = php.version;
     return t;
 }
@@ -128,7 +138,13 @@ std::optional<ShimTarget> php_target(const InstalledRuntime& php, const std::vec
 }  // namespace
 
 const std::vector<std::string>& shim_names() {
+#ifdef _WIN32
     static const std::vector<std::string> names = {"php", "node", "npm", "npx", "composer", "python", "pip"};
+#else
+    // The names people type on macOS and Linux too.
+    static const std::vector<std::string> names = {"php",    "node", "npm",     "npx", "composer",
+                                                   "python", "pip",  "python3", "pip3"};
+#endif
     return names;
 }
 
@@ -142,6 +158,16 @@ std::optional<ShimTarget> resolve_shim(const std::string& tool, const fs::path& 
         return std::nullopt;
     }
     const auto project = project_for(cwd, error);
+    // A target in the shims folder would start this shim again, without end.
+    const auto guard = [](std::optional<ShimTarget> t, const fs::path& data, std::string& why) -> std::optional<ShimTarget> {
+        std::error_code ec;
+        const fs::path shims = fs::weakly_canonical(shims_dir(data), ec);
+        if (t && !ec && fs::weakly_canonical(t->program, ec).parent_path() == shims) {
+            why = path_to_utf8(t->program) + " is a FloServer shim itself";
+            return std::nullopt;
+        }
+        return t;
+    };
     if (!project) {
         return std::nullopt;
     }
@@ -156,7 +182,7 @@ std::optional<ShimTarget> resolve_shim(const std::string& tool, const fs::path& 
         }
         auto t = php_target(*php, pc.extensions, data_dir, error);
         if (!t || tool == "php") {
-            return t;
+            return guard(t, data_dir, error);
         }
         const InstalledRuntime* composer = newest(installed, "composer", "");
         const fs::path phar = composer != nullptr ? composer->dir / "composer.phar" : fs::path();
@@ -165,7 +191,7 @@ std::optional<ShimTarget> resolve_shim(const std::string& tool, const fs::path& 
             return std::nullopt;
         }
         t->args.push_back(path_to_utf8(phar));
-        return t;
+        return guard(t, data_dir, error);
     }
 
     if (tool == "node" || tool == "npm" || tool == "npx") {
@@ -191,14 +217,22 @@ std::optional<ShimTarget> resolve_shim(const std::string& tool, const fs::path& 
             }
             t.args = {path_to_utf8(script)};
         }
-        return t;
+        return guard(t, data_dir, error);
     }
 
     // python, pip: the project's .venv first (D17), else its Python.
     ShimTarget t;
     if (project->dir && is_file(venv_python(*project->dir))) {
         t.program = venv_python(*project->dir);
-        t.env = {{"VIRTUAL_ENV", path_to_utf8(*project->dir / ".venv")}};
+        // As activating the venv does: its scripts (flask, pytest) come first.
+        const std::string path = get_env("PATH").value_or("");
+#ifdef _WIN32
+        const char sep = ';';
+#else
+        const char sep = ':';
+#endif
+        t.env = {{"VIRTUAL_ENV", path_to_utf8(*project->dir / ".venv")},
+                 {"PATH", path_to_utf8(t.program.parent_path()) + (path.empty() ? "" : sep + path)}};
         t.version = ".venv";
     } else {
         const InstalledRuntime* python = newest(installed, "python", pc.python.value_or(""));
@@ -210,10 +244,10 @@ std::optional<ShimTarget> resolve_shim(const std::string& tool, const fs::path& 
         t.program = *program;
         t.version = python->version;
     }
-    if (tool == "pip") {
+    if (tool == "pip" || tool == "pip3") {
         t.args = {"-m", "pip"};
     }
-    return t;
+    return guard(t, data_dir, error);
 }
 
 }  // namespace floserver::core

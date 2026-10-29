@@ -9,6 +9,8 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <unistd.h>
 #endif
 
 namespace floserver::core {
@@ -160,6 +162,68 @@ PathChange remove_from_user_path(const fs::path& dir, std::string& error) {
     (void)dir;
     (void)error;
     return PathChange::Unsupported;
+#endif
+}
+
+std::optional<fs::path> first_on_path(const std::string& name) {
+    std::error_code ec;
+#ifdef _WIN32
+    std::wstring machine;
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment", 0,
+                      KEY_QUERY_VALUE, &key) == ERROR_SUCCESS) {
+        DWORD size = 0;
+        DWORD type = 0;
+        if (RegQueryValueExW(key, L"Path", nullptr, &type, nullptr, &size) == ERROR_SUCCESS) {
+            machine.assign(size / sizeof(wchar_t) + 1, L'\0');
+            (void)RegQueryValueExW(key, L"Path", nullptr, &type, reinterpret_cast<BYTE*>(machine.data()), &size);
+            machine.resize(wcsnlen(machine.c_str(), machine.size()));
+        }
+        RegCloseKey(key);
+    }
+    std::wstring user;
+    DWORD user_type = 0;
+    (void)read_user_path(user, user_type);
+    const auto expand = [](const std::wstring& s) {
+        const DWORD n = ExpandEnvironmentStringsW(s.c_str(), nullptr, 0);
+        std::wstring out(n, L'\0');
+        ExpandEnvironmentStringsW(s.c_str(), out.data(), n);
+        out.resize(wcsnlen(out.c_str(), out.size()));
+        return out;
+    };
+    std::wstring exts = L".COM;.EXE;.BAT;.CMD";
+    if (const auto pathext = get_env("PATHEXT")) {
+        exts = fs::path(path_from_utf8(*pathext)).wstring();
+    }
+    const fs::path wname = path_from_utf8(name);
+    for (const std::wstring& dir : entries(expand(machine) + L";" + expand(user))) {
+        for (const std::wstring& ext : entries(exts)) {
+            fs::path p = fs::path(dir) / wname;
+            p += ext;
+            if (fs::is_regular_file(p, ec)) {
+                return p;
+            }
+        }
+    }
+    return std::nullopt;
+#else
+    const std::string path = get_env("PATH").value_or("");
+    std::size_t start = 0;
+    while (start <= path.size()) {
+        const auto end = path.find(':', start);
+        const std::string dir = path.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        if (!dir.empty()) {
+            fs::path p = fs::path(dir) / name;
+            if (fs::is_regular_file(p, ec) && access(p.c_str(), X_OK) == 0) {
+                return p;
+            }
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    return std::nullopt;
 #endif
 }
 
