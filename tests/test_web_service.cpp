@@ -93,6 +93,21 @@ bool eventually(F&& f, std::chrono::milliseconds limit = 10s) {
 
 }  // namespace
 
+TEST_CASE("open connections to a port are seen") {
+    std::string error;
+    auto listener = LoopbackListener::open(0, error);  // any free port
+    REQUIRE(listener);
+    sockaddr_in addr{};
+    socklen_t len = sizeof addr;
+    REQUIRE(getsockname(static_cast<int>(listener->native()), reinterpret_cast<sockaddr*>(&addr), &len) == 0);
+    const Port port = ntohs(addr.sin_port);
+    CHECK_FALSE(has_open_connections(port));  // listening only
+    const int c = socket(AF_INET, SOCK_STREAM, 0);
+    REQUIRE(connect(c, reinterpret_cast<const sockaddr*>(&addr), len) == 0);
+    CHECK(has_open_connections(port));  // waiting to be accepted counts
+    close(c);
+}
+
 TEST_CASE("projects run with real nginx and php-cgi, sleep when idle and wake on a request") {
     const auto nginx = tool("FLOSERVER_TEST_NGINX", "/usr/sbin/nginx");
     const auto php = tool("FLOSERVER_TEST_PHP_CGI", "/usr/bin/php-cgi");

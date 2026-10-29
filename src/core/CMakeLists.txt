@@ -43,7 +43,7 @@ target_include_directories(floserver_core PUBLIC
 # nlohmann/json is part of core's interface (protocol.h).
 target_link_libraries(floserver_core PUBLIC floserver_third_party PRIVATE floserver_monocypher floserver_miniz)
 if(WIN32)
-    target_link_libraries(floserver_core PRIVATE ws2_32 advapi32 psapi winhttp bcrypt crypt32)
+    target_link_libraries(floserver_core PRIVATE ws2_32 advapi32 psapi winhttp bcrypt crypt32 iphlpapi)
 else()
     # The local certificate authority (D7) uses the system's OpenSSL on Linux
     # and macOS. Without it the build works, but can't make certificates.

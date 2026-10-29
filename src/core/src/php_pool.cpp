@@ -233,7 +233,13 @@ void PhpPoolRunner::tick(Clock::time_point now, std::chrono::seconds idle_after)
     }
 
     if (state_ == PoolState::Running && !pool_.keep_running && last_request_ && now - *last_request_ >= idle_after) {
-        sleep();
+        // The log has a line per finished request; a request still running
+        // (or one just arriving) shows as an open connection instead.
+        if (has_open_connections(pool_.port)) {
+            last_request_ = now;
+        } else {
+            sleep();
+        }
     }
     if (pool_.keep_running && state_ != PoolState::Running && now >= retry_after_) {
         wake(now);

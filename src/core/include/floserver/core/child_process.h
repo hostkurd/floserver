@@ -54,6 +54,11 @@ private:
 [[nodiscard]] std::optional<std::string> loopback_http_get(Port port, const std::string& host, const std::string& path,
                                                            std::chrono::milliseconds limit);
 
+// True when a TCP connection to 127.0.0.1:port is open or waiting to be
+// accepted (from the system's connection table). A pool with one isn't
+// idle, even if no request has finished lately.
+[[nodiscard]] bool has_open_connections(Port port);
+
 // Which of `listeners` have a connection waiting, waiting at most `limit`.
 // Indexes into `listeners`; empty when none did in time.
 [[nodiscard]] std::vector<std::size_t> waiting_connections(const std::vector<const LoopbackListener*>& listeners,

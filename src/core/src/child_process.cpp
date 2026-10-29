@@ -3,6 +3,8 @@
 #include "floserver/core/paths.h"
 
 #include <algorithm>
+#include <fstream>
+#include <sstream>
 #include <array>
 #include <thread>
 
@@ -11,6 +13,8 @@
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
+
+#include <iphlpapi.h>
 
 #include <windows.h>
 #else
@@ -116,6 +120,27 @@ std::optional<std::string> loopback_http_get(Port port, const std::string& host,
     return http_body_if_ok(response);
 }
 
+bool has_open_connections(Port port) {
+    ULONG size = 0;
+    if (GetTcpTable(nullptr, &size, FALSE) != ERROR_INSUFFICIENT_BUFFER) {
+        return false;
+    }
+    std::vector<std::uint8_t> buf(size);
+    auto* table = reinterpret_cast<MIB_TCPTABLE*>(buf.data());
+    if (GetTcpTable(table, &size, FALSE) != NO_ERROR) {
+        return false;
+    }
+    const DWORD wanted = htons(port);
+    for (DWORD i = 0; i < table->dwNumEntries; ++i) {
+        const MIB_TCPROW& row = table->table[i];
+        if (static_cast<WORD>(row.dwLocalPort) == wanted && row.dwState != MIB_TCP_STATE_LISTEN &&
+            row.dwState != MIB_TCP_STATE_TIME_WAIT && row.dwState != MIB_TCP_STATE_CLOSED) {
+            return true;
+        }
+    }
+    return false;
+}
+
 LoopbackListener::~LoopbackListener() { closesocket(static_cast<SOCKET>(socket_)); }
 
 void LoopbackListener::drop_waiting_connection() const {
@@ -214,6 +239,46 @@ std::optional<std::string> loopback_http_get(Port port, const std::string& host,
     }
     close(s);
     return http_body_if_ok(response);
+}
+
+bool has_open_connections(Port port) {
+#ifdef __linux__
+    // /proc/net/tcp, one connection per line after the header:
+    //   sl  local_address rem_address   st ...
+    //   0:  0100007F:2390 0100007F:A1B2 01 ...
+    // Ports are hex; st 01 established, 03 waiting to be accepted
+    // (syn-recv), 08 close-wait.
+    std::ifstream in("/proc/net/tcp");
+    std::string line;
+    std::getline(in, line);  // header
+    while (std::getline(in, line)) {
+        std::istringstream fields(line);
+        std::string slot;
+        std::string local;
+        std::string remote;
+        std::string state;
+        if (!(fields >> slot >> local >> remote >> state)) {
+            continue;
+        }
+        const auto colon = local.rfind(':');
+        if (colon == std::string::npos) {
+            continue;
+        }
+        unsigned long local_port = 0;
+        try {
+            local_port = std::stoul(local.substr(colon + 1), nullptr, 16);
+        } catch (const std::exception&) {
+            continue;
+        }
+        if (local_port == port && (state == "01" || state == "03" || state == "08")) {
+            return true;
+        }
+    }
+    return false;
+#else
+    (void)port;  // macOS comes with its own stage (D3)
+    return false;
+#endif
 }
 
 LoopbackListener::~LoopbackListener() { close(static_cast<int>(socket_)); }
