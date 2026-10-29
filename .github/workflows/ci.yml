@@ -10,7 +10,7 @@ permissions:
 
 # A newer push to the same pull request replaces the run still going.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.sha }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 jobs:
@@ -272,7 +272,7 @@ jobs:
       # (tools/ci/clang_tidy_cache.py). Each run saves its own cache and
       # starts from the newest one this branch or main can see.
       - name: Restore clang-tidy passes
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/clang-tidy-cache
           key: clang-tidy-18-${{ github.sha }}
@@ -290,6 +290,13 @@ jobs:
           find "$FLOSERVER_CLANG_TIDY_CACHE_DIR" -type f -mtime +14 -delete
           cmake --build build
           echo "clang-tidy cache: $(find "$FLOSERVER_CLANG_TIDY_CACHE_DIR" -type f | wc -l) passing files"
+      # Saved after a failure too: a marker only ever means "passed".
+      - name: Save clang-tidy passes
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/clang-tidy-cache
+          key: clang-tidy-18-${{ github.sha }}
 
   windows-cross:
     name: Windows code builds with MinGW

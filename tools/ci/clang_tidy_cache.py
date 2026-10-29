@@ -3,8 +3,10 @@
 
 CMake calls this in place of clang-tidy (FLOSERVER_CLANG_TIDY_CACHE) as
   clang_tidy_cache.py <clang-tidy> <options...> <source> -- <compile command>
-The key is the preprocessed source (so every header it includes counts),
-the clang-tidy command and version, and every .clang-tidy file. A file that
+The key is the raw text of the source and of every file it includes (found
+through the preprocessor, so a header counts, and so do a macro nobody uses
+and a NOLINT on an #include line), the compile and clang-tidy commands, the
+clang-tidy version, and every .clang-tidy file. A file that
 passed with the same key before passes again without running clang-tidy.
 Only passes are remembered, so a failure is always reported in full.
 """
@@ -30,8 +32,19 @@ def preprocess_command(compile_cmd):
         if arg in ("-c", "-MD", "-MMD") or arg.startswith(("-o", "-MF")):
             continue
         out.append(arg)
-    # -C keeps comments, so adding or removing a NOLINT changes the key.
-    return out + ["-E", "-C"]
+    return out + ["-E"]
+
+
+def included_files(preprocessed):
+    """Every file named in the preprocessor's line markers."""
+    files = set()
+    for line in preprocessed.splitlines():
+        # # 12 "/path/to/file.h" 2
+        if line.startswith(b"# ") and b'"' in line:
+            name = line.split(b'"', 2)[1]
+            if not name.startswith(b"<"):
+                files.add(name)
+    return sorted(files)
 
 
 def tidy_configs(source):
@@ -56,13 +69,20 @@ def main():
     tidy_cmd, compile_cmd = args[:split], args[split + 1:]
     source = tidy_cmd[-1]
 
-    pre = subprocess.run(preprocess_command(compile_cmd), capture_output=True)
+    pre_cmd = preprocess_command(compile_cmd)
+    pre = subprocess.run(pre_cmd, capture_output=True)
     if pre.returncode != 0:
         return subprocess.call(args)
     version = subprocess.run([tidy_cmd[0], "--version"], capture_output=True).stdout
 
+    parts = [version, "\0".join(tidy_cmd).encode(), "\0".join(pre_cmd).encode(), *tidy_configs(source)]
+    for name in included_files(pre.stdout):
+        try:
+            parts += [name, Path(os.fsdecode(name)).read_bytes()]
+        except OSError:
+            return subprocess.call(args)
     key = hashlib.sha256()
-    for part in [version, "\0".join(tidy_cmd).encode(), *tidy_configs(source), pre.stdout]:
+    for part in parts:
         key.update(hashlib.sha256(part).digest())
     marker = Path(cache_dir) / key.hexdigest()
     if marker.exists():
