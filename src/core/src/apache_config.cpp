@@ -4,6 +4,7 @@
 #include "floserver/core/paths.h"
 #include "floserver/core/project_registry.h"
 
+#include <algorithm>
 #include <sstream>
 #include <system_error>
 
@@ -43,12 +44,23 @@ constexpr Module kModules[] = {  // NOLINT(modernize-avoid-c-arrays)
     {"version_module", "mod_version.so"},
     {"proxy_module", "mod_proxy.so"},
     {"proxy_fcgi_module", "mod_proxy_fcgi.so"},
-    {"slotmem_shm_module", "mod_slotmem_shm.so"},
-    {"proxy_balancer_module", "mod_proxy_balancer.so"},
-    {"lbmethod_byrequests_module", "mod_lbmethod_byrequests.so"},
 };
 
-std::string balancer_name(const std::vector<Port>& ports) { return "balancer://floserver-php-" + std::to_string(ports.front()); }
+// The last digit of the client's port (the service's relay, a new one for
+// each connection), split into `n` groups: how requests are spread over a
+// pool's workers. (mod_proxy_balancer would be the usual way, but Apache on
+// Windows didn't find its balancers: "No protocol handler was valid".)
+std::vector<std::string> digit_groups(std::size_t n) {
+    n = std::max<std::size_t>(1, std::min<std::size_t>(n, 10));
+    std::vector<std::string> out;
+    std::size_t first = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        const std::size_t last = (i + 1) * 10 / n - 1;
+        out.push_back("[" + std::to_string(first) + "-" + std::to_string(last) + "]");
+        first = last + 1;
+    }
+    return out;
+}
 
 class Writer {
 public:
@@ -56,11 +68,13 @@ public:
 
     std::optional<std::string> write() {
         const auto root = path(spec_.server_root);
-        const auto pid = path(spec_.work_dir / "apache" / "httpd.pid");
+        // Named after the port it's started on: an Apache still shutting down
+        // (another port) never shares them with the next one.
+        const auto pid = path(spec_.work_dir / "apache" / ("httpd-" + std::string(kApachePortPlaceholder) + ".pid"));
         const auto log = path(spec_.work_dir / "logs" / "apache-error.log");
         const auto mime = path(spec_.server_root / "conf" / "mime.types");
         const auto empty = path(spec_.work_dir / "apache" / "empty");
-        const auto runtime = path(spec_.work_dir / "apache");
+        const auto runtime = path(spec_.work_dir / "apache" / ("run-" + std::string(kApachePortPlaceholder)));
         if (!root || !pid || !log || !mime || !empty || !runtime) {
             return std::nullopt;
         }
@@ -175,22 +189,18 @@ private:
              << "        Require all granted\n"
              << "    </Directory>\n";
         if (!site.php_ports.empty()) {
-            // The pool's workers, a port each, as nginx does. Inside the
-            // host: Apache on Windows doesn't find a balancer from the main
-            // config in a virtual host ("No protocol handler was valid").
-            out_ << "    <Proxy \"" << balancer_name(site.php_ports) << "\">\n";
-            for (const Port p : site.php_ports) {
-                out_ << "        BalancerMember \"fcgi://127.0.0.1:" << p << "\" retry=0\n";
-            }
-            out_ << "        ProxySet lbmethod=byrequests\n"
-                 << "    </Proxy>\n";
             // Caseless: on a disk that ignores case, x.PHP is x.php and must
             // run, never be sent as source. Only files that exist go to PHP.
-            out_ << "    <FilesMatch \"(?i)\\.php$\">\n"
-                 << "        <If \"-f %{REQUEST_FILENAME}\">\n"
-                 << "            SetHandler \"proxy:" << balancer_name(site.php_ports) << "\"\n"
-                 << "        </If>\n"
-                 << "    </FilesMatch>\n"
+            out_ << "    <FilesMatch \"(?i)\\.php$\">\n";
+            const auto groups = digit_groups(site.php_ports.size());
+            for (std::size_t i = 0; i < groups.size(); ++i) {
+                const bool last = i + 1 == groups.size();
+                out_ << "        <" << (i == 0 ? "If" : "ElseIf") << " \"-f %{REQUEST_FILENAME}"
+                     << (last ? std::string() : " && %{REMOTE_PORT} =~ /" + groups[i] + "$/") << "\">\n"
+                     << "            SetHandler \"proxy:fcgi://127.0.0.1:" << site.php_ports[i] << "\"\n"
+                     << "        </" << (i == 0 ? "If" : "ElseIf") << ">\n";
+            }
+            out_ << "    </FilesMatch>\n"
                  // php-cgi takes the script's real path (GENERIC), and the
                  // CGI names as a web server gives them, which mod_proxy_fcgi
                  // gets wrong after an .htaccess rewrite: PATH_TRANSLATED is

@@ -217,9 +217,14 @@ TEST_CASE("the Apache config: one host per project, PHP to the pools, .htaccess 
     CHECK(text->find("Listen 127.0.0.1:{port}\n") != std::string::npos);
     CHECK(text->find("ServerName wp.localhost") != std::string::npos);
     CHECK(text->find("AllowOverride All") != std::string::npos);
-    CHECK(text->find("BalancerMember \"fcgi://127.0.0.1:9101\" retry=0") != std::string::npos);
-    CHECK(text->find("BalancerMember \"fcgi://127.0.0.1:9102\" retry=0") != std::string::npos);
-    CHECK(text->find("SetHandler \"proxy:balancer://floserver-php-9101\"") != std::string::npos);
+    // Both workers, split by the client port's last digit.
+    CHECK(text->find("<If \"-f %{REQUEST_FILENAME} && %{REMOTE_PORT} =~ /[0-4]$/\">\n"
+                     "            SetHandler \"proxy:fcgi://127.0.0.1:9101\"") != std::string::npos);
+    CHECK(text->find("<ElseIf \"-f %{REQUEST_FILENAME}\">\n"
+                     "            SetHandler \"proxy:fcgi://127.0.0.1:9102\"") != std::string::npos);
+    CHECK(text->find("balancer") == std::string::npos);
+    CHECK(text->find("PidFile " + *nginx_quoted_path(kBase / "web" / "apache" / "httpd-{port}.pid")) !=
+          std::string::npos);
     CHECK(text->find("ProxyFCGIBackendType GENERIC") != std::string::npos);
     CHECK(text->find("SetEnvIf X-Forwarded-Proto \"^https$\" HTTPS=on") != std::string::npos);
     CHECK(text->find("RedirectMatch 404") != std::string::npos);

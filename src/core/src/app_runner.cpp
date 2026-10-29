@@ -442,6 +442,7 @@ std::optional<AppLaunch> app_launch(const AppSpec& app, Port port, std::string& 
         }
         std::error_code ec;
         fs::create_directories(app.dir / "empty", ec);
+        fs::create_directories(app.dir / ("run-" + std::to_string(port)), ec);  // DefaultRuntimeDir
         const fs::path conf = app.dir / "httpd.conf";
         if (!write_file_atomically(conf, replace_all(app.server_config, kApachePortPlaceholder, std::to_string(port)),
                                    error)) {
