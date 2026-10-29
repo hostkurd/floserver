@@ -8,29 +8,36 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same pull request replaces the run still going.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
 jobs:
-  windows:
-    name: Windows (MSVC)
+  # Debug and Release run side by side. Debug so asserts and checked
+  # iterators run in the tests; Release is the build people try and the one
+  # that installs from the live CDN.
+  windows-debug:
+    name: Windows (MSVC, Debug)
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       # No -G: the runner's newest Visual Studio, so an image update can't
-      # break the build. Debug as well as Release so asserts and checked
-      # iterators run in the tests.
+      # break the build.
       - name: Configure
         run: cmake -S . -B build -A x64
       - name: Build (Debug)
         shell: pwsh
         run: |
-          cmake --build build --config Debug 2>&1 | Tee-Object -FilePath build-debug.log
+          cmake --build build --config Debug --parallel 2>&1 | Tee-Object -FilePath build.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Show compiler errors as annotations
         if: failure()
         shell: pwsh
         run: |
-          if (Test-Path build-debug.log) {
-            Select-String -Path build-debug.log -Pattern ': (fatal )?error [A-Z]+[0-9]+|: warning C[0-9]+' |
+          if (Test-Path build.log) {
+            Select-String -Path build.log -Pattern ': (fatal )?error [A-Z]+[0-9]+|: warning C[0-9]+' |
               Select-Object -First 30 |
               ForEach-Object { "::error title=MSVC::$($_.Line.Trim())" }
           }
@@ -43,10 +50,38 @@ jobs:
           $exe = Get-ChildItem build -Recurse -Filter floserver_tests.exe | Select-Object -First 1
           & $exe.FullName 2>&1 | Select-String 'TEST CASE|ERROR|FATAL|values:|logged:' |
             ForEach-Object { "::error title=floserver_tests::$($_.Line.Trim())" }
+
+  windows:
+    name: Windows (MSVC, Release)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -A x64
       - name: Build (Release)
-        run: cmake --build build --config Release
+        shell: pwsh
+        run: |
+          cmake --build build --config Release --parallel 2>&1 | Tee-Object -FilePath build.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Show compiler errors as annotations
+        if: failure()
+        shell: pwsh
+        run: |
+          if (Test-Path build.log) {
+            Select-String -Path build.log -Pattern ': (fatal )?error [A-Z]+[0-9]+|: warning C[0-9]+' |
+              Select-Object -First 30 |
+              ForEach-Object { "::error title=MSVC::$($_.Line.Trim())" }
+          }
       - name: Test (Release)
         run: ctest --test-dir build -C Release --output-on-failure
+      - name: Show failed tests as annotations
+        if: failure()
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem build -Recurse -Filter floserver_tests.exe | Select-Object -First 1
+          & $exe.FullName 2>&1 | Select-String 'TEST CASE|ERROR|FATAL|values:|logged:' |
+            ForEach-Object { "::error title=floserver_tests::$($_.Line.Trim())" }
       - name: Report sizes
         shell: pwsh
         run: |
@@ -232,12 +267,36 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install tools
         run: sudo apt-get update && sudo apt-get install -y ninja-build clang-18 clang-tidy-18 libssl-dev
+      # Files whose preprocessed source, checks and clang-tidy version are
+      # unchanged since they last passed aren't checked again
+      # (tools/ci/clang_tidy_cache.py). Each run saves its own cache and
+      # starts from the newest one this branch or main can see.
+      - name: Restore clang-tidy passes
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/clang-tidy-cache
+          key: clang-tidy-18-${{ github.sha }}
+          restore-keys: clang-tidy-18-
       - name: Configure
         run: >
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
-          -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18 -DFLOSERVER_CLANG_TIDY=ON
+          -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18
+          -DFLOSERVER_CLANG_TIDY=ON -DFLOSERVER_CLANG_TIDY_CACHE=ON
       - name: Build with clang-tidy
-        run: cmake --build build
+        env:
+          FLOSERVER_CLANG_TIDY_CACHE_DIR: ${{ runner.temp }}/clang-tidy-cache
+        run: |
+          mkdir -p "$FLOSERVER_CLANG_TIDY_CACHE_DIR"
+          find "$FLOSERVER_CLANG_TIDY_CACHE_DIR" -type f -mtime +14 -delete
+          cmake --build build
+          echo "clang-tidy cache: $(find "$FLOSERVER_CLANG_TIDY_CACHE_DIR" -type f | wc -l) passing files"
+      # Saved after a failure too: a marker only ever means "passed".
+      - name: Save clang-tidy passes
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/clang-tidy-cache
+          key: clang-tidy-18-${{ github.sha }}
 
   windows-cross:
     name: Windows code builds with MinGW
