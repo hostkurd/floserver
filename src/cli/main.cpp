@@ -774,7 +774,7 @@ int shims(const std::vector<std::string>& args) {
         // can be renamed: the old ones are put aside and removed next time.
         fs::create_directories(dir, ec);
         for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
-            if (it->path().filename().string().find(".old-") != std::string::npos) {
+            if (it->path().filename().native().find(fs::path(".old-").native()) != fs::path::string_type::npos) {
                 std::error_code ignored;
                 fs::remove(it->path(), ignored);
             }
@@ -863,7 +863,9 @@ int shims(const std::vector<std::string>& args) {
     // What `php` (and the rest) would run here.
     std::cout << "Shims folder: " << shown(dir) << (core::on_user_path(dir) ? "  (on your Path)" : "  (not on your Path: flo shims install)")
               << "\n";
-    print_shadowed(dir);
+    if (core::on_user_path(dir)) {
+        print_shadowed(dir);
+    }
     for (const std::string& name : core::shim_names()) {
         const auto target = core::resolve_shim(name, fs::current_path(ec), *data, error);
         std::cout << "  " << std::left << std::setw(10) << name

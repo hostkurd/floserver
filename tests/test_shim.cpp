@@ -15,6 +15,7 @@
 #ifndef _WIN32
 #include <array>
 #include <cstdio>
+#include <cstdlib>
 #endif
 
 using namespace floserver::core;
@@ -160,6 +161,25 @@ TEST_CASE("each shim runs the version the nearest floserver.json asks for") {
 }
 
 #ifndef _WIN32
+TEST_CASE("outside a project, with none of FloServer's, a shim runs the one that was there") {
+    const test_util::TempDir tmp;
+    const fs::path data = tmp.path() / "data";
+    const fs::path bin = tmp.path() / "bin";
+    test_util::write_file(bin / "python3", "");
+    test_util::write_file(shims_dir(data) / "python3", "");
+    const std::string old_path = get_env("PATH").value_or("");
+    ::setenv("PATH", (path_to_utf8(shims_dir(data)) + ":" + path_to_utf8(bin)).c_str(), 1);  // NOLINT(concurrency-mt-unsafe)
+    std::string error;
+    const auto elsewhere = resolve_shim("python3", tmp.path(), data, error);
+    test_util::write_file(tmp.path() / "proj" / "floserver.json", R"({"python": "3.13"})");
+    const auto in_project = resolve_shim("python3", tmp.path() / "proj", data, error);
+    ::setenv("PATH", old_path.c_str(), 1);  // NOLINT(concurrency-mt-unsafe)
+    REQUIRE(elsewhere);
+    CHECK(elsewhere->program == bin / "python3");
+    CHECK_FALSE(in_project);  // a project's own version is never swapped for another
+    CHECK(error.find("flo install python 3.13") != std::string::npos);
+}
+
 TEST_CASE("a shim never runs another shim") {
     const test_util::TempDir tmp;
     const fs::path data = tmp.path() / "data";
@@ -169,7 +189,7 @@ TEST_CASE("a shim never runs another shim") {
     test_util::write_file(shims_dir(data) / "node", "");
     fs::create_directory_symlink(shims_dir(data), runtimes_dir(data) / "node" / "22.0.0" / "bin");
     const fs::path project = tmp.path() / "p";
-    fs::create_directories(project);
+    test_util::write_file(project / "floserver.json", R"({"node": "22"})");
     std::string error;
     CHECK_FALSE(resolve_shim("node", project, data, error));
     CHECK(error.find("is a FloServer shim itself") != std::string::npos);

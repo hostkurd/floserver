@@ -4,7 +4,8 @@
 // python and pip programs in one folder on the user's PATH. Each finds the
 // nearest floserver.json from the current folder and runs the version it
 // asks for; outside a project, the default (for now the newest installed;
-// Settings will set it). They run runtimes directly and don't go through the
+// Settings will set it), or when FloServer has none, the program of that
+// name next on the PATH, as if the shim weren't there. They run runtimes directly and don't go through the
 // service.
 //
 //   php       php(.exe) of the project's PHP, with a php.ini FloServer writes

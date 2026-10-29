@@ -164,9 +164,14 @@ bool spawn_detached(const fs::path& program, const std::vector<std::string>& arg
     // Run in the program's own folder, so the caller's current folder isn't
     // kept in use for as long as the service runs.
     const std::wstring folder = program.parent_path().wstring();
-    if (!CreateProcessW(program.c_str(), command.data(), nullptr, nullptr, FALSE,
-                        CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP, nullptr,
-                        folder.empty() ? nullptr : folder.c_str(), &startup, &info)) {
+    // Out of the caller's job when it allows that (a shim's does), so the
+    // service outlives a terminal that's closed; else in it, as before.
+    const auto create = [&](DWORD flags) {
+        return CreateProcessW(program.c_str(), command.data(), nullptr, nullptr, FALSE,
+                              CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | flags, nullptr,
+                              folder.empty() ? nullptr : folder.c_str(), &startup, &info) != 0;
+    };
+    if (!create(CREATE_BREAKAWAY_FROM_JOB) && !create(0)) {
         error = "can't start " + program.filename().string() + " (Windows error " +
                 std::to_string(GetLastError()) + ")";
         return false;

@@ -126,7 +126,9 @@ std::optional<ShimTarget> php_target(const InstalledRuntime& php, const std::vec
     t.program = *program;
     t.args = {"-c", path_to_utf8(ini)};
     // PHP started again by the program (artisan serve, PHPUnit, Composer's
-    // @php) gets the same php.ini through PHPRC.
+    // @php) gets the same php.ini through PHPRC. So would another PHP run by
+    // its full path from there, with this install's extension_dir: rare, and
+    // its own -c or PHPRC wins.
     t.env = {{"PHPRC", path_to_utf8(ini)}};
 #ifdef _WIN32
     t.env.emplace_back("PHP_INI_SCAN_DIR", "");  // and no other ini from a system-wide PHP
@@ -150,8 +152,40 @@ const std::vector<std::string>& shim_names() {
 
 fs::path shims_dir(const fs::path& data) { return data / "shims"; }
 
-std::optional<ShimTarget> resolve_shim(const std::string& tool, const fs::path& cwd, const fs::path& data_dir,
-                                       std::string& error) {
+namespace {
+
+// The program `name` further along this process's PATH, past the shims.
+std::optional<fs::path> next_on_path(const std::string& name, const fs::path& data_dir) {
+    std::error_code ec;
+    const fs::path shims = fs::weakly_canonical(shims_dir(data_dir), ec);
+    const std::string path = get_env("PATH").value_or("");
+#ifdef _WIN32
+    const char sep = ';';
+    const fs::path file = path_from_utf8(name + ".exe");
+#else
+    const char sep = ':';
+    const fs::path file = path_from_utf8(name);
+#endif
+    std::size_t start = 0;
+    while (start <= path.size()) {
+        const auto end = path.find(sep, start);
+        const std::string dir = path.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        if (!dir.empty() && fs::weakly_canonical(path_from_utf8(dir), ec) != shims) {
+            fs::path p = path_from_utf8(dir) / file;
+            if (is_file(p)) {
+                return p;
+            }
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    return std::nullopt;
+}
+
+std::optional<ShimTarget> resolve_installed(const std::string& tool, const fs::path& cwd, const fs::path& data_dir,
+                                            std::string& error) {
     const auto& names = shim_names();
     if (std::find(names.begin(), names.end(), tool) == names.end()) {
         error = "\"" + tool + "\" isn't a FloServer shim";
@@ -248,6 +282,26 @@ std::optional<ShimTarget> resolve_shim(const std::string& tool, const fs::path& 
         t.args = {"-m", "pip"};
     }
     return guard(t, data_dir, error);
+}
+
+}  // namespace
+
+std::optional<ShimTarget> resolve_shim(const std::string& tool, const fs::path& cwd, const fs::path& data_dir,
+                                       std::string& error) {
+    auto t = resolve_installed(tool, cwd, data_dir, error);
+    const auto& names = shim_names();
+    if (t || std::find(names.begin(), names.end(), tool) == names.end() || find_project_config(cwd)) {
+        return t;
+    }
+    // Outside a project, with none of FloServer's: the one that was there
+    // before, so `#!/usr/bin/env python3` scripts and other tools still work.
+    if (auto other = next_on_path(tool, data_dir)) {
+        error.clear();
+        ShimTarget found;
+        found.program = std::move(*other);
+        return found;
+    }
+    return t;
 }
 
 }  // namespace floserver::core
