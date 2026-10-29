@@ -3,9 +3,10 @@
 A tiny local development environment for PHP, Node.js and databases, by
 HostKurd. Native C++, Windows first. Free, closed source.
 
-The design note with every decision (D1–D16) lives in the FloCMS Server
-project on claude.ai. This repository follows it; a change to a decision goes
-back to the note first.
+The design note with every decision lives in the Flo Server project on
+claude.ai; `docs/design.md` is a copy in the repo, and `docs/handoff.md` says
+where the work stands. This repository follows the design; a change to a
+decision goes back to the note first. `CLAUDE.md` has the working rules.
 
 ## Layout
 
