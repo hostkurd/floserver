@@ -264,8 +264,7 @@ jobs:
           # An Apache project (D6): WordPress's .htaccess, PHP from the pools,
           # Apache Lounge from the CDN behind nginx; asleep when idle.
           Run "flo install apache" { & "$bin/flo.exe" install apache } | Out-Null
-          # Under a folder with a space and non-ASCII letters, as C:\Users\Jörg Müller\... is.
-          $wp = "$env:RUNNER_TEMP\Jörg Müller\ci-wp"
+          $wp = "$env:RUNNER_TEMP\ci-wp"
           New-Item -ItemType Directory -Force $wp | Out-Null
           Set-Content "$wp\floserver.json" '{ "web": "apache", "php": "8.5" }'
           Set-Content "$wp\.htaccess" @'
@@ -300,6 +299,22 @@ jobs:
           if (-not $slept) { Fail "Apache didn't sleep" (Diagnostics) }
           $wpBody = (& curl.exe -sS --max-time 60 --resolve $wpResolve "http://ci-wp.localhost:18080/again" 2>&1 | Out-String).Trim()
           if ($wpBody -ne "wp /again /index.php -") { Fail "Apache project after sleeping (got '$wpBody')" (Diagnostics) }
+          # A folder with a space and non-ASCII letters, as C:\Users\Jörg Müller\... is:
+          # a PHP project on nginx and one on Apache.
+          $uni = "$env:RUNNER_TEMP\Jörg Müller"
+          New-Item -ItemType Directory -Force "$uni\ci-uni", "$uni\ci-wpu" | Out-Null
+          Set-Content "$uni\ci-uni\index.php" '<?php echo "uni ", basename(__DIR__);'
+          Set-Content "$uni\ci-uni\floserver.json" '{ "php": "8.5" }'
+          Copy-Item "$wp\.htaccess", "$wp\index.php", "$wp\floserver.json" "$uni\ci-wpu\"
+          Run "flo add uni" { & "$bin/flo.exe" add "$uni\ci-uni" } | Out-Null
+          Run "flo add wpu" { & "$bin/flo.exe" add "$uni\ci-wpu" } | Out-Null
+          Run "flo start uni" { & "$bin/flo.exe" start ci-uni } | Out-Null
+          Run "flo start wpu" { & "$bin/flo.exe" start ci-wpu } | Out-Null
+          $uniBody = (& curl.exe -sS --max-time 60 --resolve "ci-uni.localhost:18080:127.0.0.1" "http://ci-uni.localhost:18080/" 2>&1 | Out-String).Trim()
+          $wpuBody = (& curl.exe -sS --max-time 60 --resolve "ci-wpu.localhost:18080:127.0.0.1" "http://ci-wpu.localhost:18080/x/" 2>&1 | Out-String).Trim()
+          if ($uniBody -ne "uni ci-uni" -or $wpuBody -ne "wp /x/ /index.php -") {
+            Fail "non-ASCII folder: nginx PHP project got '$uniBody', Apache project got '$wpuBody'" (Diagnostics)
+          }
           Run "flo stop" { & "$bin/flo.exe" stop } | Out-Null
           Start-Sleep -Seconds 1
           $left = @(Get-Process nginx, php-cgi, node, python, httpd -ErrorAction SilentlyContinue).Count
