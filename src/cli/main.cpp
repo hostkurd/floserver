@@ -345,6 +345,9 @@ std::string state_line(const nlohmann::json& p) {
             std::string why = text_of(p, "error");
             why = why.substr(0, why.find('\n'));
             std::erase_if(why, [](char c) { return static_cast<unsigned char>(c) < 0x20 || c == 0x7F; });
+            if (text_of(p, "web") == "apache") {
+                return "on, Apache can't start" + (why.empty() ? "" : ": " + why);
+            }
             return text_of(p, "node").empty() && text_of(p, "python").empty() ? "on, PHP can't start"
                                               : "on, its server can't start" + (why.empty() ? "" : ": " + why);
         }

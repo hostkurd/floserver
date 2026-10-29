@@ -220,8 +220,16 @@ private:
                  // The first request may wait for npm install (up to 10
                  // minutes) and the start.
                  << "            proxy_read_timeout 900s;\n"
-                 << "            proxy_send_timeout 900s;\n"
-                 << "        }\n"
+                 << "            proxy_send_timeout 900s;\n";
+            // Apache projects: every request counts for their PHP pool's idle time.
+            if (!site.php_access_log.empty()) {
+                const auto idle = path(site.php_access_log);
+                if (!idle) {
+                    return false;
+                }
+                out_ << "            access_log " << *idle << " floserver_idle;\n";
+            }
+            out_ << "        }\n"
                  << "    }\n";
             return true;
         }

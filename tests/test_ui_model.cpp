@@ -124,6 +124,15 @@ TEST_CASE("Node projects show their version and a server that can't start") {
     CHECK(rows[1].detail == "The project's server can't start");
 }
 
+TEST_CASE("Apache projects show an Apache chip (D6)") {
+    const auto rows = rows_from_list(one({{"name", "wp"}, {"on", true}, {"state", "ready"}, {"run", "failed"},
+                                          {"php", "8.4.27"}, {"web", "apache"}}),
+                                     Lang::En);
+    REQUIRE(rows.size() == 1);
+    CHECK(rows[0].chips == std::vector<std::string>{"PHP 8.4.27", "Apache"});
+    CHECK(rows[0].detail == "The project's server can't start");
+}
+
 TEST_CASE("Python projects show a Python chip (D17)") {
     const auto rows = rows_from_list(
         one({{"name", "api"}, {"on", true}, {"state", "ready"}, {"run", "failed"}, {"python", "3.13.18"},

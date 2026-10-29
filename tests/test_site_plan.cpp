@@ -1,3 +1,4 @@
+#include "floserver/core/apache_config.h"
 #include "floserver/core/nginx_config.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/site_plan.h"
@@ -115,7 +116,8 @@ TEST_CASE("missing databases, bad files and not-yet-supported projects are repor
     CHECK(plan.sites[0].missing == std::vector<std::string>{"mariadb 11.8"});
     CHECK(plan.sites[1].state == SiteState::Problem);
     CHECK(plan.sites[1].problem.starts_with("php "));  // the file reader adds "floserver.json: "
-    CHECK(plan.sites[2].state == SiteState::Problem);
+    CHECK(plan.sites[2].state == SiteState::NeedsDownload);  // Apache isn't installed in this list
+    CHECK(plan.sites[2].missing == std::vector<std::string>{"apache"});
     CHECK(plan.sites[3].state == SiteState::Ready);  // a Node app (D11)
     CHECK(plan.sites[4].state == SiteState::NeedsDownload);
     CHECK(plan.sites[4].missing == std::vector<std::string>{"node 22"});
@@ -177,6 +179,64 @@ TEST_CASE("Python projects run their own server; Python serves when Node is name
     CHECK(plan.sites[2].state == SiteState::NeedsDownload);
     CHECK(plan.sites[2].missing == std::vector<std::string>{"python 3.12"});
     CHECK(plan.sites[3].pool.has_value());  // PHP serves; Python is only a tool there
+}
+
+TEST_CASE("Apache projects are PHP projects served by the shared Apache (D6)") {
+    AppConfig config;
+    config.projects = {project("wp"), project("shop"), project("old")};
+    auto installed = kInstalled;
+    installed.push_back(runtime("apache", "2.4.69"));
+    installed.push_back(runtime("apache", "2.4.62"));
+    const auto plan = plan_sites(config,
+                                 reader({{"wp", R"({"web": "apache", "php": "8.4"})"},
+                                         {"shop", R"({"php": "8.4"})"},
+                                         {"old", R"({"web": "apache", "node": "24"})"}}),
+                                 installed, std::nullopt);
+    REQUIRE(plan.sites.size() == 3);
+    CHECK(plan.sites[0].state == SiteState::Ready);
+    CHECK(plan.sites[0].apache);
+    REQUIRE(plan.sites[0].pool);
+    CHECK(plan.sites[0].pool == plan.sites[1].pool);  // the same pool as nginx's PHP 8.4 project
+    CHECK_FALSE(plan.sites[1].apache);
+    CHECK(plan.sites[2].apache);  // Apache serves it; Node is only a tool there
+    CHECK_FALSE(plan.sites[2].app);
+    CHECK(plan.apache_version == "2.4.69");
+    CHECK(plan.apache_dir == kBase / "runtimes" / "apache" / "2.4.69");
+    CHECK(plan.apps.empty());
+}
+
+TEST_CASE("the Apache config: one host per project, PHP to the pools, .htaccess read") {
+    ApacheSpec spec;
+    spec.server_root = kBase / "runtimes" / "apache" / "2.4.69" / "Apache24";
+    spec.modules_dir = spec.server_root / "modules";
+    spec.work_dir = kBase / "web";
+    spec.sites = {{"wp", kBase / "projects" / "wp", {9101, 9102}}, {"docs", kBase / "projects" / "docs", {}}};
+    std::string error;
+    const auto text = make_apache_config(spec, error);
+    REQUIRE_MESSAGE(text, error);
+    CHECK(text->find("Listen 127.0.0.1:{port}\n") != std::string::npos);
+    CHECK(text->find("ServerName wp.localhost") != std::string::npos);
+    CHECK(text->find("AllowOverride All") != std::string::npos);
+    CHECK(text->find("BalancerMember \"fcgi://127.0.0.1:9101\" retry=0") != std::string::npos);
+    CHECK(text->find("BalancerMember \"fcgi://127.0.0.1:9102\" retry=0") != std::string::npos);
+    CHECK(text->find("SetHandler \"proxy:balancer://floserver-php-9101\"") != std::string::npos);
+    CHECK(text->find("ProxyFCGIBackendType GENERIC") != std::string::npos);
+    CHECK(text->find("SetEnvIf X-Forwarded-Proto \"^https$\" HTTPS=on") != std::string::npos);
+    CHECK(text->find("RedirectMatch 404") != std::string::npos);
+    CHECK(text->find("LoadModule rewrite_module") != std::string::npos);
+    CHECK(text->find("mod_mpm_event.so") == std::string::npos);  // Windows has its own MPM
+    // A static site gets no PHP handler.
+    const auto docs = text->find("ServerName docs.localhost");
+    REQUIRE(docs != std::string::npos);
+    CHECK(text->find("SetHandler", docs) == std::string::npos);
+
+    spec.posix = true;
+    CHECK(make_apache_config(spec, error)->find("mod_mpm_event.so") != std::string::npos);
+    spec.sites = {{"bad", kBase / "projects" / "a|b", {9101}}};
+    CHECK_FALSE(make_apache_config(spec, error));
+    CHECK(error.find("has a |") != std::string::npos);
+    spec.sites = {{"Bad Name", kBase / "projects" / "x", {}}};
+    CHECK_FALSE(make_apache_config(spec, error));
 }
 
 TEST_CASE("the nginx config forwards a Node project to its port, WebSockets too") {

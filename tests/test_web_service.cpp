@@ -410,4 +410,92 @@ TEST_CASE("a Node project is forwarded to its own server, WebSockets included, a
     service.stop();
 }
 
+TEST_CASE("an Apache project is served by the shared Apache behind nginx, .htaccess and all (D6)") {
+    const auto nginx = tool("FLOSERVER_TEST_NGINX", "/usr/sbin/nginx");
+    const auto php = tool("FLOSERVER_TEST_PHP_CGI", "/usr/bin/php-cgi");
+    const auto apache = tool("FLOSERVER_TEST_APACHE", "/usr/sbin/apache2");
+    std::error_code ec;
+    const fs::path modules = get_env("FLOSERVER_TEST_APACHE_MODULES").value_or("/usr/lib/apache2/modules");
+    if (!nginx || !php || !apache || !fs::exists(modules / "mod_proxy_fcgi.so", ec)) {
+        MESSAGE("nginx, php-cgi or Apache with mod_proxy_fcgi isn't installed here; skipped");
+        return;
+    }
+    const test_util::TempDir tmp;
+    const fs::path data = tmp.path() / "data";
+    install_test_nginx(data, *nginx);
+    fake_runtime(data, "php", "8.3.6", "nts");
+    fs::create_symlink(*php, runtimes_dir(data) / "php" / "8.3.6" / "php-cgi");
+    // This machine's Apache as an installed runtime.
+    fake_runtime(data, "apache", "2.4.58", "");
+    const fs::path apache_dir = runtimes_dir(data) / "apache" / "2.4.58";
+    fs::create_directories(apache_dir / "bin");
+    fs::create_directories(apache_dir / "conf");
+    fs::create_symlink(*apache, apache_dir / "bin" / "apache2");
+    fs::create_directory_symlink(modules, apache_dir / "modules");
+    fs::copy_file("/etc/mime.types", apache_dir / "conf" / "mime.types", ec);
+    if (ec) {
+        test_util::write_file(apache_dir / "conf" / "mime.types", "text/plain txt\n");
+    }
+
+    // WordPress's own .htaccess: what isn't a file goes to index.php.
+    const fs::path wp = tmp.path() / "wp";
+    test_util::write_file(wp / "floserver.json", R"({"web": "apache", "php": "8.3"})");
+    test_util::write_file(wp / ".htaccess", "RewriteEngine On\nRewriteBase /\nRewriteRule ^index\\.php$ - [L]\n"
+                                            "RewriteCond %{REQUEST_FILENAME} !-f\nRewriteCond %{REQUEST_FILENAME} !-d\n"
+                                            "RewriteRule . /index.php [L]\n");
+    test_util::write_file(wp / "index.php", "<?php echo 'wp ', $_SERVER['REQUEST_URI'], ' ', $_SERVER['SCRIPT_NAME'], ' ',"
+                                            " $_SERVER['PATH_INFO'] ?? '-', ' ', $_SERVER['HTTPS'] ?? 'off';");
+    test_util::write_file(wp / "readme.txt", "plain file");
+    test_util::write_file(wp / ".env", "SECRET=1");
+    // Apache's workers may run as nobody here (root in a container).
+    for (const auto& e : fs::recursive_directory_iterator(tmp.path())) {
+        fs::permissions(e.path(), fs::perms::others_read | fs::perms::others_exec, fs::perm_options::add, ec);
+    }
+    fs::permissions(tmp.path(), fs::perms::others_read | fs::perms::others_exec, fs::perm_options::add, ec);
+
+    AppConfig app;
+    std::string error;
+    REQUIRE(add_project(app, wp, "", error));
+    app.projects[0].on = true;
+    REQUIRE(save_app_config(app_config_file(data), app, error));
+
+    const auto ports = pick_web_ports([](Port p) { return p > 1024 && can_listen_on_loopback(p); });
+    REQUIRE(ports);
+    CertStore certs(data);
+    WebServiceConfig config;
+    config.data_dir = data;
+    config.fixed_ports = WebPorts{static_cast<Port>(ports->http + 22000), static_cast<Port>(ports->https + 22000), true};
+    config.idle_after = 2s;
+    config.reload_every = 1s;
+    WebService service(config, certs);
+    service.start();
+    const Port http = config.fixed_ports->http;
+
+    auto st = service.status();
+    INFO(st.dump(2));
+    REQUIRE(st["nginx"]["running"] == true);
+    CHECK(st["sites"]["wp"]["app"] == "apache");
+    CHECK(st["sites"]["wp"]["run"] == "sleeping");
+
+    const std::string first = get(http, "wp.localhost", "/2026/10/hello-world/");
+    INFO(read_small_file(web_dir(data) / "apps" / "_apache.log", 1 << 20).value_or(""));
+    INFO(read_small_file(web_dir(data) / "logs" / "apache-error.log", 1 << 20).value_or(""));
+    CHECK(first == "200 wp /2026/10/hello-world/ /index.php - off");
+    CHECK(service.status()["sites"]["wp"]["run"] == "running");
+    CHECK(get(http, "wp.localhost", "/index.php/a/b") == "200 wp /index.php/a/b /index.php /a/b off");
+    CHECK(get(http, "wp.localhost", "/readme.txt") == "200 plain file");
+    CHECK(get(http, "wp.localhost", "/.env").starts_with("404 "));
+    CHECK(get(http, "wp.localhost", "/.htaccess").starts_with("404 "));
+    // Apache and its pool sleep; the next request wakes both.
+    REQUIRE(eventually([&] { return service.status()["sites"]["wp"]["run"] == "sleeping"; }, 25s));
+    CHECK(eventually([&] { return service.status()["pools"][0]["state"] == "sleeping"; }, 10s));
+    CHECK(get(http, "wp.localhost", "/again") == "200 wp /again /index.php - off");
+
+    app.projects[0].on = false;
+    REQUIRE(save_app_config(app_config_file(data), app, error));
+    st = service.reload();
+    CHECK_FALSE(st["apps"].contains("_apache"));
+    service.stop();
+}
+
 #endif

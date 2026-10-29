@@ -1,5 +1,6 @@
 #include "floserver/core/app_runner.h"
 
+#include "floserver/core/apache_config.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/process.h"
 #include "floserver/core/sha256.h"
@@ -315,6 +316,9 @@ fs::path venv_python(const fs::path& project_dir) {
 std::optional<std::vector<AppSetupStep>> app_setup(const AppSpec& app, Port port, std::string& error) {
     std::vector<AppSetupStep> steps;
     std::error_code ec;
+    if (app.kind == AppKind::Apache) {
+        return steps;  // its config is written as it starts (app_launch)
+    }
     if (app.kind == AppKind::Node) {
         if (!needs_npm_install(app.dir)) {
             return steps;
@@ -429,6 +433,28 @@ std::optional<std::vector<AppSetupStep>> app_setup(const AppSpec& app, Port port
 std::optional<AppLaunch> app_launch(const AppSpec& app, Port port, std::string& error) {
     AppLaunch launch;
     set_environment(launch.options, app, port);
+    if (app.kind == AppKind::Apache) {
+        // The shared Apache (D6): its config with this port, in its folder.
+        const auto program = apache_program(app.runtime_dir);
+        if (!program) {
+            error = "httpd is missing from " + path_to_utf8(app.runtime_dir);
+            return std::nullopt;
+        }
+        std::error_code ec;
+        fs::create_directories(app.dir / "empty", ec);
+        const fs::path conf = app.dir / "httpd.conf";
+        if (!write_file_atomically(conf, replace_all(app.server_config, kApachePortPlaceholder, std::to_string(port)),
+                                   error)) {
+            return std::nullopt;
+        }
+        launch.options.program = *program;
+        launch.options.args = {"-d", path_to_utf8(apache_server_root(app.runtime_dir)), "-f", path_to_utf8(conf)};
+#ifndef _WIN32
+        launch.options.args.emplace_back("-DFOREGROUND");  // stays our child, in our process group
+#endif
+        launch.shown = "httpd -f " + path_to_utf8(conf);
+        return launch;
+    }
     if (app.command) {
         const std::string command = replace_all(*app.command, "{port}", std::to_string(port));
         launch.shown = command;
@@ -554,7 +580,7 @@ AppState AppRunner::state() const {
 void AppRunner::set_app(const AppSpec& app) {
     std::unique_lock lock(mutex_);
     const bool other = app.kind != app_.kind || app.dir != app_.dir || app.runtime_dir != app_.runtime_dir ||
-                       app.command != app_.command;
+                       app.command != app_.command || app.server_config != app_.server_config;
     app_ = app;
     if (other) {
         error_.clear();

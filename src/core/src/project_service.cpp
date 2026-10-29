@@ -34,6 +34,9 @@ json site_json(const Project& project, const PlannedSite& site, const WebPlan& p
     if (site.pool) {
         out["php"] = plan.pools.at(*site.pool).version;
     }
+    if (site.apache) {
+        out["web"] = "apache";
+    }
     if (site.app) {
         const AppSpec& app = plan.apps.at(*site.app);
         out[app.kind == AppKind::Python ? "python" : "node"] = app.version;
