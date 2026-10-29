@@ -111,6 +111,7 @@ jobs:
           }
           # Logs can't be read from outside, so every failure becomes an annotation.
           function Fail([string]$what, [string]$output) {
+            $what = ($what -replace "`r?`n", " | ").Trim()
             $flat = ($output -replace "`r?`n", " | ").Trim()
             if ($flat.Length -gt 3000) { $flat = $flat.Substring(0, 3000) }
             Write-Host "::error title=live install::$what :: $flat"
@@ -124,7 +125,7 @@ jobs:
               $tail = (Get-Content $_.FullName -Tail 5 -ErrorAction SilentlyContinue) -join " / "
               if ($tail) { $out += " || $($_.Name): $tail" }
             }
-            $procs = (Get-Process nginx, php-cgi, node -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Name):$($_.Id)" }) -join ","
+            $procs = (Get-Process nginx, php-cgi, node, python -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Name):$($_.Id)" }) -join ","
             return "$out || processes: $procs"
           }
           function Run([string]$what, [scriptblock]$block) {
@@ -217,11 +218,54 @@ jobs:
           }
           $webBody = (& curl.exe -sS --max-time 60 --resolve $webResolve "http://ci-web.localhost:18080/again" 2>&1 | Out-String).Trim()
           if ($webBody -notlike "node v24.* /again") { Fail "Node project after sleeping (got '$webBody')" (Diagnostics) }
+          # A Python project (D17): FloServer makes .venv with the CDN's
+          # Python, pip-installs requirements.txt from PyPI into it, then
+          # runs the app from the venv; asleep when idle, woken again.
+          Run "flo install python 3.13" { & "$bin/flo.exe" install python 3.13 } | Out-Null
+          $api = "$env:RUNNER_TEMP\ci-api"
+          New-Item -ItemType Directory -Force $api | Out-Null
+          Set-Content "$api\requirements.txt" 'uvicorn'
+          Set-Content "$api\main.py" @'
+          import sys
+          async def app(scope, receive, send):
+              if scope["type"] != "http":
+                  return
+              body = ("python %d.%d %s venv=%s" % (sys.version_info[0], sys.version_info[1], scope["path"],
+                                                  sys.prefix != sys.base_prefix)).encode()
+              await send({"type": "http.response.start", "status": 200,
+                          "headers": [(b"content-length", str(len(body)).encode())]})
+              await send({"type": "http.response.body", "body": body})
+          '@
+          Set-Content "$api\floserver.json" '{ "python": "3.13", "command": "python -m uvicorn main:app --host 127.0.0.1 --port {port}" }'
+          Run "flo add api" { & "$bin/flo.exe" add $api } | Out-Null
+          Run "flo start api" { & "$bin/flo.exe" start ci-api } | Out-Null
+          $apiResolve = "ci-api.localhost:18080:127.0.0.1"
+          # The first request waits for the venv and pip.
+          $apiBody = (& curl.exe -sS --max-time 400 --resolve $apiResolve "http://ci-api.localhost:18080/hello" 2>&1 | Out-String).Trim()
+          if ($apiBody -ne "python 3.13 /hello venv=True") {
+            $log = (Get-Content "$env:FLOSERVER_DATA_DIR\web\apps\ci-api.log" -Tail 30 -ErrorAction SilentlyContinue) -join " / "
+            Fail "Python project (got '$apiBody')" "$(Diagnostics) || app log: $log"
+          }
+          if (-not (Test-Path "$api\.venv\Scripts\python.exe") -or -not (Test-Path "$api\.venv\.floserver-installed")) {
+            Fail "Python project: .venv or its stamp is missing" (Get-ChildItem "$api\.venv" -Force | ForEach-Object Name | Out-String)
+          }
+          $slept = $false
+          for ($i = 0; $i -lt 30 -and -not $slept; $i++) {
+            Start-Sleep -Seconds 1
+            $slept = (& "$bin/flo.exe" projects | Out-String) -match "ci-api\s+python 3\.13\S*\s+on, asleep"
+          }
+          if (-not $slept -or @(Get-Process python -ErrorAction SilentlyContinue).Count -ne 0) {
+            Fail "Python project didn't sleep" (Diagnostics)
+          }
+          $apiBody = (& curl.exe -sS --max-time 60 --resolve $apiResolve "http://ci-api.localhost:18080/again" 2>&1 | Out-String).Trim()
+          if ($apiBody -ne "python 3.13 /again venv=True") { Fail "Python project after sleeping (got '$apiBody')" (Diagnostics) }
+          $pips = @(Select-String -Path "$env:FLOSERVER_DATA_DIR\web\apps\ci-api.log" -Pattern "--- FloServer: pip install" -SimpleMatch).Count
+          if ($pips -ne 1) { Fail "Python project: pip ran $pips times" (Diagnostics) }
           Run "flo stop" { & "$bin/flo.exe" stop } | Out-Null
           Start-Sleep -Seconds 1
-          $left = @(Get-Process nginx, php-cgi, node -ErrorAction SilentlyContinue).Count
+          $left = @(Get-Process nginx, php-cgi, node, python -ErrorAction SilentlyContinue).Count
           if ($left -ne 0) { Fail "processes left after flo stop" (Diagnostics) }
-          "::notice title=live install::nginx, Composer, PHP and Node installed from the CDN; a project served, slept and woke for 20 requests at once; a second pool added with a reload; a Node project served, slept and woke"
+          "::notice title=live install::nginx, Composer, PHP and Node installed from the CDN; a project served, slept and woke for 20 requests at once; a second pool added with a reload; a Node project served, slept and woke; a Python project got its .venv and packages, served, slept and woke"
           exit 0
       # The build, for trying on a real PC: download it from the run's page.
       - name: Upload the Windows build
