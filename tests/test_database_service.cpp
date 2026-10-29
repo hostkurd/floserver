@@ -81,6 +81,8 @@ bool eventually(F&& f, std::chrono::milliseconds limit) {
 TEST_CASE("a project's database runs on the real MariaDB, sleeps when idle and wakes on a connection") {
     std::error_code ec;
     if (!fs::is_regular_file("/usr/sbin/mariadbd", ec) || !fs::is_regular_file("/usr/bin/mariadb-install-db", ec)) {
+        // CI installs it: there a skip would hide a broken setup.
+        REQUIRE_MESSAGE(!get_env("CI"), "MariaDB is missing from this CI machine");
         MESSAGE("MariaDB isn't installed here; skipped");
         return;
     }
