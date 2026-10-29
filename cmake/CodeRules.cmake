@@ -8,12 +8,19 @@ target_include_directories(floserver_third_party SYSTEM INTERFACE
 
 if(FLOSERVER_CLANG_TIDY)
     find_program(CLANG_TIDY_EXE NAMES clang-tidy-18 clang-tidy REQUIRED)
+    set(FLOSERVER_CLANG_TIDY_COMMAND "${CLANG_TIDY_EXE}")
+    # CI keeps the files that passed between runs (tools/ci/clang_tidy_cache.py).
+    if(FLOSERVER_CLANG_TIDY_CACHE)
+        find_package(Python3 REQUIRED COMPONENTS Interpreter)
+        set(FLOSERVER_CLANG_TIDY_COMMAND
+            "${Python3_EXECUTABLE};${PROJECT_SOURCE_DIR}/tools/ci/clang_tidy_cache.py;${CLANG_TIDY_EXE}")
+    endif()
 endif()
 
 function(floserver_code_rules target)
     if(MSVC)
         target_compile_options(${target} PRIVATE
-            /W4 /WX /permissive- /utf-8 /Zc:__cplusplus /EHsc)
+            /W4 /WX /permissive- /utf-8 /Zc:__cplusplus /EHsc /MP)
         target_compile_definitions(${target} PRIVATE
             UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
     else()
@@ -35,6 +42,6 @@ function(floserver_code_rules target)
 
     if(FLOSERVER_CLANG_TIDY)
         set_target_properties(${target} PROPERTIES
-            CXX_CLANG_TIDY "${CLANG_TIDY_EXE};--warnings-as-errors=*")
+            CXX_CLANG_TIDY "${FLOSERVER_CLANG_TIDY_COMMAND};--warnings-as-errors=*")
     endif()
 endfunction()

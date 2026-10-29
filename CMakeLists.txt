@@ -12,6 +12,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(FLOSERVER_SANITIZE "Build with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 option(FLOSERVER_CLANG_TIDY "Run clang-tidy while compiling" OFF)
+option(FLOSERVER_CLANG_TIDY_CACHE "Skip clang-tidy on files that passed before (CI)" OFF)
 option(FLOSERVER_BUILD_TESTS "Build the unit tests" ON)
 option(FLOSERVER_BUILD_TOOLS "Build the release tools (manifest signing)" ON)
 
