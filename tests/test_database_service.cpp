@@ -1,0 +1,197 @@
+// The database service with the real MariaDB (D11, D12): set up on first
+// use, root's password set, a project's own database and login, the
+// service relaying the public port, sleep when idle, wake on a connection,
+// and nothing left running after stop().
+//
+// Needs MariaDB on this machine (Linux CI installs mariadb-server). The
+// system's files are laid out as a FloServer runtime with symlinks.
+
+#ifndef _WIN32
+
+#include "floserver/core/database_service.h"
+#include "floserver/core/paths.h"
+#include "floserver/core/process.h"
+#include "floserver/core/project_registry.h"
+#include "floserver/core/runtime_store.h"
+#include "test_util.h"
+
+#include <doctest/doctest.h>
+
+#include <csignal>
+#include <cstdio>
+#include <unistd.h>
+
+#include <thread>
+
+using namespace floserver::core;
+namespace fs = std::filesystem;
+using namespace std::chrono_literals;
+
+namespace {
+
+void fake_runtime(const fs::path& data, const std::string& name, const std::string& version, const std::string& variant) {
+    const fs::path dir = runtimes_dir(data) / name / version;
+    fs::create_directories(dir);
+    test_util::write_file(dir / ".floserver-runtime.json",
+                          nlohmann::json{{"schema", 1}, {"name", name}, {"version", version},
+                                         {"platform", std::string(current_platform())}, {"variant", variant},
+                                         {"license", "x"}, {"sha256", std::string(64, 'a')}}
+                              .dump());
+}
+
+// The mariadb client's output for `sql`, or "ERROR..." when it failed.
+std::string query(Port port, const std::string& user, const std::string& password, const std::string& sql) {
+    const std::string cmd = "MYSQL_PWD='" + password + "' /usr/bin/mariadb --no-defaults --protocol=TCP --host=127.0.0.1 --port=" +
+                            std::to_string(port) + " --user=" + user + " --batch --skip-column-names -e \"" + sql + "\" 2>&1";
+    FILE* p = popen(cmd.c_str(), "r");  // NOLINT(cert-env33-c): a test, fixed text
+    if (p == nullptr) {
+        return "ERROR popen";
+    }
+    std::string out;
+    char buf[512];  // NOLINT(modernize-avoid-c-arrays)
+    while (fgets(buf, sizeof buf, p) != nullptr) {
+        out += buf;
+    }
+    const int rc = pclose(p);
+    while (!out.empty() && out.back() == '\n') {
+        out.pop_back();
+    }
+    return rc == 0 ? out : "ERROR " + out;
+}
+
+nlohmann::json server_status(const DatabaseService& db) {
+    const auto s = db.status();
+    return s["servers"].empty() ? nlohmann::json() : s["servers"][0];
+}
+
+template <class F>
+bool eventually(F&& f, std::chrono::milliseconds limit) {
+    const auto end = std::chrono::steady_clock::now() + limit;
+    while (std::chrono::steady_clock::now() < end) {
+        if (f()) {
+            return true;
+        }
+        std::this_thread::sleep_for(100ms);
+    }
+    return f();
+}
+
+}  // namespace
+
+TEST_CASE("a project's database runs on the real MariaDB, sleeps when idle and wakes on a connection") {
+    std::error_code ec;
+    if (!fs::is_regular_file("/usr/sbin/mariadbd", ec) || !fs::is_regular_file("/usr/bin/mariadb-install-db", ec)) {
+        MESSAGE("MariaDB isn't installed here; skipped");
+        return;
+    }
+    const test_util::TempDir tmp;
+    // A long path: MariaDB's socket must still fit (107 bytes on Linux).
+    const fs::path data = tmp.path() / std::string(90, 'd') / "data";
+    fake_runtime(data, "php", "8.3.6", "nts");
+    fake_runtime(data, "mariadb", "10.11.14", "");
+    const fs::path m = runtimes_dir(data) / "mariadb" / "10.11.14";
+    fs::create_directories(m / "bin");
+    fs::create_directories(m / "sbin");
+    for (const char* t : {"mariadb", "mariadb-admin", "mariadb-install-db", "my_print_defaults", "resolveip"}) {
+        fs::create_symlink(fs::path("/usr/bin") / t, m / "bin" / t, ec);
+    }
+    fs::create_symlink("/usr/sbin/mariadbd", m / "sbin" / "mariadbd");
+    fs::create_directory_symlink("/usr/share", m / "share");
+
+    const fs::path shop = tmp.path() / "my-shop";
+    test_util::write_file(shop / "index.php", "<?php echo 1;");
+    test_util::write_file(shop / "floserver.json", R"({"php": "8.3", "database": "mariadb-10.11"})");
+    const fs::path plain = tmp.path() / "plain";
+    test_util::write_file(plain / "index.php", "<?php echo 1;");
+    AppConfig app;
+    std::string error;
+    REQUIRE(add_project(app, shop, "", error));
+    REQUIRE(add_project(app, plain, "", error));
+    app.projects[0].on = true;
+    app.projects[1].on = true;
+    REQUIRE(save_app_config(app_config_file(data), app, error));
+
+    const SecretStore secrets(data);
+    DatabaseServiceConfig cfg;
+    cfg.data_dir = data;
+    cfg.idle_after = 3s;
+    cfg.reload_every = 1s;
+    // Never a port a MariaDB of this machine might use.
+    cfg.probe = [](Port p) { return p != 3306 && can_listen_on_loopback(p); };
+    DatabaseService db(cfg, secrets);
+    db.start();
+
+    auto s = server_status(db);
+    REQUIRE(s.is_object());
+    CHECK(s["series"] == "10.11");
+    CHECK(s["state"] == "sleeping");
+    CHECK(s["projects"] == nlohmann::json{"my-shop"});
+    const Port port = s["port"].get<Port>();
+    CHECK(port != 3306);
+
+    SUBCASE("logins") {
+        ServiceRefusal refusal;
+        CHECK_FALSE(db.project_login("plain", refusal));
+        CHECK(refusal.code == "no_database");
+        CHECK_FALSE(db.project_login("nobody", refusal));
+        CHECK(refusal.code == "unknown_project");
+
+        const auto login = db.project_login("my-shop", refusal);
+        REQUIRE_MESSAGE(login, refusal.message);
+        CHECK(login->port == port);
+        CHECK(login->database == "my_shop");
+        CHECK(login->user == "my_shop");
+        CHECK(login->password.size() == 24);
+        s = server_status(db);
+        CHECK(s["state"] == "running");
+        const auto pid = s["pid"].get<std::uint32_t>();
+
+        // Through the service's port, as the project's own user.
+        CHECK(query(port, "my_shop", login->password, "SELECT DATABASE(); USE my_shop; CREATE TABLE t (x INT); SELECT COUNT(*) FROM t") ==
+              "NULL\n0");
+        CHECK(query(port, "my_shop", login->password, "USE my_shop; SHOW TABLES") == "t");
+        CHECK(query(port, "my_shop", "wrong", "SELECT 1").starts_with("ERROR"));
+        CHECK(query(port, "root", "", "SELECT 1").starts_with("ERROR"));
+        const auto root = secrets.read("mariadb-10.11/root");
+        REQUIRE(root);
+        CHECK(query(port, "root", *root, "SELECT 1") == "1");
+        // Only its own database.
+        CHECK(query(port, "my_shop", login->password, "CREATE DATABASE other").starts_with("ERROR"));
+        // The init file with root's password is gone.
+        CHECK_FALSE(fs::exists(data / "data" / "mariadb-10.11" / "init.sql"));
+
+        // Asking again gives the same login (the password is kept).
+        const auto again = db.project_login("my-shop", refusal);
+        REQUIRE(again);
+        CHECK(again->password == login->password);
+
+        // Idle: shut down cleanly; the port stays and a connection wakes it.
+        CHECK(eventually([&] { return server_status(db)["state"] == "sleeping"; }, 20s));
+        CHECK(eventually([&] { return ::kill(static_cast<pid_t>(pid), 0) != 0; }, 10s));
+        CHECK(query(port, "my_shop", login->password, "USE my_shop; SHOW TABLES") == "t");
+        s = server_status(db);
+        CHECK(s["state"] == "running");
+        const auto pid2 = s["pid"].get<std::uint32_t>();
+        CHECK(pid2 != pid);
+
+        // Turning the project off: the server goes.
+        app.projects[0].on = false;
+        REQUIRE(save_app_config(app_config_file(data), app, error));
+        CHECK(db.reload()["servers"].empty());
+        CHECK(eventually([&] { return ::kill(static_cast<pid_t>(pid2), 0) != 0; }, 10s));
+        CHECK_FALSE(db.project_login("my-shop", refusal));
+        CHECK(refusal.code == "database_off");
+    }
+
+    SUBCASE("stop ends mariadbd") {
+        CHECK(query(port, "root", "x", "SELECT 1").starts_with("ERROR"));  // wakes it; root's password is wrong
+        s = server_status(db);
+        REQUIRE_MESSAGE(s["state"] == "running", s.dump());
+        const auto pid = s["pid"].get<std::uint32_t>();
+        db.stop();
+        CHECK(::kill(static_cast<pid_t>(pid), 0) != 0);
+        CHECK(db.status()["servers"].empty());
+    }
+}
+
+#endif

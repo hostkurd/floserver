@@ -17,6 +17,7 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -42,6 +43,9 @@ public:
     // server answers "bad gateway" straight away instead of waiting for a
     // pool that can't run. Only call when a connection is waiting.
     void drop_waiting_connection() const;
+    // Accepts one waiting connection (only call when one is waiting). The
+    // socket belongs to the caller: close it with close_socket().
+    [[nodiscard]] std::optional<std::uintptr_t> accept_connection() const;
 
 private:
     LoopbackListener(std::uintptr_t socket, Port port) : socket_(socket), port_(port) {}
@@ -59,6 +63,15 @@ private:
 // idle, even if no request has finished lately.
 [[nodiscard]] bool has_open_connections(Port port);
 
+// A TCP connection to 127.0.0.1:port, or nothing. The caller closes it
+// with close_socket(). Only for FloServer's own servers.
+[[nodiscard]] std::optional<std::uintptr_t> connect_loopback(Port port);
+void close_socket(std::uintptr_t socket);
+
+// Copies bytes both ways between two connected sockets until either side
+// ends, then closes both. `activity` is called whenever data passes.
+void relay_sockets(std::uintptr_t a, std::uintptr_t b, const std::function<void()>& activity);
+
 // Which of `listeners` have a connection waiting, waiting at most `limit`.
 // Indexes into `listeners`; empty when none did in time.
 [[nodiscard]] std::vector<std::size_t> waiting_connections(const std::vector<const LoopbackListener*>& listeners,
@@ -72,8 +85,11 @@ struct ChildOptions {
     std::vector<std::pair<std::string, std::string>> env;
     // Taken out of it (names, case-insensitive on Windows).
     std::vector<std::string> remove_env;
-    // Standard input is this socket (php-cgi's FastCGI listener).
+    // Standard input is this socket (php-cgi's FastCGI listener)...
     const LoopbackListener* stdin_socket = nullptr;
+    // ...or this file (SQL for the mariadb client: secrets go on input,
+    // never in an argument).
+    std::filesystem::path stdin_file;
     // Standard output and error are appended here. Empty: none at all (on
     // Windows the handles are INVALID_HANDLE_VALUE, which php-cgi needs to
     // see before it runs as a FastCGI server).

@@ -1,0 +1,102 @@
+#pragma once
+
+// MariaDB pieces for the database service (D12), ported from FloCMS
+// Studio's dbserver (the team's own code, D4) without Qt: where a series'
+// files are, its config, the SQL FloServer runs, and the .env lines a
+// project gets.
+//
+// One data folder per series ("11.4"): MariaDB can't go back a version on
+// the same data, and patch releases of a series share it.
+//   <data>/data/mariadb-<series>/   my.ini (my.cnf), data/, mariadbd.err,
+//                                   mariadbd.pid; data/mysqld.sock (not Windows)
+//
+// Passwords are only ever given to MariaDB's programs in their environment
+// (MYSQL_PWD) or on their input, never as an argument. root's first
+// password is set by an init file on the first start, before the server
+// takes any connection.
+
+#include "floserver/core/ports.h"
+
+#include <filesystem>
+#include <map>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace floserver::core {
+
+struct MariaDbFiles {
+    std::string series;                  // "11.4"
+    std::filesystem::path base_dir;      // the install (holds bin/)
+    std::filesystem::path server;        // bin/mariadbd(.exe)
+    std::filesystem::path install_db;    // mariadb-install-db(.exe): bin/ or scripts/
+    std::filesystem::path admin;         // mariadb-admin(.exe)
+    std::filesystem::path client;        // mariadb(.exe)
+    std::filesystem::path folder;        // <data>/data/mariadb-<series>
+    std::filesystem::path data_dir;      // folder/data
+    std::filesystem::path config;        // folder/my.ini (Windows) or my.cnf
+    std::filesystem::path error_log;     // folder/mariadbd.err
+    std::filesystem::path pid_file;      // folder/mariadbd.pid
+    std::filesystem::path socket;        // data_dir/mysqld.sock; empty on Windows
+};
+
+// "11.4.13" -> "11.4"; empty when it isn't a version.
+[[nodiscard]] std::string mariadb_series(std::string_view version);
+
+// The files for an install of `version` and FloServer's data folder.
+// Programs are looked for in bin/, sbin/ (a system's mariadbd) and scripts/
+// (the Linux bintar's mariadb-install-db).
+[[nodiscard]] MariaDbFiles mariadb_files(const std::filesystem::path& install_dir, const std::string& version,
+                                         const std::filesystem::path& data);
+
+// The config: 127.0.0.1 only on `port` (the internal port the service
+// relays to), utf8mb4, a small buffer pool (a development server), paths
+// with forward slashes in quotes (MariaDB reads \ as an escape there).
+// `as_root`: the service runs as root (containers): user=root.
+[[nodiscard]] std::string mariadb_config(const MariaDbFiles& files, Port port, bool as_root);
+
+// The data folder has been set up (its mysql/ system database exists).
+[[nodiscard]] bool mariadb_initialized(const MariaDbFiles& files);
+
+// SQL text: an identifier in backticks, a string in single quotes.
+[[nodiscard]] std::string sql_identifier(std::string_view name);
+[[nodiscard]] std::string sql_string(std::string_view text);
+
+// root's password on every root account, and no anonymous logins.
+[[nodiscard]] std::string root_password_sql(const std::string& password);
+
+// A project's database and its own user (@localhost and @127.0.0.1), all
+// rights on that database only. Safe to run again: it sets the password
+// the secure store holds.
+[[nodiscard]] std::string project_database_sql(const std::string& database, const std::string& user,
+                                               const std::string& password);
+
+// The database and user name for a project: its name with '-' as '_'
+// ("my-shop" -> "my_shop"), so tools that don't quote names cope.
+[[nodiscard]] std::string project_database_name(std::string_view project);
+
+// Which .env keys a project uses: FloCMS's (DB_TYPE, DB_NAME) or
+// Laravel's (DB_CONNECTION, DB_DATABASE), from the project's .env or
+// .env.example; FloCMS's when neither says.
+enum class EnvStyle : std::uint8_t { FloCms, Laravel };
+[[nodiscard]] EnvStyle env_style(const std::filesystem::path& project_dir);
+
+struct DatabaseLogin {
+    Port port = 0;
+    std::string database;
+    std::string user;
+    std::string password;
+};
+
+// The .env lines for a project's database, in order.
+[[nodiscard]] std::vector<std::pair<std::string, std::string>> env_values(EnvStyle style, const DatabaseLogin& login);
+
+// A .env text with `values` set: a key's first line is replaced, later
+// lines with the same key are dropped (FloCMS's two readers disagree on
+// which wins), missing keys are added at the end. Every other line, and the
+// file's line endings, stay as they were.
+[[nodiscard]] std::string update_env_text(const std::string& text,
+                                          const std::vector<std::pair<std::string, std::string>>& values);
+
+}  // namespace floserver::core

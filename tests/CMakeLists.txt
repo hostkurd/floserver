@@ -6,6 +6,8 @@ add_executable(floserver_tests
     test_ipc.cpp
     test_main.cpp
     test_manifest.cpp
+    test_mariadb.cpp
+    test_database_service.cpp
     test_ports.cpp
     test_project_config.cpp
     test_project_registry.cpp

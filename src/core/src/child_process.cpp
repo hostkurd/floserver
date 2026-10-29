@@ -141,6 +141,76 @@ bool has_open_connections(Port port) {
     return false;
 }
 
+std::optional<std::uintptr_t> LoopbackListener::accept_connection() const {
+    const SOCKET c = WSAAccept(static_cast<SOCKET>(socket_), nullptr, nullptr, nullptr, 0);
+    if (c == INVALID_SOCKET) {
+        return std::nullopt;
+    }
+    // Never inherited by programs FloServer starts.
+    SetHandleInformation(reinterpret_cast<HANDLE>(c), HANDLE_FLAG_INHERIT, 0);  // NOLINT(performance-no-int-to-ptr)
+    return static_cast<std::uintptr_t>(c);
+}
+
+std::optional<std::uintptr_t> connect_loopback(Port port) {
+    if (!winsock_started()) {
+        return std::nullopt;
+    }
+    const SOCKET s = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, nullptr, 0, WSA_FLAG_NO_HANDLE_INHERIT);
+    if (s == INVALID_SOCKET) {
+        return std::nullopt;
+    }
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (connect(s, reinterpret_cast<const sockaddr*>(&addr), static_cast<int>(sizeof addr)) != 0) {
+        closesocket(s);
+        return std::nullopt;
+    }
+    return static_cast<std::uintptr_t>(s);
+}
+
+void close_socket(std::uintptr_t socket) { closesocket(static_cast<SOCKET>(socket)); }
+
+void relay_sockets(std::uintptr_t a, std::uintptr_t b, const std::function<void()>& activity) {
+    const SOCKET sa = static_cast<SOCKET>(a);
+    const SOCKET sb = static_cast<SOCKET>(b);
+    std::array<char, 65536> buf{};
+    bool open = true;
+    while (open) {
+        fd_set set;
+        FD_ZERO(&set);
+        FD_SET(sa, &set);
+        FD_SET(sb, &set);
+        if (select(0, &set, nullptr, nullptr, nullptr) <= 0) {
+            break;
+        }
+        for (const auto& [from, to] : {std::pair{sa, sb}, std::pair{sb, sa}}) {
+            if (!open || !FD_ISSET(from, &set)) {
+                continue;
+            }
+            const int n = recv(from, buf.data(), static_cast<int>(buf.size()), 0);
+            if (n <= 0) {
+                open = false;
+                break;
+            }
+            for (int sent = 0; sent < n;) {
+                const int w = send(to, buf.data() + sent, n - sent, 0);
+                if (w <= 0) {
+                    open = false;
+                    break;
+                }
+                sent += w;
+            }
+            activity();
+        }
+    }
+    shutdown(sa, SD_BOTH);
+    shutdown(sb, SD_BOTH);
+    closesocket(sa);
+    closesocket(sb);
+}
+
 LoopbackListener::~LoopbackListener() { closesocket(static_cast<SOCKET>(socket_)); }
 
 void LoopbackListener::drop_waiting_connection() const {
@@ -279,6 +349,77 @@ bool has_open_connections(Port port) {
     (void)port;  // macOS comes with its own stage (D3)
     return false;
 #endif
+}
+
+std::optional<std::uintptr_t> LoopbackListener::accept_connection() const {
+#ifdef __linux__
+    const int c = accept4(static_cast<int>(socket_), nullptr, nullptr, SOCK_CLOEXEC);
+#else
+    const int c = accept(static_cast<int>(socket_), nullptr, nullptr);
+    if (c >= 0) {
+        fcntl(c, F_SETFD, FD_CLOEXEC);
+    }
+#endif
+    if (c < 0) {
+        return std::nullopt;
+    }
+    return static_cast<std::uintptr_t>(c);
+}
+
+std::optional<std::uintptr_t> connect_loopback(Port port) {
+    const int s = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_TCP);
+    if (s < 0) {
+        return std::nullopt;
+    }
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (connect(s, reinterpret_cast<const sockaddr*>(&addr), sizeof addr) != 0) {
+        close(s);
+        return std::nullopt;
+    }
+    return static_cast<std::uintptr_t>(s);
+}
+
+void close_socket(std::uintptr_t socket) { close(static_cast<int>(socket)); }
+
+void relay_sockets(std::uintptr_t a, std::uintptr_t b, const std::function<void()>& activity) {
+    const int sa = static_cast<int>(a);
+    const int sb = static_cast<int>(b);
+    std::array<char, 65536> buf{};
+    bool open = true;
+    while (open) {
+        std::array<pollfd, 2> fds{{{sa, POLLIN, 0}, {sb, POLLIN, 0}}};
+        if (poll(fds.data(), fds.size(), -1) <= 0) {
+            break;
+        }
+        for (std::size_t i = 0; i < 2 && open; ++i) {
+            if ((fds[i].revents & (POLLIN | POLLHUP | POLLERR)) == 0) {
+                continue;
+            }
+            const int from = i == 0 ? sa : sb;
+            const int to = i == 0 ? sb : sa;
+            const ssize_t n = recv(from, buf.data(), buf.size(), 0);
+            if (n <= 0) {
+                open = false;
+                break;
+            }
+            for (ssize_t sent = 0; sent < n;) {
+                const ssize_t w = send(to, buf.data() + sent, static_cast<std::size_t>(n - sent), MSG_NOSIGNAL);
+                if (w <= 0) {
+                    open = false;
+                    break;
+                }
+                sent += w;
+            }
+            activity();
+        }
+    }
+    shutdown(sa, SHUT_RDWR);
+    shutdown(sb, SHUT_RDWR);
+    close(sa);
+    close(sb);
 }
 
 LoopbackListener::~LoopbackListener() { close(static_cast<int>(socket_)); }
@@ -426,6 +567,17 @@ std::unique_ptr<ChildProcess> ChildProcess::start(const ChildOptions& o, std::st
             }
         }
     } const close_log(log);
+    HANDLE input = INVALID_HANDLE_VALUE;
+    if (!o.stdin_file.empty()) {
+        SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
+        input = CreateFileW(o.stdin_file.c_str(), GENERIC_READ, FILE_SHARE_READ, &sa, OPEN_EXISTING,
+                            FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (input == INVALID_HANDLE_VALUE) {
+            error = "can't open " + path_to_utf8(o.stdin_file);
+            return nullptr;
+        }
+    }
+    const CloseLog close_input(input);
 
     // Only the handles named here are inherited, never the service's own
     // (its pipe, other pools' sockets).
@@ -439,6 +591,9 @@ std::unique_ptr<ChildProcess> ChildProcess::start(const ChildOptions& o, std::st
     if (o.stdin_socket != nullptr) {
         si.StartupInfo.hStdInput = reinterpret_cast<HANDLE>(o.stdin_socket->native());  // NOLINT(performance-no-int-to-ptr)
         inherit.push_back(si.StartupInfo.hStdInput);
+    } else if (input != INVALID_HANDLE_VALUE) {
+        si.StartupInfo.hStdInput = input;
+        inherit.push_back(input);
     }
     if (log != INVALID_HANDLE_VALUE) {
         inherit.push_back(log);
@@ -571,8 +726,11 @@ std::unique_ptr<ChildProcess> ChildProcess::start(const ChildOptions& o, std::st
     posix_spawnattr_t attr{};
     posix_spawn_file_actions_init(&actions);
     posix_spawnattr_init(&attr);
+    const std::string input_path = o.stdin_file.string();
     if (o.stdin_socket != nullptr) {
         posix_spawn_file_actions_adddup2(&actions, static_cast<int>(o.stdin_socket->native()), 0);
+    } else if (!o.stdin_file.empty()) {
+        posix_spawn_file_actions_addopen(&actions, 0, input_path.c_str(), O_RDONLY, 0);
     } else {
         posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0);
     }
