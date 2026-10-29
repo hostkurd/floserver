@@ -92,6 +92,7 @@ private:
         std::string address;
         std::optional<std::string> pool_key;
         bool app = false;                // its own server, in apps_ by the same name
+        std::string app_kind;            // "node" or "python"
         std::string state_override;      // "needs_download" / "problem" set here
         std::vector<std::string> missing;
         std::string problem;

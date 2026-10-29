@@ -235,8 +235,8 @@ ConfigResult parse_project_config(std::string_view json_text) {
         return result;
     }
 
-    static const std::set<std::string, std::less<>> known = {"php", "node", "database", "web",
-                                                             "root", "extensions", "command"};
+    static const std::set<std::string, std::less<>> known = {"php",  "node",       "python", "database",
+                                                             "web",  "root",       "extensions", "command"};
     for (const auto& item : doc.items()) {
         if (!known.contains(item.key())) {
             result.warnings.push_back({item.key(), "is not a FloServer setting and is ignored"});
@@ -246,6 +246,7 @@ ConfigResult parse_project_config(std::string_view json_text) {
     ProjectConfig config;
     read_version(doc, "php", config.php, result);
     read_version(doc, "node", config.node, result);
+    read_version(doc, "python", config.python, result);
     read_database(doc, config, result);
     read_web(doc, config, result);
     read_root(doc, config, result);
@@ -265,6 +266,9 @@ std::string write_project_config(const ProjectConfig& config) {
     }
     if (config.node) {
         doc["node"] = *config.node;
+    }
+    if (config.python) {
+        doc["python"] = *config.python;
     }
     if (config.database) {
         doc["database"] = config.database->family + "-" + config.database->version;

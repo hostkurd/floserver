@@ -2,6 +2,8 @@
 
 #include "floserver/core/paths.h"
 #include "floserver/core/process.h"
+#include "floserver/core/sha256.h"
+#include "floserver/core/encoding.h"
 
 #include <nlohmann/json.hpp>
 
@@ -80,21 +82,118 @@ std::vector<std::string> words(std::string_view text) {
     return out;
 }
 
+fs::path venv_dir(const AppSpec& app) { return app.dir / ".venv"; }
+
 // What the environment of the app's processes adds: the port, loopback
 // only, no browser opened by the dev server, plain text in the log, and the
-// project's Node first on PATH.
-std::vector<std::pair<std::string, std::string>> app_environment(const AppSpec& app, Port port) {
-    const auto node = node_program(app.runtime_dir);
-    std::string path = node ? path_to_utf8(node->parent_path()) : std::string();
+// project's runtime first on PATH (for Python its .venv, then the install).
+void set_environment(ChildOptions& o, const AppSpec& app, Port port) {
+    std::vector<std::string> first;
+    if (app.kind == AppKind::Python) {
+        first.push_back(path_to_utf8(venv_python(app.dir).parent_path()));
+        if (const auto py = python_program(app.runtime_dir)) {
+            first.push_back(path_to_utf8(py->parent_path()));
+        }
+    } else if (const auto node = node_program(app.runtime_dir)) {
+        first.push_back(path_to_utf8(node->parent_path()));
+    }
+    std::string path;
+    for (const std::string& p : first) {
+        path += (path.empty() ? "" : std::string(1, kPathSeparator)) + p;
+    }
     if (const auto current = get_env("PATH")) {
         path += path.empty() ? *current : kPathSeparator + *current;
     }
-    return {{"PORT", std::to_string(port)},
-            {"HOST", "127.0.0.1"},
-            {"BROWSER", "none"},
-            {"NO_COLOR", "1"},
-            {"FORCE_COLOR", "0"},
-            {"PATH", path}};
+    o.env = {{"PORT", std::to_string(port)},
+             {"HOST", "127.0.0.1"},
+             {"BROWSER", "none"},
+             {"NO_COLOR", "1"},
+             {"FORCE_COLOR", "0"},
+             {"PATH", path}};
+    if (app.kind == AppKind::Python) {
+        o.env.emplace_back("VIRTUAL_ENV", path_to_utf8(venv_dir(app)));
+        o.env.emplace_back("PYTHONUNBUFFERED", "1");  // the log shows output as it comes
+        o.remove_env = {"PYTHONHOME", "PYTHONPATH", "PIP_REQUIRE_VIRTUALENV"};
+    }
+}
+
+// "3.13.18" → "3.13".
+std::string major_minor(const std::string& version) {
+    const auto first = version.find('.');
+    const auto second = first == std::string::npos ? std::string::npos : version.find('.', first + 1);
+    return version.substr(0, second);
+}
+
+// The Python version a .venv was made with ("3.13.17"), from pyvenv.cfg.
+std::optional<std::string> venv_version(const fs::path& venv) {
+    const auto text = read_small_file(venv / "pyvenv.cfg", 64 * 1024);
+    if (!text) {
+        return std::nullopt;
+    }
+    std::size_t pos = 0;
+    while (pos < text->size()) {
+        auto end = text->find('\n', pos);
+        if (end == std::string::npos) {
+            end = text->size();
+        }
+        std::string line = text->substr(pos, end - pos);
+        pos = end + 1;
+        const auto eq = line.find('=');
+        if (eq == std::string::npos) {
+            continue;
+        }
+        std::string key = line.substr(0, eq);
+        std::string value = line.substr(eq + 1);
+        const auto trim = [](std::string& s) {
+            while (!s.empty() && (s.back() == ' ' || s.back() == '\r' || s.back() == '\t')) {
+                s.pop_back();
+            }
+            while (!s.empty() && (s.front() == ' ' || s.front() == '\t')) {
+                s.erase(0, 1);
+            }
+        };
+        trim(key);
+        trim(value);
+        if (key == "version" || key == "version_info") {
+            return value;
+        }
+    }
+    return std::nullopt;
+}
+
+// A file whose text contains `marker`.
+bool file_mentions(const fs::path& file, std::string_view marker) {
+    const auto text = is_file(file) ? read_small_file(file, std::size_t{1024} * 1024) : std::nullopt;
+    return text && text->find(marker) != std::string::npos;
+}
+
+std::optional<AppLaunch> python_launch(const AppSpec& app, Port port, std::string& error) {
+    AppLaunch launch;
+    set_environment(launch.options, app, port);
+    launch.options.program = venv_python(app.dir);
+    const std::string p = std::to_string(port);
+    if (is_file(app.dir / "manage.py")) {
+        launch.options.args = {"manage.py", "runserver", "127.0.0.1:" + p};
+        launch.shown = "python manage.py runserver 127.0.0.1:" + p;
+        return launch;
+    }
+    for (const auto& [file, module] : {std::pair{"main.py", "main:app"}, std::pair{"app/main.py", "app.main:app"}}) {
+        if (file_mentions(app.dir / path_from_utf8(file), "FastAPI")) {
+            launch.options.args = {"-m", "uvicorn", module, "--reload", "--host", "127.0.0.1", "--port", p};
+            launch.shown = std::string("uvicorn ") + module + " --reload --host 127.0.0.1 --port " + p;
+            return launch;
+        }
+    }
+    for (const auto& [file, name] : {std::pair{"app.py", "app"}, std::pair{"wsgi.py", "wsgi"}}) {
+        if (file_mentions(app.dir / file, "Flask")) {
+            launch.options.args = {"-m", "flask", "--app", name, "run", "--debug", "--host", "127.0.0.1", "--port", p};
+            launch.shown = std::string("flask --app ") + name + " run --debug --host 127.0.0.1 --port " + p;
+            return launch;
+        }
+    }
+    error = "FloServer can't tell how to start this Python project (no manage.py, no FastAPI app in main.py or "
+            "app/main.py, no Flask app in app.py or wsgi.py); add a \"command\" to floserver.json";
+    return std::nullopt;
 }
 
 // package.json lists packages and node_modules isn't there yet.
@@ -182,9 +281,113 @@ std::vector<std::string> port_arguments(const std::string& script, Port port) {
     return {};
 }
 
+std::optional<fs::path> python_program(const fs::path& python_dir) {
+#ifdef _WIN32
+    fs::path p = python_dir / "python.exe";
+#else
+    fs::path p = python_dir / "bin" / "python3";
+#endif
+    return is_file(p) ? std::optional<fs::path>(std::move(p)) : std::nullopt;
+}
+
+fs::path venv_python(const fs::path& project_dir) {
+#ifdef _WIN32
+    return project_dir / ".venv" / "Scripts" / "python.exe";
+#else
+    return project_dir / ".venv" / "bin" / "python";
+#endif
+}
+
+std::optional<std::vector<AppSetupStep>> app_setup(const AppSpec& app, Port port, std::string& error) {
+    std::vector<AppSetupStep> steps;
+    std::error_code ec;
+    if (app.kind == AppKind::Node) {
+        if (!needs_npm_install(app.dir)) {
+            return steps;
+        }
+        const auto node = node_program(app.runtime_dir);
+        const auto npm = npm_script(app.runtime_dir);
+        if (!node || !npm) {
+            error = "node or npm is missing from " + path_to_utf8(app.runtime_dir);
+            return std::nullopt;
+        }
+        AppSetupStep step;
+        set_environment(step.launch.options, app, port);
+        step.launch.options.program = *node;
+        step.launch.options.args = {path_to_utf8(*npm), "install"};
+        step.launch.shown = "npm install";
+        steps.push_back(std::move(step));
+        return steps;
+    }
+
+    // Python: the project's .venv, then its packages.
+    const auto python = python_program(app.runtime_dir);
+    if (!python) {
+        error = "python is missing from " + path_to_utf8(app.runtime_dir);
+        return std::nullopt;
+    }
+    const fs::path venv = venv_dir(app);
+    if (fs::exists(venv, ec)) {
+        const auto made_with = venv_version(venv);
+        if (!made_with || !is_file(venv_python(app.dir))) {
+            error = "the project's .venv folder isn't a Python virtual environment FloServer can use; rename or "
+                    "delete it, and the next request makes a new one";
+            return std::nullopt;
+        }
+        if (major_minor(*made_with) != major_minor(app.version)) {
+            error = "the project's .venv was made with Python " + major_minor(*made_with) + ", and the project now asks "
+                    "for Python " + major_minor(app.version) + ". FloServer doesn't replace it on its own: delete the "
+                    ".venv folder, and the next request makes a new one with Python " + major_minor(app.version) + ".";
+            return std::nullopt;
+        }
+    } else {
+        AppSetupStep step;
+        set_environment(step.launch.options, app, port);
+        step.launch.options.program = *python;
+        step.launch.options.args = {"-m", "venv", ".venv"};
+        step.launch.shown = "python -m venv .venv";
+        steps.push_back(std::move(step));
+    }
+    // Packages: installed again when the file that lists them changes.
+    for (const char* name : {"requirements.txt", "pyproject.toml"}) {
+        const fs::path file = app.dir / name;
+        if (!is_file(file)) {
+            continue;
+        }
+        const auto text = read_small_file(file, std::size_t{4} * 1024 * 1024);
+        if (!text) {
+            error = std::string(name) + " can't be read (or is larger than 4 MB)";
+            return std::nullopt;
+        }
+        const std::string stamp = std::string(name) + " " + to_hex(sha256(*text)) + "\n";
+        const fs::path marker = venv / ".floserver-installed";
+        if (read_small_file(marker, 1024) == stamp) {
+            break;
+        }
+        AppSetupStep step;
+        set_environment(step.launch.options, app, port);
+        step.launch.options.program = venv_python(app.dir);
+        const bool requirements = std::string_view(name) == "requirements.txt";
+        step.launch.options.args = {"-m", "pip", "install", "--disable-pip-version-check"};
+        if (requirements) {
+            step.launch.options.args.insert(step.launch.options.args.end(), {"-r", "requirements.txt"});
+        } else {
+            step.launch.options.args.insert(step.launch.options.args.end(), {"-e", "."});
+        }
+        step.launch.shown = requirements ? "pip install -r requirements.txt" : "pip install -e .";
+        step.done = [marker, stamp] {
+            std::string ignored;
+            (void)write_file_atomically(marker, stamp, ignored);
+        };
+        steps.push_back(std::move(step));
+        break;
+    }
+    return steps;
+}
+
 std::optional<AppLaunch> app_launch(const AppSpec& app, Port port, std::string& error) {
     AppLaunch launch;
-    launch.options.env = app_environment(app, port);
+    set_environment(launch.options, app, port);
     if (app.command) {
         const std::string command = replace_all(*app.command, "{port}", std::to_string(port));
         launch.shown = command;
@@ -199,6 +402,9 @@ std::optional<AppLaunch> app_launch(const AppSpec& app, Port port, std::string& 
         return launch;
     }
 
+    if (app.kind == AppKind::Python) {
+        return python_launch(app, port, error);
+    }
     const fs::path package = app.dir / "package.json";
     const auto text = is_file(package) ? read_small_file(package, kMaxPackageJson) : std::nullopt;
     if (!text) {
@@ -516,29 +722,28 @@ std::unique_ptr<ChildProcess> AppRunner::start_server(const AppSpec& app, Port p
         return std::nullopt;
     };
 
-    // The project's packages, the first time (a fresh clone has none).
-    if (needs_npm_install(app.dir)) {
-        const auto node = node_program(app.runtime_dir);
-        const auto npm = npm_script(app.runtime_dir);
-        if (!node || !npm) {
-            error = "node or npm is missing from " + path_to_utf8(app.runtime_dir);
+    // Setup first: the project's packages (a fresh clone has none), and
+    // for Python its .venv.
+    auto steps = app_setup(app, port, error);
+    if (!steps) {
+        append_line(log_, "--- FloServer: can't set up: " + error);
+        return nullptr;
+    }
+    for (AppSetupStep& step : *steps) {
+        append_line(log_, "--- FloServer: " + step.launch.shown);
+        step.launch.options.working_dir = app.dir;
+        step.launch.options.output_log = log_;
+        auto child = ChildProcess::start(step.launch.options, error);
+        if (!child) {
             return nullptr;
         }
-        append_line(log_, "--- FloServer: npm install");
-        ChildOptions o;
-        o.program = *node;
-        o.args = {path_to_utf8(*npm), "install"};
-        o.env = app_environment(app, port);
-        o.working_dir = app.dir;
-        o.output_log = log_;
-        auto install = ChildProcess::start(o, error);
-        if (!install) {
-            return nullptr;
-        }
-        const auto code = wait_for(*install, config_.install_limit);
+        const auto code = wait_for(*child, config_.install_limit);
         if (code != 0) {
-            error = code ? "npm install failed:\n" + tail(log_) : "npm install didn't finish";
+            error = step.launch.shown + (code ? " failed:\n" + tail(log_) : std::string(" didn't finish"));
             return nullptr;
+        }
+        if (step.done) {
+            step.done();
         }
     }
 

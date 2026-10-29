@@ -1,21 +1,31 @@
 #pragma once
 
-// A project that runs its own server (D11): a Node dev server, which nginx
-// forwards the project's address to.
+// A project that runs its own server, which nginx forwards the project's
+// address to: a Node dev server (D11) or a Python app's (D17).
 //
 // A dev server binds its own port and can't be handed a listening socket the
 // way php-cgi is (Q1), so it sleeps the way MariaDB does: the service holds
 // the port nginx forwards to and relays each connection to the app's server
-// on an internal port. The first connection starts it (after `npm install`
-// when package.json lists packages and node_modules is missing) and waits until it listens; when no
-// connection has been open for the idle time it is stopped, and the port
-// stays. A server that can't start answers with a page saying why.
+// on an internal port. The first connection runs the app's setup (below),
+// starts it and waits until it listens; when no connection has been open
+// for the idle time it is stopped, and the port stays. A server that can't
+// start answers with a page saying why.
 //
-// How it starts, in order: "command" from floserver.json, run by the
-// system's shell; else package.json's "dev" script, else its "start" script,
-// through the npm that comes with the project's Node. The port to listen on
-// is in PORT (HOST is 127.0.0.1); for dev servers known to ignore PORT
-// (Vite, Next.js, Nuxt, Astro, Angular) it's also passed as --port.
+// Setup: Node runs `npm install` when package.json lists packages and
+// node_modules is missing. Python makes .venv in the project with the
+// project's Python (`python -m venv .venv`, so editors find it) and installs
+// requirements.txt (or pyproject.toml with `pip install -e .`) into it, again
+// whenever that file changes. A .venv made with another Python version is
+// never replaced on its own: the page says to delete it.
+//
+// How it starts: "command" from floserver.json, run by the system's shell
+// (for Python with .venv first on PATH); else, for Node, package.json's
+// "dev" script, else its "start" script, through the npm that comes with the
+// project's Node; for Python, Django (manage.py runserver), FastAPI (uvicorn
+// with --reload, the app in main.py or app/main.py) or Flask (flask run
+// --debug, the app in app.py or wsgi.py). The port to listen on is in PORT
+// (HOST is 127.0.0.1); for dev servers known to ignore PORT (Vite, Next.js,
+// Nuxt, Astro, Angular) it's also passed as --port.
 
 #include "floserver/core/child_process.h"
 #include "floserver/core/ports.h"
@@ -27,6 +37,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -42,11 +53,24 @@ inline constexpr Port kFirstAppInternalPort = 9600;
 // The node program and npm's script in a Node install.
 [[nodiscard]] std::optional<std::filesystem::path> node_program(const std::filesystem::path& node_dir);
 [[nodiscard]] std::optional<std::filesystem::path> npm_script(const std::filesystem::path& node_dir);
+// The python program in a Python install, and in a project's .venv.
+[[nodiscard]] std::optional<std::filesystem::path> python_program(const std::filesystem::path& python_dir);
+[[nodiscard]] std::filesystem::path venv_python(const std::filesystem::path& project_dir);
 
 struct AppLaunch {
     ChildOptions options;  // program, args, env; working_dir and log are set by the runner
     std::string shown;     // the command as a person would type it, for the log and the status
 };
+
+// One thing to run before the app starts; `done` runs when it succeeded.
+struct AppSetupStep {
+    AppLaunch launch;
+    std::function<void()> done;
+};
+
+// What has to run before `app` starts, in order (often nothing). Nothing
+// (with `error`) when the project can't be set up as it stands.
+[[nodiscard]] std::optional<std::vector<AppSetupStep>> app_setup(const AppSpec& app, Port port, std::string& error);
 
 // How `app` starts, listening on `port`. Reads package.json when there's no
 // command. Nothing (with `error`, in plain English) when it can't.

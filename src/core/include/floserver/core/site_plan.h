@@ -61,10 +61,11 @@ struct PhpPool {
     std::vector<Port> ports;
 };
 
-enum class AppKind : std::uint8_t { Node };
+enum class AppKind : std::uint8_t { Node, Python };
 
-// A project that runs its own server, which nginx forwards to (D11): a Node
-// project (one that asks for Node and not PHP).
+// A project that runs its own server, which nginx forwards to: a Python
+// project (one that asks for Python and not PHP, D17) or a Node project (one
+// that asks for Node and neither PHP nor Python, D11).
 struct AppSpec {
     std::string name;                   // the project's
     AppKind kind = AppKind::Node;
