@@ -164,10 +164,6 @@ TEST_CASE("projects run with real nginx and php-cgi, sleep when idle and wake on
         CHECK(get(http, "shop.localhost", "/cart?x=1") == "200 shop /cart?x=1");
         CHECK(get(http, "api.localhost") == "200 api");
         CHECK(get(http, "other.localhost").starts_with("404 "));
-        for (int i = 0; i < 6; ++i) {
-            MESSAGE("DBG " << web.status()["pools"].dump());
-            std::this_thread::sleep_for(300ms);
-        }
         REQUIRE(eventually([&] { return web.status()["pools"][0]["state"] == "running"; }));
         const auto php_pid = web.status()["pools"][0]["pid"].get<std::uint32_t>();
 
@@ -221,17 +217,20 @@ TEST_CASE("projects run with real nginx and php-cgi, sleep when idle and wake on
         CHECK(get(http, "api.localhost").empty());
     }
 
-    SUBCASE("a config nginx refuses is never loaded") {
-        // A root that nginx can't read as a folder still passes our checks,
-        // so break the config through mime.types instead.
+    SUBCASE("a config nginx refuses is never loaded, and the pools it still uses stay") {
+        CHECK(get(http, "shop.localhost") == "200 shop /");
+        // A new pool for shop (another extension list) and a config nginx
+        // refuses: nginx keeps the old config, which still sends shop to the
+        // old pool, so that pool must stay open.
+        test_util::write_file(shop / "floserver.json", R"({"php": "8.3", "root": "public", "extensions": ["intl"]})");
         test_util::write_file(nginx_dir / "conf" / "mime.types", "types { broken");
-        AppConfig changed = *load_app_config(app_config_file(data), error);
-        find_project(changed, "shop")->on = false;  // forces a new config
-        REQUIRE(save_app_config(app_config_file(data), changed, error));
         st = web.reload();
         CHECK(st["error"].get<std::string>().find("nginx refused") != std::string::npos);
         CHECK(st["nginx"]["running"] == true);
-        CHECK(get(http, "shop.localhost") == "200 shop /");  // the old config still runs
+        CHECK(get(http, "shop.localhost") == "200 shop /");
+        std::this_thread::sleep_for(1500ms);  // the supervisor's reloads don't ask nginx again or drop it
+        CHECK(get(http, "shop.localhost") == "200 shop /");
+        CHECK(web.status()["error"].get<std::string>().find("nginx refused") != std::string::npos);
     }
 
     std::vector<std::uint32_t> pids = {nginx_pid};
@@ -245,6 +244,12 @@ TEST_CASE("projects run with real nginx and php-cgi, sleep when idle and wake on
     for (const auto pid : pids) {
         CHECK_FALSE(alive(pid));
     }
+    CHECK(get(http, "api.localhost").empty());
+    // A reload arriving after stop (a client mid-request while quitting)
+    // starts nothing again.
+    st = web.reload();
+    CHECK(st["nginx"]["running"] == false);
+    CHECK(st["pools"].empty());
     CHECK(get(http, "api.localhost").empty());
 }
 

@@ -52,13 +52,6 @@ std::string tail_of(const fs::path& file) {
     return text;
 }
 
-// Paths for nginx's command line, with '/' (nginx for Windows reads both, but
-// its prefix must end in '/').
-std::string nginx_arg(const fs::path& p) {
-    const std::u8string u = p.generic_u8string();
-    return {u.begin(), u.end()};
-}
-
 bool running_as_root() {
 #ifdef _WIN32
     return false;
@@ -122,6 +115,7 @@ void WebService::stop() {
         thread_.join();
     }
     const std::lock_guard lock(mutex_);
+    stopped_ = true;  // a reload still on its way (a client mid-request) starts nothing
     stop_locked();
 }
 
@@ -142,18 +136,22 @@ json WebService::status() const {
     return status_locked();
 }
 
-std::optional<std::string> WebService::test_nginx_config(const fs::path& conf, std::string& error) const {
+// Runs nginx once in the web folder (-t, -s reload, -s stop) and waits for
+// it. Paths on its command line are relative to that folder: nginx for
+// Windows reads its arguments in the ANSI code page, which can't hold every
+// user folder name; the folder itself is passed as a wide string.
+std::optional<int> WebService::run_nginx(std::vector<std::string> args, const fs::path& log, std::string& error) const {
     const auto program = nginx_program(nginx_dir_);
     if (!program) {
         error = "nginx is missing from " + path_to_utf8(nginx_dir_);
         return std::nullopt;
     }
-    const fs::path log = work_ / "logs" / "nginx-test.log";
     std::error_code ec;
     fs::remove(log, ec);
     ChildOptions o;
     o.program = *program;
-    o.args = {"-t", "-q", "-p", nginx_arg(work_) + "/", "-c", nginx_arg(conf)};
+    o.args = {"-p", "./"};
+    o.args.insert(o.args.end(), args.begin(), args.end());
     o.working_dir = work_;
     o.output_log = log;
     auto child = ChildProcess::start(o, error);
@@ -162,7 +160,15 @@ std::optional<std::string> WebService::test_nginx_config(const fs::path& conf, s
     }
     const auto code = child->wait(15s);
     if (!code) {
-        error = "nginx -t didn't finish";
+        error = "nginx " + args.back() + " didn't finish";
+    }
+    return code;
+}
+
+std::optional<std::string> WebService::test_nginx_config(const std::string& conf_name, std::string& error) const {
+    const fs::path log = work_ / "logs" / "nginx-test.log";
+    const auto code = run_nginx({"-t", "-q", "-c", conf_name}, log, error);
+    if (!code) {
         return std::nullopt;
     }
     if (*code != 0) {
@@ -184,17 +190,10 @@ bool WebService::start_nginx_locked(std::string& error) {
     std::error_code ec;
     fs::create_directories(work_ / "logs", ec);
     fs::create_directories(work_ / "temp", ec);
-    const fs::path conf = work_ / "nginx.conf";
-    const std::string prefix = nginx_arg(work_) + "/";
-    // An nginx left from a service that didn't stop cleanly holds the ports.
-    if (fs::exists(work_ / "nginx.pid", ec)) {
-        std::string ignored;
-        (void)run_and_wait(*program, {"-p", prefix, "-c", nginx_arg(conf), "-s", "stop"}, 10s, ignored);
-        fs::remove(work_ / "nginx.pid", ec);
-    }
+    stop_leftover_nginx();
     ChildOptions o;
     o.program = *program;
-    o.args = {"-p", prefix, "-c", nginx_arg(conf)};
+    o.args = {"-p", "./", "-c", "nginx.conf"};
 #ifndef _WIN32
     o.args.insert(o.args.end(), {"-g", "daemon off;"});  // stays our child, in our process group
 #endif
@@ -219,6 +218,31 @@ bool WebService::start_nginx_locked(std::string& error) {
     return true;
 }
 
+// An nginx left from a service that didn't stop cleanly (a crash) holds the
+// ports. Its pid file names it; it's stopped only when that pid really is our
+// nginx, and the start waits until it's gone.
+void WebService::stop_leftover_nginx() const {
+    const fs::path pid_file = work_ / "nginx.pid";
+    std::error_code ec;
+    const auto text = read_small_file(pid_file, 64);
+    if (!text) {
+        return;
+    }
+    std::uint32_t pid = 0;
+    try {
+        pid = static_cast<std::uint32_t>(std::stoul(*text));
+    } catch (const std::exception&) {
+        fs::remove(pid_file, ec);
+        return;
+    }
+    if (pid != 0 && process_is_program(pid, nginx_program(nginx_dir_).value_or(fs::path()))) {
+        std::string ignored;
+        (void)run_nginx({"-c", "nginx.conf", "-s", "stop"}, work_ / "logs" / "nginx-signal.log", ignored);
+        (void)wait_for_process_exit(pid, 10s);
+    }
+    fs::remove(pid_file, ec);
+}
+
 void WebService::stop_nginx_locked() {
     nginx_.reset();  // ends the master and its worker
     std::error_code ec;
@@ -228,6 +252,9 @@ void WebService::stop_nginx_locked() {
 }
 
 void WebService::reload_locked() {
+    if (stopped_) {
+        return;
+    }
     error_.clear();
     std::string error;
     const auto app = load_app_config(app_config_file(config_.data_dir), error);
@@ -252,6 +279,9 @@ void WebService::reload_locked() {
         return;
     }
 
+    // The new pools and sites are built aside. They replace the current ones
+    // only once nginx runs a config that uses them: until then the running
+    // config may still send requests to pools the new plan drops.
     std::map<std::string, Site> sites;
     std::map<std::string, std::string> pool_errors;
     std::map<std::string, std::shared_ptr<PhpPoolRunner>> pools;
@@ -272,7 +302,19 @@ void WebService::reload_locked() {
         }
         pools[pool.key] = std::move(runner);
     }
-    pools_ = std::move(pools);  // pools no longer wanted end here (or when the supervisor lets go)
+    // On any failure below: keep every pool (old and new) and, while nginx
+    // runs, the sites it serves; new sites get no address yet.
+    const auto keep_both = [this, &pools, &sites] {
+        for (auto& [key, runner] : pools) {
+            pools_.try_emplace(key, runner);
+        }
+        if (!nginx_) {
+            for (auto& [name, site] : sites) {
+                site.address.clear();
+            }
+            sites_ = std::move(sites);
+        }
+    };
 
     std::vector<NginxSite> serve;
     const auto ca = certs_.load_ca(error);
@@ -295,7 +337,7 @@ void WebService::reload_locked() {
             sites[p.name] = site;
             continue;
         }
-        const auto& runner = pools_.at(pool.key);
+        const auto& runner = pools.at(pool.key);
         NginxSite ns{p.name, p.doc_root, pool.port, runner->access_log(), std::nullopt};
         if (tls_) {
             std::string cert_error;
@@ -310,28 +352,30 @@ void WebService::reload_locked() {
         serve.push_back(std::move(ns));
         sites[p.name] = site;
     }
-    sites_ = std::move(sites);
 
     if (serve.empty()) {
         stop_nginx_locked();  // nothing to serve: free the ports and the memory
+        pools_ = std::move(pools);
+        sites_ = std::move(sites);
         return;
     }
     if (nginx_ && !nginx_->running()) {
         nginx_.reset();
         config_text_.clear();
-        ports_.reset();
     }
     if (!nginx_ && Clock::now() < nginx_retry_after_) {
-        return;  // it failed a moment ago; the supervisor tries again
+        keep_both();  // it failed a moment ago; the supervisor tries again
+        return;
     }
     if (!ports_) {
         ports_ = config_.fixed_ports ? config_.fixed_ports : pick_web_ports(config_.probe);
         if (!ports_) {
             error_ = "ports 80/443 and 8080-8099/8443-8462 are all taken by other programs";
+            keep_both();
             return;
         }
     }
-    for (auto& [name, site] : sites_) {
+    for (auto& [name, site] : sites) {
         if (!site.address.empty()) {
             site.address = site_address(name, *ports_, site.address == "https");
         }
@@ -350,48 +394,64 @@ void WebService::reload_locked() {
     auto text = make_nginx_config(spec, error);
     if (!text) {
         error_ = error;
+        keep_both();
         return;
     }
     if (*text == config_text_ && nginx_) {
-        return;  // nothing changed
+        pools_ = std::move(pools);  // nothing changed for nginx
+        sites_ = std::move(sites);
+        return;
+    }
+    if (*text == rejected_text_) {
+        error_ = rejected_error_;  // already refused; don't ask nginx again every few seconds
+        keep_both();
+        return;
     }
 
     std::error_code ec;
     fs::create_directories(work_ / "logs", ec);
     fs::create_directories(work_ / "temp", ec);
-    const fs::path next = work_ / "nginx.next.conf";
-    if (!write_file_atomically(next, *text, error)) {
+    if (!write_file_atomically(work_ / "nginx.next.conf", *text, error)) {
         error_ = error;
+        keep_both();
         return;
     }
-    if (!test_nginx_config(next, error)) {
-        error_ = "nginx refused the new settings, so the old ones stay: " + error;
+    if (!test_nginx_config("nginx.next.conf", error)) {
+        rejected_text_ = *text;
+        rejected_error_ = "nginx refused the new settings, so the old ones stay: " + error;
+        error_ = rejected_error_;
+        keep_both();
         return;
     }
-    fs::rename(next, work_ / "nginx.conf", ec);
+    rejected_text_.clear();
+    fs::rename(work_ / "nginx.next.conf", work_ / "nginx.conf", ec);
     if (ec) {
         error_ = "can't replace nginx.conf: " + error_text(ec);
+        keep_both();
         return;
     }
     if (nginx_) {
-        const auto program = nginx_program(nginx_dir_);
-        const auto code = run_and_wait(*program,
-                                       {"-p", nginx_arg(work_) + "/", "-c", nginx_arg(work_ / "nginx.conf"), "-s", "reload"},
-                                       15s, error);
+        const auto code = run_nginx({"-c", "nginx.conf", "-s", "reload"}, work_ / "logs" / "nginx-signal.log", error);
         if (!code || *code != 0) {
-            nginx_error_ = "nginx didn't reload: " + (error.empty() ? "exit " + std::to_string(code.value_or(-1)) : error);
-        } else {
-            nginx_error_.clear();
+            nginx_error_ = "nginx didn't reload: " +
+                           (error.empty() ? tail_of(work_ / "logs" / "nginx-signal.log") : error);
+            keep_both();
+            return;
         }
+        nginx_error_.clear();
     } else if (!start_nginx_locked(error)) {
         nginx_error_ = error;
         nginx_retry_after_ = Clock::now() + kNginxRetry;
-        ports_.reset();
+        ports_.reset();  // perhaps taken since: choose again next time
+        keep_both();
         return;
     } else {
         nginx_error_.clear();
+        nginx_started_ = Clock::now();
     }
     config_text_ = std::move(*text);
+    pools_ = std::move(pools);  // pools the new config no longer uses end here
+    sites_ = std::move(sites);
 }
 
 void WebService::supervise() {
@@ -422,8 +482,9 @@ void WebService::supervise() {
         const std::lock_guard lock(mutex_);
         for (const std::size_t i : ready) {
             const auto& r = watched[i];
-            if (r->state() == PoolState::Running) {
-                continue;
+            const auto current = pools_.find(r->pool().key);
+            if (current == pools_.end() || current->second != r || r->state() == PoolState::Running) {
+                continue;  // dropped by a reload meanwhile, or already woken
             }
             if (r->wants_wake_on_connection(now)) {
                 r->wake(now);
@@ -440,8 +501,11 @@ void WebService::supervise() {
                 nginx_error_ = "nginx stopped: " + tail_of(work_ / "logs" / "nginx-error.log");
                 nginx_.reset();
                 config_text_.clear();
-                ports_.reset();
-                last_reload = now - config_.reload_every;  // start it again now
+                // Started again with the same ports, after a wait that grows
+                // while it keeps ending (2 s, 4 s ... 60 s); one that ran for
+                // a minute starts the count again.
+                nginx_failures_ = now - nginx_started_ > 60s ? 1 : std::min(nginx_failures_ + 1, 5);
+                nginx_retry_after_ = now + std::chrono::seconds(std::min(60, 1 << nginx_failures_));
             }
         }
         if (now - last_reload >= config_.reload_every) {

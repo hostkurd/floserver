@@ -36,6 +36,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace floserver::core {
 
@@ -93,7 +94,10 @@ private:
     void supervise();
     [[nodiscard]] bool start_nginx_locked(std::string& error);
     void stop_nginx_locked();
-    [[nodiscard]] std::optional<std::string> test_nginx_config(const std::filesystem::path& conf, std::string& error) const;
+    [[nodiscard]] std::optional<int> run_nginx(std::vector<std::string> args, const std::filesystem::path& log,
+                                               std::string& error) const;
+    [[nodiscard]] std::optional<std::string> test_nginx_config(const std::string& conf_name, std::string& error) const;
+    void stop_leftover_nginx() const;
     [[nodiscard]] nlohmann::json status_locked() const;
 
     WebServiceConfig config_;
@@ -114,6 +118,11 @@ private:
     std::string nginx_error_;
     std::string error_;
     std::chrono::steady_clock::time_point nginx_retry_after_;
+    std::chrono::steady_clock::time_point nginx_started_;
+    int nginx_failures_ = 0;
+    std::string rejected_text_;   // the last config nginx -t refused
+    std::string rejected_error_;
+    bool stopped_ = false;
 
     std::atomic<bool> stopping_{false};
     std::thread thread_;

@@ -127,15 +127,29 @@ jobs:
           $phpLeft = @(Get-Process php-cgi -ErrorAction SilentlyContinue).Count
           if ($asleep -notmatch "on, asleep" -or $phpLeft -ne 0) { Fail "pool didn't sleep ($phpLeft php-cgi left)" $asleep }
           # 20 requests at once while it wakes: every one is served.
-          $urls = 1..20 | ForEach-Object { "$url/burst/$_" }
-          $codes = & curl.exe -s -o NUL --max-time 30 --parallel --parallel-immediate --parallel-max 20 -w "%{http_code}`n" --resolve $resolve $urls
+          # -o applies to one URL each, so every URL gets its own.
+          $targets = 1..20 | ForEach-Object { "-o"; "NUL"; "$url/burst/$_" }
+          $codes = & curl.exe -s --max-time 30 --parallel --parallel-immediate --parallel-max 20 -w "%{http_code}`n" --resolve $resolve $targets
           $good = @($codes | Where-Object { $_ -eq "200" }).Count
           if ($good -ne 20) { Fail "burst while waking: $good of 20 OK" ($codes -join " ") }
+          # A second project with its own pool, added while the first runs:
+          # nginx reloads (-s reload) and both are served.
+          $blog = "$env:RUNNER_TEMP\\ci-blog"
+          New-Item -ItemType Directory -Force $blog | Out-Null
+          Set-Content "$blog\\index.php" '<?php echo "blog ", extension_loaded("intl") ? "intl" : "no-intl";'
+          Set-Content "$blog\\floserver.json" '{ "php": "8.5" }'
+          Run "flo add blog" { & "$bin/flo.exe" add $blog } | Out-Null
+          Run "flo start blog" { & "$bin/flo.exe" start ci-blog } | Out-Null
+          $blogBody = (& curl.exe -s --max-time 20 --resolve "ci-blog.localhost:18080:127.0.0.1" "http://ci-blog.localhost:18080/" | Out-String).Trim()
+          $shopBody = (& curl.exe -s --max-time 20 --resolve $resolve "$url/again" | Out-String).Trim()
+          if ($blogBody -ne "blog intl" -or $shopBody -notlike "shop 8.5.* /again") {
+            Fail "after a reload (blog '$blogBody', shop '$shopBody')" (& "$bin/flo.exe" projects 2>&1 | Out-String)
+          }
           Run "flo stop" { & "$bin/flo.exe" stop } | Out-Null
           Start-Sleep -Seconds 1
           $left = @(Get-Process nginx, php-cgi -ErrorAction SilentlyContinue).Count
           if ($left -ne 0) { Fail "processes left after flo stop" "$left" }
-          "::notice title=live install::nginx, Composer and PHP installed from the CDN; a project served, slept and woke for 20 requests at once"
+          "::notice title=live install::nginx, Composer and PHP installed from the CDN; a project served, slept and woke for 20 requests at once; a second pool added with a reload"
           exit 0
       # The build, for trying on a real PC: download it from the run's page.
       - name: Upload the Windows build

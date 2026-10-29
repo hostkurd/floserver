@@ -75,6 +75,12 @@ std::unique_ptr<LoopbackListener> LoopbackListener::open(Port port, std::string&
 LoopbackListener::~LoopbackListener() { closesocket(static_cast<SOCKET>(socket_)); }
 
 void LoopbackListener::drop_waiting_connection() const {
+    // Still waiting? A client that gave up meanwhile would leave accept()
+    // blocking the caller.
+    const std::vector<const LoopbackListener*> self = {this};
+    if (waiting_connections(self, std::chrono::milliseconds(0)).empty()) {
+        return;
+    }
     const SOCKET c = accept(static_cast<SOCKET>(socket_), nullptr, nullptr);
     if (c != INVALID_SOCKET) {
         closesocket(c);
@@ -141,6 +147,10 @@ std::unique_ptr<LoopbackListener> LoopbackListener::open(Port port, std::string&
 LoopbackListener::~LoopbackListener() { close(static_cast<int>(socket_)); }
 
 void LoopbackListener::drop_waiting_connection() const {
+    const std::vector<const LoopbackListener*> self = {this};
+    if (waiting_connections(self, std::chrono::milliseconds(0)).empty()) {
+        return;
+    }
 #ifdef __linux__
     const int c = accept4(static_cast<int>(socket_), nullptr, nullptr, SOCK_CLOEXEC | SOCK_NONBLOCK);
 #else
@@ -207,8 +217,10 @@ bool same_name(const std::wstring& entry, const std::wstring& name) {
                                 static_cast<int>(name.size()), TRUE) == CSTR_EQUAL;
 }
 
-// This process's environment with `extra` set, as a CreateProcessW block.
-std::wstring environment_block(const std::vector<std::pair<std::string, std::string>>& extra) {
+// This process's environment without `removed` and with `extra` set, as a
+// CreateProcessW block, sorted by name ignoring case as Windows documents.
+std::wstring environment_block(const std::vector<std::pair<std::string, std::string>>& extra,
+                               const std::vector<std::string>& removed) {
     std::vector<std::wstring> entries;
     if (wchar_t* env = GetEnvironmentStringsW(); env != nullptr) {
         for (const wchar_t* p = env; *p != L'\0'; p += wcslen(p) + 1) {
@@ -216,11 +228,22 @@ std::wstring environment_block(const std::vector<std::pair<std::string, std::str
         }
         FreeEnvironmentStringsW(env);
     }
+    for (const std::string& name : removed) {
+        const std::wstring wname = win::widen(name);
+        std::erase_if(entries, [&wname](const std::wstring& e) { return same_name(e, wname); });
+    }
     for (const auto& [name, value] : extra) {
         const std::wstring wname = win::widen(name);
         std::erase_if(entries, [&wname](const std::wstring& e) { return same_name(e, wname); });
         entries.push_back(wname + L"=" + win::widen(value));
     }
+    // Entries starting with '=' (the per-drive folders, "=C:=...") stay first.
+    std::stable_sort(entries.begin(), entries.end(), [](const std::wstring& a, const std::wstring& b) {
+        const std::size_t an = a.find(L'=', 1);
+        const std::size_t bn = b.find(L'=', 1);
+        return CompareStringOrdinal(a.c_str(), static_cast<int>(an), b.c_str(), static_cast<int>(bn), TRUE) ==
+               CSTR_LESS_THAN;
+    });
     std::wstring block;
     for (const std::wstring& e : entries) {
         block += e;
@@ -304,7 +327,7 @@ std::unique_ptr<ChildProcess> ChildProcess::start(const ChildOptions& o, std::st
     for (const std::string& a : o.args) {
         command += L" " + win::quote(win::widen(a));
     }
-    std::wstring env = environment_block(o.env);
+    std::wstring env = environment_block(o.env, o.remove_env);
     const std::wstring dir = o.working_dir.empty() ? o.program.parent_path().wstring() : o.working_dir.wstring();
     PROCESS_INFORMATION pi{};
     // Suspended until it's in the job, so nothing it starts escapes it.
@@ -369,14 +392,18 @@ struct ChildProcess::Native {
 
 namespace {
 
-std::vector<std::string> environment_with(const std::vector<std::pair<std::string, std::string>>& extra) {
+bool has_name(const std::string& entry, const std::string& name) {
+    return entry.size() > name.size() && entry.compare(0, name.size(), name) == 0 && entry[name.size()] == '=';
+}
+
+std::vector<std::string> environment_with(const std::vector<std::pair<std::string, std::string>>& extra,
+                                          const std::vector<std::string>& removed) {
     std::vector<std::string> out;
     for (char** e = environ; e != nullptr && *e != nullptr; ++e) {
         const std::string entry(*e);
-        const bool replaced = std::any_of(extra.begin(), extra.end(), [&entry](const auto& kv) {
-            return entry.size() > kv.first.size() && entry.compare(0, kv.first.size(), kv.first) == 0 &&
-                   entry[kv.first.size()] == '=';
-        });
+        const bool replaced =
+            std::any_of(extra.begin(), extra.end(), [&entry](const auto& kv) { return has_name(entry, kv.first); }) ||
+            std::any_of(removed.begin(), removed.end(), [&entry](const std::string& n) { return has_name(entry, n); });
         if (!replaced) {
             out.push_back(entry);
         }
@@ -435,7 +462,7 @@ std::unique_ptr<ChildProcess> ChildProcess::start(const ChildOptions& o, std::st
     std::vector<std::string> argv_s;
     argv_s.push_back(o.program.string());
     argv_s.insert(argv_s.end(), o.args.begin(), o.args.end());
-    std::vector<std::string> env_s = environment_with(o.env);
+    std::vector<std::string> env_s = environment_with(o.env, o.remove_env);
     std::vector<char*> argv = pointers(argv_s);
     std::vector<char*> envp = pointers(env_s);
     pid_t pid = 0;
@@ -499,6 +526,69 @@ void ChildProcess::kill() {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
     }
+}
+
+#endif
+
+#ifdef _WIN32
+
+bool process_is_program(std::uint32_t pid, const std::filesystem::path& program) {
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (h == nullptr) {
+        return false;
+    }
+    std::wstring name(32768, L'\0');
+    DWORD size = static_cast<DWORD>(name.size());
+    const BOOL ok = QueryFullProcessImageNameW(h, 0, name.data(), &size);
+    CloseHandle(h);
+    if (ok == FALSE) {
+        return false;
+    }
+    name.resize(size);
+    std::error_code ec;
+    return std::filesystem::equivalent(std::filesystem::path(name), program, ec);
+}
+
+bool wait_for_process_exit(std::uint32_t pid, std::chrono::milliseconds limit) {
+    HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, pid);
+    if (h == nullptr) {
+        return true;  // already gone
+    }
+    const bool gone = WaitForSingleObject(h, static_cast<DWORD>(limit.count())) == WAIT_OBJECT_0;
+    CloseHandle(h);
+    return gone;
+}
+
+#else
+
+bool process_is_program(std::uint32_t pid, const std::filesystem::path& program) {
+#ifdef __linux__
+    std::error_code ec;
+    const auto exe = std::filesystem::read_symlink("/proc/" + std::to_string(pid) + "/exe", ec);
+    if (ec) {
+        return false;
+    }
+    std::error_code ec2;
+    return std::filesystem::equivalent(exe, program, ec2) ||
+           std::filesystem::equivalent(exe, std::filesystem::canonical(program, ec2), ec2);
+#else
+    // macOS comes with its own stage (D3); until then never signal a pid we
+    // can't identify.
+    (void)pid;
+    (void)program;
+    return false;
+#endif
+}
+
+bool wait_for_process_exit(std::uint32_t pid, std::chrono::milliseconds limit) {
+    const auto deadline = std::chrono::steady_clock::now() + limit;
+    while (::kill(static_cast<pid_t>(pid), 0) == 0) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return true;
 }
 
 #endif

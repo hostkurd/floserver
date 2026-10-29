@@ -60,6 +60,8 @@ struct ChildOptions {
     std::filesystem::path working_dir;
     // Added to (or replacing) this process's environment.
     std::vector<std::pair<std::string, std::string>> env;
+    // Taken out of it (names, case-insensitive on Windows).
+    std::vector<std::string> remove_env;
     // Standard input is this socket (php-cgi's FastCGI listener).
     const LoopbackListener* stdin_socket = nullptr;
     // Standard output and error are appended here. Empty: none at all (on
@@ -67,6 +69,14 @@ struct ChildOptions {
     // see before it runs as a FastCGI server).
     std::filesystem::path output_log;
 };
+
+// True when process `pid` exists and runs `program` (compared by the file
+// system's own idea of the same file). Used before signalling a pid read
+// from a file, which may by now belong to someone else.
+[[nodiscard]] bool process_is_program(std::uint32_t pid, const std::filesystem::path& program);
+
+// Waits until process `pid` is gone; true when it is.
+bool wait_for_process_exit(std::uint32_t pid, std::chrono::milliseconds limit);
 
 class ChildProcess {
 public:

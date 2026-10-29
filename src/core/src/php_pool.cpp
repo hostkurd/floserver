@@ -172,8 +172,13 @@ void PhpPoolRunner::wake(Clock::time_point now) {
     }
     ChildOptions o;
     o.program = *program;
-    o.args = {"-c", path_to_utf8(ini_)};
-    o.working_dir = pool_.php_dir;
+    // Relative to the pool's folder: php-cgi reads its arguments in the ANSI
+    // code page on Windows, which can't hold every user folder name.
+    o.args = {"-c", "php.ini"};
+    o.working_dir = ini_.parent_path();
+    // The user's own PHP settings (a global XAMPP or Laragon install) must
+    // not load other ini files or extensions into FloServer's pools.
+    o.remove_env = {"PHPRC", "PHP_INI_SCAN_DIR"};
     // A few worker processes, so one slow request doesn't hold up the rest.
     o.env = {{"PHP_FCGI_CHILDREN", "4"}, {"PHP_FCGI_MAX_REQUESTS", "500"}};
     o.stdin_socket = listener_.get();
