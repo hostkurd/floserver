@@ -9,6 +9,7 @@
 #include "floserver/core/certificates.h"
 #include "floserver/core/encoding.h"
 #include "floserver/core/http.h"
+#include "floserver/core/integration.h"
 #include "floserver/core/ipc.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/process.h"
@@ -28,6 +29,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -163,6 +165,19 @@ struct Service {
     std::unique_ptr<floserver::core::WebService> web;
     std::unique_ptr<floserver::core::SecretStore> secrets;
     std::unique_ptr<floserver::core::DatabaseService> databases;
+    std::optional<std::filesystem::path> data;
+
+    // integration.json for FloCMS Studio (D14): rewritten when what it says
+    // changed (an install, a removal, a database port).
+    void refresh_integration() const {
+        if (!data) {
+            return;
+        }
+        const std::string status = databases ? databases->status().dump() : std::string("{}");
+        std::string error;
+        (void)floserver::core::write_integration(
+            *data, floserver::core::integration_json(floserver::core::collect_integration(*data, status)), error);
+    }
 
     // Adds what's running to a project's description: its address and
     // whether its PHP or its own server is running or asleep (and why it
@@ -469,6 +484,22 @@ int run() {
         db.idle_after = web_config(*data).idle_after;
         service->databases = std::make_unique<floserver::core::DatabaseService>(db, *service->secrets);
         service->databases->start();
+        service->data = *data;
+        service->refresh_integration();
+        try {
+            std::thread([service] {
+                while (!service->quitting.load()) {
+                    for (int i = 0; i < 25 && !service->quitting.load(); ++i) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    }
+                    if (!service->quitting.load()) {
+                        service->refresh_integration();
+                    }
+                }
+            }).detach();
+        } catch (const std::system_error&) {
+            // No thread: the file is still written at every start.
+        }
     }
 
     while (auto connection = service->server->accept()) {

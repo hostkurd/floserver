@@ -16,6 +16,7 @@ add_library(floserver_core STATIC
     src/certificates.cpp
     src/downloader.cpp
     src/encoding.cpp
+    src/integration.cpp
     src/http.cpp
     src/http_windows.cpp
     src/ipc_common.cpp
