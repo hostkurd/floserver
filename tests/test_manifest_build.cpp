@@ -122,8 +122,33 @@ TEST_CASE("an unchecked file needs --accept, and a failed one is refused") {
 TEST_CASE("files that don't fit the catalog are refused or left out") {
     auto report = real_report();
     report["files"].push_back(
-        {{"path", "python/3.13.0/python.zip"}, {"size", 1}, {"sha256", std::string(64, 'a')}, {"result", "ok"}});
+        {{"path", "ruby/3.4.0/ruby.zip"}, {"size", 1}, {"sha256", std::string(64, 'a')}, {"result", "ok"}});
     CHECK(has_error_with(build_manifest(report.dump(), options()), "isn't a runtime FloServer knows"));
+
+    // Python (D17): python-build-standalone's Windows build, a .tar.gz, CDN only.
+    report = real_report();
+    report["files"].push_back(
+        {{"path", "python/3.13.18/cpython-3.13.18-20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz"},
+         {"size", 22023022}, {"sha256", std::string(64, 'a')}, {"result", "ok"}});
+    const auto py = build_manifest(report.dump(), options());
+    REQUIRE(py.manifest_json.has_value());
+    const json py_doc = json::parse(*py.manifest_json);
+    bool found = false;
+    for (const auto& rt : py_doc["runtimes"]) {
+        if (rt["name"] == "python") {
+            found = true;
+            CHECK(rt["version"] == "3.13.18");
+            CHECK(rt["archive"] == "tar.gz");
+            CHECK(rt["license"] == "PSF-2.0");
+            CHECK(rt["urls"].size() == 1);
+        }
+    }
+    CHECK(found);
+    report = real_report();
+    report["files"].push_back(
+        {{"path", "python/3.13.18/cpython-3.13.18-20261026-x86_64-pc-windows-msvc-pgo-full.tar.zst"},
+         {"size", 1}, {"sha256", std::string(64, 'a')}, {"result", "ok"}});
+    CHECK_FALSE(build_manifest(report.dump(), options()).manifest_json.has_value());
 
     report = real_report();
     report["files"].push_back(
