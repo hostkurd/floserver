@@ -402,6 +402,7 @@ void WebService::reload_locked() {
             ns.app_port = spec.port;
             ns.tls = site_tls;
             site.app = true;
+            site.app_kind = spec.kind == AppKind::Python ? "python" : "node";
             site.address = ns.tls ? "https" : "http";
             serve.push_back(std::move(ns));
             sites[p.name] = site;
@@ -664,7 +665,7 @@ json WebService::status_locked() const {
             j["address"] = s.address;
         }
         if (s.app) {
-            j["app"] = "node";
+            j["app"] = s.app_kind;
             if (apps.contains(name)) {
                 j["run"] = apps[name]["state"];
                 if (apps[name].contains("error")) {

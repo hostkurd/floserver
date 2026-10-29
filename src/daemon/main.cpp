@@ -18,6 +18,8 @@
 #include "floserver/core/trust_store.h"
 #include "floserver/core/database_service.h"
 #include "floserver/core/mariadb.h"
+#include "floserver/core/project_config.h"
+#include "floserver/core/site_plan.h"
 #include "floserver/core/secret_store.h"
 #include "floserver/core/web_service.h"
 
@@ -363,6 +365,13 @@ struct Service {
                     json env = json::array();
                     for (const auto& [key, value] : core::env_values(laravel ? core::EnvStyle::Laravel : core::EnvStyle::FloCms, *login)) {
                         env.push_back({key, value});
+                    }
+                    // Python projects also get the database as one URL (D17).
+                    const auto parsed = core::read_project_config_file(core::Project{name, dir, true, false, {}});
+                    if (parsed.config && parsed.config->python) {
+                        std::error_code ec;
+                        env.push_back({"DATABASE_URL",
+                                       core::database_url(*login, std::filesystem::is_regular_file(dir / "manage.py", ec))});
                     }
                     result["env_style"] = laravel ? "laravel" : "flocms";
                     result["env"] = env;

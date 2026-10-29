@@ -61,10 +61,11 @@ struct PhpPool {
     std::vector<Port> ports;
 };
 
-enum class AppKind : std::uint8_t { Node };
+enum class AppKind : std::uint8_t { Node, Python };
 
-// A project that runs its own server, which nginx forwards to (D11): a Node
-// project (one that asks for Node and not PHP).
+// A project that runs its own server, which nginx forwards to: a Python
+// project (one that asks for Python and not PHP, D17) or a Node project (one
+// that asks for Node and neither PHP nor Python, D11).
 struct AppSpec {
     std::string name;                   // the project's
     AppKind kind = AppKind::Node;
@@ -74,6 +75,10 @@ struct AppSpec {
     std::optional<std::string> command; // from floserver.json
     bool keep_running = false;
     Port port = 0;                      // held by the service; given by assign_app_ports()
+    // A Python app that names Node too: that Node is on its PATH (its
+    // build tools), as "24.22.1" in the status.
+    std::filesystem::path node_dir;
+    std::string node_version;
 };
 
 struct WebPlan {

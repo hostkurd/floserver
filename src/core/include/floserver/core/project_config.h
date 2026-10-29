@@ -5,6 +5,7 @@
 //   {
 //     "php": "8.2",
 //     "node": "22",
+//     "python": "3.13",
 //     "database": "mariadb-11.4",
 //     "web": "nginx",
 //     "root": "public",
@@ -35,12 +36,13 @@ struct DatabaseSpec {
 struct ProjectConfig {
     std::optional<std::string> php;        // "8.2", "8.2.27"
     std::optional<std::string> node;       // "22", "22.11.0"
+    std::optional<std::string> python;     // "3.13" (D17)
     std::optional<DatabaseSpec> database;  // absent: the project needs no database
     WebServer web = WebServer::Nginx;
     std::string root = ".";                // document root, relative to the project
     std::vector<std::string> extensions;   // PHP extensions to enable
-    // How a Node project starts its own server (D11), instead of the
-    // package.json script FloServer would pick; {port} is replaced by the
+    // How a Node or Python project starts its own server (D11, D17),
+    // instead of what FloServer would pick; {port} is replaced by the
     // port to listen on, which is also in the PORT variable.
     std::optional<std::string> command;
 

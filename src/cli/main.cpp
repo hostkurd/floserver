@@ -55,7 +55,7 @@ void print_help(std::ostream& out) {
         << "  projects                   List your projects and what each one needs\n"
         << "  add [folder] [--name <n>]  Add a folder as a project (this folder if none)\n"
         << "  remove <name>              Forget a project (its files are kept)\n"
-        << "  use <php|node|mariadb> <v> Set a version in this project's floserver.json\n"
+        << "  use <php|node|python|mariadb> <v> Set a version in this project's floserver.json\n"
         << "  db                         Show the databases and the projects using them\n"
         << "  env [project] [--write]    A project's database settings as .env lines (--show: the password)\n"
         << "  trust                      Let your browsers trust FloServer's HTTPS certificates\n"
@@ -345,7 +345,7 @@ std::string state_line(const nlohmann::json& p) {
             std::string why = text_of(p, "error");
             why = why.substr(0, why.find('\n'));
             std::erase_if(why, [](char c) { return static_cast<unsigned char>(c) < 0x20 || c == 0x7F; });
-            return text_of(p, "node").empty() ? "on, PHP can't start"
+            return text_of(p, "node").empty() && text_of(p, "python").empty() ? "on, PHP can't start"
                                               : "on, its server can't start" + (why.empty() ? "" : ": " + why);
         }
         return run == "running" ? "on, running" : run == "starting" ? "on, starting" : run.empty() ? "on" : "on, asleep";
@@ -376,8 +376,12 @@ int projects() {
     for (const auto& p : list) {
         const std::string php = text_of(p, "php");
         const std::string node = text_of(p, "node");
-        std::cout << std::left << std::setw(22) << text_of(p, "name") << std::setw(14)
-                  << (!php.empty() ? "php " + php : !node.empty() ? "node " + node : std::string("-"))
+        const std::string python = text_of(p, "python");
+        std::cout << std::left << std::setw(22) << text_of(p, "name") << std::setw(16)
+                  << (!php.empty()      ? "php " + php
+                      : !python.empty() ? "python " + python
+                      : !node.empty()   ? "node " + node
+                                        : std::string("-"))
                   << (p.value("keep_running", false) ? "keep running  " : "") << state_line(p) << "\n";
         if (!text_of(p, "address").empty()) {
             std::cout << "  " << text_of(p, "address") << "\n";
@@ -577,8 +581,8 @@ std::optional<fs::path> project_folder_for(const fs::path& here) {
 // current folder is inside one; otherwise the nearest one above, or a new one
 // here.
 int use(const std::vector<std::string>& args) {
-    if (args.size() != 3 || (args[1] != "php" && args[1] != "node" && args[1] != "mariadb")) {
-        std::cerr << "Usage: flo use <php|node|mariadb> <version>   for example: flo use php 8.4\n";
+    if (args.size() != 3 || (args[1] != "php" && args[1] != "node" && args[1] != "python" && args[1] != "mariadb")) {
+        std::cerr << "Usage: flo use <php|node|python|mariadb> <version>   for example: flo use php 8.4\n";
         return 2;
     }
     const auto version = floserver::core::Version::parse(args[2]);
@@ -875,8 +879,20 @@ int env(const std::vector<std::string>& args) {
         return 0;
     }
     for (const auto& [key, value] : values) {
-        std::cout << key << "=" << (key == "DB_PASSWORD" && !show ? std::string("********   (flo env --show)") : value)
-                  << "\n";
+        std::string line = value;
+        if (!show && key == "DB_PASSWORD") {
+            line = "********   (flo env --show)";
+        } else if (!show && key == "DATABASE_URL") {
+            // mysql://user:<password>@host...: the password hidden, or all
+            // of it when it isn't in that shape.
+            const auto scheme = value.find("://");
+            const auto colon = scheme == std::string::npos ? scheme : value.find(':', scheme + 3);
+            const auto at = value.rfind('@');
+            line = colon != std::string::npos && at != std::string::npos && colon < at
+                       ? value.substr(0, colon + 1) + "********" + value.substr(at) + "   (flo env --show)"
+                       : "********   (flo env --show)";
+        }
+        std::cout << key << "=" << line << "\n";
     }
     return 0;
 }

@@ -140,23 +140,34 @@ WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
             plan.sites.push_back(std::move(site));
             continue;
         }
-        // Node without PHP: the project's own server, forwarded to (D11).
-        // With PHP, Node is only there for its build tools.
-        if (pc.node && !pc.php) {
-            const InstalledRuntime* node = best_installed(installed, "node", *pc.node);
-            if (node == nullptr) {
+        // Python or Node without PHP: the project's own server, forwarded to
+        // (D11, D17). Python serves when both are named (a Django app with a
+        // Vite front end); with PHP, they're only there for their tools.
+        if ((pc.node || pc.python) && !pc.php) {
+            const AppKind kind = pc.python ? AppKind::Python : AppKind::Node;
+            const std::string runtime_name = pc.python ? "python" : "node";
+            const std::string wanted = pc.python ? *pc.python : *pc.node;
+            const InstalledRuntime* runtime = best_installed(installed, runtime_name, wanted);
+            if (runtime == nullptr) {
+                site.missing.push_back(runtime_name);
+                site.missing.back().append(" ").append(wanted);
+            }
+            const InstalledRuntime* tools =
+                pc.python && pc.node ? best_installed(installed, "node", *pc.node) : nullptr;
+            if (pc.python && pc.node && tools == nullptr) {
                 site.missing.push_back("node " + *pc.node);
             }
             if (pc.database && best_installed(installed, pc.database->family, pc.database->version) == nullptr) {
                 site.missing.push_back(pc.database->family + " " + pc.database->version);
             }
-            if (!site.missing.empty() || node == nullptr) {
+            if (!site.missing.empty() || runtime == nullptr) {
                 site.state = SiteState::NeedsDownload;
                 plan.sites.push_back(std::move(site));
                 continue;
             }
-            plan.apps.push_back({project.name, AppKind::Node, project.dir, node->version, node->dir, pc.command,
-                                 project.keep_running, 0});
+            plan.apps.push_back({project.name, kind, project.dir, runtime->version, runtime->dir, pc.command,
+                                 project.keep_running, 0, tools != nullptr ? tools->dir : fs::path(),
+                                 tools != nullptr ? tools->version : std::string()});
             site.app = plan.apps.size() - 1;
             site.state = SiteState::Ready;
             plan.sites.push_back(std::move(site));
@@ -170,6 +181,9 @@ WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
         }
         if (pc.node && best_installed(installed, "node", *pc.node) == nullptr) {
             site.missing.push_back("node " + *pc.node);
+        }
+        if (pc.python && best_installed(installed, "python", *pc.python) == nullptr) {
+            site.missing.push_back("python " + *pc.python);
         }
         if (pc.database && best_installed(installed, pc.database->family, pc.database->version) == nullptr) {
             site.missing.push_back(pc.database->family + " " + pc.database->version);

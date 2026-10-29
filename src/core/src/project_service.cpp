@@ -35,7 +35,11 @@ json site_json(const Project& project, const PlannedSite& site, const WebPlan& p
         out["php"] = plan.pools.at(*site.pool).version;
     }
     if (site.app) {
-        out["node"] = plan.apps.at(*site.app).version;
+        const AppSpec& app = plan.apps.at(*site.app);
+        out[app.kind == AppKind::Python ? "python" : "node"] = app.version;
+        if (!app.node_version.empty()) {
+            out["node"] = app.node_version;
+        }
     }
     if (!site.problem.empty()) {
         out["problem"] = site.problem;

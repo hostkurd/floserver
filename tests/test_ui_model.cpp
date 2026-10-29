@@ -124,6 +124,16 @@ TEST_CASE("Node projects show their version and a server that can't start") {
     CHECK(rows[1].detail == "The project's server can't start");
 }
 
+TEST_CASE("Python projects show a Python chip (D17)") {
+    const auto rows = rows_from_list(
+        one({{"name", "api"}, {"on", true}, {"state", "ready"}, {"run", "failed"}, {"python", "3.13.18"},
+             {"database", "mariadb-11.4"}}),
+        Lang::En);
+    REQUIRE(rows.size() == 1);
+    CHECK(rows[0].chips == std::vector<std::string>{"Python 3.13.18", "MariaDB 11.4"});
+    CHECK(rows[0].detail == "The project's server can't start");
+}
+
 TEST_CASE("an On project that isn't served yet shows its folder") {
     const auto rows = rows_from_list(one({{"name", "new"}, {"on", true}, {"state", "ready"}, {"path", "D:/new"}}),
                                      Lang::Ar);
