@@ -4,7 +4,6 @@
 #include "floserver/core/paths.h"
 #include "floserver/core/project_registry.h"
 
-#include <set>
 #include <sstream>
 #include <system_error>
 
@@ -115,20 +114,6 @@ public:
              // Hidden files and folders (.env, .git, .htaccess) are never served.
              << "RedirectMatch 404 \"/\\.(?!well-known/)\"\n";
 
-        // One balancer per pool: a worker on each port, as nginx does.
-        std::set<Port> written;
-        for (const ApacheSite& site : spec_.sites) {
-            if (site.php_ports.empty() || !written.insert(site.php_ports.front()).second) {
-                continue;
-            }
-            out_ << "<Proxy \"" << balancer_name(site.php_ports) << "\">\n";
-            for (const Port p : site.php_ports) {
-                out_ << "    BalancerMember \"fcgi://127.0.0.1:" << p << "\" retry=0\n";
-            }
-            out_ << "    ProxySet lbmethod=byrequests\n"
-                 << "</Proxy>\n";
-        }
-
         // Addresses that aren't a project.
         out_ << "<VirtualHost 127.0.0.1:" << kApachePortPlaceholder << ">\n"
              << "    ServerName floserver-default.invalid\n"
@@ -190,6 +175,15 @@ private:
              << "        Require all granted\n"
              << "    </Directory>\n";
         if (!site.php_ports.empty()) {
+            // The pool's workers, a port each, as nginx does. Inside the
+            // host: Apache on Windows doesn't find a balancer from the main
+            // config in a virtual host ("No protocol handler was valid").
+            out_ << "    <Proxy \"" << balancer_name(site.php_ports) << "\">\n";
+            for (const Port p : site.php_ports) {
+                out_ << "        BalancerMember \"fcgi://127.0.0.1:" << p << "\" retry=0\n";
+            }
+            out_ << "        ProxySet lbmethod=byrequests\n"
+                 << "    </Proxy>\n";
             // Caseless: on a disk that ignores case, x.PHP is x.php and must
             // run, never be sent as source. Only files that exist go to PHP.
             out_ << "    <FilesMatch \"(?i)\\.php$\">\n"
