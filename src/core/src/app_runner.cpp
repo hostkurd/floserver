@@ -107,6 +107,11 @@ void set_environment(ChildOptions& o, const AppSpec& app, Port port) {
     if (const auto current = get_env("PATH")) {
         path += path.empty() ? *current : kPathSeparator + *current;
     }
+#ifdef _WIN32
+    // A real (empty) standard input: Python's subprocess, which venv uses to
+    // run ensurepip, fails with "the handle is invalid" without one.
+    o.stdin_file = "NUL";
+#endif
     o.env = {{"PORT", std::to_string(port)},
              {"HOST", "127.0.0.1"},
              {"BROWSER", "none"},
