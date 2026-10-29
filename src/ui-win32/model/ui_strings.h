@@ -4,7 +4,7 @@
 // Plain C++ with no Windows code, so it's built and tested on every platform.
 //
 // Text is UTF-8. Patterns hold {0}, {1}... for values; fill() wraps each value
-// in a left-to-right isolate (U+2066 ... U+2069) when the language is written
+// in a left-to-right embedding (U+202A ... U+202C) when the language is written
 // right to left, because the values are code words: names, addresses,
 // versions, ports, commands. Numbers use Western digits in every language.
 
@@ -60,10 +60,12 @@ enum class Str : std::uint8_t {
 
 [[nodiscard]] std::string_view text(Lang lang, Str key);
 
-// U+2066 LEFT-TO-RIGHT ISOLATE, the text, U+2069 POP DIRECTIONAL ISOLATE.
+// U+202A LEFT-TO-RIGHT EMBEDDING, the text, U+202C POP DIRECTIONAL
+// FORMATTING. Embeddings, not the newer isolates (U+2066...), because
+// Windows' DrawText draws isolates as boxes (seen on a real PC, 29 Oct).
 [[nodiscard]] std::string isolate_ltr(std::string_view s);
-// U+2068 FIRST STRONG ISOLATE ... U+2069: for text the user typed, which may
-// be in either direction.
+// The same with the direction of the first letter (U+202B RIGHT-TO-LEFT
+// EMBEDDING for Arabic): for text the user typed, in either direction.
 [[nodiscard]] std::string isolate_auto(std::string_view s);
 
 // Puts values into a pattern: "{0}" is the first value, "{1}" the second.

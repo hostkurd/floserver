@@ -14,9 +14,9 @@ using namespace floserver::ui;
 using nlohmann::json;
 
 namespace {
-// U+2066 and U+2069 in UTF-8, spelled out byte by byte.
-const std::string kLri{'\xE2', '\x81', '\xA6'};
-const std::string kPdi{'\xE2', '\x81', '\xA9'};
+// U+202A (LRE) and U+202C (PDF) in UTF-8, spelled out byte by byte.
+const std::string kLri{'\xE2', '\x80', '\xAA'};
+const std::string kPdi{'\xE2', '\x80', '\xAC'};
 
 json one(json project) { return json{{"projects", json::array({std::move(project)})}}; }
 }  // namespace
@@ -58,10 +58,11 @@ TEST_CASE("values are isolated left to right only in right-to-left languages") {
     CHECK(fill_pattern("{1} and {0}", false, {"a", "b"}) == "b and a");
     CHECK(fill_pattern("{2} stays out", false, {"a"}) == " stays out");
     CHECK(fill_pattern("{", false, {"a"}) == "{");
-    const std::string fsi = isolate_auto("");
-    REQUIRE(fsi.size() == 6);
-    CHECK(fsi.substr(0, 3) == std::string{'\xE2', '\x81', '\xA8'});
-    CHECK(isolate_auto("x") == fsi.substr(0, 3) + "x" + kPdi);
+    // Typed text follows its first letter.
+    CHECK(isolate_auto("shop 2") == kLri + "shop 2" + kPdi);
+    const std::string rle{'\xE2', '\x80', '\xAB'};
+    CHECK(isolate_auto("12 متجر") == rle + "12 متجر" + kPdi);
+    CHECK(isolate_auto("") == kLri + kPdi);
 }
 
 TEST_CASE("rows follow the service's state and run fields") {

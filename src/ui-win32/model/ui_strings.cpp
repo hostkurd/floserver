@@ -9,9 +9,11 @@ namespace floserver::ui {
 
 namespace {
 
-// U+2066 and U+2069 in UTF-8, for code words inside the Arabic and Kurdish text.
-#define FLO_LRI "\xE2\x81\xA6"
-#define FLO_PDI "\xE2\x81\xA9"
+// U+202A LEFT-TO-RIGHT EMBEDDING and U+202C POP DIRECTIONAL FORMATTING in
+// UTF-8, for code words inside the Arabic and Kurdish text. Not the newer
+// isolates (U+2066...): Windows' DrawText shows those as boxes.
+#define FLO_LRI "\xE2\x80\xAA"
+#define FLO_PDI "\xE2\x80\xAC"
 
 struct Entry {
     Str key;
@@ -131,11 +133,42 @@ std::string_view text(Lang lang, Str key) {
     return e.en;
 }
 
-// Byte by byte, not as literals: a lone isolate in a literal looks like a
+// Byte by byte, not as literals: a lone embedding in a literal looks like a
 // Trojan Source trick to the compiler checks.
-constexpr char kLri[] = {'\xE2', '\x81', '\xA6'};
-constexpr char kFsi[] = {'\xE2', '\x81', '\xA8'};
-constexpr char kPdi[] = {'\xE2', '\x81', '\xA9'};
+constexpr char kLri[] = {'\xE2', '\x80', '\xAA'};  // U+202A LRE
+constexpr char kRle[] = {'\xE2', '\x80', '\xAB'};  // U+202B RLE
+constexpr char kPdi[] = {'\xE2', '\x80', '\xAC'};  // U+202C PDF
+
+// Whether the first letter of `s` (UTF-8) is written right to left
+// (Hebrew, Arabic and their presentation forms).
+bool first_strong_is_rtl(std::string_view s) {
+    for (std::size_t i = 0; i < s.size();) {
+        const auto b = static_cast<unsigned char>(s[i]);
+        char32_t cp = 0;
+        std::size_t len = 1;
+        if (b < 0x80) {
+            cp = b;
+        } else if ((b & 0xE0U) == 0xC0U && i + 1 < s.size()) {
+            cp = ((b & 0x1FU) << 6U) | (static_cast<unsigned char>(s[i + 1]) & 0x3FU);
+            len = 2;
+        } else if ((b & 0xF0U) == 0xE0U && i + 2 < s.size()) {
+            cp = ((b & 0x0FU) << 12U) | ((static_cast<unsigned char>(s[i + 1]) & 0x3FU) << 6U) |
+                 (static_cast<unsigned char>(s[i + 2]) & 0x3FU);
+            len = 3;
+        } else {
+            return false;  // outside the BMP or broken: taken as left to right
+        }
+        i += len;
+        if ((cp >= 0x0590 && cp <= 0x08FF) || (cp >= 0xFB1D && cp <= 0xFDFF) || (cp >= 0xFE70 && cp <= 0xFEFF)) {
+            return true;
+        }
+        const bool latin = (cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z');
+        if (latin || (cp >= 0x00C0 && cp < 0x2000)) {
+            return false;
+        }
+    }
+    return false;
+}
 
 std::string isolated(const char (&open)[3], std::string_view s) {
     std::string out(std::begin(open), std::end(open));
@@ -145,7 +178,7 @@ std::string isolated(const char (&open)[3], std::string_view s) {
 }
 
 std::string isolate_ltr(std::string_view s) { return isolated(kLri, s); }
-std::string isolate_auto(std::string_view s) { return isolated(kFsi, s); }
+std::string isolate_auto(std::string_view s) { return isolated(first_strong_is_rtl(s) ? kRle : kLri, s); }
 
 std::string fill_pattern(std::string_view pattern, bool isolate, std::initializer_list<std::string_view> values) {
     std::string out;

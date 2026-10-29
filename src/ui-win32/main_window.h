@@ -65,6 +65,8 @@ private:
     };
 
     static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
+    // The search box's placeholder, in the theme's colour.
+    void paint_search_cue(HWND edit) const;
     static LRESULT CALLBACK search_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, UINT_PTR id,
                                         DWORD_PTR self);
     LRESULT handle(UINT msg, WPARAM wparam, LPARAM lparam);
@@ -132,6 +134,7 @@ private:
     int new_button_width_ = 0;
     std::wstring tip_new_project_;
     std::wstring tip_settings_;
+    std::wstring search_cue_;
     win::UniqueBrush input_brush_;
     win::UniqueIcon icon_small_;
     win::UniqueIcon icon_big_;

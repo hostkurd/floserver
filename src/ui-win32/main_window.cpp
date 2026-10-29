@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cwchar>
 #include <iterator>
+#include <string_view>
 
 namespace floserver::ui {
 
@@ -56,7 +57,13 @@ bool contains(const RECT& r, int x, int y) { return x >= r.left && x < r.right &
 int height_of(const RECT& r) { return static_cast<int>(r.bottom - r.top); }
 int width_of(const RECT& r) { return static_cast<int>(r.right - r.left); }
 
+// Windows' app theme, unless FLOSERVER_THEME says "light" or "dark" (for
+// screenshots and tests).
 bool apps_use_dark_theme() {
+    wchar_t forced[8] = {};
+    if (GetEnvironmentVariableW(L"FLOSERVER_THEME", forced, 8) > 0) {
+        return std::wstring_view(forced) == L"dark";
+    }
     DWORD value = 1;
     DWORD size = sizeof value;
     const LSTATUS status =
@@ -298,8 +305,9 @@ void MainWindow::on_create() {
 
     search_ = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0, 0, 0, hwnd_,
                               nullptr, instance_, nullptr);
-    const std::wstring cue = w(text(lang_, Str::SearchProjects));
-    SendMessageW(search_, EM_SETCUEBANNER, FALSE, reinterpret_cast<LPARAM>(cue.c_str()));
+    // The placeholder is drawn by search_proc in the theme's colour: the
+    // system's cue banner grey can't be changed and is hard to read on dark.
+    search_cue_ = w(text(lang_, Str::SearchProjects));
     SetWindowSubclass(search_, search_proc, kSearchSubclass, reinterpret_cast<DWORD_PTR>(this));
 
     tooltip_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
@@ -843,6 +851,17 @@ LRESULT CALLBACK MainWindow::search_proc(HWND hwnd, UINT msg, WPARAM wparam, LPA
                 return 0;  // no beep
             }
             break;
+        case WM_SETFOCUS:
+        case WM_KILLFOCUS:
+            InvalidateRect(hwnd, nullptr, TRUE);
+            break;
+        case WM_PAINT: {
+            const LRESULT result = DefSubclassProc(hwnd, msg, wparam, lparam);
+            if (GetWindowTextLengthW(hwnd) == 0 && GetFocus() != hwnd) {
+                self->paint_search_cue(hwnd);
+            }
+            return result;
+        }
         case WM_NCDESTROY:
             RemoveWindowSubclass(hwnd, search_proc, id);
             break;
@@ -850,6 +869,23 @@ LRESULT CALLBACK MainWindow::search_proc(HWND hwnd, UINT msg, WPARAM wparam, LPA
             break;
     }
     return DefSubclassProc(hwnd, msg, wparam, lparam);
+}
+
+void MainWindow::paint_search_cue(HWND edit) const {
+    HDC dc = GetDC(edit);
+    if (dc == nullptr) {
+        return;
+    }
+    RECT r{};
+    SendMessageW(edit, EM_GETRECT, 0, reinterpret_cast<LPARAM>(&r));
+    auto* font = win::int_to_ptr<HFONT>(SendMessageW(edit, WM_GETFONT, 0, 0));
+    HGDIOBJ old = SelectObject(dc, font);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, colorref(palette(dark_).text_subtle));
+    DrawTextW(dc, search_cue_.c_str(), static_cast<int>(search_cue_.size()), &r,
+              DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS | (rtl_ ? UINT{DT_RTLREADING} : 0U));
+    SelectObject(dc, old);
+    ReleaseDC(edit, dc);
 }
 
 void MainWindow::toggle(int visible_row) {
