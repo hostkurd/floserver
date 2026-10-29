@@ -14,10 +14,10 @@ back to the note first.
 | `src/core` | The shared core library: every rule and decision, no UI code (D1) |
 | `src/daemon` | `floserverd`, the background service in the user's session (D2) |
 | `src/cli` | `floserver` command line; the build also makes a copy named `flo` (D2). Install rules come with the installer. |
-| `src/ui-win32` | `FloServer.exe`, the Windows window, plain Win32 (D1) |
+| `src/ui-win32` | `FloServer.exe`, the Windows window, plain Win32 (D1); its words, rows and colours are in `model/`, built and tested on every platform |
 | `tools/manifest-tool` | `floserver-manifest`: builds, signs and verifies the runtime manifest, and makes the signing key; see `docs/manifest.md` |
 | `tools/cdn-check` | `check-floserver-cdn.ps1`: checks the files on cdn.floserver.org against the official releases |
-| `tests` | Unit tests for the core (doctest) |
+| `tests` | Unit tests for the core and the window's model (doctest) |
 | `third_party` | Vendored libraries, see `third_party/README.md` |
 
 ## Building

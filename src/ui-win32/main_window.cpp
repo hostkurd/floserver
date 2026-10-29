@@ -1,0 +1,1195 @@
+#include "main_window.h"
+
+#include "model/theme.h"
+#include "model/view_model.h"
+
+#include <commctrl.h>
+#include <dwmapi.h>
+#include <windowsx.h>
+
+#include <algorithm>
+#include <cwchar>
+#include <iterator>
+
+namespace floserver::ui {
+
+namespace {
+
+constexpr UINT kSnapshotMessage = WM_APP + 2;
+constexpr UINT kTrayMessage = WM_APP + 3;
+constexpr UINT_PTR kErrorTimer = 1;
+constexpr UINT kErrorShownMs = 8000;
+constexpr UINT kTrayId = 1;
+constexpr UINT_PTR kSearchSubclass = 1;
+constexpr UINT_PTR kTipNewProject = 1;
+constexpr UINT_PTR kTipSettings = 2;
+constexpr UINT kMenuOpen = 1;
+constexpr UINT kMenuQuit = 2;
+
+// DWM attributes newer than some SDKs.
+constexpr DWORD kDwmDarkMode = 20;       // DWMWA_USE_IMMERSIVE_DARK_MODE
+constexpr DWORD kDwmDarkModeOld = 19;    // the same before Windows 10 20H1
+constexpr DWORD kDwmCaptionColor = 35;   // DWMWA_CAPTION_COLOR, Windows 11
+
+// Sizes in device-independent pixels, from the mockups.
+constexpr int kWindowW = 960;
+constexpr int kWindowH = 640;
+constexpr int kMinW = 560;
+constexpr int kMinH = 380;
+constexpr int kTopBarH = 56;
+constexpr int kPad = 20;
+constexpr int kGap = 12;
+constexpr int kControlH = 32;
+constexpr int kSearchW = 240;
+constexpr int kSearchMinLeft = 170;
+constexpr int kBannerH = 32;
+constexpr int kFooterH = 28;
+constexpr int kRowH = 60;
+constexpr int kRowPad = 16;
+constexpr int kSwitchW = 40;
+constexpr int kSwitchH = 20;
+constexpr int kChipH = 20;
+constexpr int kStateH = 22;
+constexpr int kMinTextW = 140;
+
+bool contains(const RECT& r, int x, int y) { return x >= r.left && x < r.right && y >= r.top && y < r.bottom; }
+int height_of(const RECT& r) { return static_cast<int>(r.bottom - r.top); }
+int width_of(const RECT& r) { return static_cast<int>(r.right - r.left); }
+
+bool apps_use_dark_theme() {
+    DWORD value = 1;
+    DWORD size = sizeof value;
+    const LSTATUS status =
+        RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                     L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &value, &size);
+    return status == ERROR_SUCCESS && value == 0;
+}
+
+int CALLBACK font_found(const LOGFONTW* /*lf*/, const TEXTMETRICW* /*tm*/, DWORD /*type*/, LPARAM found) {
+    *win::int_to_ptr<bool*>(found) = true;
+    return 0;
+}
+
+bool font_exists(const std::wstring& face) {
+    LOGFONTW lf{};
+    lf.lfCharSet = DEFAULT_CHARSET;
+    const std::size_t n = std::min(face.size(), std::size(lf.lfFaceName) - 1);
+    face.copy(std::begin(lf.lfFaceName), n);
+    bool found = false;
+    HDC dc = GetDC(nullptr);
+    EnumFontFamiliesExW(dc, &lf, font_found, reinterpret_cast<LPARAM>(&found), 0);
+    ReleaseDC(nullptr, dc);
+    return found;
+}
+
+void set_face(LOGFONTW& lf, const std::wstring& face) {
+    const std::size_t n = std::min(face.size(), std::size(lf.lfFaceName) - 1);
+    face.copy(std::begin(lf.lfFaceName), n);
+    *(std::begin(lf.lfFaceName) + n) = L'\0';
+}
+
+std::wstring w(std::string_view s) { return win::widen(s); }
+
+}  // namespace
+
+MainWindow::MainWindow(HINSTANCE instance, Lang lang, std::wstring class_name)
+    : instance_(instance), lang_(lang), rtl_(is_rtl(lang)), class_name_(std::move(class_name)) {}
+
+bool MainWindow::create(int show) {
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof wc;
+    wc.lpfnWndProc = window_proc;
+    wc.hInstance = instance_;
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.lpszClassName = class_name_.c_str();
+    if (RegisterClassExW(&wc) == 0) {
+        return false;
+    }
+    const auto system_dpi = static_cast<int>(GetDpiForSystem());
+    if (CreateWindowExW(rtl_ ? WS_EX_LAYOUTRTL : 0, class_name_.c_str(), L"FloServer",
+                        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
+                        MulDiv(kWindowW, system_dpi, 96), MulDiv(kWindowH, system_dpi, 96), nullptr, nullptr,
+                        instance_, this) == nullptr) {
+        return false;
+    }
+    // The window may have opened on a monitor with another scale.
+    if (std::cmp_not_equal(dpi_, system_dpi)) {
+        SetWindowPos(hwnd_, nullptr, 0, 0, px(kWindowW), px(kWindowH), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    ShowWindow(hwnd_, show);
+    UpdateWindow(hwnd_);
+    return true;
+}
+
+LRESULT CALLBACK MainWindow::window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    MainWindow* self = nullptr;
+    if (msg == WM_NCCREATE) {
+        const auto* cs = win::int_to_ptr<const CREATESTRUCTW*>(lparam);
+        self = static_cast<MainWindow*>(cs->lpCreateParams);
+        self->hwnd_ = hwnd;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+    } else {
+        self = win::int_to_ptr<MainWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    }
+    if (self == nullptr) {
+        return DefWindowProcW(hwnd, msg, wparam, lparam);
+    }
+    return self->handle(msg, wparam, lparam);
+}
+
+LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
+    if (msg == taskbar_created_ && taskbar_created_ != 0) {
+        tray_added_ = false;  // Explorer restarted
+        add_tray_icon();
+        return 0;
+    }
+    switch (msg) {
+        case WM_CREATE:
+            on_create();
+            return 0;
+        case WM_DESTROY:
+            on_destroy();
+            return 0;
+        case WM_CLOSE:
+            // Closing hides the window; the service keeps running (D2).
+            if (quitting_) {
+                DestroyWindow(hwnd_);
+            } else {
+                ShowWindow(hwnd_, SW_HIDE);
+            }
+            return 0;
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_PAINT:
+            on_paint();
+            return 0;
+        case WM_SIZE:
+            if (wparam != SIZE_MINIMIZED) {
+                width_ = LOWORD(lparam);
+                height_ = HIWORD(lparam);
+                layout();
+                scroll_to(scroll_);
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
+            return 0;
+        case WM_GETMINMAXINFO: {
+            auto* info = win::int_to_ptr<MINMAXINFO*>(lparam);
+            info->ptMinTrackSize = {px(kMinW), px(kMinH)};
+            return 0;
+        }
+        case WM_DPICHANGED:
+            on_dpi_changed(LOWORD(wparam), *win::int_to_ptr<const RECT*>(lparam));
+            return 0;
+        case WM_SETTINGCHANGE:
+            if (lparam != 0 && std::wcscmp(win::int_to_ptr<const wchar_t*>(lparam), L"ImmersiveColorSet") == 0) {
+                const bool dark = apps_use_dark_theme();
+                if (dark != dark_) {
+                    dark_ = dark;
+                    apply_theme();
+                }
+            } else if (wparam == SPI_SETNONCLIENTMETRICS) {
+                make_fonts();
+                layout();
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
+            return 0;
+        case WM_CTLCOLOREDIT:
+            if (win::int_to_ptr<HWND>(lparam) == search_) {
+                const Palette& p = palette(dark_);
+                auto* dc = win::int_to_ptr<HDC>(wparam);
+                SetTextColor(dc, colorref(p.text));
+                SetBkColor(dc, colorref(p.input));
+                return reinterpret_cast<LRESULT>(input_brush_.get());
+            }
+            break;
+        case WM_COMMAND:
+            if (win::int_to_ptr<HWND>(lparam) == search_ && HIWORD(wparam) == EN_CHANGE) {
+                const int n = GetWindowTextLengthW(search_);
+                std::wstring text(static_cast<std::size_t>(n) + 1, L'\0');
+                GetWindowTextW(search_, text.data(), n + 1);
+                text.resize(static_cast<std::size_t>(n));
+                query_ = win::narrow(text);
+                scroll_ = 0;
+                focus_ = -1;
+                update_visible();
+                InvalidateRect(hwnd_, nullptr, FALSE);
+                return 0;
+            }
+            break;
+        case WM_MOUSEMOVE:
+            on_mouse_move(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+            return 0;
+        case WM_MOUSELEAVE:
+            tracking_mouse_ = false;
+            if (hover_.part != Part::None) {
+                hover_ = {};
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
+            return 0;
+        case WM_SETCURSOR:
+            if (LOWORD(lparam) == HTCLIENT && win::int_to_ptr<HWND>(wparam) == hwnd_) {
+                POINT pt{};
+                GetCursorPos(&pt);
+                ScreenToClient(hwnd_, &pt);
+                const Hit hit = hit_test(pt.x, pt.y);
+                const bool hand = hit.part == Part::Switch || hit.part == Part::Address ||
+                                  (hit.part == Part::Banner && banner().clickable);
+                SetCursor(LoadCursorW(nullptr, hand ? IDC_HAND : IDC_ARROW));
+                return TRUE;
+            }
+            break;
+        case WM_LBUTTONDOWN:
+            SetFocus(hwnd_);
+            pressed_ = hit_test(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+            SetCapture(hwnd_);
+            return 0;
+        case WM_LBUTTONUP: {
+            ReleaseCapture();
+            const Hit hit = hit_test(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+            if (hit == pressed_) {
+                on_click(hit);
+            }
+            pressed_ = {};
+            return 0;
+        }
+        case WM_MOUSEWHEEL:
+            scroll_to(scroll_ - GET_WHEEL_DELTA_WPARAM(wparam) * px(kRowH) / WHEEL_DELTA);
+            return 0;
+        case WM_KEYDOWN:
+            on_key(wparam);
+            return 0;
+        case WM_SETFOCUS:
+        case WM_KILLFOCUS:
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return 0;
+        case WM_TIMER:
+            if (wparam == kErrorTimer) {
+                KillTimer(hwnd_, kErrorTimer);
+                change_error_.clear();
+                layout();
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
+            return 0;
+        case kSnapshotMessage:
+            on_snapshot();
+            return 0;
+        case kTrayMessage:
+            on_tray(lparam, wparam);
+            return 0;
+        case kShowWindowMessage:
+            show_window();
+            return 0;
+        default:
+            break;
+    }
+    return DefWindowProcW(hwnd_, msg, wparam, lparam);
+}
+
+// --- lifetime -------------------------------------------------------------
+
+void MainWindow::on_create() {
+    dpi_ = GetDpiForWindow(hwnd_);
+    dark_ = apps_use_dark_theme();
+    taskbar_created_ = RegisterWindowMessageW(L"TaskbarCreated");
+    RECT client{};
+    GetClientRect(hwnd_, &client);
+    width_ = client.right;
+    height_ = client.bottom;
+
+    search_ = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0, 0, 0, hwnd_,
+                              nullptr, instance_, nullptr);
+    const std::wstring cue = w(text(lang_, Str::SearchProjects));
+    SendMessageW(search_, EM_SETCUEBANNER, FALSE, reinterpret_cast<LPARAM>(cue.c_str()));
+    SetWindowSubclass(search_, search_proc, kSearchSubclass, reinterpret_cast<DWORD_PTR>(this));
+
+    tooltip_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
+                               CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, hwnd_, nullptr, instance_,
+                               nullptr);
+    tip_new_project_ = w(text(lang_, Str::ComingSoon));
+    tip_settings_ = w(text(lang_, Str::Settings));
+    for (const auto& [id, tip] : {std::pair{kTipNewProject, &tip_new_project_}, std::pair{kTipSettings, &tip_settings_}}) {
+        TOOLINFOW ti{};
+        ti.cbSize = sizeof ti;
+        ti.uFlags = TTF_SUBCLASS | (rtl_ ? TTF_RTLREADING : 0U);
+        ti.hwnd = hwnd_;
+        ti.uId = id;
+        ti.lpszText = tip->data();
+        SendMessageW(tooltip_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
+    }
+
+    make_fonts();
+    make_icons();
+    apply_theme();
+    layout();
+    add_tray_icon();
+    worker_ = std::make_unique<ServiceWorker>(hwnd_, kSnapshotMessage, lang_);
+}
+
+void MainWindow::on_destroy() {
+    KillTimer(hwnd_, kErrorTimer);
+    if (tray_added_) {
+        NOTIFYICONDATAW nid{};
+        nid.cbSize = sizeof nid;
+        nid.hWnd = hwnd_;
+        nid.uID = kTrayId;
+        Shell_NotifyIconW(NIM_DELETE, &nid);
+        tray_added_ = false;
+    }
+    worker_.reset();
+    PostQuitMessage(0);
+}
+
+void MainWindow::on_snapshot() {
+    if (!worker_) {
+        return;
+    }
+    Snapshot s = worker_->take();
+    for (const std::string& name : s.settled) {
+        pending_.erase(name);
+    }
+    if (!s.change_error.empty()) {
+        change_error_ = s.change_error;
+        SetTimer(hwnd_, kErrorTimer, kErrorShownMs, nullptr);
+    }
+    const bool quit_done = s.quit_done;
+    const std::string quit_error = s.quit_error;
+    snap_ = std::move(s);
+    update_visible();
+    layout();
+    update_tray_tip();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+
+    if (quit_done) {
+        if (!quit_error.empty()) {
+            const std::wstring message = w(fill(lang_, Str::ServiceFailed, {quit_error}));
+            MessageBoxW(nullptr, message.c_str(), L"FloServer",
+                        MB_OK | MB_ICONWARNING | (rtl_ ? MB_RTLREADING | MB_RIGHT : 0U));
+        }
+        quitting_ = true;
+        DestroyWindow(hwnd_);
+    }
+}
+
+void MainWindow::quit() {
+    if (quitting_ || !worker_) {
+        return;
+    }
+    quitting_ = true;
+    ShowWindow(hwnd_, SW_HIDE);
+    worker_->quit_service();
+}
+
+void MainWindow::show_window() {
+    if (quitting_) {
+        return;
+    }
+    ShowWindow(hwnd_, IsIconic(hwnd_) != FALSE ? SW_RESTORE : SW_SHOW);
+    SetForegroundWindow(hwnd_);
+}
+
+// --- theme, DPI, fonts ----------------------------------------------------
+
+int MainWindow::px(int dip) const { return MulDiv(dip, static_cast<int>(dpi_), 96); }
+float MainWindow::pxf(float dip) const { return dip * static_cast<float>(dpi_) / 96.0F; }
+
+void MainWindow::apply_theme() {
+    const BOOL dark = dark_ ? TRUE : FALSE;
+    if (FAILED(DwmSetWindowAttribute(hwnd_, kDwmDarkMode, &dark, sizeof dark))) {
+        DwmSetWindowAttribute(hwnd_, kDwmDarkModeOld, &dark, sizeof dark);
+    }
+    const COLORREF caption = colorref(palette(dark_).window);
+    DwmSetWindowAttribute(hwnd_, kDwmCaptionColor, &caption, sizeof caption);  // fails quietly before Windows 11
+    input_brush_.reset(CreateSolidBrush(colorref(palette(dark_).input)));
+    SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    if (search_ != nullptr) {
+        InvalidateRect(search_, nullptr, TRUE);
+    }
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void MainWindow::make_fonts() {
+    NONCLIENTMETRICSW ncm{};
+    ncm.cbSize = sizeof ncm;
+    LOGFONTW base{};
+    if (SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof ncm, &ncm, 0, dpi_) != FALSE) {
+        base = ncm.lfMessageFont;
+    } else {
+        set_face(base, L"Segoe UI");
+    }
+    std::wstring face = std::begin(base.lfFaceName);
+    // Segoe UI Variable (Windows 11) has no Arabic letters; the Arabic and
+    // Kurdish window keeps the system's Segoe UI.
+    if (lang_ == Lang::En && font_exists(L"Segoe UI Variable Text")) {
+        face = L"Segoe UI Variable Text";
+    }
+    const std::wstring semibold = face + L" Semibold";
+    const bool has_semibold = font_exists(semibold);
+
+    const auto make = [&](int size, bool bold) {
+        LOGFONTW lf = base;
+        lf.lfHeight = -px(size);
+        lf.lfWidth = 0;
+        lf.lfItalic = 0;
+        lf.lfUnderline = 0;
+        lf.lfQuality = CLEARTYPE_QUALITY;
+        lf.lfWeight = bold && !has_semibold ? FW_SEMIBOLD : FW_NORMAL;
+        set_face(lf, bold && has_semibold ? semibold : face);
+        return win::UniqueFont(CreateFontIndirectW(&lf));
+    };
+    fonts_.title = make(20, true);
+    fonts_.body = make(14, false);
+    fonts_.body_bold = make(14, true);
+    fonts_.small = make(12, false);
+    fonts_.small_bold = make(12, true);
+    fonts_.button = make(13, false);
+    fonts_.button_bold = make(13, true);
+
+    if (search_ != nullptr) {
+        SendMessageW(search_, WM_SETFONT, reinterpret_cast<WPARAM>(fonts_.button.get()), TRUE);
+        SendMessageW(search_, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
+    }
+    HDC dc = GetDC(hwnd_);
+    new_button_width_ =
+        Canvas::measure(dc, w(text(lang_, Str::NewProject)), fonts_.button_bold.get(), rtl_) + px(24);
+    ReleaseDC(hwnd_, dc);
+}
+
+void MainWindow::make_icons() {
+    win::UniqueIcon small(make_app_icon(GetSystemMetricsForDpi(SM_CXSMICON, dpi_)));
+    win::UniqueIcon big(make_app_icon(GetSystemMetricsForDpi(SM_CXICON, dpi_)));
+    SendMessageW(hwnd_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(small.get()));
+    SendMessageW(hwnd_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(big.get()));
+    icon_small_ = std::move(small);
+    icon_big_ = std::move(big);
+    if (tray_added_) {
+        NOTIFYICONDATAW nid{};
+        nid.cbSize = sizeof nid;
+        nid.hWnd = hwnd_;
+        nid.uID = kTrayId;
+        nid.uFlags = NIF_ICON;
+        nid.hIcon = icon_small_.get();
+        Shell_NotifyIconW(NIM_MODIFY, &nid);
+    }
+}
+
+void MainWindow::on_dpi_changed(UINT dpi, const RECT& suggested) {
+    dpi_ = dpi;
+    make_fonts();
+    make_icons();
+    SetWindowPos(hwnd_, nullptr, suggested.left, suggested.top, suggested.right - suggested.left,
+                 suggested.bottom - suggested.top, SWP_NOZORDER | SWP_NOACTIVATE);
+    layout();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+// --- geometry (logical coordinates: x from the reading start) -------------
+
+RECT MainWindow::top_bar() const { return {0, 0, width_, px(kTopBarH)}; }
+
+RECT MainWindow::settings_button() const {
+    const int top = (px(kTopBarH) - px(kControlH)) / 2;
+    return {width_ - px(kPad) - px(kControlH), top, width_ - px(kPad), top + px(kControlH)};
+}
+
+RECT MainWindow::new_project_button() const {
+    const RECT s = settings_button();
+    return {s.left - px(kGap) - new_button_width_, s.top, s.left - px(kGap), s.bottom};
+}
+
+RECT MainWindow::search_box() const {
+    const RECT n = new_project_button();
+    const int right = n.left - px(kGap);
+    return {std::min(right, std::max(right - px(kSearchW), px(kSearchMinLeft))), n.top, right, n.bottom};
+}
+
+RECT MainWindow::banner_rect() const {
+    if (banner().text.empty()) {
+        return {};
+    }
+    return {px(kPad), px(kTopBarH), width_ - px(kPad), px(kTopBarH) + px(kBannerH)};
+}
+
+RECT MainWindow::card_rect() const {
+    const RECT b = banner_rect();
+    const int top = b.bottom > 0 ? b.bottom + px(8) : px(kTopBarH);
+    return {px(kPad), top, width_ - px(kPad), std::max(top, height_ - px(kFooterH) - px(kGap))};
+}
+
+RECT MainWindow::list_rect() const {
+    RECT r = card_rect();
+    const int border = std::max(1, px(1));
+    InflateRect(&r, -border, -border);
+    return r;
+}
+
+RECT MainWindow::footer_rect() const { return {0, height_ - px(kFooterH), width_, height_}; }
+
+int MainWindow::list_height() const { return static_cast<int>(visible_.size()) * px(kRowH); }
+
+std::vector<MainWindow::RowGeometry> MainWindow::row_geometry(HDC dc) const {
+    std::vector<RowGeometry> out;
+    if (!shows_rows()) {
+        return out;
+    }
+    const RECT list = list_rect();
+    const int row_h = px(kRowH);
+    out.reserve(visible_.size());
+    for (std::size_t i = 0; i < visible_.size(); ++i) {
+        const ProjectRow& row = snap_.rows[visible_[i]];
+        RowGeometry g;
+        const int top = list.top + static_cast<int>(i) * row_h - scroll_;
+        g.row = {list.left, top, list.right, top + row_h};
+        const int mid = top + row_h / 2;
+        g.toggle = {list.left + px(kRowPad), mid - px(kSwitchH) / 2, list.left + px(kRowPad) + px(kSwitchW),
+                    mid - px(kSwitchH) / 2 + px(kSwitchH)};
+        const int text_start = g.toggle.right + px(kRowPad);
+
+        // From the end: the state label, then the chips while the text keeps room.
+        const int state_w = Canvas::measure(dc, w(text(lang_, state_label(row.state))), fonts_.small_bold.get(),
+                                            rtl_) + px(20);
+        g.state = {list.right - px(kRowPad) - state_w, mid - px(kStateH) / 2, list.right - px(kRowPad),
+                   mid - px(kStateH) / 2 + px(kStateH)};
+        std::vector<int> chip_w;
+        chip_w.reserve(row.chips.size());
+        for (const std::string& chip : row.chips) {
+            chip_w.push_back(Canvas::measure(dc, w(chip), fonts_.small.get(), false) + px(16));
+        }
+        std::size_t shown = chip_w.size();
+        const auto chips_width = [&](std::size_t n) {
+            int total = 0;
+            for (std::size_t k = 0; k < n; ++k) {
+                total += chip_w[k] + px(kRowPad);
+            }
+            return total;
+        };
+        while (shown > 0 && g.state.left - px(kRowPad) - chips_width(shown) - text_start < px(kMinTextW)) {
+            --shown;
+        }
+        int x = g.state.left - px(kRowPad) - chips_width(shown) + px(kRowPad);
+        for (std::size_t k = 0; k < shown; ++k) {
+            g.chips.push_back({x, mid - px(kChipH) / 2, x + chip_w[k], mid - px(kChipH) / 2 + px(kChipH)});
+            x += chip_w[k] + px(kRowPad);
+        }
+        const int text_end = (shown > 0 ? g.chips.front().left : g.state.left) - px(kRowPad);
+
+        const int name_top = mid - px(19);
+        g.name = {text_start, name_top, text_end, name_top + px(20)};
+        g.line2 = {text_start, name_top + px(20), text_end, name_top + px(38)};
+        if (!row.address.empty() && is_openable_address(row.address)) {
+            const int aw = Canvas::measure(dc, w(row.address), fonts_.small.get(), false);
+            g.address = {text_start, g.line2.top, std::min(text_end, text_start + aw), g.line2.bottom};
+        }
+        out.push_back(std::move(g));
+    }
+    return out;
+}
+
+void MainWindow::layout() {
+    if (search_ == nullptr || !fonts_.button) {
+        return;
+    }
+    const RECT box = search_box();
+    const int icon_area = px(10 + 14 + 8);
+    const int h = px(20);
+    const int edit_w = std::max(0, width_of(box) - icon_area - px(10));
+    MoveWindow(search_, box.left + icon_area, box.top + (height_of(box) - h) / 2, edit_w, h, TRUE);
+
+    for (const auto& [id, rect] : {std::pair{kTipNewProject, new_project_button()},
+                                   std::pair{kTipSettings, settings_button()}}) {
+        TOOLINFOW ti{};
+        ti.cbSize = sizeof ti;
+        ti.hwnd = hwnd_;
+        ti.uId = id;
+        ti.rect = rect;
+        SendMessageW(tooltip_, TTM_NEWTOOLRECTW, 0, reinterpret_cast<LPARAM>(&ti));
+    }
+}
+
+void MainWindow::update_visible() {
+    visible_.clear();
+    if (shows_rows()) {
+        for (std::size_t i = 0; i < snap_.rows.size(); ++i) {
+            if (row_matches(snap_.rows[i], query_)) {
+                visible_.push_back(i);
+            }
+        }
+    }
+    if (focus_ >= static_cast<int>(visible_.size())) {
+        focus_ = static_cast<int>(visible_.size()) - 1;
+    }
+    scroll_to(scroll_);
+}
+
+void MainWindow::scroll_to(int target) {
+    const RECT list = list_rect();
+    const int most = std::max(0, list_height() - height_of(list));
+    const int value = std::clamp(target, 0, most);
+    if (value != scroll_) {
+        scroll_ = value;
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+}
+
+void MainWindow::ensure_visible(int row) {
+    if (row < 0) {
+        return;
+    }
+    const int row_h = px(kRowH);
+    const int top = row * row_h;
+    const int view = height_of(list_rect());
+    if (top < scroll_) {
+        scroll_to(top);
+    } else if (top + row_h > scroll_ + view) {
+        scroll_to(top + row_h - view);
+    }
+}
+
+bool MainWindow::shows_rows() const {
+    return snap_.has_list &&
+           (snap_.link == Link::Connected || snap_.link == Link::Lost || snap_.link == Link::Stopping);
+}
+
+MainWindow::BannerText MainWindow::banner() const {
+    if (!change_error_.empty()) {
+        return {change_error_, true, false};
+    }
+    switch (snap_.link) {
+        case Link::Connecting:
+            return {std::string(text(lang_, Str::Connecting)), false, false};
+        case Link::Starting:
+            return {std::string(text(lang_, Str::StartingService)), false, false};
+        case Link::NotRunning:
+            return {std::string(text(lang_, Str::ServiceStopped)), true, true};
+        case Link::Failed:
+            return {fill(lang_, Str::ServiceFailed, {snap_.error}), true, true};
+        case Link::Lost:
+            return {std::string(text(lang_, Str::ConnectionLost)), false, false};
+        case Link::Stopping:
+            return {std::string(text(lang_, Str::Stopping)), false, false};
+        case Link::Connected:
+            break;
+    }
+    if (!snap_.error.empty()) {
+        // The service's own words (English for now).
+        return {rtl_ ? isolate_ltr(snap_.error) : snap_.error, true, false};
+    }
+    return {};
+}
+
+bool MainWindow::switch_value(const ProjectRow& row) const {
+    const auto it = pending_.find(row.name);
+    return it != pending_.end() ? it->second : row.on;
+}
+
+MainWindow::Hit MainWindow::hit_test(int x, int y) const {
+    if (contains(new_project_button(), x, y)) {
+        return {Part::NewProject, -1};
+    }
+    if (contains(settings_button(), x, y)) {
+        return {Part::Settings, -1};
+    }
+    if (contains(banner_rect(), x, y)) {
+        return {Part::Banner, -1};
+    }
+    if (!contains(list_rect(), x, y)) {
+        return {};
+    }
+    for (std::size_t i = 0; i < geometry_.size(); ++i) {
+        const RowGeometry& g = geometry_[i];
+        const int row = static_cast<int>(i);
+        if (contains(g.toggle, x, y)) {
+            return {Part::Switch, row};
+        }
+        if (contains(g.address, x, y)) {
+            return {Part::Address, row};
+        }
+        if (contains(g.row, x, y)) {
+            return {Part::Row, row};
+        }
+    }
+    return {};
+}
+
+// --- input ----------------------------------------------------------------
+
+void MainWindow::on_mouse_move(int x, int y) {
+    if (!tracking_mouse_) {
+        TRACKMOUSEEVENT tme{};
+        tme.cbSize = sizeof tme;
+        tme.dwFlags = TME_LEAVE;
+        tme.hwndTrack = hwnd_;
+        tracking_mouse_ = TrackMouseEvent(&tme) != FALSE;
+    }
+    const Hit hit = hit_test(x, y);
+    if (!(hit == hover_)) {
+        hover_ = hit;
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+}
+
+void MainWindow::on_click(const Hit& hit) {
+    switch (hit.part) {
+        case Part::Switch:
+            focus_ = hit.row;
+            show_focus_ = false;
+            toggle(hit.row);
+            break;
+        case Part::Address:
+            open_address(hit.row);
+            break;
+        case Part::Row:
+            focus_ = hit.row;
+            show_focus_ = false;
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            break;
+        case Part::Banner:
+            if (banner().clickable && worker_) {
+                worker_->start_service();
+            }
+            break;
+        case Part::NewProject:  // the New project flow comes after 5a; the tooltip says so
+        case Part::Settings:    // the Settings screens come after 5a
+        case Part::None:
+            break;
+    }
+}
+
+void MainWindow::on_key(WPARAM key) {
+    const int count = static_cast<int>(visible_.size());
+    const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+    const int page = std::max(1, height_of(list_rect()) / px(kRowH));
+    int next = focus_;
+    switch (key) {
+        case VK_DOWN:
+            next = std::min(count - 1, focus_ + 1);
+            break;
+        case VK_UP:
+            next = std::max(0, focus_ - 1);
+            break;
+        case VK_HOME:
+            next = 0;
+            break;
+        case VK_END:
+            next = count - 1;
+            break;
+        case VK_NEXT:
+            next = std::min(count - 1, focus_ + page);
+            break;
+        case VK_PRIOR:
+            next = std::max(0, focus_ - page);
+            break;
+        case VK_SPACE:
+            if (focus_ >= 0) {
+                toggle(focus_);
+            }
+            break;
+        case VK_RETURN:
+            if (focus_ >= 0) {
+                open_address(focus_);
+            }
+            break;
+        case VK_TAB:
+            SetFocus(search_);
+            return;
+        case VK_F5:
+            if (worker_) {
+                worker_->refresh();
+            }
+            return;
+        case 'F':
+            if (ctrl) {
+                SetFocus(search_);
+                SendMessageW(search_, EM_SETSEL, 0, -1);
+            }
+            return;
+        default:
+            return;
+    }
+    show_focus_ = true;
+    if (count == 0) {
+        next = -1;
+    }
+    focus_ = next;
+    ensure_visible(focus_);
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+LRESULT CALLBACK MainWindow::search_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, UINT_PTR id,
+                                         DWORD_PTR self_ptr) {
+    auto* self = win::int_to_ptr<MainWindow*>(self_ptr);
+    switch (msg) {
+        case WM_KEYDOWN:
+            if (wparam == VK_ESCAPE) {
+                if (GetWindowTextLengthW(hwnd) > 0) {
+                    SetWindowTextW(hwnd, L"");
+                } else {
+                    SetFocus(self->hwnd_);
+                }
+                return 0;
+            }
+            if (wparam == VK_DOWN || wparam == VK_TAB || wparam == VK_RETURN) {
+                SetFocus(self->hwnd_);
+                if (self->focus_ < 0 && !self->visible_.empty()) {
+                    self->focus_ = 0;
+                }
+                self->show_focus_ = true;
+                InvalidateRect(self->hwnd_, nullptr, FALSE);
+                return 0;
+            }
+            break;
+        case WM_CHAR:
+            if (wparam == VK_ESCAPE || wparam == VK_TAB || wparam == VK_RETURN) {
+                return 0;  // no beep
+            }
+            break;
+        case WM_NCDESTROY:
+            RemoveWindowSubclass(hwnd, search_proc, id);
+            break;
+        default:
+            break;
+    }
+    return DefSubclassProc(hwnd, msg, wparam, lparam);
+}
+
+void MainWindow::toggle(int visible_row) {
+    if (visible_row < 0 || visible_row >= static_cast<int>(visible_.size()) || snap_.link != Link::Connected ||
+        !worker_) {
+        return;
+    }
+    const ProjectRow& row = snap_.rows[visible_[static_cast<std::size_t>(visible_row)]];
+    const bool value = !switch_value(row);
+    pending_[row.name] = value;
+    change_error_.clear();
+    worker_->set_on(row.name, value);
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void MainWindow::open_address(int visible_row) {
+    if (visible_row < 0 || visible_row >= static_cast<int>(visible_.size())) {
+        return;
+    }
+    const ProjectRow& row = snap_.rows[visible_[static_cast<std::size_t>(visible_row)]];
+    // Only a project's own local address ever reaches the shell.
+    if (!is_openable_address(row.address)) {
+        return;
+    }
+    ShellExecuteW(hwnd_, L"open", w(row.address).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+// --- tray (D2) ------------------------------------------------------------
+
+void MainWindow::add_tray_icon() {
+    NOTIFYICONDATAW nid{};
+    nid.cbSize = sizeof nid;
+    nid.hWnd = hwnd_;
+    nid.uID = kTrayId;
+    nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
+    nid.uCallbackMessage = kTrayMessage;
+    nid.hIcon = icon_small_.get();
+    tray_tip_ = L"FloServer";
+    const std::size_t n = std::min(tray_tip_.size(), std::size(nid.szTip) - 1);
+    tray_tip_.copy(std::begin(nid.szTip), n);
+    tray_added_ = Shell_NotifyIconW(NIM_ADD, &nid) != FALSE;
+    if (tray_added_) {
+        nid.uVersion = NOTIFYICON_VERSION_4;
+        Shell_NotifyIconW(NIM_SETVERSION, &nid);
+    }
+    update_tray_tip();
+}
+
+void MainWindow::update_tray_tip() {
+    if (!tray_added_) {
+        return;
+    }
+    std::wstring tip = L"FloServer\n";
+    if (shows_rows() && snap_.link == Link::Connected) {
+        tip += w(snap_.footer.counts);
+    } else {
+        tip += w(banner().text);
+    }
+    if (tip == tray_tip_) {
+        return;
+    }
+    tray_tip_ = tip;
+    NOTIFYICONDATAW nid{};
+    nid.cbSize = sizeof nid;
+    nid.hWnd = hwnd_;
+    nid.uID = kTrayId;
+    nid.uFlags = NIF_TIP | NIF_SHOWTIP;
+    const std::size_t n = std::min(tip.size(), std::size(nid.szTip) - 1);
+    tip.copy(std::begin(nid.szTip), n);
+    Shell_NotifyIconW(NIM_MODIFY, &nid);
+}
+
+void MainWindow::on_tray(LPARAM lparam, WPARAM wparam) {
+    switch (LOWORD(lparam)) {
+        case NIN_SELECT:
+        case NIN_KEYSELECT:
+        case WM_LBUTTONDBLCLK:
+            show_window();
+            break;
+        case WM_CONTEXTMENU:
+            show_tray_menu({GET_X_LPARAM(wparam), GET_Y_LPARAM(wparam)});
+            break;
+        default:
+            break;
+    }
+}
+
+void MainWindow::show_tray_menu(POINT at) {
+    const win::UniqueMenu menu(CreatePopupMenu());
+    if (!menu) {
+        return;
+    }
+    const std::wstring open = w(text(lang_, Str::TrayOpen));
+    const std::wstring quit_text = w(text(lang_, Str::TrayQuit));
+    AppendMenuW(menu.get(), MF_STRING, kMenuOpen, open.c_str());
+    AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu.get(), MF_STRING | (quitting_ ? MF_GRAYED : 0U), kMenuQuit, quit_text.c_str());
+    SetMenuDefaultItem(menu.get(), kMenuOpen, FALSE);
+
+    SetForegroundWindow(hwnd_);  // so the menu closes when the user clicks elsewhere
+    UINT flags = TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON;
+    flags |= GetSystemMetrics(SM_MENUDROPALIGNMENT) != 0 ? UINT{TPM_RIGHTALIGN} : UINT{TPM_LEFTALIGN};
+    if (rtl_) {
+        flags |= UINT{TPM_LAYOUTRTL};
+    }
+    const auto command = static_cast<UINT>(TrackPopupMenuEx(menu.get(), flags, at.x, at.y, hwnd_, nullptr));
+    PostMessageW(hwnd_, WM_NULL, 0, 0);
+    if (command == kMenuOpen) {
+        show_window();
+    } else if (command == kMenuQuit) {
+        quit();
+    }
+}
+
+// --- painting -------------------------------------------------------------
+
+void MainWindow::on_paint() {
+    PAINTSTRUCT ps{};
+    HDC hdc = BeginPaint(hwnd_, &ps);
+    RECT client{};
+    GetClientRect(hwnd_, &client);
+    width_ = client.right;
+    height_ = client.bottom;
+    if (width_ > 0 && height_ > 0) {
+        const win::UniqueDc mem(CreateCompatibleDC(hdc));
+        const win::UniqueBitmap bitmap(CreateCompatibleBitmap(hdc, width_, height_));
+        if (mem && bitmap) {
+            SetLayout(mem.get(), 0);
+            const win::Selected selected(mem.get(), bitmap.get());
+            geometry_ = row_geometry(mem.get());
+            {
+                Canvas canvas(mem.get(), width_, rtl_);
+                canvas.fill({0, 0, width_, height_}, palette(dark_).window);
+                for (const bool text_pass : {false, true}) {
+                    if (text_pass) {
+                        canvas.begin_text();
+                    }
+                    paint_top_bar(canvas, mem.get(), text_pass);
+                    paint_banner(canvas, text_pass);
+                    paint_list(canvas, mem.get(), text_pass);
+                    paint_footer(canvas, mem.get(), text_pass);
+                }
+            }
+            // The bitmap is already laid out right to left; copy it as it is.
+            SetLayout(hdc, 0);
+            BitBlt(hdc, 0, 0, width_, height_, mem.get(), 0, 0, SRCCOPY);
+        }
+    }
+    EndPaint(hwnd_, &ps);
+}
+
+void MainWindow::paint_top_bar(Canvas& c, HDC /*dc*/, bool text_pass) const {
+    const Palette& p = palette(dark_);
+    const float border = std::max(1.0F, pxf(1.0F));
+    const RECT search = search_box();
+    const RECT add = new_project_button();
+    const RECT settings = settings_button();
+    if (!text_pass) {
+        c.round_rect(search, pxf(4), p.input, p.input_border, border);
+        // Magnifier, 14 px on a 16 grid (mirrored in right-to-left, as in the mockup).
+        const float k = pxf(14) / 16.0F;
+        const auto ix = static_cast<float>(search.left + px(10));
+        const auto iy = static_cast<float>(search.top) + (static_cast<float>(height_of(search)) - pxf(14)) / 2.0F;
+        c.circle(ix + 7 * k, iy + 7 * k, 5 * k, p.text_subtle, 1.4F * k);
+        c.line(ix + 11 * k, iy + 11 * k, ix + 14.5F * k, iy + 14.5F * k, p.text_subtle, 1.4F * k);
+
+        c.round_rect(add, pxf(4), p.accent);
+
+        c.round_rect(settings, pxf(4), hover_.part == Part::Settings ? p.row_hover : p.button, p.button_border,
+                     border);
+        // Gear, 16 px on a 16 grid.
+        const float g = pxf(16) / 16.0F;
+        const float gx = static_cast<float>(settings.left + settings.right) / 2.0F - 8 * g;
+        const float gy = static_cast<float>(settings.top + settings.bottom) / 2.0F - 8 * g;
+        c.circle(gx + 8 * g, gy + 8 * g, 2.5F * g, p.text, 1.3F * g);
+        constexpr float kSpokes[][4] = {{8, 1.5F, 8, 3.5F},       {8, 12.5F, 8, 14.5F},     {1.5F, 8, 3.5F, 8},
+                                        {12.5F, 8, 14.5F, 8},     {3.4F, 3.4F, 4.8F, 4.8F}, {11.2F, 11.2F, 12.6F, 12.6F},
+                                        {3.4F, 12.6F, 4.8F, 11.2F}, {11.2F, 4.8F, 12.6F, 3.4F}};
+        for (const auto& s : kSpokes) {
+            c.line(gx + s[0] * g, gy + s[1] * g, gx + s[2] * g, gy + s[3] * g, p.text, 1.3F * g);
+        }
+        return;
+    }
+    const RECT title{px(kPad), 0, search.left - px(kGap), px(kTopBarH)};
+    c.text(title, w(text(lang_, Str::Projects)), fonts_.title.get(), p.text, Align::Start, false);
+    c.text(add, w(text(lang_, Str::NewProject)), fonts_.button_bold.get(), p.accent_text, Align::Center, false);
+}
+
+void MainWindow::paint_banner(Canvas& c, bool text_pass) const {
+    const BannerText b = banner();
+    if (b.text.empty()) {
+        return;
+    }
+    const Palette& p = palette(dark_);
+    const StateColors& colors = b.error ? p.banner_error : p.banner_info;
+    const RECT r = banner_rect();
+    if (!text_pass) {
+        c.round_rect(r, pxf(4), colors.fill);
+        return;
+    }
+    RECT inner = r;
+    InflateRect(&inner, -px(12), 0);
+    c.text(inner, w(b.text), fonts_.button.get(), colors.text, Align::Start, false);
+}
+
+void MainWindow::paint_list(Canvas& c, HDC /*dc*/, bool text_pass) const {
+    const Palette& p = palette(dark_);
+    const float border = std::max(1.0F, pxf(1.0F));
+    const RECT card = card_rect();
+    const RECT list = list_rect();
+    if (height_of(card) <= 0) {
+        return;
+    }
+    if (!text_pass) {
+        c.round_rect(card, pxf(8), p.card, p.card_border, border);
+    }
+
+    // Nothing to list: say why (the banner covers "not connected").
+    if (geometry_.empty()) {
+        if (text_pass && shows_rows()) {
+            const std::string message =
+                snap_.rows.empty() ? fill(lang_, Str::NoProjects, {"flo add <folder>"})
+                                   : fill_pattern(text(lang_, Str::NoMatches), false, {isolate_auto(query_)});
+            c.text(list, w(message), fonts_.body.get(), p.text_subtle, Align::Center, false);
+        }
+        return;
+    }
+
+    const bool has_focus = GetFocus() == hwnd_;
+    if (text_pass) {
+        c.clip_text(list);
+    } else {
+        c.clip(list);
+    }
+    for (std::size_t i = 0; i < geometry_.size(); ++i) {
+        const RowGeometry& g = geometry_[i];
+        if (g.row.bottom <= list.top || g.row.top >= list.bottom) {
+            continue;
+        }
+        const ProjectRow& row = snap_.rows[visible_[i]];
+        const int index = static_cast<int>(i);
+        const StateColors& sc = state_colors(p, row.state);
+        const bool on = switch_value(row);
+
+        if (!text_pass) {
+            if (hover_.row == index && hover_.part != Part::None) {
+                c.fill(g.row, p.row_hover);
+            }
+            if (i + 1 < geometry_.size()) {
+                c.fill({g.row.left, g.row.bottom - static_cast<int>(border), g.row.right, g.row.bottom}, p.divider);
+            }
+            // The switch: 40 x 20, a 10 px knob 4 px from the edge (Fluent).
+            const float radius = static_cast<float>(height_of(g.toggle)) / 2.0F;
+            const float knob = pxf(hover_.row == index && hover_.part == Part::Switch ? 6.0F : 5.0F);
+            const float cy = static_cast<float>(g.toggle.top) + radius;
+            if (on) {
+                c.round_rect(g.toggle, radius, p.accent);
+                c.ellipse(static_cast<float>(g.toggle.right) - pxf(9), cy, knob, p.switch_on_knob);
+            } else {
+                c.round_rect(g.toggle, radius, p.switch_off_fill, p.switch_off_border, border);
+                c.ellipse(static_cast<float>(g.toggle.left) + pxf(9), cy, knob, p.switch_off_knob);
+            }
+            for (const RECT& chip : g.chips) {
+                c.round_rect(chip, pxf(10), p.chip);
+            }
+            if (sc.border != sc.fill) {
+                c.round_rect(g.state, pxf(11), sc.fill, sc.border, border);
+            } else {
+                c.round_rect(g.state, pxf(11), sc.fill);
+            }
+            if (show_focus_ && has_focus && focus_ == index) {
+                RECT ring = g.row;
+                InflateRect(&ring, -px(2), -px(2));
+                c.round_outline(ring, pxf(4), p.focus, pxf(2));
+            }
+            continue;
+        }
+
+        c.text(g.name, w(row.name), fonts_.body_bold.get(), p.text, Align::Start, true);
+        if (!row.address.empty()) {
+            const bool openable = g.address.right > g.address.left;
+            c.text(g.line2, w(row.address), fonts_.small.get(), openable ? p.link : p.text_subtle, Align::Start, true);
+        } else {
+            c.text(g.line2, w(row.detail), fonts_.small.get(), p.text_subtle, Align::Start, false);
+        }
+        for (std::size_t k = 0; k < g.chips.size(); ++k) {
+            c.text(g.chips[k], w(row.chips[k]), fonts_.small.get(), p.chip_text, Align::Center, true);
+        }
+        c.text(g.state, w(text(lang_, state_label(row.state))), fonts_.small_bold.get(), sc.text, Align::Center,
+               false);
+    }
+
+    if (!text_pass) {
+        // A thin scroll indicator when the list is taller than the card.
+        const int view = height_of(list);
+        const int content = list_height();
+        if (content > view && view > 0) {
+            const int thumb = std::max(px(24), view * view / content);
+            const int top = list.top + (view - thumb) * scroll_ / (content - view);
+            c.round_rect({list.right - px(6), top + px(2), list.right - px(2), top + thumb - px(2)}, pxf(2),
+                         p.switch_off_border);
+        }
+        c.unclip();
+    } else {
+        c.unclip_text();
+    }
+}
+
+void MainWindow::paint_footer(Canvas& c, HDC dc, bool text_pass) const {
+    const Palette& p = palette(dark_);
+    const RECT f = footer_rect();
+    const bool live = shows_rows() && snap_.link == Link::Connected;
+    const int mid = (f.top + f.bottom) / 2;
+    if (!text_pass) {
+        c.fill(f, p.footer);
+        c.fill({f.left, f.top, f.right, f.top + std::max(1, px(1))}, p.footer_border);
+        if (live) {
+            c.ellipse(static_cast<float>(px(kPad)) + pxf(4), static_cast<float>(mid), pxf(4),
+                      snap_.footer.any_running ? p.footer_dot : p.text_subtle);
+        }
+        return;
+    }
+    if (!live) {
+        return;
+    }
+    const FooterText& t = snap_.footer;
+    int x = px(kPad) + px(8) + px(6);
+    const std::wstring counts = w(t.counts);
+    const int counts_w = Canvas::measure(dc, counts, fonts_.small.get(), rtl_);
+    c.text({x, f.top, x + counts_w + px(2), f.bottom}, counts, fonts_.small.get(), p.text_subtle, Align::Start, false);
+    x += counts_w + px(16);
+    const std::wstring memory = w(t.memory);
+    const int memory_w = Canvas::measure(dc, memory, fonts_.small.get(), rtl_);
+    const int memory_left = f.right - px(kPad) - memory_w;
+    if (!t.nginx.empty() && x < memory_left - px(16)) {
+        c.text({x, f.top, memory_left - px(16), f.bottom}, w(t.nginx), fonts_.small.get(), p.text_subtle,
+               Align::Start, false);
+    }
+    c.text({memory_left - px(2), f.top, f.right - px(kPad), f.bottom}, memory, fonts_.small.get(), p.text_subtle,
+           Align::End, false);
+}
+
+}  // namespace floserver::ui
