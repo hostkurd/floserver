@@ -107,15 +107,12 @@ bool needs_npm_install(const fs::path& dir) {
     if (!text) {
         return false;
     }
-    try {
-        const json doc = json::parse(*text);
-        for (const char* key : {"dependencies", "devDependencies"}) {
-            if (doc.is_object() && doc.contains(key) && doc[key].is_object() && !doc[key].empty()) {
-                return true;
-            }
+    // A damaged file is reported by app_launch(); nothing to install here.
+    const json doc = json::parse(*text, nullptr, false);
+    for (const char* key : {"dependencies", "devDependencies"}) {
+        if (doc.is_object() && doc.contains(key) && doc[key].is_object() && !doc[key].empty()) {
+            return true;
         }
-    } catch (const json::exception&) {
-        // app_launch() reports it
     }
     return false;
 }
@@ -225,7 +222,7 @@ std::optional<AppLaunch> app_launch(const AppSpec& app, Port port, std::string& 
         return std::nullopt;
     }
     if (script_name.empty()) {
-        error = "package.json has no \"dev\" or \"start\" script; add one, or a \"command\" in floserver.json";
+        error = R"(package.json has no "dev" or "start" script; add one, or a "command" in floserver.json)";
         return std::nullopt;
     }
     const auto node = node_program(app.runtime_dir);
@@ -324,7 +321,7 @@ void AppRunner::set_app(const AppSpec& app) {
 
 void AppRunner::stop_process(std::unique_lock<std::mutex>& lock) {
     (void)lock;  // held by the caller
-    std::shared_ptr<ChildProcess> process(std::move(process_));
+    const std::shared_ptr<ChildProcess> process(std::move(process_));
     const auto port = internal_;
     internal_.reset();
     state_ = AppState::Sleeping;

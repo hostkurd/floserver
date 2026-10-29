@@ -69,7 +69,7 @@ TEST_CASE("dev servers that ignore PORT are given --port") {
 }
 
 TEST_CASE("an app starts from floserver.json's command or package.json's scripts") {
-    test_util::TempDir tmp;
+    const test_util::TempDir tmp;
     AppSpec app;
     app.name = "web";
     app.dir = tmp.path() / "web";
@@ -231,7 +231,7 @@ TEST_CASE("an app's server starts on the first request, sleeps when idle and wak
         MESSAGE("python3 isn't installed here; skipped");
         return;
     }
-    test_util::TempDir tmp;
+    const test_util::TempDir tmp;
     AppSpec app;
     app.name = "web";
     app.dir = tmp.path() / "web";
@@ -242,7 +242,7 @@ TEST_CASE("an app's server starts on the first request, sleeps when idle and wak
     std::string error;
     auto runner = AppRunner::open(app, {tmp.path() / "work", nullptr, nullptr}, error);
     REQUIRE_MESSAGE(runner, error);
-    Pump pump(runner);
+    const Pump pump(runner);
 
     CHECK(runner->state() == AppState::Sleeping);
     CHECK(get(app.port, "/hello.txt") == "200 hello from web");
@@ -256,6 +256,7 @@ TEST_CASE("an app's server starts on the first request, sleeps when idle and wak
 
     // Requests while it runs, several at once.
     std::vector<std::thread> burst;
+    burst.reserve(10);
     std::atomic<int> ok{0};
     for (int i = 0; i < 10; ++i) {
         burst.emplace_back([&] { ok += get(app.port, "/hello.txt") == "200 hello from web" ? 1 : 0; });
@@ -294,7 +295,7 @@ TEST_CASE("an app's server starts on the first request, sleeps when idle and wak
 }
 
 TEST_CASE("an app that can't start answers why, and Keep running starts it without a request") {
-    test_util::TempDir tmp;
+    const test_util::TempDir tmp;
     AppSpec app;
     app.name = "web";
     app.dir = tmp.path() / "web";
@@ -305,7 +306,7 @@ TEST_CASE("an app that can't start answers why, and Keep running starts it witho
     std::string error;
     auto runner = AppRunner::open(app, {tmp.path() / "work", nullptr, nullptr}, error);
     REQUIRE(runner);
-    Pump pump(runner);
+    const Pump pump(runner);
 
     const std::string page = get(app.port);
     CHECK(page.starts_with("502 FloServer: web's server isn't running."));
@@ -336,7 +337,7 @@ TEST_CASE("settings changed while starting: the old start is thrown away") {
         MESSAGE("python3 isn't installed here; skipped");
         return;
     }
-    test_util::TempDir tmp;
+    const test_util::TempDir tmp;
     AppSpec app;
     app.name = "web";
     app.dir = tmp.path() / "web";
@@ -348,7 +349,7 @@ TEST_CASE("settings changed while starting: the old start is thrown away") {
     std::string error;
     auto runner = AppRunner::open(app, {tmp.path() / "work", nullptr, nullptr}, error);
     REQUIRE(runner);
-    Pump pump(runner);
+    const Pump pump(runner);
     std::string first;
     std::thread t([&] { first = get(app.port, "/x.txt"); });
     REQUIRE(eventually([&] { return runner->state() == AppState::Starting; }, 5s));
@@ -365,7 +366,7 @@ TEST_CASE("a server that listens on [::1] only is found there") {
         MESSAGE("python3 or IPv6 isn't available here; skipped");
         return;
     }
-    test_util::TempDir tmp;
+    const test_util::TempDir tmp;
     AppSpec app;
     app.name = "web";
     app.dir = tmp.path() / "web";
@@ -376,7 +377,7 @@ TEST_CASE("a server that listens on [::1] only is found there") {
     std::string error;
     auto runner = AppRunner::open(app, {tmp.path() / "work", nullptr, nullptr}, error);
     REQUIRE(runner);
-    Pump pump(runner);
+    const Pump pump(runner);
     CHECK(get(app.port, "/x.txt") == "200 six");
     runner->close();
 }
@@ -387,7 +388,7 @@ TEST_CASE("a Node app runs its dev script through the project's own npm") {
         MESSAGE("node with npm isn't installed here; skipped");
         return;
     }
-    test_util::TempDir tmp;
+    const test_util::TempDir tmp;
     AppSpec app;
     app.name = "web";
     app.dir = tmp.path() / "web";
@@ -403,7 +404,7 @@ TEST_CASE("a Node app runs its dev script through the project's own npm") {
     std::string error;
     auto runner = AppRunner::open(app, {tmp.path() / "work", nullptr, nullptr}, error);
     REQUIRE(runner);
-    Pump pump(runner);
+    const Pump pump(runner);
     const std::string body = get(app.port, "/cart?x=1");
     CHECK_MESSAGE(body.starts_with("200 node v"), body);
     CHECK(body.ends_with(" /cart?x=1 web.localhost"));
