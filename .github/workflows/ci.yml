@@ -264,7 +264,8 @@ jobs:
           # An Apache project (D6): WordPress's .htaccess, PHP from the pools,
           # Apache Lounge from the CDN behind nginx; asleep when idle.
           Run "flo install apache" { & "$bin/flo.exe" install apache } | Out-Null
-          $wp = "$env:RUNNER_TEMP\ci-wp"
+          # Under a folder with a space and non-ASCII letters, as C:\Users\Jörg Müller\... is.
+          $wp = "$env:RUNNER_TEMP\Jörg Müller\ci-wp"
           New-Item -ItemType Directory -Force $wp | Out-Null
           Set-Content "$wp\floserver.json" '{ "web": "apache", "php": "8.5" }'
           Set-Content "$wp\.htaccess" @'

@@ -106,6 +106,9 @@ public:
              << "EnableSendfile Off\n"
              << "EnableMMAP Off\n"
              << "Timeout 300\n"
+             // Longer than nginx keeps an idle connection to us (10 s), so
+             // nginx never sends a request on one Apache just closed.
+             << "KeepAliveTimeout 15\n"
              << "ProxyTimeout 300\n"
              << "LimitRequestBody 0\n"
              << "ServerTokens Prod\n"
@@ -125,8 +128,16 @@ public:
              << "</Directory>\n"
              // nginx says whether it received the request over https.
              << "SetEnvIf X-Forwarded-Proto \"^https$\" HTTPS=on\n"
-             // Hidden files and folders (.env, .git, .htaccess) are never served.
-             << "RedirectMatch 404 \"/\\.(?!well-known/)\"\n";
+             // Hidden files and folders (.env, .git, .htaccess) are never
+             // served: by the address, and by the file's real name too (on
+             // Windows /ENV~1 is .env).
+             << "RedirectMatch 404 \"/\\.(?!well-known/)\"\n"
+             << "<FilesMatch \"^\\.\">\n"
+             << "    Require all denied\n"
+             << "</FilesMatch>\n"
+             << "<DirectoryMatch \"/\\.(?!well-known(/|$))\">\n"
+             << "    Require all denied\n"
+             << "</DirectoryMatch>\n";
 
         // Addresses that aren't a project.
         out_ << "<VirtualHost 127.0.0.1:" << kApachePortPlaceholder << ">\n"
@@ -181,12 +192,16 @@ private:
         const std::string bare = root->substr(1, root->size() - 2);  // without the quotes
         out_ << "\n# Project " << site.name << "\n"
              << "<VirtualHost 127.0.0.1:" << kApachePortPlaceholder << ">\n"
-             << "    ServerName " << site.name << ".localhost\n"
+             // With the scheme: Apache's own redirects (a folder's missing
+             // '/', [R] rewrites) then say https, on 8443 too.
+             << "    ServerName " << (site.https ? "https://" : "") << site.name << ".localhost\n"
              << "    DocumentRoot " << *root << "\n"
              << "    <Directory " << *root << ">\n"
              << "        Options FollowSymLinks\n"
              << "        AllowOverride All\n"
              << "        Require all granted\n"
+             // Authorization reaches PHP, as with nginx (REST API tokens).
+             << "        CGIPassAuth On\n"
              << "    </Directory>\n";
         if (!site.php_ports.empty()) {
             // Caseless: on a disk that ignores case, x.PHP is x.php and must
@@ -197,7 +212,9 @@ private:
                 const bool last = i + 1 == groups.size();
                 out_ << "        <" << (i == 0 ? "If" : "ElseIf") << " \"-f %{REQUEST_FILENAME}"
                      << (last ? std::string() : " && %{REMOTE_PORT} =~ /" + groups[i] + "$/") << "\">\n"
-                     << "            SetHandler \"proxy:fcgi://127.0.0.1:" << site.php_ports[i] << "\"\n"
+                     // The '/': Apache adds the script's path, which on Windows
+                     // starts with a drive letter ("D:/..."), not '/'.
+                     << "            SetHandler \"proxy:fcgi://127.0.0.1:" << site.php_ports[i] << "/\"\n"
                      << "        </" << (i == 0 ? "If" : "ElseIf") << ">\n";
             }
             out_ << "    </FilesMatch>\n"
@@ -208,6 +225,9 @@ private:
                  // SCRIPT_NAME empty or with the path info in it.
                  << "    ProxyFCGIBackendType GENERIC\n"
                  << R"x(    ProxyFCGISetEnvIf "true" !PATH_TRANSLATED)x" << "\n"
+                 // php-cgi moves PATH_INFO aside when REDIRECT_URL is set
+                 // (rewrites to index.php/$1); nginx doesn't send it either.
+                 << R"x(    ProxyFCGISetEnvIf "true" !REDIRECT_URL)x" << "\n"
                  << R"x(    ProxyFCGISetEnvIf "reqenv('PATH_INFO') == reqenv('SCRIPT_FILENAME')" !PATH_INFO)x" << "\n"
                  << R"x(    ProxyFCGISetEnvIf "reqenv('SCRIPT_NAME') =~ m#^/.*?\\.php(/.*)$#i" PATH_INFO "$1")x" << "\n"
                  << R"x(    ProxyFCGISetEnvIf "reqenv('SCRIPT_FILENAME') =~ m|^\\Q)x" << bare

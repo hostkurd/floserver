@@ -134,8 +134,15 @@ WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
         }
 
         // Apache projects (D6) are PHP projects served by the shared Apache:
-        // the same pools, Apache for .htaccess.
+        // the same pools, Apache for .htaccess. Apache reads [ ] * ? in a
+        // folder path as a pattern, and | can't go into its regex.
         const bool apache = pc.web == WebServer::Apache;
+        if (apache && path_to_utf8(site.doc_root).find_first_of("[]*?|") != std::string::npos) {
+            site.state = SiteState::Problem;
+            site.problem = "the folder path has one of [ ] * ? | in it, which Apache can't use; rename the folder";
+            plan.sites.push_back(std::move(site));
+            continue;
+        }
         // Python or Node without PHP: the project's own server, forwarded to
         // (D11, D17). Python serves when both are named (a Django app with a
         // Vite front end); with PHP, they're only there for their tools.

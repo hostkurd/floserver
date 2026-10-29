@@ -26,6 +26,7 @@ struct ApacheSite {
     std::string name;                 // checked: project_name_problem()
     std::filesystem::path doc_root;
     std::vector<Port> php_ports;      // the pool's workers; empty: static files only
+    bool https = false;               // nginx serves it over https: Apache's own redirects say so
 };
 
 struct ApacheSpec {

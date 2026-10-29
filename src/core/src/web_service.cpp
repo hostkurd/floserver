@@ -301,6 +301,10 @@ void WebService::reload_locked() {
         error_ = "there's no free port for PHP from 9100 upwards";
         return;
     }
+    // HTTPS once the local CA exists and isn't known to be untrusted.
+    const auto ca = certs_.load_ca(error);
+    const bool tls = ca.has_value() && ca_trust_state(ca->der) != TrustState::NotTrusted;
+
     // The shared Apache (D6), for the projects that ask for it: one more
     // app, under a name no project can have, PHP from the same pools.
     std::string apache_error;
@@ -309,7 +313,7 @@ void WebService::reload_locked() {
         bool keep = false;
         for (const PlannedSite& p : plan.sites) {
             if (p.state == SiteState::Ready && p.apache) {
-                as.sites.push_back({p.name, p.doc_root, plan.pools.at(*p.pool).ports});
+                as.sites.push_back({p.name, p.doc_root, plan.pools.at(*p.pool).ports, tls});
                 const Project* project = find_project(*app, p.name);
                 keep = keep || (project != nullptr && project->keep_running);
             }
@@ -404,8 +408,7 @@ void WebService::reload_locked() {
     };
 
     std::vector<NginxSite> serve;
-    const auto ca = certs_.load_ca(error);
-    tls_ = ca.has_value() && ca_trust_state(ca->der) != TrustState::NotTrusted;
+    tls_ = tls;
     for (const PlannedSite& p : plan.sites) {
         if (p.state != SiteState::Ready) {
             continue;

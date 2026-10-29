@@ -203,6 +203,15 @@ TEST_CASE("Apache projects are PHP projects served by the shared Apache (D6)") {
     CHECK(plan.apache_version == "2.4.69");
     CHECK(plan.apache_dir == kBase / "runtimes" / "apache" / "2.4.69");
     CHECK(plan.apps.empty());
+
+    // Folder names Apache reads as a pattern: that project alone can't run.
+    config.projects = {project("old"), project("wp")};
+    config.projects[0].dir = kBase / "projects" / "shop [old]";
+    const auto bad = plan_sites(config, reader({{"old", R"({"web": "apache"})"}, {"wp", R"({"web": "apache"})"}}),
+                                installed, std::nullopt);
+    CHECK(bad.sites[0].state == SiteState::Problem);
+    CHECK(bad.sites[0].problem.find("Apache can't use") != std::string::npos);
+    CHECK(bad.sites[1].state == SiteState::Ready);
 }
 
 TEST_CASE("the Apache config: one host per project, PHP to the pools, .htaccess read") {
@@ -219,9 +228,16 @@ TEST_CASE("the Apache config: one host per project, PHP to the pools, .htaccess 
     CHECK(text->find("AllowOverride All") != std::string::npos);
     // Both workers, split by the client port's last digit.
     CHECK(text->find("<If \"-f %{REQUEST_FILENAME} && %{REMOTE_PORT} =~ /[0-4]$/\">\n"
-                     "            SetHandler \"proxy:fcgi://127.0.0.1:9101\"") != std::string::npos);
+                     "            SetHandler \"proxy:fcgi://127.0.0.1:9101/\"") != std::string::npos);
     CHECK(text->find("<ElseIf \"-f %{REQUEST_FILENAME}\">\n"
-                     "            SetHandler \"proxy:fcgi://127.0.0.1:9102\"") != std::string::npos);
+                     "            SetHandler \"proxy:fcgi://127.0.0.1:9102/\"") != std::string::npos);
+    CHECK(text->find("CGIPassAuth On") != std::string::npos);
+    CHECK(text->find(R"(ProxyFCGISetEnvIf "true" !REDIRECT_URL)") != std::string::npos);
+    CHECK(text->find("KeepAliveTimeout 15") != std::string::npos);
+    CHECK(text->find("ServerName wp.localhost\n") != std::string::npos);  // plain http until there's a CA
+    spec.sites[0].https = true;
+    CHECK(make_apache_config(spec, error)->find("ServerName https://wp.localhost\n") != std::string::npos);
+    spec.sites[0].https = false;
     CHECK(text->find("balancer") == std::string::npos);
     CHECK(text->find("PidFile " + *nginx_quoted_path(kBase / "web" / "apache" / "httpd-{port}.pid")) !=
           std::string::npos);
