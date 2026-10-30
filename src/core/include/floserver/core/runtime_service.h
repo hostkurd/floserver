@@ -44,6 +44,9 @@ struct RuntimeServiceConfig {
     std::chrono::milliseconds retry_delay{3000};
     // A list fetched less than this long ago is used without asking again.
     std::chrono::minutes list_max_age{60};
+    // The templates used when no signed list with templates can be had
+    // (offline, first run): a JSON array, normally kBuiltInTemplatesJson.
+    std::string builtin_templates_json = "[]";
 };
 
 // Why a request was refused; the codes go out on the channel.
@@ -71,10 +74,11 @@ public:
     // With `refresh`, the list is fetched again even when it's fresh.
     [[nodiscard]] nlohmann::json list(bool refresh, bool installed_only = false);
 
-    // The project templates of the list (D9), fetching it when there's no
-    // fresh copy; nothing (with `error`) when it can't be had.
-    // With `fetch` false only a list already in hand is used (a project job
-    // must never wait on the network at quit).
+    // The project templates (D9): the signed list's, fetching it when there's
+    // no fresh copy. Offline (or with `fetch` false, so a project job never
+    // waits on the network at quit) the last signed list kept on disk is used,
+    // else the templates built into FloServer. Nothing (with `error`) only
+    // when none of those has any.
     [[nodiscard]] std::optional<std::vector<ProjectTemplate>> templates(std::string& error, bool fetch = true);
 
     // Queues an install of the newest `name` matching `version` ("8.5",
@@ -106,6 +110,8 @@ private:
     // The list, fetched again when missing, stale or asked to. Nothing (with
     // `error`) when it can't be had.
     std::optional<CachedList> get_list(bool refresh, std::string& error);
+    // The templates without the network: the kept list's, else the built-in ones.
+    std::optional<std::vector<ProjectTemplate>> offline_templates(std::string& error);
     [[nodiscard]] std::filesystem::path runtimes_root() const;
     void worker();
     void run(Job& job);
@@ -119,6 +125,8 @@ private:
     std::condition_variable list_changed_;
     std::optional<CachedList> list_;
     bool fetching_ = false;
+    std::mutex offline_mutex_;  // guards offline_
+    std::optional<std::vector<ProjectTemplate>> offline_;
     std::atomic<bool> stop_requested_{false};
 
     mutable std::mutex jobs_mutex_;

@@ -4,6 +4,7 @@
 // removal), the project list, the local certificate authority, and running
 // the projects: nginx and the PHP pools that sleep when idle.
 
+#include "floserver/core/builtin_templates.h"
 #include "floserver/core/build_info.h"
 #include "floserver/core/builtin.h"
 #include "floserver/core/certificates.h"
@@ -94,6 +95,7 @@ std::unique_ptr<floserver::core::RuntimeService> make_runtimes() {
     config.platform = std::string(core::current_platform());
     config.keys = core::builtin_manifest_keys();
     config.source = {std::string(core::kManifestUrl), std::string(core::kManifestSignatureUrl)};
+    config.builtin_templates_json = std::string(core::kBuiltInTemplatesJson);
     // The Visual C++ runtime DLLs ship next to floserverd (cmake: vcruntime/).
     if (const auto self = core::executable_path()) {
         const auto vc = self->parent_path() / "vcruntime";

@@ -2,6 +2,25 @@
 
 configure_file(build_info.h.in ${CMAKE_CURRENT_BINARY_DIR}/generated/floserver/core/build_info.h @ONLY)
 
+# The templates built into FloServer for offline use: the same file the
+# manifest tool puts into the signed list.
+set(FLOSERVER_TEMPLATES_FILE ${PROJECT_SOURCE_DIR}/tools/manifest-tool/templates.json)
+file(READ ${FLOSERVER_TEMPLATES_FILE} FLOSERVER_TEMPLATES_JSON)
+# MSVC refuses a string literal over about 16 KB (C2026), counted in bytes.
+string(LENGTH "${FLOSERVER_TEMPLATES_JSON}" FLOSERVER_TEMPLATES_BYTES)
+if(FLOSERVER_TEMPLATES_BYTES GREATER 15000)
+    message(FATAL_ERROR "templates.json is ${FLOSERVER_TEMPLATES_BYTES} bytes; split the literal in builtin_templates.h.in")
+endif()
+string(FIND "${FLOSERVER_TEMPLATES_JSON}" ")FLOTPL" FLOSERVER_TEMPLATES_DELIMITER)
+if(NOT FLOSERVER_TEMPLATES_DELIMITER EQUAL -1)
+    message(FATAL_ERROR "templates.json holds the raw string delimiter )FLOTPL")
+endif()
+if(FLOSERVER_TEMPLATES_JSON MATCHES "@[A-Za-z_]+@")
+    message(FATAL_ERROR "templates.json holds an @WORD@ that configure_file would replace")
+endif()
+configure_file(builtin_templates.h.in ${CMAKE_CURRENT_BINARY_DIR}/generated/floserver/core/builtin_templates.h @ONLY)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${FLOSERVER_TEMPLATES_FILE})
+
 add_library(floserver_core STATIC
     src/builtin.cpp
     src/der.cpp
