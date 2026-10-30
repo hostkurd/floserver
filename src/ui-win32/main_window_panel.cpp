@@ -183,6 +183,14 @@ std::size_t MainWindow::field_value(const VersionField& field) const {
     return field.current;
 }
 
+std::string MainWindow::panel_button_text(PanelAction action) const {
+    if (action == PanelAction::Download) {
+        const ProjectRow* row = selected_row();
+        return row != nullptr ? download_button_text(downloads_for(*row, snap_.installed), lang_) : std::string();
+    }
+    return std::string(text(lang_, action_label(static_cast<int>(action))));
+}
+
 // --- geometry ----------------------------------------------------------------
 
 MainWindow::PanelGeometry MainWindow::panel_geometry(HDC dc) const {
@@ -211,7 +219,7 @@ MainWindow::PanelGeometry MainWindow::panel_geometry(HDC dc) const {
     int x = x0;
     const auto add_button = [&](PanelAction action) {
         const int bw =
-            Canvas::measure(dc, w(text(lang_, action_label(static_cast<int>(action)))), fonts_.button.get(), rtl_) +
+            Canvas::measure(dc, w(panel_button_text(action)), fonts_.button.get(), rtl_) +
             px(24);
         if (x > x0 && x + bw > x1) {
             x = x0;
@@ -220,6 +228,11 @@ MainWindow::PanelGeometry MainWindow::panel_geometry(HDC dc) const {
         g.buttons.emplace_back(RECT{x, y, std::min(x1, x + bw), y + px(kButtonH)}, action);
         x += bw + px(kButtonGap);
     };
+    // The row's Download button again, where the keyboard reaches it.
+    std::string ignored;
+    if (row_end(*row, ignored) == RowGeometry::End::Download) {
+        add_button(PanelAction::Download);
+    }
     if (is_openable_address(row->address)) {
         add_button(PanelAction::Browser);
     }
@@ -427,6 +440,9 @@ void MainWindow::run_panel_action(PanelAction action) {
             if (worker_) {
                 worker_->open_in_studio(row->name);
             }
+            break;
+        case PanelAction::Download:
+            start_downloads_for(row->name);
             break;
     }
 }
@@ -725,7 +741,7 @@ void MainWindow::paint_panel(Canvas& c, HDC dc, bool text_pass) const {
         c.text(g.line2, w(row->path), fonts_.button.get(), p.text_subtle, Align::Start, true);
     }
     for (const auto& [rect, action] : g.buttons) {
-        c.text(rect, w(text(lang_, action_label(static_cast<int>(action)))), fonts_.button.get(), p.text, Align::Center,
+        c.text(rect, w(panel_button_text(action)), fonts_.button.get(), p.text, Align::Center,
                false);
     }
 

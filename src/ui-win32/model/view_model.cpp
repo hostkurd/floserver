@@ -132,6 +132,13 @@ ProjectRow row_from(const json& p, Lang lang) {
     if (!database.empty()) {
         row.chips.push_back(database_chip(database));
     }
+    if (p.contains("missing") && p["missing"].is_array()) {
+        for (const auto& m : p["missing"]) {
+            if (m.is_string() && !m.get_ref<const std::string&>().empty()) {
+                row.missing.push_back(m.get<std::string>());
+            }
+        }
+    }
     row.path = path;
     row.php = php;
     row.node = node;
@@ -550,6 +557,88 @@ std::string env_text(const json& login) {
         }
     }
     return out;
+}
+
+// --- downloads -------------------------------------------------------------------
+
+std::vector<Download> downloads_for(const ProjectRow& row, const Installed& installed) {
+    std::vector<Download> out;
+    const auto add = [&out](Download d) {
+        if (std::find(out.begin(), out.end(), d) == out.end()) {
+            out.push_back(std::move(d));
+        }
+    };
+    for (const std::string& m : row.missing) {
+        const std::size_t space = m.find(' ');
+        Download d{m.substr(0, space), space == std::string::npos ? std::string() : m.substr(space + 1)};
+        // Only names and versions the service could have meant; anything else isn't offered.
+        const bool name_ok = !d.name.empty() && std::all_of(d.name.begin(), d.name.end(), [](char c) {
+            return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+        });
+        // Digits and single dots, starting and ending with a digit ("8", "8.2", "11.4.13").
+        const bool version_ok =
+            d.version.empty() ||
+            (d.version.front() != '.' && d.version.back() != '.' && d.version.find("..") == std::string::npos &&
+             std::all_of(d.version.begin(), d.version.end(), [](char c) { return (c >= '0' && c <= '9') || c == '.'; }));
+        if (name_ok && version_ok) {
+            add(std::move(d));
+        }
+    }
+    if (!out.empty() && !installed.contains("nginx")) {
+        add({"nginx", {}});
+    }
+    return out;
+}
+
+std::string runtime_label(std::string_view name) {
+    if (name == "php") {
+        return "PHP";
+    }
+    if (name == "mariadb") {
+        return "MariaDB";
+    }
+    if (name == "node") {
+        return "Node.js";
+    }
+    if (name == "python") {
+        return "Python";
+    }
+    if (name == "composer") {
+        return "Composer";
+    }
+    if (name == "apache") {
+        return "Apache";
+    }
+    return std::string(name);
+}
+
+std::string download_button_text(const std::vector<Download>& downloads, Lang lang) {
+    if (downloads.size() == 1) {
+        const Download& d = downloads.front();
+        return fill(lang, Str::DownloadOne, {runtime_label(d.name) + (d.version.empty() ? "" : " " + d.version)});
+    }
+    return fill_pattern(text(lang, Str::DownloadMany), false, {std::to_string(downloads.size())});
+}
+
+std::string job_progress_text(const json& job, Lang lang) {
+    const std::string state = text_of(job, "state");
+    if (state.empty() || state == "done" || state == "failed" || state == "cancelled") {
+        return {};
+    }
+    std::string what = runtime_label(text_of(job, "name"));
+    if (const std::string version = text_of(job, "version"); !version.empty()) {
+        what += " " + version;
+    }
+    if (state == "downloading") {
+        const auto received = count_of(job, "received");
+        const auto total = count_of(job, "total");
+        if (received && total && *total > 0) {
+            const std::uint64_t percent = std::min<std::uint64_t>(100, *received * 100 / *total);
+            return fill(lang, Str::Downloading, {what, std::to_string(percent) + "%"});
+        }
+        return fill(lang, Str::Downloading, {what, ""});
+    }
+    return fill(lang, Str::Installing, {what});
 }
 
 }  // namespace floserver::ui

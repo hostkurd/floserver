@@ -102,6 +102,11 @@ constexpr std::array kTable{
     Entry{Str::OpenFailed, "Couldn't open {0}", "تعذّر فتح {0}", "نەتوانرا {0} بکرێتەوە"},
     Entry{Str::AddExistingFolder, "Add an existing folder…", "إضافة مجلد موجود…", "زیادکردنی بوخچەیەکی هەبوو…"},
     Entry{Str::AddFailed, "Couldn't add {0}: {1}", "تعذّرت إضافة {0}: {1}", "نەتوانرا {0} زیاد بکرێت: {1}"},
+    Entry{Str::DownloadOne, "Download {0}", "تنزيل {0}", "داگرتنی {0}"},
+    Entry{Str::DownloadMany, "Download {0} runtimes", "تنزيل بيئات التشغيل ({0})", "داگرتنی ژینگەکانی کارپێکردن ({0})"},
+    Entry{Str::Downloading, "Downloading {0}… {1}", "جارٍ تنزيل {0}… {1}", "{0} دادەگیرێت… {1}"},
+    Entry{Str::Installing, "Installing {0}…", "جارٍ تثبيت {0}…", "{0} دادەمەزرێت…"},
+    Entry{Str::DownloadFailed, "Couldn't download {0}: {1}", "تعذّر تنزيل {0}: {1}", "نەتوانرا {0} دابگیرێت: {1}"},
 };
 
 #undef FLO_LRI

@@ -44,6 +44,7 @@ private:
         NewProject,
         Settings,
         Banner,
+        Download,  // a row's Download button
         // The project panel; `row` is the item's index where there are several.
         PanelClose,
         PanelAddress,
@@ -52,7 +53,7 @@ private:
         PanelCopyEnv,
         PanelKeep,
     };
-    enum class PanelAction : std::uint8_t { Browser, Folder, Terminal, Studio };
+    enum class PanelAction : std::uint8_t { Browser, Folder, Terminal, Studio, Download };
     [[nodiscard]] static constexpr bool is_panel_part(Part part) {
         return part == Part::PanelClose || part == Part::PanelAddress || part == Part::PanelButton ||
                part == Part::PanelField || part == Part::PanelCopyEnv || part == Part::PanelKeep;
@@ -72,6 +73,9 @@ private:
         RECT address{};  // the address text itself; empty when there's nothing to open
         RECT state{};
         std::vector<RECT> chips;  // the first chips.size() of the row's chips that fit
+        // The state label, or a Download button, or an install's progress.
+        enum class End : std::uint8_t { State, Download, Progress } end = End::State;
+        std::string end_text;
     };
     // The panel's pieces, from the last paint (logical coordinates).
     struct PanelGeometry {
@@ -150,6 +154,11 @@ private:
     [[nodiscard]] bool shows_rows() const;
     [[nodiscard]] bool switch_value(const ProjectRow& row) const;
     void toggle(int visible_row);
+    void start_downloads(int visible_row);
+    void start_downloads_for(const std::string& project);
+    [[nodiscard]] std::string panel_button_text(PanelAction action) const;
+    // What a row shows at its end (see RowGeometry::End).
+    [[nodiscard]] RowGeometry::End row_end(const ProjectRow& row, std::string& end_text) const;
     void open_address(int visible_row);
     [[nodiscard]] bool is_settled(const std::string& key) const;
     void settle(const std::vector<std::string>& keys);
@@ -233,6 +242,7 @@ private:
     std::map<std::string, bool> pending_keep_;  // Keep running, per project
     std::map<std::string, std::optional<std::string>> pending_use_;  // ServiceWorker::use_key -> value
     std::map<std::string, int> outstanding_;    // commands not yet finished, per ServiceWorker key
+    std::map<std::string, bool> installing_;    // Download clicked; the worker hasn't reported yet
     std::string change_error_;
     Notice notice_;  // a short message in the banner ("copied")
 
