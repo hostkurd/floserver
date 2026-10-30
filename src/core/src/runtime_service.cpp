@@ -201,7 +201,15 @@ json RuntimeService::list(bool refresh, bool installed_only) {
     return out;
 }
 
-std::optional<std::vector<ProjectTemplate>> RuntimeService::templates(std::string& error) {
+std::optional<std::vector<ProjectTemplate>> RuntimeService::templates(std::string& error, bool fetch) {
+    if (!fetch) {
+        const std::lock_guard lock(list_mutex_);
+        if (!list_) {
+            error = "the template list isn't loaded yet; open New project again";
+            return std::nullopt;
+        }
+        return list_->manifest.templates;
+    }
     const auto cached = get_list(false, error);
     if (!cached) {
         return std::nullopt;

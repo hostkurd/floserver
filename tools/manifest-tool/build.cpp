@@ -339,13 +339,11 @@ BuildResult build_manifest(std::string_view report_json, const BuildOptions& opt
                                [&](const nlohmann::ordered_json& r) { return r.value("name", std::string()) == name; });
         };
         for (const ProjectTemplate& t : parsed) {
-            for (const TemplateNeed& n : t.needs) {
+            // The same list a project job installs from.
+            for (const TemplateNeed& n : template_runtime_needs(t, t.parsed)) {
                 if (!listed(n.name)) {
                     fail("template " + t.id + " needs " + n.name + ", which the list doesn't have");
                 }
-            }
-            if (t.parsed.database && !listed(t.parsed.database->family)) {
-                fail("template " + t.id + " uses " + t.parsed.database->family + ", which the list doesn't have");
             }
         }
         result.template_count = parsed.size();

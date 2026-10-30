@@ -264,6 +264,10 @@ TEST_CASE("UTC times are written in the manifest's format") {
 
 TEST_CASE("the built-in templates go into the list, and their runtimes must be there") {
     auto report = real_report();
+    report["files"].push_back({{"path", "python/3.13.18/cpython-3.13.18-20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz"},
+                               {"size", 25000000},
+                               {"sha256", std::string(64, 'b')},
+                               {"result", "ok"}});
     report["files"].push_back({{"path", "wordpress/7.1.4/wordpress-7.1.4.zip"},
                                {"size", 27000000},
                                {"sha256", std::string(64, 'a')},
@@ -289,9 +293,10 @@ TEST_CASE("the built-in templates go into the list, and their runtimes must be t
     CHECK(wordpress);
 
     SUBCASE("a template whose runtime isn't listed is refused") {
-        const auto without = build_manifest(real_report().dump(), o);  // no WordPress file
+        const auto without = build_manifest(real_report().dump(), o);  // no WordPress or Python file
         CHECK_FALSE(without.manifest_json);
         CHECK(has_error_with(without, "template wordpress needs wordpress"));
+        CHECK(has_error_with(without, "template python-app needs python"));
     }
     SUBCASE("a template the app would skip is refused") {
         o.templates_json = R"([{"id": "Bad Id"}])";

@@ -188,6 +188,7 @@ TEST_CASE("a template job makes the folder, installs what's missing, adds the pr
         INFO(job.dump(2));
         CHECK(job["state"] == "done");
         CHECK(job["project"] == "shop");
+        CHECK_FALSE(service.cancel(*id));  // finished: nothing to cancel
         CHECK(installed == std::vector<std::string>{"php 8.4", "mariadb 11.4"});  // nginx was there
         REQUIRE(added.size() == 1);
         CHECK(fs::equivalent(path_from_utf8(added[0]), sites / "shop"));
@@ -214,6 +215,14 @@ TEST_CASE("a template job makes the folder, installs what's missing, adds the pr
         CHECK(refusal.code == "folder_exists");
         CHECK_FALSE(service.create({"php-app", "shop", sites, {{"root", "/"}}}, refusal));
         CHECK(refusal.code == "bad_params");
+        // A link where the folder would go: never followed.
+        fs::create_directories(tmp.path() / "elsewhere");
+        std::error_code ec;
+        fs::create_directory_symlink(tmp.path() / "elsewhere", sites / "linked", ec);
+        if (!ec) {
+            CHECK_FALSE(service.create({"php-app", "linked", sites, {}}, refusal));
+            CHECK(refusal.code == "folder_exists");
+        }
     }
     SUBCASE("an unknown template fails the job") {
         const auto id = service.create({"nope", "shop", sites, {}}, refusal);

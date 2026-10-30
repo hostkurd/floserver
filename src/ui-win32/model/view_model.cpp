@@ -153,6 +153,10 @@ ProjectRow row_from(const json& p, Lang lang) {
         row.wants.database = text_of(want, "database");
         row.wants.web = text_of(want, "web") == "apache" ? "apache" : "nginx";
     }
+    row.static_site = flag_of(p, "static");
+    if (row.static_site) {
+        row.chips.emplace_back("Static");  // the mockup's "Static · nginx"
+    }
     // The web server last, as in the mockup. nginx only when floserver.json
     // could be read (it serves every project that isn't Apache's).
     if (text_of(p, "web") == "apache") {
@@ -433,7 +437,7 @@ std::vector<VersionField> version_fields(const ProjectRow& row, const Installed&
     // PHP: without the key, a PHP project gets the newest installed; a Node
     // or Python project gets none.
     VersionField php{Field::Php, "php", std::string(text(lang, Str::FieldPhp)), {}, 0};
-    const bool own_server = w.php.empty() && (!w.node.empty() || !w.python.empty());
+    const bool own_server = w.php.empty() && (!w.node.empty() || !w.python.empty() || row.static_site);
     php.choices.push_back({std::string(text(lang, own_server ? Str::ChoiceNone : Str::ChoiceNewest)), std::nullopt});
     add_series(php, installed, "php", w.php, "", "", lang);
     out.push_back(std::move(php));

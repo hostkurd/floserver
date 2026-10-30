@@ -90,8 +90,7 @@ private:
     std::filesystem::path data_dir_;
     TemplateHooks hooks_;
     mutable std::mutex mutex_;
-    std::map<std::int64_t, std::shared_ptr<Job>> jobs_;
-    std::vector<std::thread> threads_;
+    std::map<std::int64_t, std::shared_ptr<Job>> jobs_;  // each holds its thread
     std::int64_t next_id_ = 1;
     bool stopping_ = false;
 };

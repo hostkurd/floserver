@@ -89,6 +89,12 @@ struct ProjectTemplate {
 // A template as the window shows it (templates.list): no files or steps.
 [[nodiscard]] nlohmann::json template_summary(const ProjectTemplate& t);
 
+// Every runtime a project from `t` needs, with `config` as its floserver.json
+// (the template's own, or with the user's versions): its PHP (the newest
+// when a PHP project names none), Node, Python, database, Apache, nginx,
+// and the template's "needs". Versions are as written ("" for the newest).
+[[nodiscard]] std::vector<TemplateNeed> template_runtime_needs(const ProjectTemplate& t, const ProjectConfig& config);
+
 // A step's arguments with {dir} and {name} filled in.
 [[nodiscard]] std::vector<std::string> fill_step_args(const TemplateStep& step, std::string_view dir,
                                                       std::string_view name);

@@ -150,12 +150,15 @@ TEST_CASE("projects run with real nginx and php-cgi, sleep when idle and wake on
     test_util::write_file(api / "index.php", "<?php echo 'api';");
     const fs::path broken = tmp.path() / "broken";
     test_util::write_file(broken / "floserver.json", R"({"php": 8})");
+    const fs::path landing = tmp.path() / "landing";
+    test_util::write_file(landing / "index.html", "landing page");
 
     AppConfig app;
     std::string error;
     REQUIRE(add_project(app, shop, "", error));
     REQUIRE(add_project(app, api, "", error));
     REQUIRE(add_project(app, broken, "", error));
+    REQUIRE(add_project(app, landing, "", error));
     for (Project& p : app.projects) {
         p.on = true;
     }
@@ -182,6 +185,10 @@ TEST_CASE("projects run with real nginx and php-cgi, sleep when idle and wake on
     CHECK(st["sites"]["shop"]["run"] == "sleeping");
     CHECK_FALSE(st["sites"].contains("broken"));  // a bad file only stops its own project
     CHECK(st["pools"].size() == 1);               // shop and api share PHP 8.3 with no extensions
+    // HTML only: nginx serves it, with no PHP behind it.
+    CHECK(st["sites"]["landing"]["run"] == "running");
+    CHECK_FALSE(st["sites"]["landing"].contains("pool"));
+    CHECK(get(http, "landing.localhost") == "200 landing page");
 
     SUBCASE("serve, sleep, wake under a burst") {
         CHECK(get(http, "shop.localhost", "/cart?x=1") == "200 shop /cart?x=1");

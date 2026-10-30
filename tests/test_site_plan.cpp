@@ -476,3 +476,38 @@ TEST_CASE("the nginx config serves PHP and static sites on loopback") {
         CHECK(t->find("ssl") == std::string::npos);
     }
 }
+
+TEST_CASE("an HTML-only project is a static site: no PHP, no download") {
+    const test_util::TempDir tmp;
+    test_util::write_file(tmp.path() / "landing" / "index.html", "<h1>hi</h1>");
+    test_util::write_file(tmp.path() / "landing" / "css" / "site.css", "body{}");
+    test_util::write_file(tmp.path() / "shop" / "index.PHP", "<?php");  // caseless
+    test_util::write_file(tmp.path() / "data" / "index.html", "db");
+    AppConfig config;
+    config.projects = {{"landing", tmp.path() / "landing", true, false, {}},
+                       {"shop", tmp.path() / "shop", true, false, {}},
+                       {"pinned", tmp.path() / "landing", true, false, {}},
+                       {"data", tmp.path() / "data", true, false, {}},
+                       {"missing", tmp.path() / "not-made-yet", true, false, {}}};
+    const auto files = reader({{"pinned", R"({"php": "8.4"})"}, {"data", R"({"database": "mariadb-11.8"})"}});
+
+    // Nothing installed but nginx: the static site is ready all the same.
+    const std::vector<InstalledRuntime> only_nginx = {runtime("nginx", "1.30.6")};
+    const auto plan = plan_sites(config, files, only_nginx, std::nullopt);
+    REQUIRE(plan.sites.size() == 5);
+    CHECK(plan.sites[0].static_site);
+    CHECK(plan.sites[0].state == SiteState::Ready);
+    CHECK_FALSE(plan.sites[0].pool);
+    CHECK_FALSE(plan.sites[1].static_site);               // a .php file makes it PHP
+    CHECK(plan.sites[1].state == SiteState::NeedsDownload);
+    CHECK_FALSE(plan.sites[2].static_site);               // so does a PHP version
+    CHECK(plan.sites[3].static_site);                     // a database alone doesn't need PHP
+    CHECK(plan.sites[3].state == SiteState::NeedsDownload);
+    CHECK(plan.sites[3].missing == std::vector<std::string>{"mariadb 11.8"});
+    CHECK_FALSE(plan.sites[4].static_site);               // a folder not there yet: as before
+    CHECK(plan.pools.empty());
+
+    CHECK_FALSE(has_php_files(tmp.path() / "landing"));
+    CHECK(has_php_files(tmp.path() / "shop"));
+    CHECK(has_php_files(tmp.path() / "nope"));
+}

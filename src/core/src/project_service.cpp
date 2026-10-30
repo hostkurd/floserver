@@ -37,6 +37,9 @@ json site_json(const Project& project, const PlannedSite& site, const WebPlan& p
     if (site.apache) {
         out["web"] = "apache";
     }
+    if (site.static_site) {
+        out["static"] = true;
+    }
     if (site.app) {
         const AppSpec& app = plan.apps.at(*site.app);
         out[app.kind == AppKind::Python ? "python" : "node"] = app.version;

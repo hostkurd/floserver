@@ -1,7 +1,6 @@
 #include "floserver/core/template_service.h"
 
 #include "floserver/core/child_process.h"
-#include "floserver/core/crypto.h"
 #include "floserver/core/encoding.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/project_registry.h"
@@ -64,10 +63,32 @@ std::string titled(const std::string& name, const std::string& version) {
 // A word in a shown command: quoted when it has a space.
 std::string shown_arg(const std::string& a) { return a.find(' ') == std::string::npos ? a : "\"" + a + "\""; }
 
-bool folder_is_empty(const fs::path& dir) {
+// A new project's folder must not be there, or be a real, empty folder: a
+// link or junction there would send every file somewhere else.
+bool folder_is_free(const fs::path& dir) {
     std::error_code ec;
-    return fs::is_directory(dir, ec) && fs::is_empty(dir, ec) && !ec;
+    const fs::file_status status = fs::symlink_status(dir, ec);
+    if (status.type() == fs::file_type::not_found) {
+        return true;
+    }
+    return !ec && status.type() == fs::file_type::directory && fs::is_empty(dir, ec) && !ec;
 }
+
+// The same folder, by Windows' rules on Windows (case doesn't count).
+bool same_folder(const std::string& a, const std::string& b) {
+#ifdef _WIN32
+    return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
+               const auto lower = [](char c) { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c; };
+               return lower(x) == lower(y);
+           });
+#else
+    return a == b;
+#endif
+}
+
+constexpr std::size_t kMaxPending = std::size_t{8} * 1024;
+constexpr std::size_t kMaxLine = 1000;
+constexpr std::size_t kKeptFinishedJobs = 8;
 
 // Copies a runtime's files into the new project, leaving out FloServer's marker.
 bool copy_runtime(const fs::path& from, const fs::path& to, std::string& error) {
@@ -99,22 +120,8 @@ bool copy_runtime(const fs::path& from, const fs::path& to, std::string& error) 
     return true;
 }
 
-std::string random_salt() {
-    // Letters, digits and punctuation that's safe inside a PHP single-quoted string.
-    static constexpr std::string_view kAlphabet =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&()*+,-./:;<=>?@[]^_{|}~";
-    std::array<std::uint8_t, 64> bytes{};
-    std::string error;
-    if (!random_bytes(bytes, error)) {
-        return {};
-    }
-    std::string out;
-    out.reserve(bytes.size());
-    for (const std::uint8_t b : bytes) {
-        out += kAlphabet[b % kAlphabet.size()];
-    }
-    return out;
-}
+// 64 letters and digits (about 380 bits), safe inside a PHP single-quoted string.
+std::string random_salt() { return generate_password(64).value_or(std::string()); }
 
 }  // namespace
 
@@ -153,6 +160,7 @@ std::optional<std::string> make_wp_config(const std::string& sample, const Datab
 
 struct TemplateService::Job {
     std::int64_t id = 0;
+    std::thread thread;
     std::atomic<bool> cancel{false};
     mutable std::mutex mutex;
     std::string state = "running";
@@ -195,13 +203,16 @@ std::optional<std::int64_t> TemplateService::create(const CreateRequest& request
         return std::nullopt;
     }
     std::error_code ec;
-    if (!request.parent.is_absolute() || !fs::is_directory(request.parent, ec)) {
-        refusal = {"bad_folder", "the folder to make it in must be an existing full path"};
+    // Local folders only: a \\server\share path would make Windows sign in there.
+    const std::string parent_text = path_to_utf8(request.parent);
+    if (!request.parent.is_absolute() || parent_text.starts_with("\\\\") || parent_text.starts_with("//") ||
+        !fs::is_directory(request.parent, ec)) {
+        refusal = {"bad_folder", "the folder to make it in must be an existing full path on this computer"};
         return std::nullopt;
     }
     const fs::path dir = request.parent / path_from_utf8(request.name);
-    if (fs::exists(fs::symlink_status(dir, ec)) && !folder_is_empty(dir)) {
-        refusal = {"folder_exists", path_to_utf8(dir) + " already exists and isn't empty"};
+    if (!folder_is_free(dir)) {
+        refusal = {"folder_exists", path_to_utf8(dir) + " already exists and isn't an empty folder"};
         return std::nullopt;
     }
     for (const auto& [key, value] : request.versions) {
@@ -215,26 +226,52 @@ std::optional<std::int64_t> TemplateService::create(const CreateRequest& request
         refusal = {"stopping", "FloServer is stopping"};
         return std::nullopt;
     }
+    const std::string folder = path_to_utf8(dir);
     std::size_t running = 0;
+    std::vector<std::int64_t> finished;
     for (const auto& [id, j] : jobs_) {
         const std::lock_guard job_lock(j->mutex);
-        running += j->state == "running" ? 1U : 0U;
+        if (j->state == "running") {
+            ++running;
+            if (same_folder(j->folder, folder)) {
+                refusal = {"folder_exists", folder + " is already being made"};
+                return std::nullopt;
+            }
+        } else {
+            finished.push_back(id);
+        }
     }
     if (running >= kMaxRunningJobs) {
         refusal = {"busy", "a new project is still being made; try again when it's done"};
         return std::nullopt;
     }
+    // Finished jobs beyond the last few go; their threads have ended.
+    while (finished.size() > kKeptFinishedJobs) {
+        const auto it = jobs_.find(finished.front());
+        if (it->second->thread.joinable()) {
+            it->second->thread.join();
+        }
+        jobs_.erase(it);
+        finished.erase(finished.begin());
+    }
     auto job = std::make_shared<Job>();
     job->id = next_id_++;
-    job->folder = path_to_utf8(dir);
+    job->folder = folder;
+    try {
+        job->thread = std::thread([this, job, request] {
+            try {
+                run(job, request);
+            } catch (const std::exception& e) {
+                job->finish("failed", std::string("something went wrong: ") + e.what());
+            } catch (...) {
+                job->finish("failed", "something went wrong");
+            }
+        });
+    } catch (const std::system_error&) {
+        refusal = {"busy", "FloServer couldn't start the job; try again"};
+        return std::nullopt;
+    }
     jobs_[job->id] = job;
-    threads_.emplace_back([this, job, request] {
-        try {
-            run(job, request);
-        } catch (const std::exception& e) {
-            job->finish("failed", std::string("something went wrong: ") + e.what());
-        }
-    });
     return job->id;
 }
 
@@ -265,23 +302,27 @@ bool TemplateService::cancel(std::int64_t id) {
     if (it == jobs_.end()) {
         return false;
     }
+    const std::lock_guard job_lock(it->second->mutex);
+    if (it->second->state != "running") {
+        return false;
+    }
     it->second->cancel = true;
     return true;
 }
 
 void TemplateService::stop() {
-    std::vector<std::thread> threads;
+    std::vector<std::shared_ptr<Job>> jobs;
     {
         const std::lock_guard lock(mutex_);
         stopping_ = true;
         for (auto& [id, j] : jobs_) {
             j->cancel = true;
+            jobs.push_back(j);
         }
-        threads.swap(threads_);
     }
-    for (std::thread& t : threads) {
-        if (t.joinable()) {
-            t.join();
+    for (const auto& j : jobs) {
+        if (j->thread.joinable()) {
+            j->thread.join();
         }
     }
 }
@@ -327,32 +368,7 @@ void TemplateService::run(const std::shared_ptr<Job>& job, const CreateRequest& 
 
     // 2. Every runtime it will need. A PHP project without a version gets the
     // newest; a version that isn't installed is downloaded.
-    std::vector<TemplateNeed> needs;
-    const auto need = [&needs](const std::string& name, const std::string& version) {
-        if (std::none_of(needs.begin(), needs.end(), [&](const TemplateNeed& n) { return n.name == name; })) {
-            needs.push_back({name, version});
-        }
-    };
-    const bool own_server = !pc.php && (pc.node || pc.python) && pc.web != WebServer::Apache;
-    if (pc.php || (t.config.contains("php") && !own_server)) {
-        need("php", pc.php.value_or(""));
-    }
-    if (pc.node) {
-        need("node", *pc.node);
-    }
-    if (pc.python) {
-        need("python", *pc.python);
-    }
-    if (pc.database) {
-        need(pc.database->family, pc.database->version);
-    }
-    if (pc.web == WebServer::Apache) {
-        need("apache", "");
-    }
-    need("nginx", "");
-    for (const TemplateNeed& n : t.needs) {
-        need(n.name, n.version);
-    }
+    const std::vector<TemplateNeed> needs = template_runtime_needs(t, pc);
     for (const TemplateNeed& n : needs) {
         if (cancelled()) {
             return;
@@ -378,14 +394,14 @@ void TemplateService::run(const std::shared_ptr<Job>& job, const CreateRequest& 
     const fs::path dir = request.parent / path_from_utf8(request.name);
     const std::string dir_text = path_to_utf8(dir);
     std::error_code ec;
-    if (fs::exists(fs::symlink_status(dir, ec)) && !folder_is_empty(dir)) {
-        fail(dir_text + " already exists and isn't empty");
+    if (!folder_is_free(dir)) {
+        fail(dir_text + " already exists and isn't an empty folder");
         return;
     }
     job->set_step("Making " + dir_text);
-    fs::create_directories(dir, ec);
-    if (ec) {
-        fail("couldn't make " + dir_text + ": " + error_text(ec));
+    (void)fs::create_directory(dir, ec);
+    if (ec || !folder_is_free(dir)) {
+        fail("couldn't make " + dir_text + (ec ? ": " + error_text(ec) : std::string()));
         return;
     }
     std::string left_note = " The folder ";
@@ -428,6 +444,19 @@ void TemplateService::run(const std::shared_ptr<Job>& job, const CreateRequest& 
     const fs::path work = data_dir_ / "templates" / ("job-" + std::to_string(job->id));
     fs::remove_all(work, ec);
     fs::create_directories(work, ec);
+    // The work folder goes however the job ends.
+    struct RemoveWork {
+        fs::path path;
+        RemoveWork(const RemoveWork&) = delete;
+        RemoveWork& operator=(const RemoveWork&) = delete;
+        RemoveWork(RemoveWork&&) = delete;
+        RemoveWork& operator=(RemoveWork&&) = delete;
+        explicit RemoveWork(fs::path p) : path(std::move(p)) {}
+        ~RemoveWork() {
+            std::error_code ignored;
+            fs::remove_all(path, ignored);
+        }
+    } const remove_work(work);
     if (!t.steps.empty() && !write_file_atomically(work / path_from_utf8(kProjectConfigFileName), config_text, error)) {
         fail_left(error);
         return;
@@ -482,9 +511,14 @@ void TemplateService::run(const std::shared_ptr<Job>& job, const CreateRequest& 
                     break;
                 }
             }
+            // A spinner redrawn with \r and no newline: keep only its last state.
+            if (pending.size() > kMaxPending && pending.find('\n') == std::string::npos) {
+                const std::size_t cr = pending.rfind('\r');
+                pending.erase(0, cr == std::string::npos ? pending.size() - kMaxPending : cr + 1);
+            }
             std::size_t nl = 0;
             while ((nl = pending.find('\n')) != std::string::npos) {
-                std::string line = pending.substr(0, nl);
+                std::string line = pending.substr(0, std::min(nl, kMaxPending));
                 pending.erase(0, nl + 1);
                 if (!line.empty() && line.back() == '\r') {
                     line.pop_back();
@@ -492,6 +526,10 @@ void TemplateService::run(const std::shared_ptr<Job>& job, const CreateRequest& 
                 // A progress line redrawn with \r keeps only its last state.
                 if (const std::size_t cr = line.rfind('\r'); cr != std::string::npos) {
                     line.erase(0, cr + 1);
+                }
+                if (line.size() > kMaxLine) {
+                    line.resize(kMaxLine);
+                    line += "...";
                 }
                 if (!line.empty()) {
                     job->add_line(line);  // replies replace bad UTF-8 when they are written
@@ -517,7 +555,7 @@ void TemplateService::run(const std::shared_ptr<Job>& job, const CreateRequest& 
         }
         pump();
         if (!pending.empty()) {
-            job->add_line(pending);
+            job->add_line(pending.substr(0, kMaxLine));
             pending.clear();
         }
         if (*code != 0) {
@@ -525,7 +563,6 @@ void TemplateService::run(const std::shared_ptr<Job>& job, const CreateRequest& 
             return;
         }
     }
-    fs::remove_all(work, ec);
 
     // 5. floserver.json: the template's keys over whatever the steps wrote.
     const fs::path config_file = dir / path_from_utf8(kProjectConfigFileName);
@@ -561,6 +598,9 @@ void TemplateService::run(const std::shared_ptr<Job>& job, const CreateRequest& 
     }
 
     // 7. Its database settings.
+    if (cancelled()) {
+        return;
+    }
     if (pc.database && (t.env || t.wordpress)) {
         job->set_step("Setting up the database…");
         const auto login = hooks_.database_login ? hooks_.database_login(*name, error) : std::nullopt;

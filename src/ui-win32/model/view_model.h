@@ -55,6 +55,7 @@ struct ProjectRow {
     Wants wants;
     // What the service says is missing, as it says it: "php", "php 8.2", "nginx".
     std::vector<std::string> missing;
+    bool static_site = false;  // HTML files served as they are, no PHP
 };
 
 // projects.list's result ({"projects": [...]}). Entries without a name are skipped.

@@ -304,6 +304,37 @@ json template_summary(const ProjectTemplate& t) {
             {"studio", t.studio}};
 }
 
+std::vector<TemplateNeed> template_runtime_needs(const ProjectTemplate& t, const ProjectConfig& pc) {
+    std::vector<TemplateNeed> needs;
+    const auto need = [&needs](const std::string& name, const std::string& version) {
+        if (std::none_of(needs.begin(), needs.end(), [&](const TemplateNeed& n) { return n.name == name; })) {
+            needs.push_back({name, version});
+        }
+    };
+    // PHP when it's asked for, or when the template is a PHP one whose version
+    // was left to "the newest"; a static or Node/Python project has none.
+    if (pc.php || (t.config.contains("php") && !pc.node && !pc.python)) {
+        need("php", pc.php.value_or(""));
+    }
+    if (pc.node) {
+        need("node", *pc.node);
+    }
+    if (pc.python) {
+        need("python", *pc.python);
+    }
+    if (pc.database) {
+        need(pc.database->family, pc.database->version);
+    }
+    if (pc.web == WebServer::Apache) {
+        need("apache", "");
+    }
+    need("nginx", "");
+    for (const TemplateNeed& n : t.needs) {
+        need(n.name, n.version);
+    }
+    return needs;
+}
+
 std::vector<std::string> fill_step_args(const TemplateStep& step, std::string_view dir, std::string_view name) {
     std::vector<std::string> out;
     out.reserve(step.args.size());

@@ -566,7 +566,7 @@ floserver::core::TemplateHooks template_hooks(const std::shared_ptr<Service>& se
     core::TemplateHooks hooks;
     Service* s = service.get();
     hooks.find_template = [s](const std::string& id, std::string& error) -> std::optional<core::ProjectTemplate> {
-        const auto list = s->runtimes->templates(error);
+        const auto list = s->runtimes->templates(error, false);
         if (!list) {
             return std::nullopt;
         }
@@ -601,7 +601,7 @@ floserver::core::TemplateHooks template_hooks(const std::shared_ptr<Service>& se
                 return false;
             }
             if (cancel) {
-                (void)s->runtimes->cancel(*id);
+                // The install may be shared with one the user started: it goes on.
                 error = "cancelled";
                 return false;
             }
@@ -716,7 +716,6 @@ int run() {
     if (service->templates) {
         service->templates->stop();
     }
-    // Give the client that asked us to quit time to read the reply.
     if (service->runtimes) {
         service->runtimes->stop();
     }
