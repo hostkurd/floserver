@@ -46,7 +46,7 @@ enum class Str : std::uint8_t {
     ServiceFailed,     // {0}: the reason, from the service
     ServiceStopped,    // clickable: starts it again
     ConnectionLost,
-    NoProjects,
+    NoProjects,        // {0}: the New project button's words
     NoMatches,         // {0}: the search text
     FooterCounts,      // {0} running, {1} asleep
     FooterNginx,       // {0} http port, {1} https port

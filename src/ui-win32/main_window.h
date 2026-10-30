@@ -237,6 +237,8 @@ private:
     Notice notice_;  // a short message in the banner ("copied")
 
     std::string selected_;  // the project whose panel is open
+    std::string pending_added_;  // a folder just added; its panel opens once its row is listed
+    bool picking_folder_ = false;  // the folder picker is open
     std::vector<VersionField> fields_;
     mutable PanelGeometry panel_geometry_;  // from the last paint
     int panel_focus_ = -1;  // keyboard focus among panel_focus_order(); -1: in the list

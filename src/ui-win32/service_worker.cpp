@@ -301,7 +301,10 @@ void ServiceWorker::run(const std::stop_token& stop) {
                 }
                 case Command::Kind::AddFolder: {
                     // The folder's own name for the message; the path for the service.
-                    const std::string shown = core::path_to_utf8(core::path_from_utf8(c.project).filename());
+                    std::string shown = core::path_to_utf8(core::path_from_utf8(c.project).filename());
+                    if (shown.empty()) {
+                        shown = c.project;  // a drive or share root
+                    }
                     const auto failed = [&](const std::string& reason, bool english) {
                         const bool rtl = is_rtl(lang_);
                         change_error = fill_pattern(text(lang_, Str::AddFailed), false,
@@ -318,7 +321,15 @@ void ServiceWorker::run(const std::stop_token& stop) {
                         failed(lost, false);
                     } else if (!reply->ok) {
                         failed(reply->error_message, true);
-                    } else if (const std::string name = reply->result.value("name", std::string()); !name.empty()) {
+                    } else {
+                        const std::string name = reply->result.is_object() && reply->result.contains("name") &&
+                                                         reply->result["name"].is_string()
+                                                     ? reply->result["name"].get<std::string>()
+                                                     : std::string();
+                        if (name.empty()) {
+                            failed("the service's reply had no project name", true);
+                            break;
+                        }
                         // Turned on at once; if that fails it stays Off and change_error says why.
                         std::optional<core::protocol::Reply> on;
                         (void)send(name, "projects.set", {{"name", name}, {"on", true}}, on);
@@ -381,7 +392,8 @@ void ServiceWorker::run(const std::stop_token& stop) {
         if (!clipboard.empty()) {
             latest_.clipboard = std::move(clipboard);
         }
-        if (!added.empty()) {
+        // The UI may not have taken an earlier one yet: that one stays.
+        if (!added.empty() && latest_.added.empty()) {
             latest_.added = added;
         }
         latest_.panel = panel;

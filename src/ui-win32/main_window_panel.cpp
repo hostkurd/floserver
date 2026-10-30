@@ -513,22 +513,31 @@ void MainWindow::open_terminal(const std::string& path) {
 // templates screen comes later in step 5c; "Add an existing folder…" is a
 // button on it in the mockup.
 void MainWindow::add_existing_folder() {
-    if (!worker_ || snap_.link != Link::Connected) {
+    if (!worker_ || snap_.link != Link::Connected || picking_folder_) {
         return;
     }
+    // The dialog runs its own message loop: the button mustn't stay pressed
+    // under it, and a second picker mustn't open.
+    picking_folder_ = true;
+    pressed_ = {};
+    hover_ = {};
+    InvalidateRect(hwnd_, nullptr, FALSE);
     IFileOpenDialog* dialog = nullptr;
     if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog))) ||
         dialog == nullptr) {
+        picking_folder_ = false;
         show_notice(fill(lang_, Str::OpenFailed, {"folder picker"}), true);
         return;
     }
     FILEOPENDIALOGOPTIONS options = 0;
     dialog->GetOptions(&options);
-    dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR);
+    dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR);
     const std::wstring title = w(text(lang_, Str::AddExistingFolder));
     dialog->SetTitle(title.c_str());
     std::string path;
-    if (SUCCEEDED(dialog->Show(hwnd_))) {
+    bool failed = false;
+    const HRESULT shown = dialog->Show(hwnd_);
+    if (SUCCEEDED(shown)) {
         IShellItem* item = nullptr;
         if (SUCCEEDED(dialog->GetResult(&item)) && item != nullptr) {
             PWSTR chosen = nullptr;
@@ -538,9 +547,15 @@ void MainWindow::add_existing_folder() {
             }
             item->Release();
         }
+        failed = path.empty();
+    } else {
+        failed = shown != HRESULT_FROM_WIN32(ERROR_CANCELLED);
     }
     dialog->Release();
-    if (!path.empty() && worker_) {
+    picking_folder_ = false;
+    if (failed) {
+        show_notice(fill(lang_, Str::OpenFailed, {"folder picker"}), true);
+    } else if (!path.empty() && worker_) {
         change_error_.clear();
         worker_->add_folder(path);
     }
