@@ -278,10 +278,16 @@ struct Service {
         }
         if (r.method == "shared.get" || r.method == "shared.set") {
             // Shared sites (D19): the settings, the folders and how they run.
+            // "folders": false leaves the www folder unread (the window asks
+            // every 2 seconds and never shows the folders).
+            json params = r.params.is_object() ? r.params : json::object();
+            const bool folders = !params.contains("folders") || !params["folders"].is_boolean() ||
+                                 params["folders"].get<bool>();
+            params.erase("folders");
             if (r.method == "shared.get") {
-                result = projects->shared(refusal);
+                result = projects->shared(refusal, folders);
             } else {
-                result = projects->set_shared(r.params.is_object() ? r.params : json::object(), refusal);
+                result = projects->set_shared(params, refusal, folders);
                 if (result && databases) {
                     (void)databases->reload();
                 }

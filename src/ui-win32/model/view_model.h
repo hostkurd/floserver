@@ -201,4 +201,51 @@ struct TemplateCard {
 // writes them. Empty when there are none.
 [[nodiscard]] std::string env_text(const nlohmann::json& login);
 
+// --- Shared sites (D19) ------------------------------------------------------------
+
+// shared.get's answer, as the window keeps it (asked without the folders).
+struct SharedSites {
+    bool known = false;        // shared.get has answered at least once
+    bool on = false;
+    std::string dir;           // the www folder, or empty
+    std::string php;           // the setting ("8.4"); empty: the newest installed
+    std::string web = "apache";
+    std::string database;      // "mariadb-11.4", or empty
+    // From "status" (null while they're off):
+    std::string address;       // "http://localhost:8080" while served
+    std::string run;           // "running", "sleeping", "starting", "failed"
+    std::string state;         // "needs_download", "problem", or empty
+    std::vector<std::string> missing;
+    std::string problem;
+};
+
+// shared.get's or shared.set's result; `known` is set.
+[[nodiscard]] SharedSites shared_from_reply(const nlohmann::json& result);
+
+// Only "http://localhost", with an optional port and a single "/" after it:
+// shared sites' own address. Anything else is never handed to the shell.
+[[nodiscard]] bool is_shared_address(std::string_view address);
+
+// What the Shared sites row shows.
+struct SharedRow {
+    RowState state = RowState::Off;
+    // Under the title: the hint when off, what's missing, the problem, or
+    // the www folder. In the window's language, code words isolated.
+    std::string detail;
+    std::vector<std::string> chips;  // "PHP 8.5", "Apache"
+    // The address button's text ("localhost:8080"); empty when there's
+    // nothing to open.
+    std::string address;
+};
+
+[[nodiscard]] SharedRow shared_row(const SharedSites& shared, const Installed& installed, Lang lang);
+
+// What to install so shared sites can run (as downloads_for() for a project).
+[[nodiscard]] std::vector<Download> shared_downloads(const SharedSites& shared, const Installed& installed);
+
+// The settings page's pickers: PHP ("Newest installed" and each installed
+// series), Database ("None" and each installed MariaDB series) and Web
+// server (Apache, nginx). Each key is shared.set's.
+[[nodiscard]] std::vector<VersionField> shared_fields(const SharedSites& shared, const Installed& installed, Lang lang);
+
 }  // namespace floserver::ui

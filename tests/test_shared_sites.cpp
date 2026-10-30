@@ -300,6 +300,30 @@ TEST_CASE("the service keeps shared sites settings in config.json") {
     CHECK_FALSE(service.set_shared({{"web", "iis"}}, refusal));
 }
 
+TEST_CASE("the window's shared sites: the settings without reading the www folder") {
+    const test_util::TempDir tmp;
+    const fs::path www = tmp.path() / "www";
+    test_util::write_file(www / "blog" / "index.php", "<?php");
+    ProjectService service(tmp.path() / "data");
+    ServiceRefusal refusal;
+    REQUIRE(service.set_shared({{"on", true}, {"dir", path_to_utf8(www)}}, refusal));
+
+    // folders: false has no "folders" key at all, so it's never mistaken for an empty www folder.
+    auto r = service.shared(refusal, false);
+    REQUIRE_MESSAGE(r, refusal.message);
+    CHECK((*r)["on"] == true);
+    CHECK((*r)["dir"].get<std::string>() == path_to_utf8(www));
+    CHECK_FALSE(r->contains("folders"));
+    r = service.set_shared({{"web", "nginx"}}, refusal, false);
+    REQUIRE_MESSAGE(r, refusal.message);
+    CHECK((*r)["web"] == "nginx");
+    CHECK_FALSE(r->contains("folders"));
+    // The CLI's ask is as it was.
+    r = service.shared(refusal);
+    REQUIRE(r);
+    REQUIRE((*r)["folders"].size() == 1);
+}
+
 TEST_CASE("the list page's script: the www folder read when it's opened, values quoted for PHP") {
     const std::string script =
         shared_list_script(kBase / "it's" / "www", kBase / "data" / "config.json", WebServer::Apache);

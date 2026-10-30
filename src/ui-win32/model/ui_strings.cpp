@@ -138,6 +138,22 @@ constexpr std::array kTable{
           "تأتي القوالب مع قائمة بيئات التشغيل، وتعذّر تحميلها: {0}",
           "قاڵبەکان لەگەڵ لیستی ژینگەکانی کارپێکردن دێن، کە نەتوانرا باربکرێت: {0}"},
     Entry{Str::WizardLoading, "Loading the templates…", "جارٍ تحميل القوالب…", "قاڵبەکان بار دەکرێن…"},
+    Entry{Str::SharedSites, "Shared sites", "المواقع المشتركة", "ماڵپەڕە هاوبەشەکان"},
+    Entry{Str::SharedHint, "Every folder in {0} opens at {1}", "كل مجلد في {0} يُفتح على {1}",
+          "هەموو بوخچەیەک لە {0} لە {1} دەکرێتەوە"},
+    Entry{Str::SharedCantStart, "Shared sites can't start", "تعذّر تشغيل المواقع المشتركة",
+          "ماڵپەڕە هاوبەشەکان ناتوانرێن بخرێنە کار"},
+    Entry{Str::SharedOpenFolder, "Open folder", "فتح المجلد", "کردنەوەی بوخچە"},
+    Entry{Str::SharedWwwFolder, "www folder", "مجلد " FLO_LRI "www" FLO_PDI, "بوخچەی " FLO_LRI "www" FLO_PDI},
+    Entry{Str::SharedChange, "Change…", "تغيير…", "گۆڕین…"},
+    Entry{Str::SharedOpen, "Open", "فتح", "کردنەوە"},
+    Entry{Str::WebApacheChoice, "Apache (.htaccess works)", FLO_LRI "Apache" FLO_PDI " (يعمل " FLO_LRI ".htaccess" FLO_PDI ")",
+          FLO_LRI "Apache" FLO_PDI " (" FLO_LRI ".htaccess" FLO_PDI " کار دەکات)"},
+    Entry{Str::WebNginxChoice, "nginx (lighter, no .htaccess)",
+          FLO_LRI "nginx" FLO_PDI " (أخف، بلا " FLO_LRI ".htaccess" FLO_PDI ")",
+          FLO_LRI "nginx" FLO_PDI " (سووکترە، بێ " FLO_LRI ".htaccess" FLO_PDI ")"},
+    Entry{Str::SharedDatabaseDetail, "{0} · user {1} · can create {2}… databases",
+          "{0} · المستخدم {1} · يمكنه إنشاء قواعد بيانات {2}…", "{0} · بەکارهێنەر {1} · دەتوانێت داتابەیسی {2}… دروست بکات"},
 };
 
 #undef FLO_LRI

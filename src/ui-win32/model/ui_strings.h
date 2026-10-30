@@ -118,6 +118,17 @@ enum class Str : std::uint8_t {
     WizardClose,
     WizardNoTemplates, // {0}: why
     WizardLoading,
+    // Shared sites (D19): the row under the list and its settings page.
+    SharedSites,
+    SharedHint,        // {0}: the www folder, {1}: "localhost:8080/<folder>/"
+    SharedCantStart,
+    SharedOpenFolder,
+    SharedWwwFolder,
+    SharedChange,
+    SharedOpen,
+    WebApacheChoice,
+    WebNginxChoice,
+    SharedDatabaseDetail,  // {0}: "127.0.0.1:3306", {1}: the user, {2}: the prefix "www_"
     Count_,
 };
 

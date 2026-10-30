@@ -234,6 +234,8 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
                 const Hit hit = hit_test(pt.x, pt.y);
                 const bool hand = hit.part == Part::Switch || hit.part == Part::Address || hit.part == Part::Download ||
                                   hit.part == Part::PanelAddress || hit.part == Part::PanelKeep ||
+                                  hit.part == Part::SharedSwitch || hit.part == Part::SharedEnd ||
+                                  hit.part == Part::WwwSwitch ||
                                   (hit.part == Part::Banner && banner().clickable);
                 SetCursor(LoadCursorW(nullptr, hand ? IDC_HAND : IDC_ARROW));
                 return TRUE;
@@ -254,7 +256,7 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             return 0;
         }
         case WM_MOUSEWHEEL:
-            if (wizard_open()) {
+            if (wizard_open() || www_open()) {
                 return 0;  // the list under the page stays put
             }
             scroll_to(scroll_ - GET_WHEEL_DELTA_WPARAM(wparam) * px(kRowH) / WHEEL_DELTA);
@@ -382,6 +384,13 @@ void MainWindow::on_snapshot() {
         close_panel();
     }
     update_fields();
+    // Shared sites: the row goes when the service stops answering shared.get.
+    if (!snap_.shared.known) {
+        shared_focused_ = false;
+        close_www();
+    } else if (www_open()) {
+        www_fields_ = shared_fields(snap_.shared, snap_.installed, lang_);
+    }
     if (!focused.empty()) {
         if (const int again = visible_index(focused); again >= 0) {
             focus_ = again;
@@ -590,6 +599,10 @@ RECT MainWindow::list_rect() const {
     RECT r = card_rect();
     const int border = std::max(1, px(1));
     InflateRect(&r, -border, -border);
+    // The Shared sites row is pinned under the list; the list scrolls above it.
+    if (shows_shared() && width_of(r) > 0 && height_of(r) >= px(kRowH)) {
+        r.bottom -= px(kRowH);
+    }
     return r;
 }
 
@@ -779,8 +792,14 @@ MainWindow::Hit MainWindow::hit_test(int x, int y) const {
     if (wizard_open()) {
         return contains(wizard_geometry_.area, x, y) ? wizard_hit_test(x, y) : Hit{};
     }
+    if (www_open()) {
+        return contains(www_geometry_.area, x, y) ? www_hit_test(x, y) : Hit{};
+    }
     if (panel_open() && contains(panel_geometry_.panel, x, y)) {
         return panel_hit_test(x, y);
+    }
+    if (contains(shared_geometry_.row, x, y)) {
+        return shared_hit_test(x, y);
     }
     if (!contains(list_rect(), x, y)) {
         return {};
@@ -843,6 +862,7 @@ void MainWindow::on_click(const Hit& clicked) {
     switch (hit.part) {
         case Part::Switch:
             focus_ = hit.row;
+            shared_focused_ = false;
             show_focus_ = false;
             toggle(hit.row);
             break;
@@ -854,6 +874,7 @@ void MainWindow::on_click(const Hit& clicked) {
             break;
         case Part::Row:
             focus_ = hit.row;
+            shared_focused_ = false;
             show_focus_ = false;
             panel_focus_ = -1;
             select(hit.project);
@@ -884,6 +905,31 @@ void MainWindow::on_click(const Hit& clicked) {
         case Part::WizNext:
             on_wizard_click(hit);
             break;
+        case Part::SharedRow:
+        case Part::SharedSwitch:
+        case Part::SharedEnd:
+        case Part::SharedOpen:
+        case Part::SharedGear: {
+            // The keys follow the mouse to the row.
+            focus_ = -1;
+            shared_focused_ = true;
+            show_focus_ = false;
+            const std::vector<Part> order = shared_focus_order();
+            if (const auto it = std::find(order.begin(), order.end(), hit.part); it != order.end()) {
+                shared_part_ = static_cast<int>(it - order.begin());
+            }
+            run_shared_part(hit.part);
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            break;
+        }
+        case Part::WwwSwitch:
+        case Part::WwwChange:
+        case Part::WwwOpen:
+        case Part::WwwField:
+        case Part::WwwCopyEnv:
+        case Part::WwwClose:
+            on_www_click(hit);
+            break;
         case Part::Settings:    // the Settings screens come later in step 5c
         case Part::None:
             break;
@@ -895,16 +941,34 @@ void MainWindow::on_key(WPARAM key) {
         on_wizard_key(key);
         return;
     }
+    if (www_open()) {
+        on_www_key(key);
+        return;
+    }
     if (panel_open() && (panel_focus_ >= 0 || !panel_beside_list())) {
         on_panel_key(key);
         return;
     }
+    if (shared_focused_ && width_of(shared_geometry_.row) > 0) {
+        on_shared_key(key);
+        return;
+    }
+    shared_focused_ = false;
     const int count = static_cast<int>(visible_.size());
     const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
     const int page = std::max(1, height_of(list_rect()) / px(kRowH));
     int next = focus_;
     switch (key) {
         case VK_DOWN:
+            // Past the last project: the Shared sites row.
+            if (focus_ == count - 1 && width_of(shared_geometry_.row) > 0) {
+                focus_ = -1;
+                shared_focused_ = true;
+                shared_part_ = 0;
+                show_focus_ = true;
+                InvalidateRect(hwnd_, nullptr, FALSE);
+                return;
+            }
             next = std::min(count - 1, focus_ + 1);
             break;
         case VK_UP:
@@ -988,6 +1052,9 @@ LRESULT CALLBACK MainWindow::search_proc(HWND hwnd, UINT msg, WPARAM wparam, LPA
                 SetFocus(self->hwnd_);
                 if (self->focus_ < 0 && !self->visible_.empty()) {
                     self->focus_ = 0;
+                    self->shared_focused_ = false;
+                } else if (self->focus_ < 0 && width_of(self->shared_geometry_.row) > 0) {
+                    self->shared_focused_ = true;  // no projects listed: the Shared sites row
                 }
                 self->show_focus_ = true;
                 InvalidateRect(self->hwnd_, nullptr, FALSE);
@@ -1289,6 +1356,9 @@ void MainWindow::on_paint() {
             geometry_ = row_geometry(mem.get());
             panel_geometry_ = panel_open() ? panel_geometry(mem.get()) : PanelGeometry{};
             wizard_geometry_ = wizard_open() ? wizard_geometry(mem.get()) : WizardGeometry{};
+            const bool list_shown = !wizard_open() && !www_open();
+            shared_geometry_ = list_shown ? shared_geometry(mem.get()) : SharedGeometry{};
+            www_geometry_ = www_open() && !wizard_open() ? www_geometry(mem.get()) : WwwGeometry{};
             {
                 Canvas canvas(mem.get(), width_, rtl_);
                 canvas.fill({0, 0, width_, height_}, palette(dark_).window);
@@ -1300,8 +1370,11 @@ void MainWindow::on_paint() {
                     paint_banner(canvas, text_pass);
                     if (wizard_open()) {
                         paint_wizard(canvas, mem.get(), text_pass);
+                    } else if (www_open()) {
+                        paint_www(canvas, mem.get(), text_pass);
                     } else {
                         paint_list(canvas, mem.get(), text_pass);
+                        paint_shared_row(canvas, mem.get(), text_pass);
                         paint_panel(canvas, mem.get(), text_pass);
                     }
                     paint_footer(canvas, mem.get(), text_pass);
@@ -1334,22 +1407,26 @@ void MainWindow::paint_top_bar(Canvas& c, HDC /*dc*/, bool text_pass) const {
 
         c.round_rect(settings, pxf(4), hover_.part == Part::Settings ? p.row_hover : p.button, p.button_border,
                      border);
-        // Gear, 16 px on a 16 grid.
-        const float g = pxf(16) / 16.0F;
-        const float gx = static_cast<float>(settings.left + settings.right) / 2.0F - 8 * g;
-        const float gy = static_cast<float>(settings.top + settings.bottom) / 2.0F - 8 * g;
-        c.circle(gx + 8 * g, gy + 8 * g, 2.5F * g, p.text, 1.3F * g);
-        constexpr float kSpokes[][4] = {{8, 1.5F, 8, 3.5F},       {8, 12.5F, 8, 14.5F},     {1.5F, 8, 3.5F, 8},
-                                        {12.5F, 8, 14.5F, 8},     {3.4F, 3.4F, 4.8F, 4.8F}, {11.2F, 11.2F, 12.6F, 12.6F},
-                                        {3.4F, 12.6F, 4.8F, 11.2F}, {11.2F, 4.8F, 12.6F, 3.4F}};
-        for (const auto& s : kSpokes) {
-            c.line(gx + s[0] * g, gy + s[1] * g, gx + s[2] * g, gy + s[3] * g, p.text, 1.3F * g);
-        }
+        paint_gear(c, settings, p.text);
         return;
     }
     const RECT title{px(kPad), 0, search.left - px(kGap), px(kTopBarH)};
     c.text(title, w(text(lang_, Str::Projects)), fonts_.title.get(), p.text, Align::Start, false);
     c.text(add, w(text(lang_, Str::NewProject)), fonts_.button_bold.get(), p.accent_text, Align::Center, false);
+}
+
+void MainWindow::paint_gear(Canvas& c, const RECT& r, Rgb color) const {
+    // Gear, 16 px on a 16 grid.
+    const float g = pxf(16) / 16.0F;
+    const float gx = static_cast<float>(r.left + r.right) / 2.0F - 8 * g;
+    const float gy = static_cast<float>(r.top + r.bottom) / 2.0F - 8 * g;
+    c.circle(gx + 8 * g, gy + 8 * g, 2.5F * g, color, 1.3F * g);
+    constexpr float kSpokes[][4] = {{8, 1.5F, 8, 3.5F},       {8, 12.5F, 8, 14.5F},     {1.5F, 8, 3.5F, 8},
+                                    {12.5F, 8, 14.5F, 8},     {3.4F, 3.4F, 4.8F, 4.8F}, {11.2F, 11.2F, 12.6F, 12.6F},
+                                    {3.4F, 12.6F, 4.8F, 11.2F}, {11.2F, 4.8F, 12.6F, 3.4F}};
+    for (const auto& s : kSpokes) {
+        c.line(gx + s[0] * g, gy + s[1] * g, gx + s[2] * g, gy + s[3] * g, color, 1.3F * g);
+    }
 }
 
 void MainWindow::paint_banner(Canvas& c, bool text_pass) const {

@@ -2,8 +2,9 @@
 
 // The window's link to floserverd (D2). One background thread connects
 // (starting the service the way the CLI does), asks for projects.list,
-// status, web.status and databases.list every 2 seconds, and sends the
-// user's changes. While a project's panel is open it also asks for that
+// status, web.status, databases.list and shared.get (without the www
+// folder's folders: nothing reads it in the background) every 2 seconds,
+// and sends the user's changes. While a project's panel is open it also asks for that
 // project's log. The UI thread never waits on the pipe: the worker keeps the
 // latest snapshot and posts a message to the window when it changes.
 
@@ -58,6 +59,7 @@ struct Snapshot {
     // Projects with installs running from the window: the progress line.
     std::map<std::string, std::string> downloads;
     std::string projects_dir;  // projects.list's, or empty
+    SharedSites shared;        // Shared sites (D19): shared.get's answer
     // New project (D9): the templates, once asked for.
     bool templates_loaded = false;
     std::string templates_error;
@@ -101,7 +103,13 @@ public:
     // Adds a folder as a project (projects.add) and turns it on.
     void add_folder(const std::string& path);
     // Installs what a project needs (runtimes.install) and follows the jobs.
+    // Shared sites' installs go under kSharedKey.
     void install(const std::string& project, const std::vector<Download>& downloads);
+    // Shared sites (D19): sends shared.set with `changes`; `key` is reported
+    // in settled when it's done (on_key(kSharedKey) or use_key(kSharedKey, ...)).
+    void set_shared(const nlohmann::json& changes, const std::string& key);
+    // Puts shared sites' database login on the clipboard as .env lines (shared.login).
+    void copy_shared_env();
     // Asks for the templates (templates.list).
     void load_templates();
     // Makes a project from a template (projects.create) and follows the job.
@@ -112,6 +120,9 @@ public:
     void start_service();  // after NotRunning or Failed
     void refresh();
     void quit_service();   // stops floserverd; quit_done follows
+
+    // Shared sites' name wherever a project's goes; project names can't have '_'.
+    static constexpr const char* kSharedKey = "_shared";
 
     [[nodiscard]] static std::string on_key(const std::string& project) { return "on\n" + project; }
     [[nodiscard]] static std::string keep_key(const std::string& project) { return "keep\n" + project; }
@@ -133,6 +144,8 @@ private:
             OpenStudio,
             AddFolder,
             Install,
+            SetShared,
+            CopySharedEnv,
             LoadTemplates,
             CreateProject,
             Select,
@@ -145,7 +158,7 @@ private:
         std::string key;
         std::optional<std::string> value;
         std::vector<Download> downloads;
-        nlohmann::json params;  // CreateProject: projects.create's parameters
+        nlohmann::json params;  // CreateProject: projects.create's parameters; SetShared: the changes
     };
 
     void push(Command command);

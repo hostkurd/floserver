@@ -487,3 +487,90 @@ TEST_CASE("new project names") {
     CHECK_FALSE(is_project_name("xn--abc"));
     CHECK_FALSE(is_project_name(""));
 }
+
+TEST_CASE("the Shared sites row: from shared.get's answer, without the folders") {
+    const Installed installed = {{"php", {"8.5.12", "8.4.27"}}, {"mariadb", {"11.4.13"}}, {"nginx", {"1.30.6"}}};
+    // Off: the hint, with the www folder.
+    SharedSites s = shared_from_reply({{"on", false}, {"dir", "C:/Users/me/FloServer/www"}, {"web", "apache"},
+                                       {"status", nullptr}});
+    CHECK(s.known);
+    auto row = shared_row(s, installed, Lang::En);
+    CHECK(row.state == RowState::Off);
+    CHECK(row.detail == "Every folder in C:/Users/me/FloServer/www opens at localhost/<folder>/");
+    CHECK(row.address.empty());
+    REQUIRE(row.chips.size() == 2);
+    CHECK(row.chips[0] == "PHP 8.5");  // no setting: the newest installed
+    CHECK(row.chips[1] == "Apache");
+
+    // On and served: the folder under the title, the address to open.
+    s = shared_from_reply({{"on", true}, {"dir", "C:/www"}, {"php", "8.4"}, {"web", "nginx"},
+                           {"status", {{"address", "http://localhost:8080"}, {"run", "sleeping"}}}});
+    row = shared_row(s, installed, Lang::En);
+    CHECK(row.state == RowState::Asleep);
+    CHECK(row.detail == "C:/www");
+    CHECK(row.address == "localhost:8080");
+    CHECK(row.chips == std::vector<std::string>{"PHP 8.4", "nginx"});
+    CHECK(shared_row(s, installed, Lang::Ar).detail == kLri + "C:/www" + kPdi);
+
+    // Needs download: what's missing, and what to install for it.
+    s = shared_from_reply({{"on", true}, {"dir", "C:/www"}, {"web", "apache"},
+                           {"status", {{"state", "needs_download"}, {"missing", {"php", "apache"}}}}});
+    row = shared_row(s, {}, Lang::En);
+    CHECK(row.state == RowState::NeedsDownload);
+    CHECK(row.detail == "Needs php, apache");
+    CHECK(row.chips == std::vector<std::string>{"Apache"});
+    const auto downloads = shared_downloads(s, {});
+    REQUIRE(downloads.size() == 3);
+    CHECK(downloads[1] == Download{"apache", ""});
+    CHECK(downloads[2] == Download{"nginx", ""});
+    s.on = false;
+    CHECK(shared_downloads(s, {}).empty());
+
+    // A problem: the service's reason, else that they can't start.
+    s = shared_from_reply({{"on", true}, {"status", {{"state", "problem"}, {"problem", "the www folder is gone"}}}});
+    CHECK(shared_row(s, installed, Lang::En).state == RowState::Problem);
+    CHECK(shared_row(s, installed, Lang::En).detail == "the www folder is gone");
+    s = shared_from_reply({{"on", true}, {"status", {{"run", "failed"}, {"address", "http://localhost"}}}});
+    row = shared_row(s, installed, Lang::En);
+    CHECK(row.detail == "Shared sites can't start");
+    CHECK(row.address.empty());
+}
+
+TEST_CASE("shared sites' address: only localhost with a port") {
+    CHECK(is_shared_address("http://localhost"));
+    CHECK(is_shared_address("http://localhost:8080"));
+    CHECK(is_shared_address("http://localhost:8080/"));
+    CHECK_FALSE(is_shared_address("https://localhost:8080"));
+    CHECK_FALSE(is_shared_address("http://localhost.evil.com"));
+    CHECK_FALSE(is_shared_address("http://localhost:0"));
+    CHECK_FALSE(is_shared_address("http://localhost:70000"));
+    CHECK_FALSE(is_shared_address("http://localhost:80/x"));
+    CHECK_FALSE(is_shared_address("http://localhost:"));
+}
+
+TEST_CASE("the Shared sites settings page's pickers") {
+    const Installed installed = {{"php", {"8.5.12", "8.4.27"}}, {"mariadb", {"11.4.13"}}};
+    SharedSites s;
+    auto fields = shared_fields(s, installed, Lang::En);
+    REQUIRE(fields.size() == 3);
+    CHECK(fields[0].key == "php");
+    REQUIRE(fields[0].choices.size() == 3);
+    CHECK(fields[0].choices[0].label == "Newest installed");
+    CHECK_FALSE(fields[0].choices[0].value);
+    CHECK(fields[0].choices[2].value == "8.4");
+    CHECK(fields[0].current == 0);
+    CHECK(fields[1].key == "database");
+    REQUIRE(fields[1].choices.size() == 2);
+    CHECK(fields[1].choices[0].label == "None");
+    CHECK(fields[1].choices[1].value == "mariadb-11.4");
+    CHECK(fields[2].key == "web");
+    CHECK(fields[2].choices[fields[2].current].label == "Apache (.htaccess works)");
+
+    s.php = "8.4";
+    s.database = "mariadb-11.4";
+    s.web = "nginx";
+    fields = shared_fields(s, installed, Lang::En);
+    CHECK(fields[0].current == 2);
+    CHECK(fields[1].current == 1);
+    CHECK(fields[2].choices[fields[2].current].value == "nginx");
+}
