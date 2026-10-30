@@ -83,43 +83,7 @@ const char* pool_state_name(PoolState s) {
 
 fs::path web_dir(const fs::path& data) { return data / "web"; }
 
-fs::path shared_list_page(const fs::path& web) { return web / "shared" / "shared-sites-list.html"; }
-
-void WebService::write_shared_list_locked(const PlannedSite& shared, const AppConfig& app) {
-    if (!ports_) {
-        return;
-    }
-    // A big www folder isn't read every few seconds: again when the folder
-    // itself, the projects or the ports change, or every 30 seconds (for
-    // index files added inside a folder).
-    std::error_code ec;
-    const auto modified = fs::last_write_time(shared.doc_root, ec);
-    std::string key = path_to_utf8(shared.doc_root) + "|" + std::to_string(ports_->http) + "|" +
-                      std::to_string(ec ? 0 : modified.time_since_epoch().count()) + "|" +
-                      (shared.config && shared.config->php ? *shared.config->php : std::string()) + "|" +
-                      (shared.apache ? "a" : "n");
-    for (const Project& p : app.projects) {
-        key += "|" + p.name;
-    }
-    const auto now = Clock::now();
-    if (key == shared_list_key_ && now - shared_list_written_ < std::chrono::seconds{30}) {
-        return;
-    }
-    shared_list_key_ = key;
-    shared_list_written_ = now;
-    const auto folders = scan_shared_folders(shared.doc_root, app);
-    const std::string php = shared.config && shared.config->php ? *shared.config->php : std::string();
-    const WebServer web = shared.apache ? WebServer::Apache : WebServer::Nginx;
-    const std::string page =
-        shared_index_page(folders, shared.doc_root, php, web, shared_address(*ports_), shared_port_suffix(*ports_));
-    const fs::path file = shared_list_page(work_);
-    if (const auto old = read_small_file(file, std::size_t{4} * 1024 * 1024); old && *old == page) {
-        return;
-    }
-    fs::create_directories(file.parent_path(), ec);
-    std::string error;
-    (void)write_file_atomically(file, page, error);
-}
+fs::path shared_list_script_file(const fs::path& web) { return web / "shared" / "shared-sites-list.php"; }
 
 std::optional<fs::path> nginx_program(const fs::path& nginx_dir) {
 #ifdef _WIN32
@@ -361,8 +325,7 @@ void WebService::reload_locked() {
         }
         const bool shared_apache = plan.shared && plan.shared->state == SiteState::Ready && plan.shared->apache;
         if (shared_apache) {
-            as.shared = ApacheShared{plan.shared->doc_root, plan.pools.at(*plan.shared->pool).ports,
-                                     shared_list_page(work_)};
+            as.shared = ApacheShared{plan.shared->doc_root, plan.pools.at(*plan.shared->pool).ports};
         }
         if (!as.sites.empty() || as.shared) {
             as.server_root = apache_server_root(plan.apache_dir);
@@ -588,7 +551,8 @@ void WebService::reload_locked() {
             }
             NginxShared ns;
             ns.dir = p.doc_root;
-            ns.list_page = shared_list_page(work_);
+            ns.list_script = shared_list_script_file(work_);
+            ns.php_ports = pool.ports;  // the list page runs on the pool either way
             if (p.apache) {
                 const auto spec = std::find_if(plan.apps.begin(), plan.apps.end(),
                                                [](const AppSpec& a) { return a.name == kApacheAppName; });
@@ -610,7 +574,6 @@ void WebService::reload_locked() {
                     site.app_name = spec->name;
                 }
             } else {
-                ns.php_ports = pool.ports;
                 site.pool_key = pool.key;
             }
             if (!why.empty()) {
@@ -659,7 +622,19 @@ void WebService::reload_locked() {
         }
     }
     if (shared_spec) {
-        write_shared_list_locked(*plan.shared, *app);
+        // The list page's script: it changes only with the settings, and it
+        // reads the www folder only when the page is opened.
+        const std::string script = shared_list_script(shared_spec->dir, app_config_file(config_.data_dir),
+                                                      plan.shared->apache ? WebServer::Apache : WebServer::Nginx);
+        if (script != shared_script_text_) {
+            const fs::path file = shared_list_script_file(work_);
+            std::error_code dir_ec;
+            fs::create_directories(file.parent_path(), dir_ec);
+            std::string script_error;
+            if (write_file_atomically(file, script, script_error)) {
+                shared_script_text_ = script;
+            }
+        }
     }
 
     NginxSpec spec;

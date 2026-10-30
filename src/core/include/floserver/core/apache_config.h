@@ -31,15 +31,11 @@ struct ApacheSite {
 
 // Shared sites (D19) when Apache serves them: the www folder at
 // localhost/<folder>/ and each folder at <folder>.localhost (mod_vhost_alias).
-// The www folder's own address shows `list_page` when it has no index file.
+// nginx answers localhost/ itself when the www folder has no index file.
 struct ApacheShared {
     std::filesystem::path dir;
     std::vector<Port> php_ports;
-    std::filesystem::path list_page;
 };
-
-// Where the shared list page is answered on localhost (no dot: dot paths are refused).
-inline constexpr std::string_view kSharedListPath = "/__floserver_shared__.html";
 
 struct ApacheSpec {
     std::filesystem::path server_root;  // the installed Apache (Apache24): conf/mime.types

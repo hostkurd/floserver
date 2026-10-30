@@ -219,8 +219,7 @@ private:
     // has no index file of its own) and *.localhost (each folder its own root).
     bool write_shared(const ApacheShared& shared) {
         const auto root = path(shared.dir);
-        const auto list = path(shared.list_page);
-        if (!root || !list) {
+        if (!root) {
             return false;
         }
         // The root goes into a regex and into VirtualDocumentRoot, where % is special.
@@ -242,15 +241,7 @@ private:
              << "<VirtualHost 127.0.0.1:" << kApachePortPlaceholder << ">\n"
              << "    ServerName localhost\n"
              << "    DocumentRoot " << *root << "\n";
-        directory("index.php index.html index.htm " + std::string(kSharedListPath));
-        // Folders inside keep the usual index files only.
-        out_ << "    <Directory \"" << bare << "/*\">\n"
-             << "        DirectoryIndex index.php index.html index.htm\n"
-             << "    </Directory>\n"
-             << "    Alias \"" << kSharedListPath << "\" " << *list << "\n"
-             << "    <Files \"" << shared.list_page.filename().string() << "\">\n"
-             << "        Require all granted\n"
-             << "    </Files>\n";
+        directory("index.php index.html index.htm");
         if (!shared.php_ports.empty()) {
             write_php(shared.php_ports, bare);
         }

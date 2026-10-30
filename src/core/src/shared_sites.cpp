@@ -5,7 +5,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
-#include <sstream>
+#include <array>
 #include <system_error>
 
 namespace floserver::core {
@@ -22,49 +22,6 @@ bool is_host_label(std::string_view s) {
            !s.starts_with("xn--") && std::all_of(s.begin(), s.end(), is_label_char);
 }
 
-std::string html_escape(std::string_view s) {
-    std::string out;
-    for (const char c : s) {
-        switch (c) {
-            case '&':
-                out += "&amp;";
-                break;
-            case '<':
-                out += "&lt;";
-                break;
-            case '>':
-                out += "&gt;";
-                break;
-            case '"':
-                out += "&quot;";
-                break;
-            case '\'':
-                out += "&#39;";
-                break;
-            default:
-                out += c;
-        }
-    }
-    return out;
-}
-
-// A folder name as one URL path segment.
-std::string url_segment(std::string_view s) {
-    static constexpr std::string_view kHex = "0123456789ABCDEF";
-    std::string out;
-    for (const char c : s) {
-        const auto u = static_cast<unsigned char>(c);
-        if ((u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z') || (u >= '0' && u <= '9') || c == '-' || c == '_' ||
-            c == '.' || c == '~') {
-            out += c;
-        } else {
-            out += '%';
-            out += kHex.at(u >> 4U);
-            out += kHex.at(u & 0xFU);
-        }
-    }
-    return out;
-}
 
 bool exists_file(const fs::path& p) {
     std::error_code ec;
@@ -242,56 +199,150 @@ std::vector<SharedFolder> scan_shared_folders(const fs::path& dir, const AppConf
     return out;
 }
 
-std::string shared_port_suffix(const WebPorts& ports) {
-    return ports.http == 80 ? std::string() : ":" + std::to_string(ports.http);
+std::string shared_address(const WebPorts& ports) {
+    return ports.http == 80 ? std::string("http://localhost") : "http://localhost:" + std::to_string(ports.http);
 }
 
-std::string shared_address(const WebPorts& ports) { return "http://localhost" + shared_port_suffix(ports); }
+namespace {
 
-std::string shared_index_page(const std::vector<SharedFolder>& folders, const fs::path& dir,
-                              const std::string& php_version, WebServer web, const std::string& base_url,
-                              const std::string& host_suffix) {
-    std::ostringstream o;
-    o << "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
-      << "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-      << "<title>Shared sites</title>\n<style>\n"
-      << ":root{color-scheme:light dark;--bg:#f7f7f8;--card:#fff;--line:#e1e1e1;--text:#1b1b1b;--muted:#5f5f5f;--link:#0f6cbd;--warn:#7a4a00}\n"
-      << "@media (prefers-color-scheme:dark){:root{--bg:#1c1c1c;--card:#262626;--line:#3a3a3a;--text:#f0f0f0;--muted:#b0b0b0;--link:#6cb4ff;--warn:#f0c060}}\n"
-      << "body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 'Segoe UI',system-ui,sans-serif}\n"
-      << "main{max-width:860px;margin:0 auto;padding:28px 16px}\n"
-      << "h1{margin:0;font-size:22px;font-weight:600}.sub{color:var(--muted);font-size:13px;margin:4px 0 16px}\n"
-      << "ul{list-style:none;margin:0;padding:0;background:var(--card);border:1px solid var(--line);border-radius:8px;overflow:hidden}\n"
-      << "li{display:flex;gap:12px;align-items:baseline;padding:11px 16px;border-bottom:1px solid var(--line);flex-wrap:wrap}\n"
-      << "li:last-child{border-bottom:0}a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}\n"
-      << ".name{font-weight:600;flex:1;min-width:160px}.note{color:var(--muted);font-size:12px}.warn{color:var(--warn);font-size:12px}\n"
-      << "p.foot{color:var(--muted);font-size:12px;margin:12px 2px}\n</style>\n</head>\n<body>\n<main>\n"
-      << "<h1>Shared sites</h1>\n<p class=\"sub\">" << html_escape(path_to_utf8(dir)) << " · PHP "
-      << html_escape(php_version) << " · " << (web == WebServer::Apache ? "Apache" : "nginx")
-      << " · served by FloServer</p>\n";
-    if (folders.empty()) {
-        o << "<p>The www folder is empty. Put a folder with an index.php or index.html in it and reload this page.</p>\n";
-    } else {
-        o << "<ul>\n";
-        for (const SharedFolder& f : folders) {
-            const std::string name = html_escape(f.name);
-            o << R"(<li><a class="name" href=")" << base_url << "/" << url_segment(f.name) << R"(/">)" << name
-              << "/</a>";
-            if (f.kind == SharedKind::Node || f.kind == SharedKind::Python) {
-                o << "<span class=\"warn\">" << (f.kind == SharedKind::Node ? "Node.js" : "Python")
-                  << " app: make it a project in FloServer</span>";
-            } else if (f.clash) {
-                o << "<span class=\"note\">" << name << ".localhost is the project " << name << "</span>";
-            } else if (f.host_name) {
-                o << R"(<a class="note" href="http://)" << f.name << ".localhost" << host_suffix << R"(/">)" << name
-                  << ".localhost" << html_escape(host_suffix) << "</a>";
-            }
-            o << "</li>\n";
+// A PHP single-quoted string literal.
+std::string php_string(std::string_view s) {
+    std::string out = "'";
+    for (const char c : s) {
+        if (c == '\\' || c == '\'') {
+            out += '\\';
         }
-        o << "</ul>\n";
+        out += c;
     }
-    o << "<p class=\"foot\">Put your own index.php or index.html in the www folder to show it here instead.</p>\n"
-      << "</main>\n</body>\n</html>\n";
-    return o.str();
+    return out + "'";
+}
+
+
+constexpr std::string_view kListScript = R"FLOPHP(<?php
+// Written by FloServer: the list of Shared sites (D19). It reads the www
+// folder only when this page is opened; nothing else reads it.
+$www = @WWW@;
+$config = @CONFIG@;
+$web = @WEB@;
+header('Content-Type: text/html; charset=utf-8');
+header('Cache-Control: no-store');
+function fs_h($s) { return htmlspecialchars((string)$s, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'); }
+function fs_kind($dir) {
+    if (is_file("$dir/index.php")) { return 'php'; }
+    $names = @scandir($dir) ?: [];
+    $count = 0;
+    foreach ($names as $n) {
+        if (++$count > 500) { break; }
+        if (strcasecmp(pathinfo($n, PATHINFO_EXTENSION), 'php') === 0) { return 'php'; }
+    }
+    if (is_file("$dir/index.html") || is_file("$dir/index.htm")) { return 'static'; }
+    if (is_file("$dir/package.json")) { return 'node'; }
+    if (is_file("$dir/requirements.txt") || is_file("$dir/pyproject.toml") || is_file("$dir/manage.py")) { return 'python'; }
+    return count($names) > 2 ? 'static' : 'empty';
+}
+$projects = [];
+$c = json_decode((string)@file_get_contents($config), true);
+if (is_array($c) && isset($c['projects']) && is_array($c['projects'])) {
+    foreach ($c['projects'] as $p) {
+        if (is_array($p) && isset($p['name']) && is_string($p['name'])) { $projects[$p['name']] = true; }
+    }
+}
+$host = isset($_SERVER['HTTP_HOST']) ? (string)$_SERVER['HTTP_HOST'] : 'localhost';
+$port = preg_match('/:(\d{1,5})$/', $host, $m) ? ':' . $m[1] : '';
+$base = 'http://localhost' . $port;
+$folders = [];
+foreach ((@scandir($www) ?: []) as $n) {
+    if ($n === '' || $n[0] === '.' || !is_dir("$www/$n")) { continue; }
+    $folders[] = $n;
+    if (count($folders) >= 1000) { break; }
+}
+sort($folders, SORT_STRING);
+?><!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shared sites</title>
+<style>
+:root{color-scheme:light dark;--bg:#f7f7f8;--card:#fff;--line:#e1e1e1;--text:#1b1b1b;--muted:#5f5f5f;--link:#0f6cbd;--warn:#7a4a00}
+@media (prefers-color-scheme:dark){:root{--bg:#1c1c1c;--card:#262626;--line:#3a3a3a;--text:#f0f0f0;--muted:#b0b0b0;--link:#6cb4ff;--warn:#f0c060}}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 'Segoe UI',system-ui,sans-serif}
+main{max-width:860px;margin:0 auto;padding:28px 16px}
+h1{margin:0;font-size:22px;font-weight:600}.sub{color:var(--muted);font-size:13px;margin:4px 0 16px}
+ul{list-style:none;margin:0;padding:0;background:var(--card);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+li{display:flex;gap:12px;align-items:baseline;padding:11px 16px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+li:last-child{border-bottom:0}a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}
+.name{font-weight:600;flex:1;min-width:160px}.note{color:var(--muted);font-size:12px}.warn{color:var(--warn);font-size:12px}
+p.foot{color:var(--muted);font-size:12px;margin:12px 2px}
+</style>
+</head>
+<body>
+<main>
+<h1>Shared sites</h1>
+<p class="sub"><?= fs_h($www) ?> · PHP <?= fs_h(PHP_VERSION) ?> · <?= fs_h($web) ?> · served by FloServer</p>
+<?php if (!$folders): ?>
+<p>The www folder is empty. Put a folder with an index.php or index.html in it and reload this page.</p>
+<?php else: ?>
+<ul>
+<?php foreach ($folders as $n):
+    $kind = fs_kind("$www/$n");
+    $label = preg_match('/^(?!xn--)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/D', $n) === 1; ?>
+<li><a class="name" href="<?= fs_h($base . '/' . rawurlencode($n) . '/') ?>"><?= fs_h($n) ?>/</a>
+<?php if ($kind === 'node' || $kind === 'python'): ?>
+<span class="warn"><?= $kind === 'node' ? 'Node.js' : 'Python' ?> app: make it a project in FloServer</span>
+<?php elseif ($label && isset($projects[$n])): ?>
+<span class="note"><?= fs_h($n) ?>.localhost is the project <?= fs_h($n) ?></span>
+<?php elseif ($label): ?>
+<a class="note" href="<?= fs_h('http://' . $n . '.localhost' . $port . '/') ?>"><?= fs_h($n . '.localhost' . $port) ?></a>
+<?php endif; ?>
+</li>
+<?php endforeach; ?>
+</ul>
+<?php endif; ?>
+<p class="foot">Put your own index.php or index.html in the www folder to show it here instead.</p>
+</main>
+</body>
+</html>
+)FLOPHP";
+
+}  // namespace
+
+std::string shared_list_script(const fs::path& dir, const fs::path& config_json, WebServer web) {
+    const auto text = [](const fs::path& p) {
+        const std::u8string u = p.generic_u8string();
+        return std::string(u.begin(), u.end());
+    };
+    // One pass over the template: an inserted value is never searched again.
+    const std::array<std::pair<std::string_view, std::string>, 3> values = {{
+        {"@WWW@", php_string(text(dir))},
+        {"@CONFIG@", php_string(text(config_json))},
+        {"@WEB@", php_string(web == WebServer::Apache ? "Apache" : "nginx")},
+    }};
+    std::string out;
+    std::string_view rest = kListScript;
+    while (!rest.empty()) {
+        const auto at = rest.find('@');
+        if (at == std::string_view::npos) {
+            out += rest;
+            break;
+        }
+        out += rest.substr(0, at);
+        rest.remove_prefix(at);
+        bool replaced = false;
+        for (const auto& [key, value] : values) {
+            if (rest.starts_with(key)) {
+                out += value;
+                rest.remove_prefix(key.size());
+                replaced = true;
+                break;
+            }
+        }
+        if (!replaced) {
+            out += '@';
+            rest.remove_prefix(1);
+        }
+    }
+    return out;
 }
 
 }  // namespace floserver::core
