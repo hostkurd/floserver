@@ -120,7 +120,7 @@ private:
     [[nodiscard]] nlohmann::json status_locked() const;
     void trim_request_logs_locked() const;
     // FloServer's list of the www folder's folders (D19), rewritten when it changes.
-    void write_shared_list_locked(const PlannedSite& shared, const AppConfig& app) const;
+    void write_shared_list_locked(const PlannedSite& shared, const AppConfig& app);
 
     WebServiceConfig config_;
     CertStore& certs_;
@@ -147,6 +147,8 @@ private:
     std::string rejected_text_;   // the last config nginx -t refused
     std::string rejected_error_;
     bool stopped_ = false;
+    std::string shared_list_key_;  // what the list page was last made from
+    std::chrono::steady_clock::time_point shared_list_written_;
 
     std::atomic<bool> stopping_{false};
     std::thread thread_;

@@ -68,10 +68,14 @@ TEST_CASE("shared sites settings: defaults, what's read and what's refused") {
     REQUIRE(s->database);
     CHECK(s->database->version == "11.4");
 
-    // Written back the way it's read.
-    AppConfig app;
+    // Written back the way it's read, keys this version doesn't know kept.
+    AppConfig app = with_shared({{"future", 1}, {"php", "8.2"}});
     write_shared_config(app, *s);
     CHECK(read_shared_config(app, error) == s);
+    CHECK(app.other["shared"]["future"] == 1);
+    s->php.reset();
+    write_shared_config(app, *s);
+    CHECK_FALSE(app.other["shared"].contains("php"));
 
     CHECK_FALSE(read_shared_config(with_shared({{"on", "yes"}}), error));
     CHECK_FALSE(read_shared_config(with_shared({{"dir", "relative/www"}}), error));
@@ -218,6 +222,13 @@ TEST_CASE("the nginx config: localhost and <folder>.localhost, PHP or Apache beh
     CHECK(text->find("upstream floserver_php_9101") != std::string::npos);
     CHECK(text->find("try_files $uri $uri/ =404;") != std::string::npos);  // localhost/x: no front controller
     CHECK(text->find("server_name shop.localhost;") != std::string::npos);  // the project keeps its name
+
+    // A project not served now keeps its name.
+    spec.shared->reserved = {"crm", "old"};
+    text = make_nginx_config(spec, error);
+    REQUIRE_MESSAGE(text, error);
+    CHECK(text->find("server_name crm.localhost old.localhost;") != std::string::npos);
+    spec.shared->reserved.clear();
 
     // Apache: everything goes to it.
     spec.shared->php_ports.clear();

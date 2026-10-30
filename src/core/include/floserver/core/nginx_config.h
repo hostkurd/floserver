@@ -52,6 +52,9 @@ struct NginxShared {
     std::filesystem::path php_access_log;   // the pool's idle log
     std::optional<Port> app_port;           // the shared Apache serves (web apache)
     std::filesystem::path request_log;      // every request; empty for none
+    // Projects that aren't served now (off, waiting for a download, a
+    // problem): their <name>.localhost stays theirs, a 404, never a www folder.
+    std::vector<std::string> reserved;
 };
 
 struct NginxSpec {

@@ -409,6 +409,25 @@ private:
         out_ << "\n    # Shared sites\n";
         server(false);
         server(true);
+        if (!shared.reserved.empty()) {
+            out_ << "    # Projects not served now keep their names.\n"
+                 << "    server {\n";
+            listen(spec_.ports.http, "");
+            out_ << "        server_name";
+            for (const std::string& name : shared.reserved) {
+                if (const auto problem = project_name_problem(name)) {
+                    error_ = "the project name " + name + " can't be used: " + *problem;
+                    return false;
+                }
+                out_ << " " << name << ".localhost";
+            }
+            out_ << ";\n"
+                 << "        default_type text/plain;\n"
+                 << "        location / {\n"
+                 << "            return 404 \"There's no FloServer project at this address.\\n\";\n"
+                 << "        }\n"
+                 << "    }\n";
+        }
         return true;
     }
 

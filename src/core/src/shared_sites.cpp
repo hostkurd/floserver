@@ -170,7 +170,11 @@ void write_shared_config(AppConfig& app, const SharedConfig& shared) {
     if (!app.other.is_object()) {
         app.other = json::object();
     }
-    json doc = json::object();
+    // Keys this version doesn't know stay.
+    json doc = app.other.contains("shared") && app.other["shared"].is_object() ? app.other["shared"] : json::object();
+    for (const char* key : {"dir", "php", "database"}) {
+        doc.erase(key);
+    }
     doc["on"] = shared.on;
     if (shared.dir) {
         const std::u8string u = shared.dir->generic_u8string();

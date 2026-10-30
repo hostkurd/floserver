@@ -85,20 +85,37 @@ fs::path web_dir(const fs::path& data) { return data / "web"; }
 
 fs::path shared_list_page(const fs::path& web) { return web / "shared" / "shared-sites-list.html"; }
 
-void WebService::write_shared_list_locked(const PlannedSite& shared, const AppConfig& app) const {
+void WebService::write_shared_list_locked(const PlannedSite& shared, const AppConfig& app) {
     if (!ports_) {
         return;
     }
+    // A big www folder isn't read every few seconds: again when the folder
+    // itself, the projects or the ports change, or every 30 seconds (for
+    // index files added inside a folder).
+    std::error_code ec;
+    const auto modified = fs::last_write_time(shared.doc_root, ec);
+    std::string key = path_to_utf8(shared.doc_root) + "|" + std::to_string(ports_->http) + "|" +
+                      std::to_string(ec ? 0 : modified.time_since_epoch().count()) + "|" +
+                      (shared.config && shared.config->php ? *shared.config->php : std::string()) + "|" +
+                      (shared.apache ? "a" : "n");
+    for (const Project& p : app.projects) {
+        key += "|" + p.name;
+    }
+    const auto now = Clock::now();
+    if (key == shared_list_key_ && now - shared_list_written_ < std::chrono::seconds{30}) {
+        return;
+    }
+    shared_list_key_ = key;
+    shared_list_written_ = now;
     const auto folders = scan_shared_folders(shared.doc_root, app);
     const std::string php = shared.config && shared.config->php ? *shared.config->php : std::string();
     const WebServer web = shared.apache ? WebServer::Apache : WebServer::Nginx;
     const std::string page =
         shared_index_page(folders, shared.doc_root, php, web, shared_address(*ports_), shared_port_suffix(*ports_));
     const fs::path file = shared_list_page(work_);
-    if (const auto now = read_small_file(file, std::size_t{4} * 1024 * 1024); now && *now == page) {
+    if (const auto old = read_small_file(file, std::size_t{4} * 1024 * 1024); old && *old == page) {
         return;
     }
-    std::error_code ec;
     fs::create_directories(file.parent_path(), ec);
     std::string error;
     (void)write_file_atomically(file, page, error);
@@ -657,6 +674,15 @@ void WebService::reload_locked() {
     spec.sites = std::move(serve);
     for (NginxSite& site : spec.sites) {
         site.request_log = request_log_file(work_, site.name);
+    }
+    if (shared_spec) {
+        for (const Project& p : app->projects) {
+            const bool served = std::any_of(spec.sites.begin(), spec.sites.end(),
+                                            [&p](const NginxSite& s) { return s.name == p.name; });
+            if (!served) {
+                shared_spec->reserved.push_back(p.name);
+            }
+        }
     }
     spec.shared = std::move(shared_spec);
     // The id comes from the config itself, so the same config has the same

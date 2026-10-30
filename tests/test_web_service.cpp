@@ -627,6 +627,12 @@ TEST_CASE("shared sites: the www folder at localhost/<folder>/ and <folder>.loca
         test_util::write_file(www / "index.php", "<?php echo 'my own index';");
         fs::permissions(www / "index.php", fs::perms::others_read, fs::perm_options::add, ec);
         CHECK(get(http, "localhost") == "200 my own index");
+        // A project that's off keeps its name: no www folder takes it.
+        app.projects.front().on = false;
+        REQUIRE(save_app_config(app_config_file(data), app, error));
+        (void)service.reload();
+        CHECK(get(http, "shop.localhost").starts_with("404 There's no FloServer project"));
+        CHECK(get(http, "localhost", "/shop/") == "200 www shop");
         // The list page follows new folders.
         fs::remove(www / "index.php");
         test_util::write_file(www / "newsite" / "index.html", "new");
@@ -637,7 +643,9 @@ TEST_CASE("shared sites: the www folder at localhost/<folder>/ and <folder>.loca
         write_shared_config(app, shared);
         REQUIRE(save_app_config(app_config_file(data), app, error));
         CHECK(service.reload()["shared"].is_null());
-        CHECK(get(http, "blog.localhost").starts_with("404 "));
+        // Nothing is served now (the project is off too), so nginx may be stopped.
+        const std::string after = get(http, "blog.localhost");
+        CHECK((after.empty() || after.starts_with("404 ")));
         service.stop();
     }
 }
