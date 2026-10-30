@@ -1023,7 +1023,8 @@ MainWindow::RowGeometry::End MainWindow::row_end(const ProjectRow& row, std::str
         end_text = fill(lang_, Str::Installing, {first});
         return RowGeometry::End::Progress;
     }
-    if (row.state == RowState::NeedsDownload && snap_.link == Link::Connected) {
+    // Not before the first runtimes.list answer: nginx would be counted as missing.
+    if (row.state == RowState::NeedsDownload && snap_.link == Link::Connected && snap_.has_installed) {
         const std::vector<Download> downloads = downloads_for(row, snap_.installed);
         if (!downloads.empty()) {
             end_text = download_button_text(downloads, lang_);
@@ -1035,11 +1036,18 @@ MainWindow::RowGeometry::End MainWindow::row_end(const ProjectRow& row, std::str
 }
 
 void MainWindow::start_downloads(int visible_row) {
-    if (visible_row < 0 || visible_row >= static_cast<int>(visible_.size()) || snap_.link != Link::Connected ||
-        !worker_) {
+    if (visible_row >= 0 && visible_row < static_cast<int>(visible_.size())) {
+        start_downloads_for(snap_.rows[visible_[static_cast<std::size_t>(visible_row)]].name);
+    }
+}
+
+void MainWindow::start_downloads_for(const std::string& project) {
+    const auto found = std::find_if(snap_.rows.begin(), snap_.rows.end(),
+                                    [&](const ProjectRow& r) { return r.name == project; });
+    if (found == snap_.rows.end() || snap_.link != Link::Connected || !worker_) {
         return;
     }
-    const ProjectRow& row = snap_.rows[visible_[static_cast<std::size_t>(visible_row)]];
+    const ProjectRow& row = *found;
     const std::vector<Download> downloads = downloads_for(row, snap_.installed);
     if (downloads.empty() || installing_.contains(row.name)) {
         return;

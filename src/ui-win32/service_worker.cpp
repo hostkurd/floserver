@@ -5,9 +5,13 @@
 #include "floserver/core/paths.h"
 #include "floserver/core/service_client.h"
 
+#include <algorithm>
 #include <chrono>
+#include <map>
 #include <optional>
+#include <set>
 #include <utility>
+#include <vector>
 
 namespace floserver::ui {
 
@@ -24,6 +28,14 @@ constexpr std::size_t kLogLines = 60;
 // projects.set waits until nginx serves the change, so it's generous; the
 // window never waits for it, only this thread does.
 constexpr auto kRequestTimeout = 30s;
+
+// A string member of a reply, or empty.
+std::string string_field(const nlohmann::json& j, const char* key) {
+    if (j.is_object() && j.contains(key) && j[key].is_string()) {
+        return j[key].get<std::string>();
+    }
+    return {};
+}
 
 // Zeroes a string's bytes before it's freed (it may hold a password).
 void wipe(std::string& s) {
@@ -142,9 +154,11 @@ void ServiceWorker::run(const std::stop_token& stop) {
     PanelData panel;
     bool panel_checked = false;  // flocms/studio looked up for `selected`
     // Installs started from the window, followed until they finish.
+    // The service hands out one job for the same runtime while it runs, so
+    // several projects can wait on one job.
     struct Job {
         std::int64_t id = 0;
-        std::string project;
+        std::set<std::string> projects;
         std::string label;  // "PHP 8.2"
     };
     std::vector<Job> jobs;
@@ -223,6 +237,11 @@ void ServiceWorker::run(const std::stop_token& stop) {
 
         if (!client) {
             client = connect();
+            // Job ids belong to the service that gave them; a new one starts again at 1.
+            if (client && !jobs.empty()) {
+                jobs.clear();
+                need_installed = true;
+            }
         }
 
         std::vector<std::string> settled;
@@ -373,8 +392,11 @@ void ServiceWorker::run(const std::stop_token& stop) {
                             continue;
                         }
                         const auto id = started->result["job"].get<std::int64_t>();
-                        if (std::none_of(jobs.begin(), jobs.end(), [id](const Job& j) { return j.id == id; })) {
-                            jobs.push_back({id, c.project, label});
+                        const auto same = std::find_if(jobs.begin(), jobs.end(), [id](const Job& j) { return j.id == id; });
+                        if (same != jobs.end()) {
+                            same->projects.insert(c.project);
+                        } else {
+                            jobs.push_back({id, {c.project}, label});
                         }
                     }
                     break;
@@ -413,32 +435,49 @@ void ServiceWorker::run(const std::stop_token& stop) {
         std::map<std::string, std::string> downloads;
         if (client && !jobs.empty()) {
             std::vector<Job> running;
-            for (const Job& j : jobs) {
+            bool any_done = false;
+            for (std::size_t k = 0; k < jobs.size(); ++k) {
+                const Job& j = jobs[k];
                 const auto got = client->call("jobs.get", {{"id", j.id}});
                 if (!got) {
                     client.reset();
-                    running.assign(jobs.begin(), jobs.end());
+                    running.insert(running.end(), jobs.begin() + static_cast<std::ptrdiff_t>(k), jobs.end());
                     break;
                 }
-                if (!got->ok) {
-                    continue;  // forgotten by a restarted service
+                if (!got->ok || !got->result.is_object()) {
+                    need_installed = true;  // forgotten by a restarted service: ask what's there
+                    continue;
                 }
-                const std::string state = got->result.value("state", std::string());
+                const std::string state = string_field(got->result, "state");
                 if (state == "done") {
+                    any_done = true;
                     need_installed = true;
                 } else if (state == "failed") {
-                    change_error = fill(lang_, Str::DownloadFailed, {j.label, got->result.value("message", std::string())});
+                    change_error = fill(lang_, Str::DownloadFailed, {j.label, string_field(got->result, "message")});
                 } else if (state != "cancelled") {
-                    if (!downloads.contains(j.project)) {
-                        downloads[j.project] = job_progress_text(got->result, lang_);
+                    std::string progress = job_progress_text(got->result, lang_);
+                    if (progress.empty()) {
+                        progress = fill(lang_, Str::Installing, {j.label});
+                    }
+                    for (const std::string& project : j.projects) {
+                        downloads.try_emplace(project, progress);
                     }
                     running.push_back(j);
                 }
             }
             jobs = std::move(running);
-            if (jobs.empty() && client) {
-                // Served at once rather than at the service's next look (5 s).
+            if (any_done && client) {
+                // Served at once rather than at the service's next look (5 s),
+                // and the list asked again, so a finished project doesn't show
+                // its Download button once more with the old answers.
                 (void)client->call("web.reload");
+                if (auto fresh = client->call("runtimes.list", {{"installed_only", true}}); fresh && fresh->ok) {
+                    installed = std::move(fresh);
+                    need_installed = false;
+                }
+                if (auto fresh = client->call("projects.list"); fresh) {
+                    list = std::move(fresh);
+                }
             }
         }
         // Whether the open project is FloCMS (D14), read from its folder
@@ -481,6 +520,7 @@ void ServiceWorker::run(const std::stop_token& stop) {
             latest_.databases = databases->ok ? databases->result : nlohmann::json();
             if (installed && installed->ok) {
                 latest_.installed = installed_from_list(installed->result);
+                latest_.has_installed = true;
             }
         } else if (latest_.link == Link::Connected) {
             // It was answering a moment ago: keep the last list on screen.

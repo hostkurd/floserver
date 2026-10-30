@@ -575,9 +575,11 @@ std::vector<Download> downloads_for(const ProjectRow& row, const Installed& inst
         const bool name_ok = !d.name.empty() && std::all_of(d.name.begin(), d.name.end(), [](char c) {
             return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
         });
-        const bool version_ok = std::all_of(d.version.begin(), d.version.end(), [](char c) {
-            return (c >= '0' && c <= '9') || c == '.';
-        });
+        // Digits and single dots, starting and ending with a digit ("8", "8.2", "11.4.13").
+        const bool version_ok =
+            d.version.empty() ||
+            (d.version.front() != '.' && d.version.back() != '.' && d.version.find("..") == std::string::npos &&
+             std::all_of(d.version.begin(), d.version.end(), [](char c) { return (c >= '0' && c <= '9') || c == '.'; }));
         if (name_ok && version_ok) {
             add(std::move(d));
         }

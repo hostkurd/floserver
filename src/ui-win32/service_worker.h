@@ -52,6 +52,7 @@ struct Snapshot {
     std::vector<ProjectRow> rows;
     FooterText footer;
     Installed installed;
+    bool has_installed = false;  // runtimes.list has answered at least once
     nlohmann::json databases;   // databases.list's result, or null
     PanelData panel;
     // Projects with installs running from the window: the progress line.

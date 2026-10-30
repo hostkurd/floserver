@@ -53,7 +53,7 @@ private:
         PanelCopyEnv,
         PanelKeep,
     };
-    enum class PanelAction : std::uint8_t { Browser, Folder, Terminal, Studio };
+    enum class PanelAction : std::uint8_t { Browser, Folder, Terminal, Studio, Download };
     [[nodiscard]] static constexpr bool is_panel_part(Part part) {
         return part == Part::PanelClose || part == Part::PanelAddress || part == Part::PanelButton ||
                part == Part::PanelField || part == Part::PanelCopyEnv || part == Part::PanelKeep;
@@ -155,6 +155,8 @@ private:
     [[nodiscard]] bool switch_value(const ProjectRow& row) const;
     void toggle(int visible_row);
     void start_downloads(int visible_row);
+    void start_downloads_for(const std::string& project);
+    [[nodiscard]] std::string panel_button_text(PanelAction action) const;
     // What a row shows at its end (see RowGeometry::End).
     [[nodiscard]] RowGeometry::End row_end(const ProjectRow& row, std::string& end_text) const;
     void open_address(int visible_row);

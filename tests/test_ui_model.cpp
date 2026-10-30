@@ -406,7 +406,7 @@ TEST_CASE("the .env lines for the clipboard") {
 
 TEST_CASE("a row's downloads: what's missing, plus nginx when none is installed") {
     ProjectRow row;
-    row.missing = {"php", "mariadb 11.4", "php", "bad name", "x 1;rm"};
+    row.missing = {"php", "mariadb 11.4", "php", "bad name", "x 1;rm", "php 8..2", "php .8"};
     Installed installed;
     auto d = downloads_for(row, installed);
     REQUIRE(d.size() == 3);
