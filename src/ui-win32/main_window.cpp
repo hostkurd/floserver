@@ -912,6 +912,7 @@ void MainWindow::on_click(const Hit& clicked) {
         case Part::SharedGear: {
             // The keys follow the mouse to the row.
             focus_ = -1;
+            panel_focus_ = -1;
             shared_focused_ = true;
             show_focus_ = false;
             const std::vector<Part> order = shared_focus_order();

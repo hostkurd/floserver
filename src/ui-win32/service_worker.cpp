@@ -602,6 +602,12 @@ void ServiceWorker::run(const std::stop_token& stop) {
                 if (auto fresh = client->call("projects.list"); fresh) {
                     list = std::move(fresh);
                 }
+                // Shared sites too, or their Download button comes back once.
+                if (shared) {
+                    if (auto fresh = client->call("shared.get", {{"folders", false}}); fresh) {
+                        shared = std::move(fresh);
+                    }
+                }
             }
         }
         // The project being made.

@@ -260,9 +260,8 @@ void MainWindow::on_shared_key(WPARAM key) {
             shared_part_ = std::clamp(shared_part_ + (shift ? -1 : 1), 0, count - 1);
             break;
         case VK_SPACE:
-            toggle_shared();
-            break;
         case VK_RETURN:
+            // The focused part (on the switch, that toggles it).
             run_shared_part(order[static_cast<std::size_t>(shared_part_)]);
             return;
         case VK_ESCAPE:
@@ -534,7 +533,8 @@ MainWindow::WwwGeometry MainWindow::www_geometry(HDC dc) const {
     }
     y += static_cast<int>((www_fields_.size() + 1) / 2) * cell_h + px(6);
 
-    if (!snap_.shared.database.empty()) {
+    // The login exists only while shared sites are on.
+    if (!snap_.shared.database.empty() && snap_.shared.on) {
         const int right = std::min(x1, x0 + 2 * col_w + px(16));
         g.db_box = {x0, y, right, y + px(56)};
         const int mid = y + px(28);
