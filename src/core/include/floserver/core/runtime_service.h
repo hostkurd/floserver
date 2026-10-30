@@ -71,8 +71,10 @@ public:
     void stop();
 
     // Installed runtimes and the ones the list offers for this platform.
-    // With `refresh`, the list is fetched again even when it's fresh.
-    [[nodiscard]] nlohmann::json list(bool refresh, bool installed_only = false);
+    // With `refresh`, the list is fetched again even when it's fresh. With
+    // `cached_only` (and no `refresh`), nothing goes online: the list in
+    // hand however old, else the last signed list kept on disk.
+    [[nodiscard]] nlohmann::json list(bool refresh, bool installed_only = false, bool cached_only = false);
 
     // The project templates (D9): the signed list's, fetching it when there's
     // no fresh copy. Offline (or with `fetch` false, so a project job never
@@ -112,6 +114,9 @@ private:
     std::optional<CachedList> get_list(bool refresh, std::string& error);
     // The templates without the network: the kept list's, else the built-in ones.
     std::optional<std::vector<ProjectTemplate>> offline_templates(std::string& error);
+    // The kept list's bytes opened and checked (an expired one still opens).
+    [[nodiscard]] std::optional<Manifest> open_kept_list(const std::optional<std::string>& list,
+                                                         const std::optional<std::string>& sig) const;
     [[nodiscard]] std::filesystem::path runtimes_root() const;
     void worker();
     void run(Job& job);

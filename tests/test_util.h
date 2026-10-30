@@ -111,6 +111,14 @@ public:
         const auto it = counts_.find(url);
         return it == counts_.end() ? 0 : it->second;
     }
+    [[nodiscard]] int total_requests() const {
+        const std::lock_guard lock(mutex_);
+        int n = 0;
+        for (const auto& [url, count] : counts_) {
+            n += count;
+        }
+        return n;
+    }
     [[nodiscard]] std::size_t bytes_sent() const {
         const std::lock_guard lock(mutex_);
         return bytes_sent_;

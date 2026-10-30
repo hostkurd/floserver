@@ -401,4 +401,66 @@ bool assign_app_ports(WebPlan& plan, const std::map<std::string, Port>& previous
     return true;
 }
 
+std::map<std::string, std::vector<std::string>> runtime_users(const AppConfig& config, const ConfigReader& read_config,
+                                                              const std::vector<InstalledRuntime>& installed,
+                                                              const std::optional<std::string>& default_php) {
+    AppConfig all_on = config;
+    for (Project& p : all_on.projects) {
+        p.on = true;
+    }
+    const WebPlan plan = plan_sites(all_on, read_config, installed, default_php);
+
+    std::map<std::string, std::set<std::string>> users;
+    const auto use = [&users](const std::string& name, const fs::path& dir, const std::string& who) {
+        if (!dir.empty()) {
+            users[name + "/" + path_to_utf8(dir.filename())].insert(who);
+        }
+    };
+    for (const PhpPool& pool : plan.pools) {
+        for (const std::string& site : pool.sites) {
+            use("php", pool.php_dir, site);
+        }
+    }
+    for (const AppSpec& app : plan.apps) {
+        if (app.kind == AppKind::Node) {
+            use("node", app.runtime_dir, app.name);
+        } else if (app.kind == AppKind::Python) {
+            use("python", app.runtime_dir, app.name);
+            use("node", app.node_dir, app.name);
+        }
+    }
+    std::vector<const PlannedSite*> sites;
+    for (const PlannedSite& site : plan.sites) {
+        sites.push_back(&site);
+    }
+    if (plan.shared) {
+        sites.push_back(&*plan.shared);
+    }
+    for (const PlannedSite* site : sites) {
+        if (site->apache) {
+            use("apache", plan.apache_dir, site->name);
+        }
+        if (site->database && site->database->family == "mariadb") {
+            if (const InstalledRuntime* db = best_installed(installed, "mariadb", site->database->version)) {
+                use("mariadb", db->dir, site->name);
+            }
+        }
+        // A PHP project that names Node needs it for its build tools.
+        if (site->config && site->config->node && site->pool) {
+            if (const InstalledRuntime* node = best_installed(installed, "node", *site->config->node)) {
+                use("node", node->dir, site->name);
+            }
+        }
+    }
+    if (const InstalledRuntime* nginx = best_installed(installed, "nginx", "")) {
+        use("nginx", nginx->dir, "FloServer");
+    }
+
+    std::map<std::string, std::vector<std::string>> out;
+    for (auto& [key, who] : users) {
+        out[key] = {who.begin(), who.end()};
+    }
+    return out;
+}
+
 }  // namespace floserver::core

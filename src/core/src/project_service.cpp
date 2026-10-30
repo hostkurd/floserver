@@ -4,6 +4,11 @@
 
 #include "floserver/core/paths.h"
 #include "floserver/core/site_plan.h"
+#include "floserver/core/version.h"
+
+#include <algorithm>
+#include <array>
+#include <string_view>
 
 namespace floserver::core {
 
@@ -272,6 +277,90 @@ std::optional<json> ProjectService::describe_shared(const AppConfig& config, Ser
     }
     out["folders"] = std::move(list);
     return out;
+}
+
+namespace {
+
+constexpr std::array<std::string_view, 4> kDefaultRuntimes = {"php", "mariadb", "node", "python"};
+
+// config.json's "defaults", keeping only what this version understands.
+json read_defaults(const AppConfig& config) {
+    json out = json::object();
+    const auto it = config.other.find("defaults");
+    if (it == config.other.end() || !it->is_object()) {
+        return out;
+    }
+    for (const std::string_view name : kDefaultRuntimes) {
+        const std::string key(name);
+        if (it->contains(key) && (*it)[key].is_string() && Version::parse((*it)[key].get<std::string>())) {
+            out[key] = (*it)[key];
+        }
+    }
+    return out;
+}
+
+}  // namespace
+
+std::optional<json> ProjectService::runtime_users(const std::vector<InstalledRuntime>& installed,
+                                                  ServiceRefusal& refusal) const {
+    AppConfig config;
+    {
+        const std::lock_guard lock(mutex_);
+        auto loaded = load(refusal);
+        if (!loaded) {
+            return std::nullopt;
+        }
+        config = std::move(*loaded);
+    }
+    // The floserver.json files are read without the lock: a slow disk
+    // doesn't hold up other requests.
+    json out = json::object();
+    for (auto& [key, who] : floserver::core::runtime_users(config, read_project_config_file, installed, std::nullopt)) {
+        out[key] = who;
+    }
+    return out;
+}
+
+std::optional<json> ProjectService::defaults(ServiceRefusal& refusal) const {
+    const std::lock_guard lock(mutex_);
+    const auto config = load(refusal);
+    if (!config) {
+        return std::nullopt;
+    }
+    return read_defaults(*config);
+}
+
+std::optional<json> ProjectService::set_default(const std::string& runtime, const std::optional<std::string>& series,
+                                                ServiceRefusal& refusal) {
+    if (std::find(kDefaultRuntimes.begin(), kDefaultRuntimes.end(), runtime) == kDefaultRuntimes.end()) {
+        refusal = {"bad_params", "a default can be set for php, mariadb, node or python, not \"" + runtime + "\""};
+        return std::nullopt;
+    }
+    if (series && !Version::parse(*series)) {
+        refusal = {"bad_params", "\"" + *series + "\" isn't a version such as 8.5"};
+        return std::nullopt;
+    }
+    const std::lock_guard lock(mutex_);
+    auto config = load(refusal);
+    if (!config) {
+        return std::nullopt;
+    }
+    json& stored = config->other["defaults"];
+    if (!stored.is_object()) {
+        stored = json::object();  // unusable before: replaced
+    }
+    if (series) {
+        stored[runtime] = *series;
+    } else {
+        stored.erase(runtime);
+    }
+    if (stored.empty()) {
+        config->other.erase("defaults");
+    }
+    if (!save(*config, refusal)) {
+        return std::nullopt;
+    }
+    return read_defaults(*config);
 }
 
 std::optional<json> ProjectService::shared(ServiceRefusal& refusal, bool folders) const {

@@ -511,3 +511,32 @@ TEST_CASE("an HTML-only project is a static site: no PHP, no download") {
     CHECK(has_php_files(tmp.path() / "shop"));
     CHECK(has_php_files(tmp.path() / "nope"));
 }
+
+TEST_CASE("runtime_users: who uses each installed runtime, off projects included (D20)") {
+    AppConfig config;
+    config.projects = {project("shop"), project("blog", false), project("legacy"), project("app"), project("py")};
+    const std::vector<InstalledRuntime> installed = {
+        runtime("php", "8.4.27"),     runtime("php", "8.5.12"),   runtime("mariadb", "11.4.13"),
+        runtime("mariadb", "11.8.5"), runtime("node", "24.22.1"), runtime("node", "22.21.1"),
+        runtime("nginx", "1.30.6"),   runtime("nginx", "1.28.0"), runtime("python", "3.13.18"),
+        runtime("apache", "2.4.66")};
+    const auto users = runtime_users(
+        config,
+        reader({{"shop", R"({"php": "8.4", "database": "mariadb-11.4", "web": "apache", "node": "22"})"},
+                {"blog", R"({"php": "8.4", "database": "mariadb-11.8"})"},
+                {"legacy", R"({"php": "7.4"})"},  // not installed: uses nothing
+                {"app", R"({"node": "24"})"},
+                {"py", R"({"python": "3.13", "node": "24"})"}}),
+        installed, std::nullopt);
+    using V = std::vector<std::string>;
+    CHECK(users.at("php/8.4.27") == V{"blog", "shop"});  // blog is off, still counted
+    CHECK_FALSE(users.contains("php/8.5.12"));
+    CHECK(users.at("mariadb/11.4.13") == V{"shop"});
+    CHECK(users.at("mariadb/11.8.5") == V{"blog"});
+    CHECK(users.at("apache/2.4.66") == V{"shop"});
+    CHECK(users.at("node/22.21.1") == V{"shop"});
+    CHECK(users.at("node/24.22.1") == V{"app", "py"});
+    CHECK(users.at("python/3.13.18") == V{"py"});
+    CHECK(users.at("nginx/1.30.6") == V{"FloServer"});
+    CHECK_FALSE(users.contains("nginx/1.28.0"));
+}
