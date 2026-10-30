@@ -1,6 +1,7 @@
 #include "build.h"
 #include "publish.h"
 #include "signing.h"
+#include "templates_json.h"
 #include "test_util.h"
 
 #include "floserver/core/encoding.h"
@@ -157,12 +158,30 @@ TEST_CASE("publisher: a new file that differs, or has no official checksum") {
     CHECK(f.state == CheckState::Failed);
     CHECK(f.detail.find("DIFFERENT") != std::string::npos);
 
-    // Not in the checksum list: compare by hand.
+    // Not in the checksum list, or the list can't be read: it fails (never
+    // "by hand"), and a list that couldn't be read is asked for again.
     cdn.http.serve("https://nodejs.org/dist/v24.23.0/SHASUMS256.txt", {200, "nothing here\n"});
     ctx.sums_cache.clear();
     check_file(ctx, f);
-    CHECK(f.state == CheckState::ByHand);
-    CHECK(f.detail.find(sha256_hex("tampered")) != std::string::npos);
+    CHECK(f.state == CheckState::Failed);
+    CHECK(f.detail.find("doesn't name node-v24.23.0-win-x64.zip") != std::string::npos);
+    ctx.sums_cache.clear();
+    cdn.http.serve("https://nodejs.org/dist/v24.23.0/SHASUMS256.txt", {503, ""});
+    check_file(ctx, f);
+    CHECK(f.state == CheckState::Failed);
+    CHECK(f.detail.find("Can't read the official checksum list") != std::string::npos);
+    cdn.http.serve("https://nodejs.org/dist/v24.23.0/SHASUMS256.txt",
+                   {200, sha256_hex("tampered") + "  node-v24.23.0-win-x64.zip\n"});
+    check_file(ctx, f);
+    CHECK(f.state == CheckState::Ok);
+
+    // nginx's original can't be downloaded: fails too.
+    PublishFile ng;
+    ng.path = "nginx/1.30.8/nginx-1.30.8.zip";
+    cdn.http.serve(kTestCdn + "/" + ng.path, {200, "nginx"});
+    check_file(ctx, ng);
+    CHECK(ng.state == CheckState::Failed);
+    CHECK(ng.detail.find("Can't download the original") != std::string::npos);
 
     // Not uploaded (S3 answers 403 through CloudFront).
     PublishFile missing;
@@ -237,6 +256,9 @@ TEST_CASE("publisher: official checksums are read from the usual list formats") 
     CHECK_FALSE(find_official_hash(h + "  file.zip.asc\n" + h + "  debug-file.zip\n", "file.zip"));
     // composer.phar.sha256sum: just the hash.
     CHECK(find_official_hash(h + "\n", "composer.phar") == h);
+    CHECK(find_official_hash(h + "  \r\n", "composer.phar") == h);
+    // A single line naming another file isn't this file's hash.
+    CHECK_FALSE(find_official_hash(h + "  composer-other.phar\n", "composer.phar"));
     CHECK(find_official_hash(h + "  composer.phar\n", "composer.phar") == h);
     CHECK_FALSE(find_official_hash(h + "\n" + h + "\n", "composer.phar"));
     CHECK_FALSE(find_official_hash("", "file.zip"));
@@ -314,15 +336,65 @@ TEST_CASE("publisher: signing refuses a key FloServer doesn't trust and a damage
     CHECK_FALSE(parse_secret_key(one_line, k3));
 }
 
-TEST_CASE("publisher: the bucket must refuse direct reads") {
+TEST_CASE("publisher: the bucket must refuse direct reads, and its Date checks the clock") {
     FakeTransport http;
     const std::string s3(kDirectS3);
-    http.serve(s3 + "/composer/2.10.3/composer.phar", {403, ""});
-    CHECK(check_direct_s3(http, s3, "composer/2.10.3/composer.phar").empty());
+    const auto now = at("2026-10-30T12:00:00Z");
+    http.serve(s3 + "/composer/2.10.3/composer.phar", {403, "", "", now + std::chrono::minutes{3}});
+    const S3Check refused = check_direct_s3(http, s3, "composer/2.10.3/composer.phar");
+    CHECK(refused.problem.empty());
+    CHECK(clock_problem(refused.server_date, now).empty());
+    CHECK(clock_problem(now + std::chrono::minutes{11}, now).find("11 minutes off") != std::string::npos);
+    CHECK(clock_problem(std::nullopt, now).find("Can't check") != std::string::npos);
     http.serve(s3 + "/composer/2.10.3/composer.phar", {200, "phar"});
-    CHECK(check_direct_s3(http, s3, "composer/2.10.3/composer.phar").find("make it private") !=
+    CHECK(check_direct_s3(http, s3, "composer/2.10.3/composer.phar").problem.find("make it private") !=
           std::string::npos);
-    CHECK(check_direct_s3(http, s3, "nothing").find("by hand") != std::string::npos);
+    CHECK(check_direct_s3(http, s3, "nothing").problem.find("by hand") != std::string::npos);
+}
+
+TEST_CASE("publisher: an old live list, or different templates, need a yes or stop") {
+    FakeCdn cdn;
+    const auto now = at("2026-10-30T12:00:00Z");
+    cdn.publish(4, now - std::chrono::days{1});
+    LiveResult live = fetch_live_list(cdn.http, kTestCdn, cdn.keys(), now);
+    REQUIRE(live.list);
+    SuccessorCheck c = check_successor(*live.list, kBuiltInTemplates, now);
+    CHECK(c.stop.empty());
+    CHECK(c.confirm.empty());
+    c = check_successor(*live.list, "[]", now);
+    REQUIRE(c.confirm.size() == 1);
+    CHECK(c.confirm.front().find("templates") != std::string::npos);
+
+    live.list->expired = true;
+    live.list->expires = now - std::chrono::days{3};
+    c = check_successor(*live.list, kBuiltInTemplates, now);
+    CHECK(c.stop.empty());
+    REQUIRE(c.confirm.size() == 1);
+    CHECK(c.confirm.front().find("expired on 2026-10-27") != std::string::npos);
+    live.list->expires = now - std::chrono::days{91};
+    c = check_successor(*live.list, kBuiltInTemplates, now);
+    CHECK(c.stop.size() == 1);
+}
+
+TEST_CASE("publisher: a published file without a size from the CDN fails") {
+    class NoLength final : public floserver::core::HttpTransport {
+    public:
+        floserver::core::HttpReply get(const std::string&, const floserver::core::HttpLimits&,
+                                       const floserver::core::HttpBody& body) override {
+            floserver::core::HttpReply r;
+            r.status = 200;
+            const std::string data = "abc";
+            r.stopped = !body(std::span(reinterpret_cast<const std::uint8_t*>(data.data()), data.size()));
+            return r;
+        }
+    } http;
+    CheckContext ctx(http, kTestCdn);
+    PublishFile f;
+    f.path = "composer/2.10.3/composer.phar";
+    f.published = true;
+    f.size = 3;
+    check_file(ctx, f);
+    CHECK(f.state == CheckState::Failed);
 }
 
 TEST_CASE("publisher: sizes read like the window shows them") {

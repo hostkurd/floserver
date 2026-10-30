@@ -14,6 +14,7 @@
 #include "build.h"
 #include "publish.h"
 #include "signing.h"
+#include "templates_json.h"
 #include "win_util.h"
 #include "floserver/core/builtin.h"
 #include "floserver/core/http.h"
@@ -35,6 +36,7 @@
 #include <fstream>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -89,6 +91,7 @@ struct Outcome {
     std::array<std::string, 4> details;
     std::string error;  // shown in a message box when set
     fs::path folder;    // where the files went, when published
+    std::int64_t sequence = 0;
     std::vector<mt::PublishFile> files;
 };
 
@@ -105,18 +108,36 @@ std::chrono::sys_seconds now_utc() {
     return std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
 }
 
-std::optional<std::string> read_small_file(const fs::path& p, std::size_t max) {
-    std::ifstream in(p, std::ios::binary);
-    if (!in) {
+// Reads the key file straight into the string that gets wiped, with no
+// stream buffer keeping a copy.
+std::optional<std::string> read_key_file(const fs::path& p) {
+    constexpr DWORD kMax = 4096;
+    HANDLE h = CreateFileW(p.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
         return std::nullopt;
     }
-    std::string data(max + 1, '\0');
-    in.read(data.data(), static_cast<std::streamsize>(data.size()));
-    const auto got = static_cast<std::size_t>(in.gcount());
-    if (got > max) {
+    std::string data(kMax + 1, '\0');
+    DWORD total = 0;
+    bool ok = true;
+    while (total < kMax + 1) {
+        DWORD got = 0;
+        if (!ReadFile(h, data.data() + total, kMax + 1 - total, &got, nullptr)) {
+            ok = false;
+            break;
+        }
+        if (got == 0) {
+            break;
+        }
+        total += got;
+    }
+    CloseHandle(h);
+    if (!ok || total > kMax) {
+        SecureZeroMemory(data.data(), data.size());
         return std::nullopt;
     }
-    data.resize(got);
+    // Shrinking never moves the characters, so the one buffer is what gets wiped.
+    data.resize(total);
     return data;
 }
 
@@ -171,6 +192,7 @@ private:
     void update_selection();
     void update_steps();
     void set_busy(bool busy);
+    void reset_steps();
     int selected_row() const;
     std::wstring check_text(int row) const;
     LRESULT list_custom_draw(NMLVCUSTOMDRAW* cd) const;
@@ -201,6 +223,9 @@ private:
     fs::path key_file_;
     fs::path last_folder_;
     bool live_busy_ = false;
+    std::vector<std::string> live_notes_;  // live runtimes that can't be carried over
+    std::set<std::string> removed_;        // published files the user left out
+    std::int64_t signed_sequence_ = 0;     // the last list made in this window
 
     std::thread worker_;
     std::atomic<bool> cancel_{false};
@@ -329,7 +354,7 @@ void Publisher::create_controls() {
     copy_paths_ = make(L"BUTTON", L"Copy invalidation paths", WS_TABSTOP | BS_PUSHBUTTON, IdCopyPaths, font_.get());
     ShowWindow(open_folder_, SW_HIDE);
     ShowWindow(copy_paths_, SW_HIDE);
-    publish_ = make(L"BUTTON", L"Publish", WS_TABSTOP | BS_DEFPUSHBUTTON, IdPublish, bold_.get());
+    publish_ = make(L"BUTTON", L"Publish", WS_TABSTOP | BS_PUSHBUTTON, IdPublish, bold_.get());
     update_steps();
 }
 
@@ -485,7 +510,12 @@ LRESULT Publisher::handle(UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_DPICHANGED: {
+        const UINT old_dpi = dpi_;
         dpi_ = HIWORD(wp);
+        for (int c = 0; c < 4; ++c) {
+            ListView_SetColumnWidth(list_, c, MulDiv(ListView_GetColumnWidth(list_, c), static_cast<int>(dpi_),
+                                                    static_cast<int>(old_dpi)));
+        }
         make_fonts();
         // Every control gets the new normal font, then the bold and heading ones theirs.
         EnumChildWindows(hwnd_, &set_font, reinterpret_cast<LPARAM>(font_.get()));
@@ -556,10 +586,9 @@ LRESULT Publisher::handle(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_COMMAND:
         switch (LOWORD(wp)) {
         case IDOK:
+            // Enter adds a typed path; Publish needs its own button.
             if (GetFocus() == path_) {
                 add_path();
-            } else if (!busy_) {
-                publish();
             }
             return 0;
         case IdCheckLive:
@@ -625,9 +654,7 @@ LRESULT Publisher::handle(UINT msg, WPARAM wp, LPARAM lp) {
         std::unique_ptr<mt::PublishFile> f(int_to_ptr<mt::PublishFile*>(lp));
         const auto row = static_cast<std::size_t>(wp);
         if (row < files_.size()) {
-            const bool accepted = files_.at(row).accepted;
-            files_.at(row) = *f;
-            files_.at(row).accepted = accepted && f->state == mt::CheckState::ByHand;
+            files_.at(row) = *f;  // the worker decides whether a tick still holds
             working_row_ = -1;
             update_row(static_cast<int>(row));
             update_selection();
@@ -777,7 +804,7 @@ void Publisher::update_selection() {
         text += "\r\nSHA-256 " + f.sha256;
     }
     SetWindowTextW(detail_, widen(text).c_str());
-    EnableWindow(remove_, busy_ ? FALSE : TRUE);
+    EnableWindow(remove_, busy_ || live_busy_ ? FALSE : TRUE);
     const bool by_hand = f.state == mt::CheckState::ByHand;
     EnableWindow(accept_, by_hand && !busy_ ? TRUE : FALSE);
     Button_SetCheck(accept_, by_hand && f.accepted ? BST_CHECKED : BST_UNCHECKED);
@@ -817,6 +844,8 @@ void Publisher::check_live() {
     }
     live_busy_ = true;
     EnableWindow(check_live_, FALSE);
+    EnableWindow(add_, FALSE);
+    update_selection();
     SetWindowTextW(live_value_, L"Reading…");
     stop_worker();
     cancel_ = false;
@@ -834,8 +863,13 @@ void Publisher::check_live() {
 }
 
 void Publisher::on_live(std::unique_ptr<mt::LiveResult> live) {
+    if (worker_.joinable()) {
+        worker_.join();
+    }
     live_busy_ = false;
     EnableWindow(check_live_, TRUE);
+    EnableWindow(add_, TRUE);
+    update_selection();
     if (!live->list) {
         live_error_ = live->error;
         SetWindowTextW(live_value_, widen(live->error).c_str());
@@ -848,6 +882,9 @@ void Publisher::on_live(std::unique_ptr<mt::LiveResult> live) {
     live_ = std::move(live->list);
     std::vector<std::string> notes;
     std::vector<mt::PublishFile> next = mt::files_from_live(*live_, mt::kCdn, notes);
+    live_notes_ = notes;
+    // A file the user left out stays out.
+    std::erase_if(next, [this](const mt::PublishFile& f) { return removed_.contains(f.path); });
     // New files added before stay, unless the live list has them now.
     for (const mt::PublishFile& f : files_) {
         if (!f.published && std::none_of(next.begin(), next.end(), [&](const mt::PublishFile& n) {
@@ -874,13 +911,14 @@ void Publisher::on_live(std::unique_ptr<mt::LiveResult> live) {
         for (const std::string& n : notes) {
             text += n + "\n";
         }
-        MessageBoxW(hwnd_, widen(text).c_str(), L"FloServer Publisher", MB_OK | MB_ICONINFORMATION);
+        text += "\nThe Publisher can't make the next list while these are in the live list.";
+        MessageBoxW(hwnd_, widen(text).c_str(), L"FloServer Publisher", MB_OK | MB_ICONWARNING);
     }
     update_steps();
 }
 
 void Publisher::add_path() {
-    if (busy_) {
+    if (busy_ || live_busy_) {
         return;
     }
     const int n = GetWindowTextLengthW(path_);
@@ -893,33 +931,55 @@ void Publisher::add_path() {
         SetFocus(path_);
         return;
     }
+    removed_.erase(added.file->path);
     files_.push_back(*added.file);
     SetWindowTextW(path_, L"");
     fill_list();
     const int row = static_cast<int>(files_.size()) - 1;
     ListView_SetItemState(list_, row, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
     ListView_EnsureVisible(list_, row, FALSE);
-    steps_.fill(StepState::Waiting);
-    update_steps();
+    reset_steps();
 }
 
 void Publisher::remove_selected() {
     const int row = selected_row();
-    if (busy_ || row < 0 || row >= static_cast<int>(files_.size())) {
+    if (busy_ || live_busy_ || row < 0 || row >= static_cast<int>(files_.size())) {
         return;
     }
-    const mt::PublishFile& f = files_.at(static_cast<std::size_t>(row));
-    if (f.published) {
-        const std::wstring q = L"Leave " + widen(f.title) +
+    // Copies: the list may change while the question is open.
+    const std::string path = files_.at(static_cast<std::size_t>(row)).path;
+    const bool published = files_.at(static_cast<std::size_t>(row)).published;
+    if (published) {
+        const std::wstring q = L"Leave " + widen(files_.at(static_cast<std::size_t>(row)).title) +
                                L" out of the next list?\n\nFloServer users can't download it any more once the "
                                L"new list is live. Projects that already have it keep working.";
         if (MessageBoxW(hwnd_, q.c_str(), L"FloServer Publisher", MB_YESNO | MB_ICONQUESTION) != IDYES) {
             return;
         }
     }
-    files_.erase(files_.begin() + row);
+    if (busy_ || live_busy_) {
+        return;
+    }
+    const auto it = std::find_if(files_.begin(), files_.end(), [&](const mt::PublishFile& f) { return f.path == path; });
+    if (it == files_.end()) {
+        return;
+    }
+    if (published) {
+        removed_.insert(path);
+    }
+    files_.erase(it);
     fill_list();
+    reset_steps();
+}
+
+void Publisher::reset_steps() {
     steps_.fill(StepState::Waiting);
+    step_details_text_ = {"New files are compared with their official checksums; the others must still be served",
+                          "Next sequence, expires in 90 days, with the built-in templates",
+                          "The key is read, used and forgotten",
+                          "manifest.json and manifest.json.sig in a dated folder"};
+    ShowWindow(open_folder_, SW_HIDE);
+    ShowWindow(copy_paths_, SW_HIDE);
     update_steps();
 }
 
@@ -979,13 +1039,30 @@ std::unique_ptr<Outcome> run_publish(HWND target, std::vector<mt::PublishFile> f
         return fail(0, "The live list changed (now sequence " + std::to_string(live.list->sequence) +
                            "). Press Check live, then publish again.");
     }
-    if (live.list->server_date) {
-        const auto off = std::chrono::abs(*live.list->server_date - now);
-        if (off > std::chrono::minutes{10}) {
-            return fail(0, "This computer's clock is " +
-                               std::to_string(std::chrono::duration_cast<std::chrono::minutes>(off).count()) +
-                               " minutes off the CDN's. Set the clock right, then publish.");
+    if (live.list->key_id.empty()) {
+        return fail(0, "The live list has no key id");
+    }
+    // The bucket must refuse direct reads. Any listed file will do; the
+    // smallest published one keeps it quick. S3's Date (never cached, unlike
+    // CloudFront's) is the clock check: the expiry is counted from this clock.
+    const mt::PublishFile* probe = nullptr;
+    for (const mt::PublishFile& f : files) {
+        if (probe == nullptr || (f.published && (!probe->published || f.size < probe->size))) {
+            probe = &f;
         }
+    }
+    if (probe == nullptr) {
+        return fail(0, "There are no files");
+    }
+    const mt::S3Check s3 = mt::check_direct_s3(*http, mt::kDirectS3, probe->path, &cancel);
+    if (cancel) {
+        return fail(0, "Stopped");
+    }
+    if (!s3.problem.empty()) {
+        return fail(0, s3.problem);
+    }
+    if (std::string clock = mt::clock_problem(s3.server_date, now); !clock.empty()) {
+        return fail(0, clock);
     }
 
     mt::CheckContext ctx(*http, mt::kCdn);
@@ -1005,38 +1082,27 @@ std::unique_ptr<Outcome> run_publish(HWND target, std::vector<mt::PublishFile> f
     std::size_t problems = 0;
     for (row = 0; row < files.size(); ++row) {
         mt::PublishFile& f = files.at(row);
-        // A new file checked earlier in this window keeps its result.
-        const bool keep = !f.published && (f.state == mt::CheckState::Ok || f.state == mt::CheckState::ByHand);
-        if (!keep) {
-            PostMessageW(target, kMsgProgress, row, 0);
-            mt::check_file(ctx, f);
-            if (cancel) {
-                return fail(0, "Stopped");
-            }
-            PostMessageW(target, kMsgRow, row, reinterpret_cast<LPARAM>(new mt::PublishFile(f)));
+        // Every file is checked again on every run (it may have been
+        // re-uploaded). A tick for a by-hand file holds only while its
+        // SHA-256 stays the one that was compared.
+        const std::string ticked_sha = f.accepted ? f.sha256 : std::string();
+        PostMessageW(target, kMsgProgress, row, 0);
+        mt::check_file(ctx, f);
+        if (cancel) {
+            return fail(0, "Stopped");
         }
+        f.accepted = f.state == mt::CheckState::ByHand && !ticked_sha.empty() && f.sha256 == ticked_sha;
+        PostMessageW(target, kMsgRow, row, reinterpret_cast<LPARAM>(new mt::PublishFile(f)));
         if (f.state == mt::CheckState::Ok) {
             (f.published ? served : matched) += 1;
         } else if (!(f.state == mt::CheckState::ByHand && f.accepted)) {
             ++problems;
         }
     }
-    // Any listed file will do for the bucket; the smallest keeps it quick.
-    const auto smallest = std::min_element(files.begin(), files.end(), [](const auto& a, const auto& b) {
-        return a.size < b.size;
-    });
-    std::string s3 = smallest == files.end() ? std::string("there are no files")
-                                             : mt::check_direct_s3(*http, mt::kDirectS3, smallest->path, &cancel);
-    if (cancel) {
-        return fail(0, "Stopped");
-    }
     out->files = files;
     if (problems > 0) {
         return fail(0, std::to_string(problems) + (problems == 1 ? " file needs" : " files need") +
                            " attention: select the orange or red rows");
-    }
-    if (!s3.empty()) {
-        return fail(0, s3);
     }
     out->steps.at(0) = StepState::Done;
     out->details.at(0) = std::to_string(matched) + (matched == 1 ? " new file matches" : " new files match") +
@@ -1059,13 +1125,19 @@ std::unique_ptr<Outcome> run_publish(HWND target, std::vector<mt::PublishFile> f
     step(2);
     mt::SignResult signed_list;
     {
-        auto text = read_small_file(key_file, 4096);
+        auto text = read_key_file(key_file);
         mt::SecretKey key;
         if (!text) {
             return fail(2, "Can't read the key file");
         }
         if (!mt::parse_secret_key(*text, key)) {  // wipes *text
             return fail(2, "That isn't a FloServer signing key file");
+        }
+        // FloServer counts sequences per key: a list signed with another key
+        // would start a new count, and apps could refuse it.
+        if (key.id != live.list->key_id) {
+            return fail(2, "This key is \"" + key.id + "\", but the live list was signed with \"" +
+                               live.list->key_id + "\". Choose that key file.");
         }
         signed_list = mt::sign_manifest(*built.manifest_json, key, now, floserver::core::builtin_manifest_keys());
     }  // the key is wiped here
@@ -1075,6 +1147,9 @@ std::unique_ptr<Outcome> run_publish(HWND target, std::vector<mt::PublishFile> f
     out->steps.at(2) = StepState::Done;
     out->details.at(2) = "Signed for FloServer, sequence " + std::to_string(signed_list.sequence);
 
+    if (cancel) {
+        return fail(2, "Stopped; nothing was written");
+    }
     step(3);
     const fs::path docs = documents_folder();
     if (docs.empty()) {
@@ -1114,6 +1189,7 @@ std::unique_ptr<Outcome> run_publish(HWND target, std::vector<mt::PublishFile> f
                          ". Upload both to the top of the bucket, then invalidate /manifest.json and "
                          "/manifest.json.sig in CloudFront.";
     out->folder = folder;
+    out->sequence = signed_list.sequence;
     return out;
 }
 
@@ -1125,6 +1201,33 @@ void Publisher::publish() {
         MessageBoxW(hwnd_, L"The live list hasn't been read. Press Check live first.", L"FloServer Publisher",
                     MB_OK | MB_ICONWARNING);
         return;
+    }
+    if (!live_notes_.empty()) {
+        MessageBoxW(hwnd_, widen(live_notes_.front() + ". FloServer Publisher only carries over runtimes on the CDN; "
+                                 "publish this list with floserver-manifest.").c_str(),
+                    L"Not published", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    // Two different lists must never share a sequence number.
+    if (signed_sequence_ > live_->sequence) {
+        MessageBoxW(hwnd_,
+                    (L"Sequence " + std::to_wstring(signed_sequence_) +
+                     L" was already made in this window. Upload it and invalidate, then press Check live; it "
+                     L"must show that sequence before the next one is made.")
+                        .c_str(),
+                    L"Not published", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    const mt::SuccessorCheck successor = mt::check_successor(*live_, mt::kBuiltInTemplates, now_utc());
+    if (!successor.stop.empty()) {
+        MessageBoxW(hwnd_, widen(successor.stop.front()).c_str(), L"Not published", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    for (const std::string& q : successor.confirm) {
+        if (MessageBoxW(hwnd_, widen(q).c_str(), L"FloServer Publisher", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) !=
+            IDYES) {
+            return;
+        }
     }
     if (key_file_.empty()) {
         choose_key();
@@ -1153,11 +1256,7 @@ void Publisher::on_done(std::unique_ptr<Outcome> outcome) {
     }
     working_row_ = -1;
     if (outcome->files.size() == files_.size()) {
-        for (std::size_t i = 0; i < files_.size(); ++i) {
-            const bool accepted = files_.at(i).accepted;
-            files_.at(i) = outcome->files.at(i);
-            files_.at(i).accepted = accepted && files_.at(i).state == mt::CheckState::ByHand;
-        }
+        files_ = outcome->files;
     }
     fill_list();
     steps_ = outcome->steps;
@@ -1170,6 +1269,7 @@ void Publisher::on_done(std::unique_ptr<Outcome> outcome) {
     set_busy(false);
     if (!outcome->folder.empty()) {
         last_folder_ = outcome->folder;
+        signed_sequence_ = outcome->sequence;
         ShowWindow(open_folder_, SW_SHOW);
         ShowWindow(copy_paths_, SW_SHOW);
         SetWindowTextW(copy_paths_, L"Copy invalidation paths");

@@ -159,8 +159,7 @@ LiveResult fetch_live_list(HttpTransport& http, std::string_view cdn,
     LiveResult result;
     const std::string base(cdn);
     std::string error;
-    HttpReply reply;
-    const auto list = get_text(http, base + "/manifest.json", kMaxListBytes, cancel, error, &reply);
+    const auto list = get_text(http, base + "/manifest.json", kMaxListBytes, cancel, error);
     if (!list) {
         result.error = "Can't read the live list: " + error;
         return result;
@@ -197,7 +196,7 @@ LiveResult fetch_live_list(HttpTransport& http, std::string_view cdn,
     live.key_id = opened.key_id;
     live.runtimes = opened.manifest->runtimes;
     live.template_count = opened.manifest->templates.size();
-    live.server_date = reply.server_date;
+    live.templates_json = doc.is_object() && doc.contains("templates") ? doc["templates"].dump() : "[]";
     result.list = std::move(live);
     return result;
 }
@@ -370,9 +369,11 @@ std::optional<std::string> find_official_hash(std::string_view sums, std::string
         while (l.starts_with(' ') || l.starts_with('\t')) {
             l.remove_prefix(1);
         }
-        if (l.size() >= 64 && std::all_of(l.begin(), l.begin() + 64, is_hex) &&
-            (l.size() == 64 || l[64] == ' ' || l[64] == '\t')) {
-            return lower(std::string(l.substr(0, 64)));
+        while (l.ends_with(' ') || l.ends_with('\t')) {
+            l.remove_suffix(1);
+        }
+        if (l.size() == 64 && std::all_of(l.begin(), l.end(), is_hex)) {
+            return lower(std::string(l));
         }
     }
     return std::nullopt;
@@ -397,7 +398,10 @@ void check_file(CheckContext& ctx, PublishFile& file) {
         if (r.status != 200) {
             file.state = CheckState::Failed;
             file.detail = "The CDN doesn't serve it any more (" + describe_failure(r) + ")";
-        } else if (r.content_length && *r.content_length != file.size) {
+        } else if (!r.content_length) {
+            file.state = CheckState::Failed;
+            file.detail = "The CDN didn't say the file's size";
+        } else if (*r.content_length != file.size) {
             file.state = CheckState::Failed;
             file.detail = "The CDN serves a different size (" + std::to_string(*r.content_length) +
                           " bytes, the list says " + std::to_string(file.size) + ")";
@@ -434,17 +438,24 @@ void check_file(CheckContext& ctx, PublishFile& file) {
     std::string from;
     std::string why_not;
     if (source.kind == OfficialSource::Kind::Sums) {
+        std::string fetch_error;
+        bool listed_nowhere = true;
         for (const std::string& sums_url : source.urls) {
             auto cached = ctx.sums_cache.find(sums_url);
             if (cached == ctx.sums_cache.end()) {
                 std::string error;
-                cached = ctx.sums_cache.emplace(sums_url, get_text(ctx.http, sums_url, kMaxSumsBytes,
-                                                                   ctx.cancel, error)).first;
+                auto text = get_text(ctx.http, sums_url, kMaxSumsBytes, ctx.cancel, error);
                 if (cancelled(ctx.cancel)) {
-                    ctx.sums_cache.erase(cached);
                     file.detail = "Stopped";
                     return;
                 }
+                if (!text) {
+                    // Not cached: the next run asks again.
+                    fetch_error = error;
+                    listed_nowhere = false;
+                    continue;
+                }
+                cached = ctx.sums_cache.emplace(sums_url, std::move(text)).first;
             }
             if (const std::optional<std::string>& sums = cached->second; sums.has_value()) {
                 official = find_official_hash(sums.value(), source.name);
@@ -455,7 +466,10 @@ void check_file(CheckContext& ctx, PublishFile& file) {
             }
         }
         if (!official) {
-            why_not = "No official checksum found for it at " + host_of(source.urls.front());
+            why_not = listed_nowhere
+                          ? "Its official checksum list (" + host_of(source.urls.front()) +
+                                ") doesn't name " + source.name + ". Check the file name and version"
+                          : "Can't read the official checksum list: " + fetch_error;
         }
     } else if (source.kind == OfficialSource::Kind::Original) {
         const Download orig = download_and_hash(ctx, source.urls.front());
@@ -467,15 +481,20 @@ void check_file(CheckContext& ctx, PublishFile& file) {
             official = orig.sha256;
             from = "the original from " + host_of(source.urls.front());
         } else {
-            why_not = "Can't download the original (" + describe_failure(orig.reply) + ")";
+            why_not = "Can't download the original to compare with (" + describe_failure(orig.reply) + ")";
         }
-    } else {
-        why_not = "Its project publishes no checksum list";
     }
 
-    if (!official) {
+    if (source.kind == OfficialSource::Kind::ByHand) {
+        // Only a project that publishes no checksum at all (Apache Lounge).
         file.state = CheckState::ByHand;
-        file.detail = why_not + ". Compare its SHA-256 by hand: " + file.sha256;
+        file.detail = "Its project publishes no checksum list. Compare its SHA-256 with the one on its "
+                      "download page: " + file.sha256;
+    } else if (!official) {
+        // A file with an official source is never signed without that source:
+        // it fails, and the next Publish tries again.
+        file.state = CheckState::Failed;
+        file.detail = why_not + ".";
     } else if (*official == file.sha256) {
         file.state = CheckState::Ok;
         file.detail = "Matches " + from;
@@ -485,20 +504,59 @@ void check_file(CheckContext& ctx, PublishFile& file) {
     }
 }
 
-std::string check_direct_s3(HttpTransport& http, std::string_view s3_base, std::string_view path,
-                            const std::atomic<bool>* cancel) {
+S3Check check_direct_s3(HttpTransport& http, std::string_view s3_base, std::string_view path,
+                        const std::atomic<bool>* cancel) {
     HttpLimits limits;
     limits.max_time = std::chrono::seconds{60};
     limits.cancel = cancel;
     const HttpReply r = http.get(std::string(s3_base) + "/" + std::string(path), limits,
                                  [](std::span<const std::uint8_t>) { return false; });
-    if (r.status == 403) {
-        return {};
-    }
+    S3Check check;
+    check.server_date = r.server_date;
     if (r.status == 200) {
-        return "The S3 bucket answers direct reads: make it private, so only CloudFront can read it.";
+        check.problem = "The S3 bucket answers direct reads: make it private, so only CloudFront can read it.";
+    } else if (r.status != 403) {
+        check.problem = "A direct S3 read gave " + describe_failure(r) + " instead of 403; check the bucket by hand.";
     }
-    return "A direct S3 read gave " + describe_failure(r) + " instead of 403; check the bucket by hand.";
+    return check;
+}
+
+std::string clock_problem(std::optional<std::chrono::sys_seconds> server_date, std::chrono::sys_seconds now) {
+    if (!server_date) {
+        return "Can't check this computer's clock (no time from the server). Try again.";
+    }
+    const auto off = std::chrono::abs(*server_date - now);
+    if (off > std::chrono::minutes{10}) {
+        return "This computer's clock is " +
+               std::to_string(std::chrono::duration_cast<std::chrono::minutes>(off).count()) +
+               " minutes off. Set the clock right, then publish.";
+    }
+    return {};
+}
+
+SuccessorCheck check_successor(const LiveList& live, std::string_view templates_json,
+                               std::chrono::sys_seconds now) {
+    SuccessorCheck check;
+    if (live.expired) {
+        if (now - live.expires > std::chrono::days{kMaxExpiryDays}) {
+            check.stop.push_back("The live list (sequence " + std::to_string(live.sequence) + ") expired on " +
+                                 format_utc_time(live.expires).substr(0, 10) +
+                                 ", more than 90 days ago. It may be an old copy; check the bucket and "
+                                 "publish with floserver-manifest instead.");
+        } else {
+            check.confirm.push_back("The live list (sequence " + std::to_string(live.sequence) + ") expired on " +
+                                    format_utc_time(live.expires).substr(0, 10) +
+                                    ". Is that the latest list you published?");
+        }
+    }
+    const json live_templates = json::parse(live.templates_json, nullptr, false);
+    const json next_templates = json::parse(templates_json, nullptr, false);
+    if (live_templates != next_templates) {
+        check.confirm.push_back("The project templates built into this Publisher differ from the live list's (" +
+                                std::to_string(live.template_count) +
+                                " there). The new list will carry this Publisher's. Is this Publisher the newest build?");
+    }
+    return check;
 }
 
 BuiltList build_next_list(std::string_view cdn, const std::vector<PublishFile>& files,

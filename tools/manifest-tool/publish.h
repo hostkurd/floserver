@@ -39,8 +39,7 @@ struct LiveList {
     std::string key_id;
     std::vector<core::RuntimeFile> runtimes;
     std::size_t template_count = 0;
-    // The CDN's Date header, to catch a wrong clock on this computer.
-    std::optional<std::chrono::sys_seconds> server_date;
+    std::string templates_json;  // the live "templates", compact JSON
 };
 
 struct LiveResult {
@@ -115,10 +114,28 @@ struct CheckContext {
 // Checks one file and sets its state, detail, and (new files) size and sha256.
 void check_file(CheckContext& ctx, PublishFile& file);
 
-// Direct reads of the bucket must give 403. Empty when they do, else what happened.
-[[nodiscard]] std::string check_direct_s3(core::HttpTransport& http, std::string_view s3_base,
-                                          std::string_view path,
-                                          const std::atomic<bool>* cancel = nullptr);
+// Direct reads of the bucket must give 403. `problem` is empty when they do.
+// S3's Date header is fresh (CloudFront's may be cached), so it also serves
+// as the clock check before signing.
+struct S3Check {
+    std::string problem;
+    std::optional<std::chrono::sys_seconds> server_date;
+};
+[[nodiscard]] S3Check check_direct_s3(core::HttpTransport& http, std::string_view s3_base,
+                                      std::string_view path, const std::atomic<bool>* cancel = nullptr);
+
+// Before building on `live`: what stops publishing, and what needs the
+// user's yes. `templates_json` is what the new list will carry.
+struct SuccessorCheck {
+    std::vector<std::string> stop;
+    std::vector<std::string> confirm;
+};
+[[nodiscard]] SuccessorCheck check_successor(const LiveList& live, std::string_view templates_json,
+                                             std::chrono::sys_seconds now);
+
+// The clock check: empty when `server_date` is within 10 minutes of `now`.
+[[nodiscard]] std::string clock_problem(std::optional<std::chrono::sys_seconds> server_date,
+                                        std::chrono::sys_seconds now);
 
 struct BuiltList {
     std::optional<std::string> manifest_json;
