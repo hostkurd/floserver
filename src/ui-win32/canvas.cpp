@@ -198,6 +198,17 @@ void Canvas::text(const RECT& r, std::wstring_view s, HFONT font, Rgb color, Ali
     DrawTextW(dc_, s.data(), static_cast<int>(s.size()), &p, flags);
 }
 
+void Canvas::paragraph(const RECT& r, std::wstring_view s, HFONT font, Rgb color) {
+    if (s.empty()) {
+        return;
+    }
+    UINT flags = DT_WORDBREAK | DT_NOPREFIX | DT_END_ELLIPSIS | DT_EDITCONTROL | (rtl_ ? DT_RIGHT | DT_RTLREADING : DT_LEFT);
+    RECT p = physical(r);
+    const win::Selected selected(dc_, font);
+    SetTextColor(dc_, colorref(color));
+    DrawTextW(dc_, s.data(), static_cast<int>(s.size()), &p, flags);
+}
+
 void Canvas::clip_text(const RECT& r) {
     unclip_text();
     saved_ = SaveDC(dc_);

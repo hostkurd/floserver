@@ -92,32 +92,48 @@ void ServiceWorker::push(Command command) {
 }
 
 void ServiceWorker::set_on(const std::string& project, bool on) {
-    push({Command::Kind::SetOn, project, on, {}, std::nullopt, {}});
+    push({Command::Kind::SetOn, project, on, {}, std::nullopt, {}, {}});
 }
 void ServiceWorker::set_keep_running(const std::string& project, bool keep) {
-    push({Command::Kind::SetKeep, project, keep, {}, std::nullopt, {}});
+    push({Command::Kind::SetKeep, project, keep, {}, std::nullopt, {}, {}});
 }
 void ServiceWorker::use(const std::string& project, const std::string& key, const std::optional<std::string>& value) {
-    push({Command::Kind::Use, project, false, key, value, {}});
+    push({Command::Kind::Use, project, false, key, value, {}, {}});
 }
 void ServiceWorker::copy_env(const std::string& project) {
-    push({Command::Kind::CopyEnv, project, false, {}, std::nullopt, {}});
+    push({Command::Kind::CopyEnv, project, false, {}, std::nullopt, {}, {}});
 }
-void ServiceWorker::open_in_studio(const std::string& project) {
-    push({Command::Kind::OpenStudio, project, false, {}, std::nullopt, {}});
+void ServiceWorker::open_in_studio(const std::string& project, bool quietly) {
+    push({Command::Kind::OpenStudio, project, quietly, {}, std::nullopt, {}, {}});
 }
 void ServiceWorker::add_folder(const std::string& path) {
-    push({Command::Kind::AddFolder, path, false, {}, std::nullopt, {}});
+    push({Command::Kind::AddFolder, path, false, {}, std::nullopt, {}, {}});
 }
 void ServiceWorker::install(const std::string& project, const std::vector<Download>& downloads) {
-    push({Command::Kind::Install, project, false, {}, std::nullopt, downloads});
+    push({Command::Kind::Install, project, false, {}, std::nullopt, downloads, {}});
+}
+void ServiceWorker::load_templates() {
+    push({Command::Kind::LoadTemplates, {}, false, {}, std::nullopt, {}, {}});
+}
+void ServiceWorker::create_project(const std::string& template_id, const std::string& name, const std::string& parent,
+                                   const std::map<std::string, std::optional<std::string>>& versions) {
+    nlohmann::json params = {{"template", template_id}, {"name", name}, {"parent", parent}, {"versions", nlohmann::json::object()}};
+    for (const auto& [key, value] : versions) {
+        params["versions"][key] = value ? nlohmann::json(*value) : nlohmann::json(nullptr);
+    }
+    {
+        // The last project's answer goes now, so the window never mistakes it for this one's.
+        const std::lock_guard lock(mutex_);
+        latest_.create = {};
+    }
+    push({Command::Kind::CreateProject, name, false, {}, std::nullopt, {}, std::move(params)});
 }
 void ServiceWorker::select(const std::string& project) {
-    push({Command::Kind::Select, project, false, {}, std::nullopt, {}});
+    push({Command::Kind::Select, project, false, {}, std::nullopt, {}, {}});
 }
-void ServiceWorker::start_service() { push({Command::Kind::Start, {}, false, {}, std::nullopt, {}}); }
-void ServiceWorker::refresh() { push({Command::Kind::Refresh, {}, false, {}, std::nullopt, {}}); }
-void ServiceWorker::quit_service() { push({Command::Kind::Quit, {}, false, {}, std::nullopt, {}}); }
+void ServiceWorker::start_service() { push({Command::Kind::Start, {}, false, {}, std::nullopt, {}, {}}); }
+void ServiceWorker::refresh() { push({Command::Kind::Refresh, {}, false, {}, std::nullopt, {}, {}}); }
+void ServiceWorker::quit_service() { push({Command::Kind::Quit, {}, false, {}, std::nullopt, {}, {}}); }
 
 Snapshot ServiceWorker::take() {
     const std::lock_guard lock(mutex_);
@@ -162,6 +178,7 @@ void ServiceWorker::run(const std::stop_token& stop) {
         std::string label;  // "PHP 8.2"
     };
     std::vector<Job> jobs;
+    std::int64_t create_job = 0;  // the project being made, followed until it ends
 
     const auto set_link = [this](Link link, std::string error = {}) {
         const std::lock_guard lock(mutex_);
@@ -314,7 +331,9 @@ void ServiceWorker::run(const std::stop_token& stop) {
                     std::string error;
                     const auto program = core::find_studio();
                     if (!program) {
-                        change_error = fill(lang_, Str::OpenFailed, {"FloCMS Studio"});
+                        if (!c.flag) {
+                            change_error = fill(lang_, Str::OpenFailed, {"FloCMS Studio"});
+                        }
                     } else if (send(c.project, "projects.list", {}, list)) {
                         for (const auto& p : list->result.value("projects", nlohmann::json::array())) {
                             if (p.value("name", std::string()) == c.project) {
@@ -400,6 +419,46 @@ void ServiceWorker::run(const std::stop_token& stop) {
                         }
                     }
                     break;
+                case Command::Kind::LoadTemplates: {
+                    std::optional<core::protocol::Reply> got;
+                    std::string why;
+                    std::vector<TemplateCard> cards;
+                    if (!client) {
+                        why = lost;
+                    } else if (got = client->call("templates.list"); !got) {
+                        client.reset();
+                        why = lost;
+                    } else if (!got->ok) {
+                        why = got->error_message;
+                    } else {
+                        cards = cards_from_list(got->result, lang_);
+                    }
+                    const std::lock_guard lock(mutex_);
+                    latest_.templates_loaded = true;
+                    latest_.templates_error = why;
+                    latest_.templates = std::move(cards);
+                    break;
+                }
+                case Command::Kind::CreateProject: {
+                    Snapshot::Create made;
+                    if (!client) {
+                        made.state = "failed";
+                        made.error = lost;
+                    } else if (reply = client->call("projects.create", c.params); !reply) {
+                        client.reset();
+                        made.state = "failed";
+                        made.error = lost;
+                    } else if (!reply->ok || !reply->result.contains("job") || !reply->result["job"].is_number_integer()) {
+                        made.state = "failed";
+                        made.error = reply->ok ? std::string("no job") : reply->error_message;
+                    } else {
+                        made.job = reply->result["job"].get<std::int64_t>();
+                        create_job = made.job;
+                    }
+                    const std::lock_guard lock(mutex_);
+                    latest_.create = std::move(made);
+                    break;
+                }
                 case Command::Kind::Select:
                 case Command::Kind::Start:
                 case Command::Kind::Refresh:
@@ -480,6 +539,37 @@ void ServiceWorker::run(const std::stop_token& stop) {
                 }
             }
         }
+        // The project being made.
+        std::optional<Snapshot::Create> create;
+        if (client && create_job != 0) {
+            if (const auto got = client->call("create.get", {{"id", create_job}}); !got) {
+                client.reset();
+            } else if (got->ok && got->result.is_object()) {
+                Snapshot::Create made;
+                made.job = create_job;
+                made.state = string_field(got->result, "state");
+                made.step = string_field(got->result, "step");
+                made.project = string_field(got->result, "project");
+                made.error = string_field(got->result, "error");
+                if (got->result.contains("log") && got->result["log"].is_array()) {
+                    for (const auto& line : got->result["log"]) {
+                        if (line.is_string()) {
+                            made.log.push_back(line.get<std::string>());
+                        }
+                    }
+                }
+                if (made.state != "running") {
+                    create_job = 0;  // finished: the last answer stays on screen
+                    need_installed = true;
+                    if (auto fresh = client->call("projects.list"); fresh) {
+                        list = std::move(fresh);
+                    }
+                }
+                create = std::move(made);
+            } else {
+                create_job = 0;
+            }
+        }
         // Whether the open project is FloCMS (D14), read from its folder
         // here, off the UI thread, when it's first shown.
         if (list && list->ok && !selected.empty() && !panel_checked) {
@@ -510,11 +600,15 @@ void ServiceWorker::run(const std::stop_token& stop) {
         }
         latest_.panel = panel;
         latest_.downloads = std::move(downloads);
+        if (create) {
+            latest_.create = std::move(*create);
+        }
         if (databases) {
             latest_.link = Link::Connected;
             latest_.error = list->ok ? std::string() : list->error_message;
             latest_.has_list = list->ok;
             latest_.rows = list->ok ? rows_from_list(list->result, lang_) : std::vector<ProjectRow>{};
+            latest_.projects_dir = list->ok ? string_field(list->result, "projects_dir") : std::string();
             latest_.footer = footer_text(latest_.rows, status->ok ? &status->result : nullptr,
                                          web->ok ? &web->result : nullptr, lang_);
             latest_.databases = databases->ok ? databases->result : nlohmann::json();

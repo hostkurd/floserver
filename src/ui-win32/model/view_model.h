@@ -162,6 +162,36 @@ struct Download {
 // "Installing PHP 8.5.12…", or empty when it's finished.
 [[nodiscard]] std::string job_progress_text(const nlohmann::json& job, Lang lang);
 
+// --- New project from a template (D9) ---------------------------------------------
+
+struct TemplateCard {
+    std::string id;
+    std::string title;        // in the window's language, English when the list has none
+    std::string description;
+    std::string mark;
+    std::uint32_t mark_bg = 0;  // 0xRRGGBB
+    std::uint32_t mark_fg = 0;
+    std::vector<std::string> chips;
+    Wants config;             // what its floserver.json starts with
+    bool uses_php = false;    // its config names PHP: PHP, Database and Web server are offered
+    bool studio = false;
+};
+
+// templates.list's result. Cards without an id or title are skipped.
+[[nodiscard]] std::vector<TemplateCard> cards_from_list(const nlohmann::json& result, Lang lang);
+
+// The wizard's version pickers for a template: the fields its config uses,
+// starting at the template's versions; versions not installed yet are
+// offered as "(not installed)" and downloaded when the project is made.
+[[nodiscard]] std::vector<VersionField> template_fields(const TemplateCard& card, const Installed& installed, Lang lang);
+
+// A free name for a new project: `base`, else base-2, base-3...
+[[nodiscard]] std::string free_project_name(const std::string& base, const std::vector<ProjectRow>& rows);
+
+// The rules for a project name (as the service checks them): a-z 0-9 and
+// '-', at most 63, not starting or ending with '-', not "xn--".
+[[nodiscard]] bool is_project_name(std::string_view name);
+
 // One log line as the Log box shows it: "19:41:02  GET  /cart  302  44 ms".
 [[nodiscard]] std::string log_text(const LogLine& line);
 

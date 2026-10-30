@@ -66,6 +66,8 @@ public:
     // `code`: a name, address or version, read left to right even in
     // right-to-left languages. Ellipsis when it doesn't fit.
     void text(const RECT& r, std::wstring_view s, HFONT font, Rgb color, Align align, bool code);
+    // Several lines, broken at words, cut with an ellipsis when it runs out of room.
+    void paragraph(const RECT& r, std::wstring_view s, HFONT font, Rgb color);
     void clip_text(const RECT& r);
     void unclip_text();
 

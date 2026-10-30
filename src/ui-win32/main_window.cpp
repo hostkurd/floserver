@@ -190,7 +190,7 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             }
             return 0;
         case WM_CTLCOLOREDIT:
-            if (win::int_to_ptr<HWND>(lparam) == search_) {
+            if (win::int_to_ptr<HWND>(lparam) == search_ || win::int_to_ptr<HWND>(lparam) == name_edit_) {
                 const Palette& p = palette(dark_);
                 auto* dc = win::int_to_ptr<HDC>(wparam);
                 SetTextColor(dc, colorref(p.text));
@@ -199,6 +199,10 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             }
             break;
         case WM_COMMAND:
+            if (name_edit_ != nullptr && win::int_to_ptr<HWND>(lparam) == name_edit_ && HIWORD(wparam) == EN_CHANGE) {
+                InvalidateRect(hwnd_, nullptr, FALSE);  // the address and folder lines follow the name
+                return 0;
+            }
             if (win::int_to_ptr<HWND>(lparam) == search_ && HIWORD(wparam) == EN_CHANGE) {
                 const int n = GetWindowTextLengthW(search_);
                 std::wstring text(static_cast<std::size_t>(n) + 1, L'\0');
@@ -307,7 +311,7 @@ void MainWindow::on_create() {
     tooltip_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
                                CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, hwnd_, nullptr, instance_,
                                nullptr);
-    tip_new_project_ = w(text(lang_, Str::AddExistingFolder));
+    tip_new_project_ = w(text(lang_, Str::NewProject));
     tip_settings_ = w(text(lang_, Str::Settings));
     for (const auto& [id, tip] : {std::pair{kTipNewProject, &tip_new_project_}, std::pair{kTipSettings, &tip_settings_}}) {
         TOOLINFOW ti{};
@@ -361,6 +365,9 @@ void MainWindow::on_snapshot() {
     }
     const bool quit_done = s.quit_done;
     const std::string quit_error = s.quit_error;
+    // A project made from a template that hands over to FloCMS Studio (D9, D14).
+    const bool just_made = wizard_open() && wizard_.step == 3 && snap_.create.state != "done" &&
+                           s.create.state == "done" && !s.create.project.empty();
     // Keyboard focus stays on the same project when the list changes.
     std::string focused;
     if (focus_ >= 0 && focus_ < static_cast<int>(visible_.size())) {
@@ -389,6 +396,11 @@ void MainWindow::on_snapshot() {
             }
             select(pending_added_);
             pending_added_.clear();
+        }
+    }
+    if (just_made && worker_) {
+        if (const TemplateCard* card = wizard_card(); card != nullptr && card->studio) {
+            worker_->open_in_studio(snap_.create.project, true);
         }
     }
     layout();
@@ -493,6 +505,9 @@ void MainWindow::make_fonts() {
         fonts_.mono = win::UniqueFont(CreateFontIndirectW(&lf));
     }
 
+    if (name_edit_ != nullptr) {
+        SendMessageW(name_edit_, WM_SETFONT, reinterpret_cast<WPARAM>(fonts_.body.get()), TRUE);
+    }
     if (search_ != nullptr) {
         SendMessageW(search_, WM_SETFONT, reinterpret_cast<WPARAM>(fonts_.button.get()), TRUE);
         SendMessageW(search_, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
@@ -652,6 +667,15 @@ void MainWindow::layout() {
     const int edit_w = std::max(0, width_of(box) - icon_area - px(10));
     MoveWindow(search_, box.left + icon_area, box.top + (height_of(box) - h) / 2, edit_w, h, TRUE);
 
+    // The New project name box sits in its outlined field.
+    if (name_edit_ != nullptr && wizard_open() && wizard_.step == 1) {
+        HDC dc = GetDC(hwnd_);
+        const WizardGeometry g = wizard_geometry(dc);
+        ReleaseDC(hwnd_, dc);
+        const int eh = px(20);
+        const RECT r = g.name_box;  // child positions use the same mirrored space as ours
+        MoveWindow(name_edit_, r.left + px(10), r.top + (height_of(r) - eh) / 2, std::max(0, width_of(r) - px(20)), eh, TRUE);
+    }
     for (const auto& [id, rect] : {std::pair{kTipNewProject, new_project_button()},
                                    std::pair{kTipSettings, settings_button()}}) {
         TOOLINFOW ti{};
@@ -752,6 +776,9 @@ MainWindow::Hit MainWindow::hit_test(int x, int y) const {
     if (contains(banner_rect(), x, y)) {
         return {Part::Banner, -1, {}};
     }
+    if (wizard_open()) {
+        return contains(wizard_geometry_.area, x, y) ? wizard_hit_test(x, y) : Hit{};
+    }
     if (panel_open() && contains(panel_geometry_.panel, x, y)) {
         return panel_hit_test(x, y);
     }
@@ -846,7 +873,16 @@ void MainWindow::on_click(const Hit& clicked) {
             }
             break;
         case Part::NewProject:
-            add_existing_folder();
+            open_wizard();
+            break;
+        case Part::WizCard:
+        case Part::WizField:
+        case Part::WizBrowse:
+        case Part::WizAddFolder:
+        case Part::WizCancel:
+        case Part::WizBack:
+        case Part::WizNext:
+            on_wizard_click(hit);
             break;
         case Part::Settings:    // the Settings screens come later in step 5c
         case Part::None:
@@ -855,6 +891,10 @@ void MainWindow::on_click(const Hit& clicked) {
 }
 
 void MainWindow::on_key(WPARAM key) {
+    if (wizard_open()) {
+        on_wizard_key(key);
+        return;
+    }
     if (panel_open() && (panel_focus_ >= 0 || !panel_beside_list())) {
         on_panel_key(key);
         return;
@@ -1248,6 +1288,7 @@ void MainWindow::on_paint() {
             const win::Selected selected(mem.get(), bitmap.get());
             geometry_ = row_geometry(mem.get());
             panel_geometry_ = panel_open() ? panel_geometry(mem.get()) : PanelGeometry{};
+            wizard_geometry_ = wizard_open() ? wizard_geometry(mem.get()) : WizardGeometry{};
             {
                 Canvas canvas(mem.get(), width_, rtl_);
                 canvas.fill({0, 0, width_, height_}, palette(dark_).window);
@@ -1257,8 +1298,12 @@ void MainWindow::on_paint() {
                     }
                     paint_top_bar(canvas, mem.get(), text_pass);
                     paint_banner(canvas, text_pass);
-                    paint_list(canvas, mem.get(), text_pass);
-                    paint_panel(canvas, mem.get(), text_pass);
+                    if (wizard_open()) {
+                        paint_wizard(canvas, mem.get(), text_pass);
+                    } else {
+                        paint_list(canvas, mem.get(), text_pass);
+                        paint_panel(canvas, mem.get(), text_pass);
+                    }
                     paint_footer(canvas, mem.get(), text_pass);
                 }
             }
