@@ -36,6 +36,15 @@ enum class SiteState : std::uint8_t {
     Problem,        // floserver.json has an error, the folder is gone, or it asks for what this version can't run
 };
 
+// Whether a document root holds a .php file at its top level; true when it
+// can't be read (a folder not made yet counts as PHP, as before).
+[[nodiscard]] bool has_php_files(const std::filesystem::path& doc_root);
+
+// The newest install of `name` matching `wanted` ("8.2"), or the newest of
+// all when `wanted` is empty; PHP only counts NTS builds (the pools' kind).
+[[nodiscard]] const InstalledRuntime* best_installed(const std::vector<InstalledRuntime>& installed,
+                                                     const std::string& name, const std::string& wanted);
+
 struct PlannedSite {
     std::string name;
     std::filesystem::path dir;
@@ -44,6 +53,7 @@ struct PlannedSite {
     std::optional<std::size_t> pool;    // index into WebPlan::pools; set when Ready (PHP)
     std::optional<std::size_t> app;     // index into WebPlan::apps; set when Ready (own server)
     bool apache = false;                // served by the shared Apache (D6), PHP from `pool`
+    bool static_site = false;           // nginx serves its files as they are; no PHP, no server of its own
     std::vector<std::string> missing;   // "php 8.2", "mariadb 11.4"
     std::string problem;                // plain English, when state is Problem
     std::optional<DatabaseSpec> database;

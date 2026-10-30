@@ -31,6 +31,9 @@ struct BuildOptions {
     int days = 30;                   // expiry, 1-90 days from `now`
     std::chrono::sys_seconds now;
     std::set<std::string> accepted;  // "unchecked" paths compared by hand
+    // The project templates (D9): a JSON array, normally the built-in
+    // templates.json. Each one's runtimes must be in the list.
+    std::string templates_json = "[]";
 };
 
 struct BuildResult {
@@ -38,6 +41,7 @@ struct BuildResult {
     std::vector<std::string> errors;
     std::vector<std::string> notes;  // files left out on purpose, e.g. source archives
     std::size_t runtime_count = 0;
+    std::size_t template_count = 0;
 };
 
 [[nodiscard]] BuildResult build_manifest(std::string_view report_json, const BuildOptions& options);

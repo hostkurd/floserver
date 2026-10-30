@@ -1,0 +1,286 @@
+[
+  {
+    "id": "php-app",
+    "order": 10,
+    "title": {
+      "en": "PHP app",
+      "ar": "تطبيق PHP",
+      "ku": "ئەپی PHP"
+    },
+    "description": {
+      "en": "An empty PHP project with a public folder",
+      "ar": "مشروع PHP فارغ مع مجلد public",
+      "ku": "پڕۆژەیەکی بەتاڵی PHP لەگەڵ بوخچەی public"
+    },
+    "mark": "php",
+    "mark_bg": "#E8EAF6",
+    "mark_fg": "#3949AB",
+    "chips": [
+      "PHP",
+      "nginx"
+    ],
+    "config": {
+      "php": "8.5",
+      "root": "public"
+    },
+    "files": [
+      {
+        "path": "public/index.php",
+        "text": "<?php\n// Your new PHP app. Edit this file and reload the page.\n$name = basename(dirname(__DIR__));\n?><!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<title><?= htmlspecialchars($name) ?></title>\n</head>\n<body style=\"font-family: system-ui, sans-serif; margin: 3rem\">\n<h1><?= htmlspecialchars($name) ?></h1>\n<p>Running on PHP <?= PHP_VERSION ?>. Edit <code>public/index.php</code> to start.</p>\n</body>\n</html>\n"
+      }
+    ]
+  },
+  {
+    "id": "flocms",
+    "order": 20,
+    "title": {
+      "en": "FloCMS",
+      "ar": "FloCMS",
+      "ku": "FloCMS"
+    },
+    "description": {
+      "en": "A FloCMS site; opens in FloCMS Studio",
+      "ar": "موقع FloCMS؛ يُفتح في FloCMS Studio",
+      "ku": "ماڵپەڕێکی FloCMS؛ لە FloCMS Studio دەکرێتەوە"
+    },
+    "mark": "Flo",
+    "mark_bg": "#0F6CBD",
+    "mark_fg": "#FFFFFF",
+    "chips": [
+      "PHP",
+      "MariaDB",
+      "Composer"
+    ],
+    "config": {
+      "php": "8.5",
+      "database": "mariadb-11.4",
+      "root": "public"
+    },
+    "needs": [
+      "composer"
+    ],
+    "steps": [
+      {
+        "tool": "composer",
+        "args": [
+          "create-project",
+          "--no-interaction",
+          "--prefer-dist",
+          "--no-progress",
+          "hostkurd/flocms",
+          "{dir}"
+        ]
+      }
+    ],
+    "env": true,
+    "studio": true
+  },
+  {
+    "id": "laravel",
+    "order": 30,
+    "title": {
+      "en": "Laravel",
+      "ar": "Laravel",
+      "ku": "Laravel"
+    },
+    "description": {
+      "en": "A new Laravel app through Composer",
+      "ar": "تطبيق Laravel جديد عبر Composer",
+      "ku": "ئەپێکی نوێی Laravel لە ڕێگەی Composer"
+    },
+    "mark": "L",
+    "mark_bg": "#FDECEA",
+    "mark_fg": "#B3261E",
+    "chips": [
+      "PHP",
+      "MariaDB",
+      "Composer"
+    ],
+    "config": {
+      "php": "8.4",
+      "database": "mariadb-11.4",
+      "root": "public"
+    },
+    "needs": [
+      "composer"
+    ],
+    "steps": [
+      {
+        "tool": "composer",
+        "args": [
+          "create-project",
+          "--no-interaction",
+          "--prefer-dist",
+          "--no-progress",
+          "laravel/laravel",
+          "{dir}"
+        ]
+      }
+    ],
+    "env": true
+  },
+  {
+    "id": "wordpress",
+    "order": 40,
+    "title": {
+      "en": "WordPress",
+      "ar": "WordPress",
+      "ku": "WordPress"
+    },
+    "description": {
+      "en": "Latest WordPress with its database ready",
+      "ar": "أحدث إصدار من WordPress مع قاعدة بياناته جاهزة",
+      "ku": "نوێترین WordPress لەگەڵ داتابەیسەکەی ئامادە"
+    },
+    "mark": "W",
+    "mark_bg": "#E3F2FD",
+    "mark_fg": "#1565C0",
+    "chips": [
+      "PHP",
+      "MariaDB",
+      "Apache"
+    ],
+    "config": {
+      "php": "8.4",
+      "database": "mariadb-11.4",
+      "web": "apache"
+    },
+    "needs": [
+      "wordpress"
+    ],
+    "copy": "wordpress",
+    "wordpress": true
+  },
+  {
+    "id": "node-app",
+    "order": 50,
+    "title": {
+      "en": "Node app",
+      "ar": "تطبيق Node",
+      "ku": "ئەپی Node"
+    },
+    "description": {
+      "en": "A Node.js project; its dev server runs behind the project address",
+      "ar": "مشروع Node.js؛ يعمل خادم التطوير خلف عنوان المشروع",
+      "ku": "پڕۆژەیەکی Node.js؛ سێرڤەری گەشەپێدانەکەی لە پشت ناونیشانی پڕۆژەکە کار دەکات"
+    },
+    "mark": "JS",
+    "mark_bg": "#E8F5E9",
+    "mark_fg": "#2E7D32",
+    "chips": [
+      "Node.js"
+    ],
+    "config": {
+      "node": "24"
+    },
+    "files": [
+      {
+        "path": "package.json",
+        "text": "{\n  \"name\": \"node-app\",\n  \"private\": true,\n  \"scripts\": {\n    \"start\": \"node server.js\"\n  }\n}\n"
+      },
+      {
+        "path": "server.js",
+        "text": "// Your new Node.js app. FloServer runs `npm start` and passes the port in PORT.\nconst http = require('node:http');\n\nconst port = Number(process.env.PORT) || 3000;\n\nhttp.createServer((req, res) => {\n  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });\n  res.end(`<!doctype html><title>Node app</title>\n<body style=\"font-family: system-ui, sans-serif; margin: 3rem\">\n<h1>Node app</h1><p>Running on Node.js ${process.version}. Edit <code>server.js</code> to start.</p>`);\n}).listen(port, '127.0.0.1');\n"
+      }
+    ]
+  },
+  {
+    "id": "python-app",
+    "order": 60,
+    "title": {
+      "en": "Python app",
+      "ar": "تطبيق Python",
+      "ku": "ئەپی Python"
+    },
+    "description": {
+      "en": "A Python project with its own .venv, served at the project address",
+      "ar": "مشروع Python مع .venv خاص به، يُخدَم على عنوان المشروع",
+      "ku": "پڕۆژەیەکی Python لەگەڵ .venv ی خۆی، لەسەر ناونیشانی پڕۆژەکە پێشکەش دەکرێت"
+    },
+    "mark": "Py",
+    "mark_bg": "#E6EEF7",
+    "mark_fg": "#2F5F8F",
+    "chips": [
+      "Python",
+      "pip"
+    ],
+    "config": {
+      "python": "3.13"
+    },
+    "files": [
+      {
+        "path": "requirements.txt",
+        "text": "fastapi\nuvicorn[standard]\n"
+      },
+      {
+        "path": "main.py",
+        "text": "# Your new Python app (FastAPI). FloServer makes .venv, installs\n# requirements.txt and runs it with uvicorn behind the project address.\nimport platform\n\nfrom fastapi import FastAPI\nfrom fastapi.responses import HTMLResponse\n\napp = FastAPI()\n\n\n@app.get(\"/\", response_class=HTMLResponse)\ndef home() -> str:\n    return (\n        '<!doctype html><title>Python app</title>'\n        '<body style=\"font-family: system-ui, sans-serif; margin: 3rem\">'\n        f'<h1>Python app</h1><p>Running on Python {platform.python_version()}. '\n        'Edit <code>main.py</code> to start.</p>'\n    )\n"
+      }
+    ]
+  },
+  {
+    "id": "static-site",
+    "order": 70,
+    "title": {
+      "en": "Static site",
+      "ar": "موقع ثابت",
+      "ku": "ماڵپەڕی جێگیر"
+    },
+    "description": {
+      "en": "HTML, CSS and JavaScript files served as they are",
+      "ar": "ملفات HTML وCSS وJavaScript تُخدَم كما هي",
+      "ku": "فایلەکانی HTML و CSS و JavaScript وەک خۆیان پێشکەش دەکرێن"
+    },
+    "mark": "</>",
+    "mark_bg": "#FFF3E0",
+    "mark_fg": "#A85A00",
+    "chips": [
+      "nginx"
+    ],
+    "config": {},
+    "files": [
+      {
+        "path": "index.html",
+        "text": "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>Static site</title>\n<link rel=\"stylesheet\" href=\"style.css\">\n</head>\n<body>\n<h1>Static site</h1>\n<p>Edit <code>index.html</code>, <code>style.css</code> and <code>script.js</code> to start.</p>\n<script src=\"script.js\"></script>\n</body>\n</html>\n"
+      },
+      {
+        "path": "style.css",
+        "text": "body {\n  font-family: system-ui, sans-serif;\n  margin: 3rem;\n}\n"
+      },
+      {
+        "path": "script.js",
+        "text": "// Your site's JavaScript.\n"
+      }
+    ]
+  },
+  {
+    "id": "database-only",
+    "order": 80,
+    "title": {
+      "en": "Database only",
+      "ar": "قاعدة بيانات فقط",
+      "ku": "تەنها داتابەیس"
+    },
+    "description": {
+      "en": "A database and user, no website",
+      "ar": "قاعدة بيانات ومستخدم، بلا موقع",
+      "ku": "داتابەیسێک و بەکارهێنەرێک، بێ ماڵپەڕ"
+    },
+    "mark": "DB",
+    "mark_bg": "#F3E5F5",
+    "mark_fg": "#7B1FA2",
+    "chips": [
+      "MariaDB"
+    ],
+    "config": {
+      "database": "mariadb-11.4"
+    },
+    "files": [
+      {
+        "path": "index.html",
+        "text": "<!doctype html>\n<html lang=\"en\">\n<head><meta charset=\"utf-8\"><title>Database only</title></head>\n<body style=\"font-family: system-ui, sans-serif; margin: 3rem\">\n<h1>Database only</h1>\n<p>This project holds a database and its user. Its login is in <code>.env</code>; FloServer's panel copies the lines with <b>Copy .env lines</b>.</p>\n</body>\n</html>\n"
+      }
+    ],
+    "env": true
+  }
+]

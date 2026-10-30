@@ -23,6 +23,7 @@
 #include "floserver/core/project_config.h"
 #include "floserver/core/site_plan.h"
 #include "floserver/core/secret_store.h"
+#include "floserver/core/template_service.h"
 #include "floserver/core/web_service.h"
 
 #include <algorithm>
@@ -166,6 +167,7 @@ struct Service {
     std::unique_ptr<floserver::core::WebService> web;
     std::unique_ptr<floserver::core::SecretStore> secrets;
     std::unique_ptr<floserver::core::DatabaseService> databases;
+    std::unique_ptr<floserver::core::TemplateService> templates;
     std::optional<std::filesystem::path> data;
 
     // integration.json for FloCMS Studio (D14): rewritten when what it says
@@ -441,6 +443,59 @@ struct Service {
         return protocol::make_result(r.id, result);
     }
 
+    // templates.list; projects.create {"template", "name", "parent", "versions"?};
+    // create.get / create.cancel {"id"} (D9).
+    [[nodiscard]] std::string template_request(const protocol::Request& r) const {
+        namespace core = floserver::core;
+        if (!templates || !runtimes) {
+            return protocol::make_error(r.id, "no_data_folder",
+                                        "FloServer can't find a folder to keep its settings in (LOCALAPPDATA or HOME)");
+        }
+        if (r.method == "templates.list") {
+            std::string error;
+            const auto list = runtimes->templates(error);
+            if (!list) {
+                return protocol::make_error(r.id, "no_list", error);
+            }
+            json out = json::array();
+            for (const core::ProjectTemplate& t : *list) {
+                out.push_back(core::template_summary(t));
+            }
+            return protocol::make_result(r.id, {{"templates", std::move(out)}});
+        }
+        if (r.method == "projects.create") {
+            core::CreateRequest request;
+            request.template_id = string_param(r.params, "template");
+            request.name = string_param(r.params, "name");
+            request.parent = core::path_from_utf8(string_param(r.params, "parent"));
+            if (r.params.contains("versions") && r.params["versions"].is_object()) {
+                for (const auto& [key, value] : r.params["versions"].items()) {
+                    if (value.is_string()) {
+                        request.versions[key] = value.get<std::string>();
+                    } else if (value.is_null()) {
+                        request.versions[key] = std::nullopt;
+                    } else {
+                        return protocol::make_error(r.id, "bad_params", "a version is a string, or null to leave it out");
+                    }
+                }
+            }
+            core::ServiceRefusal refusal;
+            const auto id = templates->create(request, refusal);
+            return id ? protocol::make_result(r.id, {{"job", *id}})
+                      : protocol::make_error(r.id, refusal.code, refusal.message);
+        }
+        const auto id = job_id(r.params);
+        if (!id) {
+            return protocol::make_error(r.id, "bad_params", "a job id is needed");
+        }
+        if (r.method == "create.get") {
+            const auto job = templates->job(*id);
+            return job ? protocol::make_result(r.id, *job)
+                       : protocol::make_error(r.id, "unknown_job", "there's no job " + std::to_string(*id));
+        }
+        return protocol::make_result(r.id, {{"cancelled", templates->cancel(*id)}});
+    }
+
     [[nodiscard]] json status() const {
         const auto memory = floserver::core::memory_in_use();
         return {{"version", floserver::core::kVersion},
@@ -483,6 +538,9 @@ struct Service {
                 reply = web_request(*request);
             } else if (request->method == "databases.list" || request->method == "databases.login") {
                 reply = database_request(*request);
+            } else if (request->method == "templates.list" || request->method == "projects.create" ||
+                       request->method == "create.get" || request->method == "create.cancel") {
+                reply = template_request(*request);
             } else if (request->method == "quit") {
                 reply = protocol::make_result(request->id, json::object());
                 quit = true;
@@ -499,6 +557,91 @@ struct Service {
         }
     }
 };
+
+// What the template jobs need from the rest of the service (D9). The
+// service outlives them: TemplateService::stop() runs before anything else
+// stops at quit.
+floserver::core::TemplateHooks template_hooks(const std::shared_ptr<Service>& service) {
+    namespace core = floserver::core;
+    core::TemplateHooks hooks;
+    Service* s = service.get();
+    hooks.find_template = [s](const std::string& id, std::string& error) -> std::optional<core::ProjectTemplate> {
+        const auto list = s->runtimes->templates(error, false);
+        if (!list) {
+            return std::nullopt;
+        }
+        for (const core::ProjectTemplate& t : *list) {
+            if (t.id == id) {
+                return t;
+            }
+        }
+        error = "the runtime list has no template called " + id;
+        return std::nullopt;
+    };
+    hooks.install = [s](const std::string& name, const std::string& version, const std::atomic<bool>& cancel,
+                        const std::function<void(const std::string&)>& progress, std::string& error) {
+        core::ServiceRefusal refusal;
+        const auto id = s->runtimes->install(name, version, refusal);
+        if (!id) {
+            error = refusal.message;
+            return false;
+        }
+        while (true) {
+            const auto job = s->runtimes->job(*id);
+            if (!job) {
+                error = "the install was forgotten";
+                return false;
+            }
+            const std::string state = job->value("state", std::string());
+            if (state == "done") {
+                return true;
+            }
+            if (state == "failed" || state == "cancelled") {
+                error = job->value("message", state);
+                return false;
+            }
+            if (cancel) {
+                // The install may be shared with one the user started: it goes on.
+                error = "cancelled";
+                return false;
+            }
+            if (state == "downloading" && job->value("total", std::uint64_t{0}) > 0) {
+                const auto received = job->value("received", std::uint64_t{0});
+                const auto total = job->value("total", std::uint64_t{1});
+                progress("Downloading " + name + " " + job->value("version", version) + "… " +
+                         std::to_string(std::min<std::uint64_t>(100, received * 100 / total)) + "%");
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+    };
+    hooks.add_project = [s](const std::filesystem::path& dir, const std::string& name,
+                            std::string& error) -> std::optional<std::string> {
+        core::ServiceRefusal refusal;
+        const auto added = s->projects->add(dir, name, refusal);
+        if (!added) {
+            error = refusal.message;
+            return std::nullopt;
+        }
+        std::string registered = added->value("name", name);
+        (void)s->projects->set(registered, true, std::nullopt, refusal);
+        if (s->web) {
+            (void)s->web->reload();
+        }
+        if (s->databases) {
+            (void)s->databases->reload();
+        }
+        return registered;
+    };
+    hooks.database_login = [s](const std::string& project, std::string& error) -> std::optional<core::DatabaseLogin> {
+        core::ServiceRefusal refusal;
+        auto login = s->databases ? s->databases->project_login(project, refusal) : std::nullopt;
+        if (!login) {
+            error = refusal.message;
+        }
+        return login;
+    };
+    return hooks;
+}
 
 int run() {
     const std::string instance = ipc::default_instance();
@@ -530,6 +673,7 @@ int run() {
         db.idle_after = web_config(*data).idle_after;
         service->databases = std::make_unique<floserver::core::DatabaseService>(db, *service->secrets);
         service->databases->start();
+        service->templates = std::make_unique<floserver::core::TemplateService>(*data, template_hooks(service));
         service->data = *data;
         service->refresh_integration();
         try {
@@ -568,7 +712,10 @@ int run() {
     if (integration_thread.joinable()) {
         integration_thread.join();
     }
-    // Give the client that asked us to quit time to read the reply.
+    // Templates first: a job waits on installs and adds projects.
+    if (service->templates) {
+        service->templates->stop();
+    }
     if (service->runtimes) {
         service->runtimes->stop();
     }

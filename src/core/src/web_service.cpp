@@ -489,6 +489,18 @@ void WebService::reload_locked() {
             sites[p.name] = site;
             continue;
         }
+        if (p.static_site || !p.pool) {
+            // Files as they are: nginx alone, nothing to wake.
+            NginxSite ns;
+            ns.name = p.name;
+            ns.doc_root = p.doc_root;
+            ns.tls = site_tls;
+            site.static_site = true;
+            site.address = ns.tls ? "https" : "http";
+            serve.push_back(std::move(ns));
+            sites[p.name] = site;
+            continue;
+        }
         const PhpPool& pool = plan.pools.at(*p.pool);
         if (const auto e = pool_errors.find(pool.key); e != pool_errors.end()) {
             site.state_override = "problem";
@@ -772,6 +784,9 @@ json WebService::status_locked() const {
             } else {
                 j["run"] = "sleeping";
             }
+        }
+        if (s.static_site) {
+            j["run"] = "running";  // nginx serves it whenever nginx runs
         }
         if (s.pool_key) {
             j["pool"] = *s.pool_key;

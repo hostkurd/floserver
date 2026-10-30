@@ -25,6 +25,7 @@ add_executable(floserver_tests
     test_ui_model.cpp
     test_web_service.cpp
     test_tar.cpp
+    test_templates.cpp
     test_version.cpp
     test_zip.cpp)
 # test_service.cpp runs the real floserverd.

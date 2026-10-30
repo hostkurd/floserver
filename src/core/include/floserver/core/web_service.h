@@ -97,6 +97,7 @@ private:
         bool app = false;                // its own server, in apps_ by the same name
         std::string app_kind;            // "node", "python" or "apache"
         std::string app_name;            // its runner in apps_: the project's name, or the shared Apache's
+        bool static_site = false;        // nginx alone serves its files
         std::string state_override;      // "needs_download" / "problem" set here
         std::vector<std::string> missing;
         std::string problem;

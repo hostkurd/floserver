@@ -52,6 +52,14 @@ private:
         PanelField,
         PanelCopyEnv,
         PanelKeep,
+        // The New project page; `row` is the card's or field's index.
+        WizCard,
+        WizField,
+        WizBrowse,
+        WizAddFolder,
+        WizCancel,
+        WizBack,
+        WizNext,
     };
     enum class PanelAction : std::uint8_t { Browser, Folder, Terminal, Studio, Download };
     [[nodiscard]] static constexpr bool is_panel_part(Part part) {
@@ -99,6 +107,44 @@ private:
         RECT log_label{};
         RECT log_box{};
     };
+    // The New project page's pieces, from the last paint.
+    struct WizardGeometry {
+        RECT area{};
+        RECT steps{};
+        RECT title{};
+        RECT footer{};
+        RECT next{};
+        Str next_label = Str::WizardNext;
+        RECT back{};
+        RECT cancel{};
+        RECT add_folder{};
+        RECT message{};
+        std::vector<RECT> cards;
+        RECT name_label{};
+        RECT name_box{};
+        RECT name_hint{};
+        RECT folder_label{};
+        RECT folder_box{};
+        RECT browse{};
+        RECT folder_hint{};
+        std::vector<std::pair<RECT, RECT>> fields;  // label, box
+        RECT log_box{};
+        int columns = 1;  // of the cards, for the arrow keys
+    };
+    struct WizardState {
+        bool open = false;
+        int step = 0;  // 0 template, 1 name and folder, 2 versions, 3 making it
+        std::size_t card = 0;
+        std::string name;
+        std::string parent;
+        std::vector<VersionField> fields;
+        std::map<std::string, std::size_t> picks;  // field key -> chosen index
+        // Kept from the card at step 0 -> 1: the card list may change later.
+        std::string template_id;
+        bool studio = false;
+    };
+    // Step 3 and the job not finished yet (also before its first answer).
+    [[nodiscard]] bool wizard_running() const;
     struct Fonts {
         win::UniqueFont title;
         win::UniqueFont panel_title;
@@ -189,6 +235,25 @@ private:
     void paint_panel(Canvas& c, HDC dc, bool text_pass) const;
     void paint_switch(Canvas& c, const RECT& r, bool on, bool hover) const;
     void paint_button(Canvas& c, const RECT& r, bool hover, bool focused) const;
+
+    // --- New project (main_window_wizard.cpp) ---
+    [[nodiscard]] bool wizard_open() const;
+    [[nodiscard]] const TemplateCard* wizard_card() const;
+    [[nodiscard]] RECT wizard_rect() const;
+    [[nodiscard]] std::string wizard_name() const;
+    [[nodiscard]] WizardGeometry wizard_geometry(HDC dc) const;
+    [[nodiscard]] Hit wizard_hit_test(int x, int y) const;
+    [[nodiscard]] std::vector<RECT> card_chips(HDC dc, const RECT& card, const TemplateCard& t) const;
+    void open_wizard();
+    void close_wizard();
+    void wizard_next();
+    void wizard_back();
+    void wizard_browse();
+    void wizard_field_menu(std::size_t index);
+    void on_wizard_click(const Hit& hit);
+    void on_wizard_key(WPARAM key);
+    void paint_wizard(Canvas& c, HDC dc, bool text_pass) const;
+    static LRESULT CALLBACK name_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, UINT_PTR id, DWORD_PTR self);
     void show_window();
     void quit();
     void add_tray_icon();
@@ -245,6 +310,10 @@ private:
     std::map<std::string, bool> installing_;    // Download clicked; the worker hasn't reported yet
     std::string change_error_;
     Notice notice_;  // a short message in the banner ("copied")
+
+    WizardState wizard_;
+    mutable WizardGeometry wizard_geometry_;
+    HWND name_edit_ = nullptr;  // the New project name box
 
     std::string selected_;  // the project whose panel is open
     std::string pending_added_;  // a folder just added; its panel opens once its row is listed

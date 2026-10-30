@@ -38,7 +38,7 @@ struct CatalogEntry {
 
 // The runtimes FloServer 1.0 knows (Windows x64). Add a row here before
 // publishing a new kind of runtime.
-constexpr std::array<CatalogEntry, 7> kCatalog = {{
+constexpr std::array<CatalogEntry, 8> kCatalog = {{
     {"php", R"(php-{v}(-\d+)?-Win32-vs1[67]-x64\.zip)", "PHP-3.01", "windows-x64", "nts", R"(php-{v}(-\d+)?-nts-Win32-vs1[67]-x64\.zip)",
      "https://downloads.php.net/~windows/releases/archives/{file}"},
     {"mariadb", "", "GPL-2.0", "windows-x64", "", R"(mariadb-{v}-winx64\.zip)",
@@ -49,6 +49,8 @@ constexpr std::array<CatalogEntry, 7> kCatalog = {{
     {"nginx", "", "BSD-2-Clause", "windows-x64", "", R"(nginx-{v}\.zip)",
      "https://nginx.org/download/{file}"},
     {"apache", "", "Apache-2.0", "windows-x64", "", R"(httpd-{v}-\d+-Win64-VS1[78]\.zip)", ""},
+    // The WordPress template's files (D9), copied into each new project.
+    {"wordpress", "", "GPL-2.0", "any", "", R"(wordpress-{v}\.zip)", "https://wordpress.org/{file}"},
     // python-build-standalone (D17). Its own names have "+" where the CDN's
     // have "-", so there's no fallback address built from the CDN name.
     {"python", "", "PSF-2.0", "windows-x64", "",
@@ -125,7 +127,7 @@ std::string archive_of(std::string_view file) {
 // Runs the finished list through the app's own checks, signed with a
 // throwaway key, so the tool never writes a list the app would refuse.
 std::optional<std::string> self_check(const std::string& bytes, std::chrono::sys_seconds now,
-                                      std::size_t expected) {
+                                      std::size_t expected, std::size_t expected_templates) {
     std::array<std::uint8_t, 32> seed{};
     seed.fill(0x5a);
     std::array<std::uint8_t, 64> secret{};
@@ -147,6 +149,9 @@ std::optional<std::string> self_check(const std::string& bytes, std::chrono::sys
     }
     if (r.manifest->runtimes.size() != expected) {
         return "the app reads a different number of runtimes than were written";
+    }
+    if (r.manifest->templates.size() != expected_templates) {
+        return "the app reads a different number of templates than were written";
     }
     return std::nullopt;
 }
@@ -318,6 +323,31 @@ BuildResult build_manifest(std::string_view report_json, const BuildOptions& opt
     if (runtimes.empty()) {
         fail("the report has no runtimes to list");
     }
+
+    // Templates: read by the app's own rules, and every runtime they need listed.
+    const json templates = json::parse(options.templates_json, nullptr, false);
+    if (!templates.is_array()) {
+        fail("the templates aren't a JSON array");
+    } else {
+        std::vector<std::string> warnings;
+        const auto parsed = parse_templates(templates, warnings);
+        for (const std::string& w : warnings) {
+            fail(w);
+        }
+        const auto listed = [&runtimes](const std::string& name) {
+            return std::any_of(runtimes.begin(), runtimes.end(),
+                               [&](const nlohmann::ordered_json& r) { return r.value("name", std::string()) == name; });
+        };
+        for (const ProjectTemplate& t : parsed) {
+            // The same list a project job installs from.
+            for (const TemplateNeed& n : template_runtime_needs(t, t.parsed)) {
+                if (!listed(n.name)) {
+                    fail("template " + t.id + " needs " + n.name + ", which the list doesn't have");
+                }
+            }
+        }
+        result.template_count = parsed.size();
+    }
     if (!result.errors.empty()) {
         return result;
     }
@@ -327,9 +357,10 @@ BuildResult build_manifest(std::string_view report_json, const BuildOptions& opt
     doc["sequence"] = options.sequence;
     doc["expires"] = format_utc_time(options.now + std::chrono::days{options.days});
     doc["runtimes"] = runtimes;
+    doc["templates"] = nlohmann::ordered_json::parse(options.templates_json);
     std::string bytes = doc.dump(2) + "\n";
 
-    if (auto problem = self_check(bytes, options.now, runtimes.size())) {
+    if (auto problem = self_check(bytes, options.now, runtimes.size(), result.template_count)) {
         fail(*problem);
         return result;
     }

@@ -443,3 +443,47 @@ TEST_CASE("rows keep what's missing as the service said it") {
     REQUIRE(rows.size() == 1);
     CHECK(rows[0].missing == std::vector<std::string>{"php", "nginx"});
 }
+
+TEST_CASE("template cards come from templates.list in the window's language") {
+    const json list = {{"templates",
+                        json::array({{{"id", "wordpress"},
+                                      {"title", {{"en", "WordPress"}}},
+                                      {"description", {{"en", "Latest WordPress"}, {"ar", "أحدث WordPress"}}},
+                                      {"mark", "W"},
+                                      {"mark_bg", "#E3F2FD"},
+                                      {"mark_fg", "#1565C0"},
+                                      {"chips", json::array({"PHP", "MariaDB", "Apache"})},
+                                      {"config", {{"php", "8.4"}, {"database", "mariadb-11.4"}, {"web", "apache"}}}},
+                                     {{"id", "node-app"}, {"title", {{"en", "Node app"}}}, {"config", {{"node", "24"}}}},
+                                     {{"title", {{"en", "no id"}}}}})}};
+    const auto cards = cards_from_list(list, Lang::Ar);
+    REQUIRE(cards.size() == 2);
+    CHECK(cards[0].title == "WordPress");          // no Arabic title: English
+    CHECK(cards[0].description == "أحدث WordPress");
+    CHECK(cards[0].mark_bg == 0xE3F2FDU);
+    CHECK(cards[0].uses_php);
+    CHECK(cards[0].config.web == "apache");
+
+    const Installed installed = {{"php", {"8.5.12"}}, {"node", {"24.22.1"}}};
+    const auto wp = template_fields(cards[0], installed, Lang::En);
+    REQUIRE(wp.size() == 3);  // PHP, Database, Web server
+    CHECK(wp[0].choices[wp[0].current].label == "8.4 (not installed)");
+    CHECK(wp[2].current == 1);  // Apache
+    const auto node = template_fields(cards[1], installed, Lang::En);
+    REQUIRE(node.size() == 1);
+    CHECK(node[0].key == "node");
+    CHECK(node[0].choices[node[0].current].label == "24");
+}
+
+TEST_CASE("new project names") {
+    std::vector<ProjectRow> rows(2);
+    rows[0].name = "php-app";
+    rows[1].name = "php-app-2";
+    CHECK(free_project_name("php-app", rows) == "php-app-3");
+    CHECK(free_project_name("blog", rows) == "blog");
+    CHECK(is_project_name("my-shop2"));
+    CHECK_FALSE(is_project_name("My Shop"));
+    CHECK_FALSE(is_project_name("-shop"));
+    CHECK_FALSE(is_project_name("xn--abc"));
+    CHECK_FALSE(is_project_name(""));
+}

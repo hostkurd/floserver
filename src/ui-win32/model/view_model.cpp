@@ -153,6 +153,10 @@ ProjectRow row_from(const json& p, Lang lang) {
         row.wants.database = text_of(want, "database");
         row.wants.web = text_of(want, "web") == "apache" ? "apache" : "nginx";
     }
+    row.static_site = flag_of(p, "static");
+    if (row.static_site) {
+        row.chips.emplace_back("Static");  // the mockup's "Static · nginx"
+    }
     // The web server last, as in the mockup. nginx only when floserver.json
     // could be read (it serves every project that isn't Apache's).
     if (text_of(p, "web") == "apache") {
@@ -433,7 +437,7 @@ std::vector<VersionField> version_fields(const ProjectRow& row, const Installed&
     // PHP: without the key, a PHP project gets the newest installed; a Node
     // or Python project gets none.
     VersionField php{Field::Php, "php", std::string(text(lang, Str::FieldPhp)), {}, 0};
-    const bool own_server = w.php.empty() && (!w.node.empty() || !w.python.empty());
+    const bool own_server = w.php.empty() && (!w.node.empty() || !w.python.empty() || row.static_site);
     php.choices.push_back({std::string(text(lang, own_server ? Str::ChoiceNone : Str::ChoiceNewest)), std::nullopt});
     add_series(php, installed, "php", w.php, "", "", lang);
     out.push_back(std::move(php));
@@ -639,6 +643,112 @@ std::string job_progress_text(const json& job, Lang lang) {
         return fill(lang, Str::Downloading, {what, ""});
     }
     return fill(lang, Str::Installing, {what});
+}
+
+// --- templates --------------------------------------------------------------------
+
+namespace {
+
+std::uint32_t colour_of(const std::string& hex) {
+    if (hex.size() != 7 || hex[0] != '#') {
+        return 0;
+    }
+    std::uint32_t v = 0;
+    for (std::size_t i = 1; i < hex.size(); ++i) {
+        const char c = hex[i];
+        const int d = (c >= '0' && c <= '9') ? c - '0' : (c >= 'a' && c <= 'f') ? c - 'a' + 10 : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
+        if (d < 0) {
+            return 0;
+        }
+        v = v * 16 + static_cast<std::uint32_t>(d);
+    }
+    return v;
+}
+
+std::string text_in(const json& texts, Lang lang) {
+    const char* code = lang == Lang::Ar ? "ar" : lang == Lang::Ku ? "ku" : "en";
+    const std::string out = text_of(texts, code);
+    return out.empty() ? text_of(texts, "en") : out;
+}
+
+}  // namespace
+
+std::vector<TemplateCard> cards_from_list(const json& result, Lang lang) {
+    std::vector<TemplateCard> out;
+    if (!result.is_object() || !result.contains("templates") || !result["templates"].is_array()) {
+        return out;
+    }
+    for (const json& t : result["templates"]) {
+        TemplateCard c;
+        c.id = text_of(t, "id");
+        c.title = t.is_object() && t.contains("title") ? text_in(t["title"], lang) : std::string();
+        if (c.id.empty() || c.title.empty()) {
+            continue;
+        }
+        c.description = t.contains("description") ? text_in(t["description"], lang) : std::string();
+        c.mark = text_of(t, "mark");
+        c.mark_bg = colour_of(text_of(t, "mark_bg"));
+        c.mark_fg = colour_of(text_of(t, "mark_fg"));
+        if (t.contains("chips") && t["chips"].is_array()) {
+            for (const json& chip : t["chips"]) {
+                if (chip.is_string()) {
+                    c.chips.push_back(chip.get<std::string>());
+                }
+            }
+        }
+        if (t.contains("config") && t["config"].is_object()) {
+            const json& cfg = t["config"];
+            c.config.known = true;
+            c.config.php = text_of(cfg, "php");
+            c.config.node = text_of(cfg, "node");
+            c.config.python = text_of(cfg, "python");
+            c.config.database = text_of(cfg, "database");
+            c.config.web = text_of(cfg, "web") == "apache" ? "apache" : "nginx";
+            c.uses_php = cfg.contains("php");
+        }
+        c.studio = flag_of(t, "studio");
+        out.push_back(std::move(c));
+    }
+    return out;
+}
+
+std::vector<VersionField> template_fields(const TemplateCard& card, const Installed& installed, Lang lang) {
+    ProjectRow row;
+    row.wants = card.config;
+    std::vector<VersionField> all = version_fields(row, installed, lang);
+    std::vector<VersionField> out;
+    for (VersionField& f : all) {
+        const bool keep = (f.field == Field::Php && card.uses_php) ||
+                          (f.field == Field::Database && (card.uses_php || !card.config.database.empty())) ||
+                          (f.field == Field::Web && card.uses_php) ||
+                          (f.field == Field::Node && !card.config.node.empty()) ||
+                          (f.field == Field::Python && !card.config.python.empty());
+        if (keep) {
+            out.push_back(std::move(f));
+        }
+    }
+    return out;
+}
+
+bool is_project_name(std::string_view name) {
+    return !name.empty() && name.size() <= 63 && name.front() != '-' && name.back() != '-' && !name.starts_with("xn--") &&
+           std::all_of(name.begin(), name.end(), [](char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-'; });
+}
+
+std::string free_project_name(const std::string& base, const std::vector<ProjectRow>& rows) {
+    const auto taken = [&rows](const std::string& n) {
+        return std::any_of(rows.begin(), rows.end(), [&](const ProjectRow& r) { return r.name == n; });
+    };
+    if (!taken(base)) {
+        return base;
+    }
+    for (int i = 2; i < 1000; ++i) {
+        std::string candidate = base + "-" + std::to_string(i);
+        if (!taken(candidate)) {
+            return candidate;
+        }
+    }
+    return base;
 }
 
 }  // namespace floserver::ui

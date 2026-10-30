@@ -57,6 +57,20 @@ struct Snapshot {
     PanelData panel;
     // Projects with installs running from the window: the progress line.
     std::map<std::string, std::string> downloads;
+    std::string projects_dir;  // projects.list's, or empty
+    // New project (D9): the templates, once asked for.
+    bool templates_loaded = false;
+    std::string templates_error;
+    std::vector<TemplateCard> templates;
+    // The project being made: create.get's answer.
+    struct Create {
+        std::int64_t job = 0;
+        std::string state;  // running, done, failed, cancelled; empty before the first answer
+        std::string step;
+        std::vector<std::string> log;
+        std::string project;
+        std::string error;
+    } create;
     // Taken once by the UI:
     std::vector<std::string> settled;  // change keys whose command finished (see ServiceWorker)
     std::string change_error;          // "Couldn't change shop: ..."
@@ -82,11 +96,17 @@ public:
     void set_keep_running(const std::string& project, bool keep);
     void use(const std::string& project, const std::string& key, const std::optional<std::string>& value);
     void copy_env(const std::string& project);
-    void open_in_studio(const std::string& project);
+    // Quietly: nothing is said when Studio isn't installed (after a FloCMS template).
+    void open_in_studio(const std::string& project, bool quietly = false);
     // Adds a folder as a project (projects.add) and turns it on.
     void add_folder(const std::string& path);
     // Installs what a project needs (runtimes.install) and follows the jobs.
     void install(const std::string& project, const std::vector<Download>& downloads);
+    // Asks for the templates (templates.list).
+    void load_templates();
+    // Makes a project from a template (projects.create) and follows the job.
+    void create_project(const std::string& template_id, const std::string& name, const std::string& parent,
+                        const std::map<std::string, std::optional<std::string>>& versions);
     // The project whose log is fetched; empty for none.
     void select(const std::string& project);
     void start_service();  // after NotRunning or Failed
@@ -113,6 +133,8 @@ private:
             OpenStudio,
             AddFolder,
             Install,
+            LoadTemplates,
+            CreateProject,
             Select,
             Start,
             Refresh,
@@ -123,6 +145,7 @@ private:
         std::string key;
         std::optional<std::string> value;
         std::vector<Download> downloads;
+        nlohmann::json params;  // CreateProject: projects.create's parameters
     };
 
     void push(Command command);

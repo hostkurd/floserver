@@ -92,6 +92,32 @@ enum class Str : std::uint8_t {
     Downloading,       // {0}: "PHP 8.5.12", {1}: "42%" or empty
     Installing,        // {0}: "PHP 8.5.12"
     DownloadFailed,    // {0}: "PHP 8.2", {1}: the service's reason
+    // The New project wizard (D9).
+    WizardStepTemplate,
+    WizardStepName,
+    WizardStepVersions,
+    WizardWhat,
+    WizardNameTitle,
+    WizardVersionsTitle,
+    WizardName,
+    WizardFolder,
+    WizardBrowse,
+    WizardAddress,     // {0}: "https://shop.localhost"
+    WizardMadeIn,      // {0}: the full folder path
+    WizardNameRule,
+    WizardDownloads,
+    WizardBack,
+    WizardNext,
+    WizardCreate,
+    WizardCancel,
+    WizardMaking,      // {0}: the project's name
+    WizardDone,        // {0}: the project's name
+    WizardFailed,      // {0}: the service's reason
+    WizardNotMade,
+    WizardOpenProject,
+    WizardClose,
+    WizardNoTemplates, // {0}: why
+    WizardLoading,
     Count_,
 };
 

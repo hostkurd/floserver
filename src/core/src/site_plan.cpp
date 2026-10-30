@@ -21,8 +21,36 @@ bool is_pool_php(const InstalledRuntime& r) {
     return r.name == "php" && (r.variant.empty() || r.variant == "nts");
 }
 
-// The newest install of `name` matching `wanted` ("8.2"), or the newest of all
-// when `wanted` is empty.
+std::string pool_key(const std::string& version, const std::vector<std::string>& extensions) {
+    std::string key = "php-" + version;
+    for (const std::string& e : extensions) {
+        key += "+" + e;
+    }
+    return key;
+}
+
+}  // namespace
+
+bool has_php_files(const fs::path& doc_root) {
+    std::error_code ec;
+    fs::directory_iterator it(doc_root, ec);
+    if (ec) {
+        return true;  // can't tell (no such folder yet): a PHP project, as before
+    }
+    std::size_t looked = 0;
+    for (; it != fs::directory_iterator() && looked < 2000; it.increment(ec), ++looked) {
+        if (ec) {
+            return true;
+        }
+        std::string ext = path_to_utf8(it->path().extension());
+        std::transform(ext.begin(), ext.end(), ext.begin(), [](char c) { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c; });
+        if (ext == ".php" && !it->is_directory(ec)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 const InstalledRuntime* best_installed(const std::vector<InstalledRuntime>& installed, const std::string& name,
                                        const std::string& wanted) {
     const std::optional<Version> want = wanted.empty() ? std::nullopt : Version::parse(wanted);
@@ -46,16 +74,6 @@ const InstalledRuntime* best_installed(const std::vector<InstalledRuntime>& inst
     }
     return best;
 }
-
-std::string pool_key(const std::string& version, const std::vector<std::string>& extensions) {
-    std::string key = "php-" + version;
-    for (const std::string& e : extensions) {
-        key += "+" + e;
-    }
-    return key;
-}
-
-}  // namespace
 
 ConfigResult read_project_config_file(const Project& project) {
     std::error_code ec;
@@ -174,6 +192,21 @@ WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
                                  tools != nullptr ? tools->version : std::string(), {}});
             site.app = plan.apps.size() - 1;
             site.state = SiteState::Ready;
+            plan.sites.push_back(std::move(site));
+            continue;
+        }
+
+        // A static site: no PHP, Node or Python asked for and no .php file in
+        // the document root. nginx serves its files as they are; nothing else
+        // runs. A .php file (or a PHP version) later makes it a PHP project.
+        if (!pc.php && !pc.node && !pc.python && !apache && !has_php_files(site.doc_root)) {
+            if (pc.database && best_installed(installed, pc.database->family, pc.database->version) == nullptr) {
+                site.missing.push_back(pc.database->family + " " + pc.database->version);
+                site.state = SiteState::NeedsDownload;
+            } else {
+                site.state = SiteState::Ready;
+            }
+            site.static_site = true;
             plan.sites.push_back(std::move(site));
             continue;
         }

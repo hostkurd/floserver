@@ -45,6 +45,8 @@ add_library(floserver_core STATIC
     src/sha256.cpp
     src/version.cpp
     src/tar_extract.cpp
+    src/templates.cpp
+    src/template_service.cpp
     src/zip_extract.cpp)
 
 target_include_directories(floserver_core PUBLIC
