@@ -75,6 +75,37 @@ compared with the official release. Files live on `https://cdn.floserver.org`
 (S3 bucket `floserver-cdn-origin`, eu-central-1, readable only through
 CloudFront) at `<runtime>/<version>/<original file name>`.
 
+### With FloServer Publisher (the usual way)
+
+`floserver-publisher.exe` (Windows, `tools/publisher`, in the CI build) does
+steps 2 to 6 below in one window:
+
+1. Upload the new runtime files to the bucket (step 1 below).
+2. Open the Publisher. It reads the live list (signed, sequence, expiry) and
+   lists its files. Type each new file's CDN path and press **Add**; select a
+   file and **Remove** to leave it out of the next list.
+3. Press **Publish** and choose the key file (asked every time; only the
+   path is kept while the window is open, and the key is wiped right after
+   signing). It then:
+   - checks the live list hasn't changed and this computer's clock is within
+     10 minutes of the CDN's;
+   - checks the files: those in the live list must still be served at their
+     size; new ones are downloaded from the CDN and compared with the official
+     checksum list (PHP, MariaDB, Node.js, Composer, Python) or the original
+     download (nginx, WordPress). Apache is compared by hand: select it,
+     compare the SHA-256 shown with apachelounge.com, tick the box and press
+     Publish again;
+   - checks the bucket refuses direct reads (403);
+   - builds the list (live sequence + 1, 90 days, built-in templates), signs
+     it and checks FloServer's built-in key opens it;
+   - writes `manifest.json`, `manifest.json.sig` and `upload-steps.txt` to
+     `Documents\FloServer Publisher\<date> sequence <N>` and opens the folder.
+4. Upload both files and invalidate `/manifest.json` and `/manifest.json.sig`
+   (**Copy invalidation paths**), then press **Check live**: it must show the
+   new sequence.
+
+### By hand
+
 1. **Upload** new runtime files to the bucket. Keep the original file name, in a
    folder named after the plain version (`php/8.5.12/php-8.5.12-1-nts-Win32-vs17-x64.zip`).
 2. **Add them** to the `$files` list at the top of

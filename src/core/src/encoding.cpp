@@ -92,6 +92,15 @@ std::optional<std::vector<std::uint8_t>> from_base64(std::string_view text) {
     }
     std::vector<std::uint8_t> out;
     out.reserve(text.size() / 4 * 3);
+    // Base64 may carry a key seed: what was decoded before a bad character is
+    // wiped, not left in freed memory.
+    const auto refuse = [&out]() -> std::optional<std::vector<std::uint8_t>> {
+        volatile std::uint8_t* p = out.data();
+        for (std::size_t k = 0; k < out.size(); ++k) {
+            p[k] = 0;
+        }
+        return std::nullopt;
+    };
     for (std::size_t i = 0; i < text.size(); i += 4) {
         const bool last = i + 4 == text.size();
         std::array<int, 4> v{};
@@ -104,11 +113,11 @@ std::optional<std::vector<std::uint8_t>> from_base64(std::string_view text) {
                 continue;
             }
             if (pad != 0) {
-                return std::nullopt;  // data after padding
+                return refuse();  // data after padding
             }
             v[j] = base64_value(c);
             if (v[j] < 0) {
-                return std::nullopt;
+                return refuse();
             }
         }
         const auto n = (static_cast<std::uint32_t>(v[0]) << 18U) |
@@ -116,7 +125,7 @@ std::optional<std::vector<std::uint8_t>> from_base64(std::string_view text) {
                        (static_cast<std::uint32_t>(v[2]) << 6U) | static_cast<std::uint32_t>(v[3]);
         // Unused bits must be zero, so every value has one spelling.
         if ((pad == 1 && (n & 0xFFU) != 0) || (pad == 2 && (n & 0xFFFFU) != 0)) {
-            return std::nullopt;
+            return refuse();
         }
         out.push_back(static_cast<std::uint8_t>(n >> 16U));
         if (pad < 2) {

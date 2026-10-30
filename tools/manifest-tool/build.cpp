@@ -156,7 +156,69 @@ std::optional<std::string> self_check(const std::string& bytes, std::chrono::sys
     return std::nullopt;
 }
 
+struct Classified {
+    CdnPath parts;
+    const CatalogEntry* entry = nullptr;  // set when the list can carry the file
+    bool note = false;                    // left out on purpose (not an error)
+    std::string message;
+};
+
+Classified classify(const std::string& path) {
+    Classified c;
+    // <runtime>/<version>/<file>
+    const auto first = path.find('/');
+    const auto second = first == std::string::npos ? first : path.find('/', first + 1);
+    if (second == std::string::npos || path.find('/', second + 1) != std::string::npos) {
+        c.message = path + ": expected <runtime>/<version>/<file>";
+        return c;
+    }
+    c.parts.runtime = path.substr(0, first);
+    c.parts.version = path.substr(first + 1, second - first - 1);
+    c.parts.file = path.substr(second + 1);
+    const std::string& name = c.parts.runtime;
+    const std::string& version = c.parts.version;
+    const std::string& file = c.parts.file;
+
+    const auto entry = std::find_if(kCatalog.begin(), kCatalog.end(),
+                                     [&](const CatalogEntry& e) { return e.name == name; });
+    if (entry == kCatalog.end()) {
+        c.message = join({path, ": \"", name, "\" isn't a runtime FloServer knows; add it to the catalog"});
+        return c;
+    }
+    if (!Version::parse(version)) {
+        c.message = join({path, ": \"", version, "\" isn't a version folder such as 8.5.12"});
+        return c;
+    }
+    const std::regex pattern(
+        replace_all(std::string(entry->file_pattern), "{v}", regex_escape(version)));
+    if (!std::regex_match(file, pattern)) {
+        const bool source = file.ends_with(".tar.gz") || file.ends_with(".tar.xz");
+        const bool other_build =
+            !entry->other_builds.empty() &&
+            std::regex_match(file, std::regex(replace_all(std::string(entry->other_builds), "{v}",
+                                                          regex_escape(version))));
+        if (source || other_build) {
+            c.note = true;
+            c.message = join({path, source ? ": source archive, not listed"
+                                           : ": another build of this release, not listed"});
+        } else {
+            c.message = join({path, ": the file name doesn't match a ", name, " ", version,
+                              " Windows download; check the name and the version folder"});
+        }
+        return c;
+    }
+    c.entry = &*entry;
+    return c;
+}
+
 }  // namespace
+
+CdnPath describe_cdn_path(std::string_view path) {
+    Classified c = classify(std::string(path));
+    c.parts.listable = c.entry != nullptr;
+    c.parts.problem = std::move(c.message);
+    return std::move(c.parts);
+}
 
 std::string format_utc_time(std::chrono::sys_seconds t) {
     using namespace std::chrono;
@@ -220,44 +282,19 @@ BuildResult build_manifest(std::string_view report_json, const BuildOptions& opt
             continue;
         }
 
-        // <runtime>/<version>/<file>
-        const auto first = path.find('/');
-        const auto second = first == std::string::npos ? first : path.find('/', first + 1);
-        if (second == std::string::npos || path.find('/', second + 1) != std::string::npos) {
-            fail(path + ": expected <runtime>/<version>/<file>");
-            continue;
-        }
-        const std::string name = path.substr(0, first);
-        const std::string version = path.substr(first + 1, second - first - 1);
-        const std::string file = path.substr(second + 1);
-
-        const auto entry = std::find_if(kCatalog.begin(), kCatalog.end(),
-                                         [&](const CatalogEntry& c) { return c.name == name; });
-        if (entry == kCatalog.end()) {
-            fail(join({path, ": \"", name, "\" isn't a runtime FloServer knows; add it to the catalog"}));
-            continue;
-        }
-        if (!Version::parse(version)) {
-            fail(join({path, ": \"", version, "\" isn't a version folder such as 8.5.12"}));
-            continue;
-        }
-        const std::regex pattern(
-            replace_all(std::string(entry->file_pattern), "{v}", regex_escape(version)));
-        if (!std::regex_match(file, pattern)) {
-            const bool source = file.ends_with(".tar.gz") || file.ends_with(".tar.xz");
-            const bool other_build =
-                !entry->other_builds.empty() &&
-                std::regex_match(file, std::regex(replace_all(std::string(entry->other_builds), "{v}",
-                                                              regex_escape(version))));
-            if (source || other_build) {
-                result.notes.push_back(join({path, source ? ": source archive, not listed"
-                                                          : ": another build of this release, not listed"}));
+        const Classified kind = classify(path);
+        if (!kind.entry) {
+            if (kind.note) {
+                result.notes.push_back(kind.message);
             } else {
-                fail(join({path, ": the file name doesn't match a ", name, " ", version,
-                           " Windows download; check the name and the version folder"}));
+                fail(kind.message);
             }
             continue;
         }
+        const CatalogEntry* const entry = kind.entry;
+        const std::string& name = kind.parts.runtime;
+        const std::string& version = kind.parts.version;
+        const std::string& file = kind.parts.file;
 
         const std::string state =
             f.contains("result") && f["result"].is_string() ? f["result"].get<std::string>() : "";
