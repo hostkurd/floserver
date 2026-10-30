@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <deque>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -195,9 +196,23 @@ private:
         nlohmann::json params;  // CreateProject: projects.create's parameters; SetShared: the changes
     };
 
+    // "Check for updates" (runtimes.list {"refresh": true}) can take as long
+    // as the network does. It runs on its own short-lived thread and pipe
+    // connection, never on the 2 s polling path, so the main window keeps
+    // updating during a slow or offline fetch. The thread is detached and
+    // shares only this box; take() hands its answer over.
+    struct RefreshBox {
+        std::mutex mutex;
+        bool running = false;
+        bool done = false;
+        std::optional<nlohmann::json> reply;
+        std::string error;
+    };
+
     void push(Command command);
     void run(const std::stop_token& stop);
     void publish();
+    void start_refresh();
 
     HWND window_;
     UINT message_;
@@ -207,6 +222,7 @@ private:
     std::deque<Command> commands_;
     Snapshot latest_;
     bool posted_ = false;
+    std::shared_ptr<RefreshBox> refresh_ = std::make_shared<RefreshBox>();
     std::jthread thread_;  // last: it starts after everything above exists
 };
 

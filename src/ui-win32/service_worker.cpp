@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <exception>
 #include <map>
 #include <optional>
 #include <set>
@@ -141,7 +142,54 @@ void ServiceWorker::create_project(const std::string& template_id, const std::st
     push({Command::Kind::CreateProject, name, false, {}, std::nullopt, {}, std::move(params)});
 }
 void ServiceWorker::list_runtimes(bool refresh) {
-    push({Command::Kind::ListRuntimes, {}, refresh, {}, std::nullopt, {}, {}});
+    if (refresh) {
+        start_refresh();  // off the polling path: see RefreshBox
+        return;
+    }
+    // Cached is quick: the service copies the list in hand under its lock,
+    // or reads the kept file, and never waits on a fetch that's running
+    // (get_list() keeps its lock released during the download).
+    push({Command::Kind::ListRuntimes, {}, false, {}, std::nullopt, {}, {}});
+}
+
+void ServiceWorker::start_refresh() {
+    {
+        const std::lock_guard lock(refresh_->mutex);
+        if (refresh_->running) {
+            return;  // one check at a time; its answer is on its way
+        }
+        refresh_->running = true;
+        refresh_->done = false;
+    }
+    std::thread([box = refresh_, window = window_, message = message_, lost = std::string(text(lang_, Str::ConnectionLost))] {
+        std::optional<nlohmann::json> reply;
+        std::string error;
+        try {
+            const std::string instance = core::ipc::default_instance();
+            if (auto client = core::ServiceClient::connect(instance, error, kRequestTimeout)) {
+                if (auto got = client->call("runtimes.list", {{"refresh", true}}); !got) {
+                    error = lost;
+                } else if (!got->ok) {
+                    error = got->error_message;
+                } else {
+                    reply = std::move(got->result);
+                }
+            } else if (error.empty()) {
+                error = lost;  // not running: the main window says so and offers to start it
+            }
+        } catch (const std::exception& e) {
+            error = e.what();
+        }
+        {
+            const std::lock_guard lock(box->mutex);
+            box->reply = std::move(reply);
+            box->error = std::move(error);
+            box->done = true;
+            box->running = false;
+        }
+        // Gone windows ignore it; the box lives as long as this thread needs it.
+        PostMessageW(window, message, 0, 0);
+    }).detach();
 }
 void ServiceWorker::watch_runtimes(bool on) { push({Command::Kind::WatchRuntimes, {}, on, {}, std::nullopt, {}, {}}); }
 void ServiceWorker::remove_runtime(const std::string& name, const std::string& folder) {
@@ -176,6 +224,18 @@ Snapshot ServiceWorker::take() {
     latest_.clipboard.clear();
     Snapshot out = latest_;
     out.clipboard = std::move(clipboard);
+    {
+        const std::lock_guard refresh_lock(refresh_->mutex);
+        // A cached answer waiting in this snapshot goes first; the check's follows.
+        if (refresh_->done && !out.runtimes) {
+            refresh_->done = false;
+            out.runtimes_refresh = true;
+            out.runtimes = std::move(refresh_->reply);
+            out.runtimes_error = std::move(refresh_->error);
+            refresh_->reply.reset();
+            refresh_->error.clear();
+        }
+    }
     latest_.settled.clear();
     latest_.change_error.clear();
     latest_.added.clear();
@@ -315,7 +375,6 @@ void ServiceWorker::run(const std::stop_token& stop) {
         std::string settings_error;
         std::optional<nlohmann::json> runtimes;
         std::string runtimes_error;
-        bool runtimes_refresh = false;
         bool refetch_runtimes = false;  // a change Settings shows is done: ask again
         std::optional<Defaults> defaults;
         const auto list_runtimes_now = [&](bool refresh) {
@@ -573,8 +632,7 @@ void ServiceWorker::run(const std::stop_token& stop) {
                     break;
                 }
                 case Command::Kind::ListRuntimes:
-                    list_runtimes_now(c.flag);
-                    runtimes_refresh = c.flag;
+                    list_runtimes_now(false);  // cached only; a refresh has its own thread
                     break;
                 case Command::Kind::WatchRuntimes:
                     watching = c.flag;
@@ -809,7 +867,6 @@ void ServiceWorker::run(const std::stop_token& stop) {
         if (runtimes || !runtimes_error.empty()) {
             latest_.runtimes = std::move(runtimes);
             latest_.runtimes_error = runtimes_error;
-            latest_.runtimes_refresh = latest_.runtimes_refresh || runtimes_refresh;
         }
         if (defaults) {
             latest_.defaults = std::move(*defaults);
