@@ -29,6 +29,18 @@ struct ApacheSite {
     bool https = false;               // nginx serves it over https: Apache's own redirects say so
 };
 
+// Shared sites (D19) when Apache serves them: the www folder at
+// localhost/<folder>/ and each folder at <folder>.localhost (mod_vhost_alias).
+// The www folder's own address shows `list_page` when it has no index file.
+struct ApacheShared {
+    std::filesystem::path dir;
+    std::vector<Port> php_ports;
+    std::filesystem::path list_page;
+};
+
+// Where the shared list page is answered on localhost (no dot: dot paths are refused).
+inline constexpr std::string_view kSharedListPath = "/__floserver_shared__.html";
+
 struct ApacheSpec {
     std::filesystem::path server_root;  // the installed Apache (Apache24): conf/mime.types
     std::filesystem::path modules_dir;  // where mod_*.so are (server_root/modules on Windows)
@@ -39,6 +51,7 @@ struct ApacheSpec {
     // "proxy_fcgi:trace8" the values it sends PHP (FLOSERVER_APACHE_TRACE).
     std::string log_level = "warn";
     std::vector<ApacheSite> sites;
+    std::optional<ApacheShared> shared;
 };
 
 // The port Apache listens on is filled in when it starts.

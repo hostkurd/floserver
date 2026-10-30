@@ -100,6 +100,9 @@ struct AppSpec {
 
 struct WebPlan {
     std::vector<PlannedSite> sites;  // same order as the project list
+    // Shared sites (D19), named kSharedSiteName, when they're on (or their
+    // settings can't be read: then a Problem). doc_root is the www folder.
+    std::optional<PlannedSite> shared;
     std::vector<PhpPool> pools;      // in order of first use
     std::vector<AppSpec> apps;       // in list order
     // The newest installed Apache, when a project needs it.
@@ -116,7 +119,8 @@ using ConfigReader = std::function<ConfigResult(const Project&)>;
 [[nodiscard]] ConfigResult read_project_config_file(const Project& project);
 
 // `default_php` is the version to use for projects whose floserver.json names
-// none ("8.5"); nothing means the newest installed PHP.
+// none ("8.5"); nothing means the newest installed PHP. Shared sites are
+// planned from config.json's "shared" (shared_sites.h).
 [[nodiscard]] WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
                                  const std::vector<InstalledRuntime>& installed,
                                  const std::optional<std::string>& default_php);

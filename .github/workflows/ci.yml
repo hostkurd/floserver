@@ -316,6 +316,26 @@ jobs:
           if ($uniBody -ne "uni ci-uni" -or $wpuBody -ne "wp /x/ /index.php -") {
             Fail "non-ASCII folder: nginx PHP project got '$uniBody', Apache project got '$wpuBody'" (Diagnostics)
           }
+          # Shared sites (D19): a www folder at localhost/<folder>/ and <folder>.localhost, through Apache,
+          # then through nginx.
+          $www = "$env:RUNNER_TEMP\ci-www"
+          New-Item -ItemType Directory -Force "$www\notes", "$www\plain" | Out-Null
+          Set-Content "$www\notes\index.php" '<?php echo "notes ", $_SERVER["SCRIPT_NAME"];'
+          Set-Content "$www\plain\index.html" 'plain html'
+          Run "flo shared dir" { & "$bin/flo.exe" shared dir $www } | Out-Null
+          foreach ($webServer in "apache", "nginx") {
+            Run "flo shared web $webServer" { & "$bin/flo.exe" shared web $webServer } | Out-Null
+            Run "flo shared on" { & "$bin/flo.exe" shared on } | Out-Null
+            $listBody = (& curl.exe -sS --max-time 60 --resolve "localhost:18080:127.0.0.1" "http://localhost:18080/" 2>&1 | Out-String)
+            $pathBody = (& curl.exe -sS --max-time 60 --resolve "localhost:18080:127.0.0.1" "http://localhost:18080/notes/" 2>&1 | Out-String).Trim()
+            $hostBody = (& curl.exe -sS --max-time 60 --resolve "notes.localhost:18080:127.0.0.1" "http://notes.localhost:18080/" 2>&1 | Out-String).Trim()
+            $plainBody = (& curl.exe -sS --max-time 60 --resolve "plain.localhost:18080:127.0.0.1" "http://plain.localhost:18080/" 2>&1 | Out-String).Trim()
+            if ($listBody -notlike "*Shared sites*notes/*" -or $pathBody -ne "notes /notes/index.php" -or
+                $hostBody -ne "notes /index.php" -or $plainBody -ne "plain html") {
+              Fail "shared sites ($webServer)" "list: $listBody || path: $pathBody || host: $hostBody || plain: $plainBody || $(& "$bin/flo.exe" shared 2>&1 | Out-String) || $(Diagnostics)"
+            }
+          }
+          Run "flo shared off" { & "$bin/flo.exe" shared off } | Out-Null
           # The terminal shims (D10): each runs the project's own version.
           Run "flo install composer" { & "$bin/flo.exe" install composer } | Out-Null  # uninstalled above
           Run "flo shims install" { & "$bin/flo.exe" shims install } | Out-Null
@@ -344,7 +364,7 @@ jobs:
           Start-Sleep -Seconds 1
           $left = @(Get-Process nginx, php-cgi, node, python, httpd -ErrorAction SilentlyContinue).Count
           if ($left -ne 0) { Fail "processes left after flo stop" (Diagnostics) }
-          "::notice title=live install::nginx, Composer, PHP and Node installed from the CDN; a project served, slept and woke for 20 requests at once; a second pool added with a reload; a Node project served, slept and woke; a Python project got its .venv and packages, served, slept and woke; an Apache project served with .htaccess rewrites, slept and woke; the shims ran each project's php, composer, node, npm, python and pip"
+          "::notice title=live install::nginx, Composer, PHP and Node installed from the CDN; a project served, slept and woke for 20 requests at once; a second pool added with a reload; a Node project served, slept and woke; a Python project got its .venv and packages, served, slept and woke; an Apache project served with .htaccess rewrites, slept and woke; shared sites served through Apache and nginx; the shims ran each project's php, composer, node, npm, python and pip"
           exit 0
       # The build, for trying on a real PC: download it from the run's page.
       - name: Upload the Windows build

@@ -1,5 +1,7 @@
 #include "floserver/core/project_service.h"
 
+#include "floserver/core/shared_sites.h"
+
 #include "floserver/core/paths.h"
 #include "floserver/core/site_plan.h"
 
@@ -233,6 +235,134 @@ std::optional<fs::path> ProjectService::folder(const std::string& name, ServiceR
     }
     refusal = {"unknown_project", "there's no project called " + name};
     return std::nullopt;
+}
+
+std::optional<json> ProjectService::describe_shared(const AppConfig& config, ServiceRefusal& refusal) const {
+    std::string error;
+    const auto shared = read_shared_config(config, error);
+    if (!shared) {
+        refusal = {"config_unreadable", "FloServer's settings for shared sites can't be used: " + error};
+        return std::nullopt;
+    }
+    json out = {{"on", shared->on}, {"web", shared->web == WebServer::Apache ? "apache" : "nginx"}};
+    const auto dir = shared_dir(*shared);
+    out["dir"] = dir ? json(path_to_utf8(*dir)) : json(nullptr);
+    if (const auto d = default_shared_dir()) {
+        out["default_dir"] = path_to_utf8(*d);
+    }
+    if (shared->php) {
+        out["php"] = *shared->php;
+    }
+    if (shared->database) {
+        out["database"] = shared->database->family + "-" + shared->database->version;
+    }
+    json folders = json::array();
+    if (dir) {
+        for (const SharedFolder& f : scan_shared_folders(*dir, config)) {
+            json j = {{"name", f.name}, {"kind", shared_kind_name(f.kind)}, {"host", f.host_name}};
+            if (f.clash) {
+                j["clash"] = *f.clash;
+            }
+            folders.push_back(std::move(j));
+        }
+    }
+    out["folders"] = std::move(folders);
+    return out;
+}
+
+std::optional<json> ProjectService::shared(ServiceRefusal& refusal) const {
+    const std::lock_guard lock(mutex_);
+    const auto config = load(refusal);
+    if (!config) {
+        return std::nullopt;
+    }
+    return describe_shared(*config, refusal);
+}
+
+std::optional<json> ProjectService::set_shared(const json& changes, ServiceRefusal& refusal) {
+    const std::lock_guard lock(mutex_);
+    auto config = load(refusal);
+    if (!config) {
+        return std::nullopt;
+    }
+    std::string error;
+    auto shared = read_shared_config(*config, error);
+    if (!shared) {
+        refusal = {"config_unreadable", "FloServer's settings for shared sites can't be used: " + error};
+        return std::nullopt;
+    }
+    if (!changes.is_object()) {
+        refusal = {"bad_params", "the changes must be an object"};
+        return std::nullopt;
+    }
+    for (const auto& [key, value] : changes.items()) {
+        if (key == "on") {
+            if (!value.is_boolean()) {
+                refusal = {"bad_params", "on must be true or false"};
+                return std::nullopt;
+            }
+            shared->on = value.get<bool>();
+        } else if (key == "dir") {
+            if (value.is_null()) {
+                shared->dir.reset();
+                continue;
+            }
+            if (!value.is_string()) {
+                refusal = {"bad_params", "dir must be a folder"};
+                return std::nullopt;
+            }
+            const auto real = real_folder(path_from_utf8(value.get<std::string>()), error);
+            if (!real) {
+                refusal = {"bad_params", error};
+                return std::nullopt;
+            }
+            shared->dir = *real;
+        } else if (key == "php" || key == "web" || key == "database") {
+            if (value.is_null() && key != "web") {
+                if (key == "php") {
+                    shared->php.reset();
+                } else {
+                    shared->database.reset();
+                }
+                continue;
+            }
+            // Checked by floserver.json's own rules.
+            const ConfigResult parsed = parse_project_config(json{{key, value}}.dump());
+            if (!parsed.config) {
+                const std::string why = parsed.errors.empty() ? std::string("isn't valid") : parsed.errors.front().message;
+                std::string message = key;
+                message.append(" ").append(why);
+                refusal = {"bad_params", std::move(message)};
+                return std::nullopt;
+            }
+            if (key == "php") {
+                shared->php = parsed.config->php;
+            } else if (key == "web") {
+                shared->web = parsed.config->web;
+            } else {
+                shared->database = parsed.config->database;
+            }
+        } else {
+            refusal = {"bad_params", "unknown setting " + key + " (on, dir, php, web, database)"};
+            return std::nullopt;
+        }
+    }
+    // The default www folder is made when shared sites are turned on.
+    if (shared->on && !shared->dir) {
+        if (const auto d = default_shared_dir()) {
+            std::error_code ec;
+            fs::create_directories(*d, ec);
+            if (ec) {
+                refusal = {"folder_unwritable", "can't make " + path_to_utf8(*d) + ": " + error_text(ec)};
+                return std::nullopt;
+            }
+        }
+    }
+    write_shared_config(*config, *shared);
+    if (!save(*config, refusal)) {
+        return std::nullopt;
+    }
+    return describe_shared(*config, refusal);
 }
 
 }  // namespace floserver::core

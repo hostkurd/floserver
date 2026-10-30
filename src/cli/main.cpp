@@ -61,6 +61,8 @@ void print_help(std::ostream& out) {
         << "  remove <name>              Forget a project (its files are kept)\n"
         << "  use <php|node|python|mariadb> <v> Set a version in this project's floserver.json\n"
         << "  db                         Show the databases and the projects using them\n"
+        << "  shared [on|off]            Shared sites: every folder in the www folder at localhost (D19)\n"
+        << "  shared php <v|newest>      ...their PHP version; shared web <apache|nginx>; shared dir <folder|default>\n"
         << "  env [project] [--write]    A project's database settings as .env lines (--show: the password)\n"
         << "  trust                      Let your browsers trust FloServer's HTTPS certificates\n"
         << "  untrust                    Remove FloServer's certificate authority\n"
@@ -909,6 +911,90 @@ int check(const fs::path& start) {
 }
 
 // flo db: the MariaDB servers and the projects using each.
+// Shared sites (D19): flo shared [on|off|php <v>|web <apache|nginx>|dir <folder>].
+int shared(const std::vector<std::string>& args) {
+    nlohmann::json changes = nlohmann::json::object();
+    if (args.size() == 2 && (args[1] == "on" || args[1] == "off")) {
+        changes["on"] = args[1] == "on";
+    } else if (args.size() == 3 && args[1] == "php") {
+        changes["php"] = args[2] == "newest" ? nlohmann::json(nullptr) : nlohmann::json(args[2]);
+    } else if (args.size() == 3 && args[1] == "web") {
+        changes["web"] = args[2];
+    } else if (args.size() == 3 && args[1] == "dir") {
+        if (args[2] == "default") {
+            changes["dir"] = nullptr;
+        } else {
+            std::error_code ec;
+            const fs::path dir = fs::absolute(floserver::core::path_from_utf8(args[2]), ec);
+            changes["dir"] = floserver::core::path_to_utf8(dir);
+        }
+    } else if (args.size() != 1) {
+        std::cerr << "Usage: flo shared [on|off] | flo shared php <version|newest> | flo shared web <apache|nginx>"
+                     " | flo shared dir <folder|default>\n";
+        return 2;
+    }
+    auto client = connect_or_start(std::chrono::seconds(60));
+    if (!client) {
+        return 1;
+    }
+    const auto reply = changes.empty() ? client->call("shared.get") : client->call("shared.set", changes);
+    if (!reply || !reply->ok) {
+        return print_refusal(reply);
+    }
+    const auto& r = reply->result;
+    const bool on = r.value("on", false);
+    std::cout << "Shared sites: " << (on ? "on" : "off") << "\n"
+              << "  www folder: " << (r["dir"].is_string() ? r["dir"].get<std::string>() : std::string("(none)")) << "\n"
+              << "  PHP:        " << (r.contains("php") ? r["php"].get<std::string>() : std::string("newest installed")) << "\n"
+              << "  web server: " << text_of(r, "web") << "\n";
+    const auto& status = r.value("status", nlohmann::json());
+    std::string address;
+    if (status.is_object()) {
+        address = text_of(status, "address");
+        if (!address.empty()) {
+            std::cout << "  address:    " << address << "/\n";
+        }
+        if (status.contains("missing")) {
+            std::string missing;
+            for (const auto& m : status["missing"]) {
+                missing += (missing.empty() ? "" : ", ") + m.get<std::string>();
+            }
+            std::cout << "  needs:      " << missing << " (flo install ...)\n";
+        }
+        if (status.contains("problem")) {
+            std::cout << "  problem:    " << text_of(status, "problem") << "\n";
+        }
+    }
+    const auto& folders = r["folders"];
+    if (on && folders.empty()) {
+        std::cout << "\nThe www folder is empty. Put a folder with an index.php or index.html in it.\n";
+    }
+    if (!folders.empty()) {
+        std::cout << "\n";
+    }
+    const std::string suffix = address.size() > std::string("http://localhost").size()
+                                   ? address.substr(std::string("http://localhost").size())
+                                   : std::string();
+    for (const auto& f : folders) {
+        const std::string name = text_of(f, "name");
+        const std::string kind = text_of(f, "kind");
+        std::cout << "  " << name;
+        if (kind == "node" || kind == "python") {
+            std::cout << "  (" << (kind == "node" ? "Node.js" : "Python")
+                      << " app: it needs its own server; add it as a project: flo add)";
+        } else if (!address.empty()) {
+            std::cout << "  " << address << "/" << name << "/";
+            if (f.contains("clash")) {
+                std::cout << "  (" << name << ".localhost is the project " << text_of(f, "clash") << ")";
+            } else if (f.value("host", false)) {
+                std::cout << "  http://" << name << ".localhost" << suffix;
+            }
+        }
+        std::cout << "\n";
+    }
+    return 0;
+}
+
 int db() {
     auto client = connect_or_start(std::chrono::seconds(60));
     if (!client) {
@@ -1158,6 +1244,9 @@ int run_command(const std::vector<std::string>& args, const std::vector<fs::path
     }
     if (args[0] == "untrust" && args.size() == 1) {
         return untrust();
+    }
+    if (args[0] == "shared") {
+        return shared(args);
     }
     if (args[0] == "db" && args.size() == 1) {
         return db();

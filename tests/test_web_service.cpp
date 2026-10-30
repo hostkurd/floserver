@@ -12,6 +12,7 @@
 #include "floserver/core/process.h"
 #include "floserver/core/project_registry.h"
 #include "floserver/core/request_log.h"
+#include "floserver/core/shared_sites.h"
 #include "floserver/core/web_service.h"
 #include "test_util.h"
 
@@ -527,6 +528,118 @@ TEST_CASE("an Apache project is served by the shared Apache behind nginx, .htacc
     st = service.reload();
     CHECK_FALSE(st["apps"].contains("_apache"));
     service.stop();
+}
+
+TEST_CASE("shared sites: the www folder at localhost/<folder>/ and <folder>.localhost, with nginx or Apache (D19)") {
+    const auto nginx = tool("FLOSERVER_TEST_NGINX", "/usr/sbin/nginx");
+    const auto php = tool("FLOSERVER_TEST_PHP_CGI", "/usr/bin/php-cgi");
+    const auto apache = tool("FLOSERVER_TEST_APACHE", "/usr/sbin/apache2");
+    std::error_code ec;
+    const fs::path modules = get_env("FLOSERVER_TEST_APACHE_MODULES").value_or("/usr/lib/apache2/modules");
+    if (!nginx || !php) {
+        MESSAGE("nginx or php-cgi isn't installed here; skipped");
+        return;
+    }
+    const bool can_apache = apache && fs::exists(modules / "mod_vhost_alias.so", ec);
+    for (const bool use_apache : {false, true}) {
+        if (use_apache && !can_apache) {
+            MESSAGE("Apache with mod_vhost_alias isn't installed here; the Apache half skipped");
+            continue;
+        }
+        CAPTURE(use_apache);
+        const test_util::TempDir tmp;
+        const fs::path data = tmp.path() / "data";
+        install_test_nginx(data, *nginx);
+        fake_runtime(data, "php", "8.3.6", "nts");
+        fs::create_symlink(*php, runtimes_dir(data) / "php" / "8.3.6" / "php-cgi");
+        if (use_apache) {
+            fake_runtime(data, "apache", "2.4.58", "");
+            const fs::path apache_dir = runtimes_dir(data) / "apache" / "2.4.58";
+            fs::create_directories(apache_dir / "bin");
+            fs::create_directories(apache_dir / "conf");
+            fs::create_symlink(*apache, apache_dir / "bin" / "apache2");
+            fs::create_directory_symlink(modules, apache_dir / "modules");
+            fs::copy_file("/etc/mime.types", apache_dir / "conf" / "mime.types", ec);
+            if (ec) {
+                test_util::write_file(apache_dir / "conf" / "mime.types", "text/html html\ntext/plain txt\n");
+            }
+        }
+        const fs::path www = tmp.path() / "www";
+        test_util::write_file(www / "blog" / "index.php", "<?php echo 'blog ', $_SERVER['SCRIPT_NAME'];");
+        test_util::write_file(www / "blog" / "about.php", "<?php echo 'about';");
+        test_util::write_file(www / "site" / "index.html", "static site");
+        test_util::write_file(www / "shop" / "index.php", "<?php echo 'www shop';");
+        test_util::write_file(www / "blog" / ".env", "SECRET=1");
+        // A project called shop: shop.localhost is its.
+        const fs::path project = tmp.path() / "shop-project";
+        test_util::write_file(project / "index.html", "project shop");
+        for (const auto& e : fs::recursive_directory_iterator(tmp.path())) {
+            fs::permissions(e.path(), fs::perms::others_read | fs::perms::others_exec, fs::perm_options::add, ec);
+        }
+        fs::permissions(tmp.path(), fs::perms::others_read | fs::perms::others_exec, fs::perm_options::add, ec);
+
+        AppConfig app;
+        std::string error;
+        REQUIRE(add_project(app, project, "shop", error));
+        app.projects.front().on = true;
+        SharedConfig shared;
+        shared.on = true;
+        shared.dir = www;
+        shared.web = use_apache ? WebServer::Apache : WebServer::Nginx;
+        write_shared_config(app, shared);
+        REQUIRE(save_app_config(app_config_file(data), app, error));
+
+        const auto ports = pick_web_ports([](Port p) { return p > 1024 && can_listen_on_loopback(p); });
+        REQUIRE(ports);
+        CertStore certs(data);
+        WebServiceConfig config;
+        config.data_dir = data;
+        config.fixed_ports =
+            WebPorts{static_cast<Port>(ports->http + 23000), static_cast<Port>(ports->https + 23000), true};
+        config.reload_every = 1s;
+        WebService service(config, certs);
+        service.start();
+        const Port http = config.fixed_ports->http;
+
+        const auto st = service.status();
+        INFO(st.dump(2));
+        INFO(read_small_file(web_dir(data) / "nginx.conf", 1 << 20).value_or(""));
+        INFO(read_small_file(web_dir(data) / "logs" / "apache-error.log", 1 << 20).value_or(""));
+        REQUIRE(st["shared"].is_object());
+        CHECK(st["shared"]["address"] == "http://localhost:" + std::to_string(http));
+
+        const std::string list = get(http, "localhost");
+        CHECK(list.starts_with("200 "));
+        CHECK(list.find("Shared sites") != std::string::npos);
+        CHECK(list.find("/blog/") != std::string::npos);
+        CHECK(get(http, "localhost", "/blog/") == "200 blog /blog/index.php");
+        CHECK(get(http, "localhost", "/blog/about.php") == "200 about");
+        CHECK(get(http, "blog.localhost") == "200 blog /index.php");
+        CHECK(get(http, "site.localhost") == "200 static site");
+        CHECK(get(http, "localhost", "/site/") == "200 static site");
+        // The project keeps its name; the folder still opens by its path.
+        CHECK(get(http, "shop.localhost") == "200 project shop");
+        CHECK(get(http, "localhost", "/shop/") == "200 www shop");
+        CHECK(get(http, "localhost", "/blog/.env").starts_with("404 "));
+        CHECK(get(http, "blog.localhost", "/.env").starts_with("404 "));
+        CHECK(get(http, "nothing-here.localhost").starts_with("404 "));
+        // The www folder's own index replaces the list.
+        test_util::write_file(www / "index.php", "<?php echo 'my own index';");
+        fs::permissions(www / "index.php", fs::perms::others_read, fs::perm_options::add, ec);
+        CHECK(get(http, "localhost") == "200 my own index");
+        // The list page follows new folders.
+        fs::remove(www / "index.php");
+        test_util::write_file(www / "newsite" / "index.html", "new");
+        CHECK(eventually([&] { return get(http, "localhost").find("/newsite/") != std::string::npos; }, 5s));
+
+        // Off: localhost is no one's again.
+        shared.on = false;
+        write_shared_config(app, shared);
+        REQUIRE(save_app_config(app_config_file(data), app, error));
+        CHECK(service.reload()["shared"].is_null());
+        CHECK(get(http, "blog.localhost").starts_with("404 "));
+        service.stop();
+    }
 }
 
 #endif

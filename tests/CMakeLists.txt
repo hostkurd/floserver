@@ -22,6 +22,7 @@ add_executable(floserver_tests
     test_shim.cpp
     test_integration.cpp
     test_site_plan.cpp
+    test_shared_sites.cpp
     test_ui_model.cpp
     test_web_service.cpp
     test_tar.cpp
