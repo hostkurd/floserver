@@ -67,6 +67,9 @@ struct MariaDbFiles {
 // SQL text: an identifier in backticks, a string in single quotes.
 [[nodiscard]] std::string sql_identifier(std::string_view name);
 [[nodiscard]] std::string sql_string(std::string_view text);
+// A database name for GRANT ... ON <it>.*, where '_' and '%' are wildcards:
+// escaped, so the grant is for that one database.
+[[nodiscard]] std::string grant_pattern(std::string_view database);
 
 // root's password on every root account, and no anonymous logins.
 [[nodiscard]] std::string root_password_sql(const std::string& password);

@@ -1042,6 +1042,9 @@ int db() {
         for (const auto& p : s["projects"]) {
             projects += (projects.empty() ? "" : ", ") + p.get<std::string>();
         }
+        if (s.value("shared", false)) {
+            projects += (projects.empty() ? "" : ", ") + std::string("shared sites");
+        }
         std::cout << "MariaDB " << text_of(s, "version") << "  127.0.0.1:" << s.value("port", 0) << "  "
                   << text_of(s, "state") << (s.value("keep_running", false) ? " (keep running)" : "") << "  " << projects
                   << "\n";

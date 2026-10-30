@@ -694,6 +694,29 @@ void DatabaseService::reap_stoppers(bool all) {
     }
 }
 
+namespace {
+
+// A server's status, shared sites (D19) shown as "shared": true rather than
+// as a project named _shared.
+json describe_server_json(json j) {
+    if (j.contains("projects") && j["projects"].is_array()) {
+        json projects = json::array();
+        bool shared = false;
+        for (const json& p : j["projects"]) {
+            if (p == kSharedSiteName) {
+                shared = true;
+            } else {
+                projects.push_back(p);
+            }
+        }
+        j["projects"] = std::move(projects);
+        j["shared"] = shared;
+    }
+    return j;
+}
+
+}  // namespace
+
 json DatabaseService::reload() {
     std::vector<std::shared_ptr<Server>> servers;
     {
@@ -705,7 +728,7 @@ json DatabaseService::reload() {
     }
     json list = json::array();
     for (const auto& s : servers) {
-        list.push_back(s->describe());
+        list.push_back(describe_server_json(s->describe()));
     }
     return {{"servers", list}};
 }
@@ -720,7 +743,7 @@ json DatabaseService::status() const {
     }
     json list = json::array();
     for (const auto& s : servers) {
-        list.push_back(s->describe());
+        list.push_back(describe_server_json(s->describe()));
     }
     return {{"servers", list}};
 }
@@ -996,6 +1019,17 @@ std::optional<DatabaseLogin> DatabaseService::shared_login(ServiceRefusal& refus
     if (!shared->database || shared->database->family != "mariadb") {
         refusal = {"no_database", "shared sites have no database (choose one in Settings, or: flo shared db 11.4)"};
         return std::nullopt;
+    }
+    // A project from before shared sites had a database (www, www-blog):
+    // its data must not become the shared sites'.
+    for (const Project& p : app ? app->projects : std::vector<Project>()) {
+        if (reserved_database_name(project_database_name(p.name)) && p.name.starts_with("www")) {
+            refusal = {"reserved_name", "the project " + p.name + " uses a name shared sites' database needs (" +
+                                            std::string(kSharedDatabaseUser) + ", " + std::string(kSharedDatabasePrefix) +
+                                            "...); rename it first (flo remove " + p.name +
+                                            ", then flo add --name <other name>)"};
+            return std::nullopt;
+        }
     }
     std::shared_ptr<Server> server;
     {

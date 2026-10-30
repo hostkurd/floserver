@@ -58,11 +58,13 @@ TEST_CASE("SQL is quoted and a project's database is its own") {
     const std::string shared = shared_database_sql("Pw'1");
     CHECK(shared.find("CREATE DATABASE IF NOT EXISTS `www`") != std::string::npos);
     CHECK(shared.find("GRANT ALL PRIVILEGES ON `www\\_%`.* TO 'www'@'localhost';") != std::string::npos);
+    CHECK(grant_pattern("my_shop") == "`my\\_shop`");
+    CHECK(project_database_sql("my_shop", "my_shop", "p").find("ON `my\\_shop`.* TO") != std::string::npos);
     CHECK(shared.find("IDENTIFIED BY 'Pw''1'") != std::string::npos);
     const std::string sql = project_database_sql("my_shop", "my_shop", "Pw23");
     CHECK(sql.find("CREATE DATABASE IF NOT EXISTS `my_shop` CHARACTER SET utf8mb4") != std::string::npos);
-    CHECK(sql.find("GRANT ALL PRIVILEGES ON `my_shop`.* TO 'my_shop'@'localhost';") != std::string::npos);
-    CHECK(sql.find("GRANT ALL PRIVILEGES ON `my_shop`.* TO 'my_shop'@'127.0.0.1';") != std::string::npos);
+    CHECK(sql.find("GRANT ALL PRIVILEGES ON `my\\_shop`.* TO 'my_shop'@'localhost';") != std::string::npos);
+    CHECK(sql.find("GRANT ALL PRIVILEGES ON `my\\_shop`.* TO 'my_shop'@'127.0.0.1';") != std::string::npos);
     CHECK(sql.find("*.*") == std::string::npos);  // never every database
     const std::string root = root_password_sql("Pw23");
     CHECK(root.find("ALTER USER IF EXISTS 'root'@'localhost' IDENTIFIED BY 'Pw23';") != std::string::npos);

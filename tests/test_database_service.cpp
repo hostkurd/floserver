@@ -175,6 +175,42 @@ TEST_CASE("a project's database runs on the real MariaDB, sleeps when idle and w
         const auto again = db.shared_login(refusal);
         REQUIRE(again);
         CHECK(again->password == login->password);
+
+        // '_' in a GRANT is a wildcard: a project named w-w (user w_w) must
+        // not reach www, nor my-shop another project's myashop.
+        const fs::path ww = tmp.path() / "w-w";
+        test_util::write_file(ww / "floserver.json", R"({"php": "8.3", "database": "mariadb-10.11"})");
+        REQUIRE(add_project(app, ww, "", error));
+        app.projects.back().on = true;
+        REQUIRE(save_app_config(app_config_file(data), app, error));
+        auto ww_login = db.project_login("w-w", refusal);
+        REQUIRE_MESSAGE(ww_login, refusal.message);
+        CHECK(query(port, "w_w", ww_login->password, "USE www").starts_with("ERROR"));
+        CHECK(query(port, "w_w", ww_login->password, "USE w_w; SELECT 1") == "1");
+        CHECK(query(port, "my_shop", shop_login->password, "CREATE DATABASE myashop").starts_with("ERROR"));
+        // The unescaped grant earlier versions made is removed on the next login.
+        const auto root = secrets.read("mariadb-10.11/root");
+        REQUIRE(root);
+        CHECK(query(port, "root", *root, "GRANT ALL PRIVILEGES ON w_w.* TO 'w_w'@'127.0.0.1'; FLUSH PRIVILEGES; SELECT 1") == "1");
+        CHECK(query(port, "w_w", ww_login->password, "USE www; SELECT 1") == "1");  // the old hole
+        ww_login = db.project_login("w-w", refusal);
+        REQUIRE(ww_login);
+        CHECK(query(port, "w_w", ww_login->password, "USE www").starts_with("ERROR"));
+        CHECK(query(port, "w_w", ww_login->password, "USE w_w; SELECT 1") == "1");
+        // _shared isn't listed as a project.
+        const auto servers = db.status()["servers"];
+        REQUIRE(servers.size() == 1);
+        CHECK(servers[0]["shared"] == true);
+        CHECK(std::find(servers[0]["projects"].begin(), servers[0]["projects"].end(), "_shared") ==
+              servers[0]["projects"].end());
+
+        // A project from before shared sites with a www name stops the shared login.
+        const fs::path old = tmp.path() / "www-blog";
+        fs::create_directories(old);
+        REQUIRE(add_project(app, old, "", error));
+        REQUIRE(save_app_config(app_config_file(data), app, error));
+        CHECK_FALSE(db.shared_login(refusal));
+        CHECK(refusal.code == "reserved_name");
     }
 
     SUBCASE("logins") {
