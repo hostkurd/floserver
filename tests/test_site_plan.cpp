@@ -540,3 +540,32 @@ TEST_CASE("runtime_users: who uses each installed runtime, off projects included
     CHECK(users.at("nginx/1.30.6") == V{"FloServer"});
     CHECK_FALSE(users.contains("nginx/1.28.0"));
 }
+
+TEST_CASE("runtime_users: a project waiting for one download still uses the rest; shared sites while on") {
+    AppConfig config;
+    config.projects = {project("half")};
+    const std::vector<InstalledRuntime> installed = {runtime("php", "8.4.27"), runtime("php", "8.3.36", "ts"),
+                                                     runtime("mariadb", "11.4.13"), runtime("php", "8.5.12"),
+                                                     runtime("apache", "2.4.66")};
+    // Node 22 isn't installed: the plan holds the project back, but its PHP
+    // and MariaDB mustn't look unused.
+    const auto files = reader({{"half", R"({"php": "8.4", "node": "22", "database": "mariadb-11.4"})"}});
+    using V = std::vector<std::string>;
+    auto users = runtime_users(config, files, installed, std::nullopt);
+    CHECK(users.at("php/8.4.27") == V{"half"});
+    CHECK(users.at("mariadb/11.4.13") == V{"half"});
+    CHECK_FALSE(users.contains("php/8.3.36"));  // a thread-safe build: never used by a pool
+    CHECK_FALSE(users.contains("php/8.5.12"));
+
+    // Shared sites on, no PHP named: the newest; Apache by default.
+    config.other["shared"] = {{"on", true}, {"dir", path_to_utf8(kBase / "www")}, {"database", "mariadb-11.4"}};
+    users = runtime_users(config, files, installed, std::nullopt);
+    CHECK(users.at("php/8.5.12") == V{"_shared"});
+    CHECK(users.at("apache/2.4.66") == V{"_shared"});
+    CHECK(users.at("mariadb/11.4.13") == V{"_shared", "half"});
+    // Off: not a user.
+    config.other["shared"]["on"] = false;
+    users = runtime_users(config, files, installed, std::nullopt);
+    CHECK_FALSE(users.contains("php/8.5.12"));
+    CHECK_FALSE(users.contains("apache/2.4.66"));
+}

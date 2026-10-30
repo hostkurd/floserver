@@ -429,28 +429,46 @@ std::map<std::string, std::vector<std::string>> runtime_users(const AppConfig& c
             use("node", app.node_dir, app.name);
         }
     }
-    std::vector<const PlannedSite*> sites;
+    // What each project names, whatever state the plan left it in: one that
+    // waits for a download (or has a problem such as a missing folder) still
+    // needs the rest, and removing one of those would mean two downloads.
+    const auto named = [&](const ProjectConfig& pc, const std::string& who) {
+        if (pc.php) {
+            if (const InstalledRuntime* r = best_installed(installed, "php", *pc.php)) {
+                use("php", r->dir, who);
+            }
+        }
+        if (pc.node) {
+            if (const InstalledRuntime* r = best_installed(installed, "node", *pc.node)) {
+                use("node", r->dir, who);
+            }
+        }
+        if (pc.python) {
+            if (const InstalledRuntime* r = best_installed(installed, "python", *pc.python)) {
+                use("python", r->dir, who);
+            }
+        }
+        if (pc.database && pc.database->family == "mariadb") {
+            if (const InstalledRuntime* r = best_installed(installed, "mariadb", pc.database->version)) {
+                use("mariadb", r->dir, who);
+            }
+        }
+        if (pc.web == WebServer::Apache) {
+            if (const InstalledRuntime* r = best_installed(installed, "apache", "")) {
+                use("apache", r->dir, who);
+            }
+        }
+    };
     for (const PlannedSite& site : plan.sites) {
-        sites.push_back(&site);
+        if (site.config) {
+            named(*site.config, site.name);
+        }
     }
-    if (plan.shared) {
-        sites.push_back(&*plan.shared);
-    }
-    for (const PlannedSite* site : sites) {
-        if (site->apache) {
-            use("apache", plan.apache_dir, site->name);
-        }
-        if (site->database && site->database->family == "mariadb") {
-            if (const InstalledRuntime* db = best_installed(installed, "mariadb", site->database->version)) {
-                use("mariadb", db->dir, site->name);
-            }
-        }
-        // A PHP project that names Node needs it for its build tools.
-        if (site->config && site->config->node && site->pool) {
-            if (const InstalledRuntime* node = best_installed(installed, "node", *site->config->node)) {
-                use("node", node->dir, site->name);
-            }
-        }
+    // Shared sites while on, from config.json's own settings (the plan
+    // doesn't record them when one is missing). No PHP named: the newest.
+    std::string shared_error;
+    if (const auto shared = read_shared_config(config, shared_error); shared && shared->on) {
+        named(shared_project_config(*shared, shared->php.value_or("")), std::string(kSharedSiteName));
     }
     if (const InstalledRuntime* nginx = best_installed(installed, "nginx", "")) {
         use("nginx", nginx->dir, "FloServer");
