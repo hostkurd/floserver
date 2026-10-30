@@ -2,6 +2,7 @@
 
 #include "floserver/core/integration.h"
 #include "floserver/core/ipc.h"
+#include "floserver/core/mariadb.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/service_client.h"
 
@@ -111,6 +112,12 @@ void ServiceWorker::add_folder(const std::string& path) {
 }
 void ServiceWorker::install(const std::string& project, const std::vector<Download>& downloads) {
     push({Command::Kind::Install, project, false, {}, std::nullopt, downloads, {}});
+}
+void ServiceWorker::set_shared(const nlohmann::json& changes, const std::string& key) {
+    push({Command::Kind::SetShared, {}, false, key, std::nullopt, {}, changes});
+}
+void ServiceWorker::copy_shared_env() {
+    push({Command::Kind::CopySharedEnv, {}, false, {}, std::nullopt, {}, {}});
 }
 void ServiceWorker::load_templates() {
     {
@@ -288,6 +295,7 @@ void ServiceWorker::run(const std::stop_token& stop) {
                                 {rtl ? isolate_auto(project) : project, rtl && english ? isolate_ltr(reason) : reason});
         };
         const std::string lost(text(lang_, Str::ConnectionLost));
+        const std::string shared_name(text(lang_, Str::SharedSites));  // "Couldn't change Shared sites: ..."
         // One request for a change: false when the connection is gone.
         const auto send = [&](const std::string& project, const char* method, const nlohmann::json& params,
                               std::optional<core::protocol::Reply>& reply) {
@@ -434,6 +442,43 @@ void ServiceWorker::run(const std::stop_token& stop) {
                         }
                     }
                     break;
+                case Command::Kind::SetShared: {
+                    settled.push_back(c.key);
+                    nlohmann::json params = c.params;
+                    params["folders"] = false;  // the www folder isn't read for the window
+                    (void)send(shared_name, "shared.set", params, reply);
+                    break;
+                }
+                case Command::Kind::CopySharedEnv:
+                    // As CopyEnv: the reply holds the password, kept only until
+                    // it's on the clipboard. FloCMS's keys (the default when a
+                    // project's .env doesn't say).
+                    if (send(shared_name, "shared.login", nlohmann::json::object(), reply)) {
+                        core::DatabaseLogin login;
+                        const auto& r = reply->result;
+                        if (r.is_object() && r.contains("port") && r["port"].is_number_unsigned() &&
+                            r["port"].get<std::uint64_t>() <= 0xFFFFU) {
+                            login.port = static_cast<core::Port>(r["port"].get<std::uint64_t>());
+                        }
+                        login.database = string_field(r, "database");
+                        login.user = string_field(r, "user");
+                        login.password = string_field(r, "password");
+                        auto values = core::env_values(core::EnvStyle::FloCms, login);
+                        nlohmann::json env = {{"env", nlohmann::json::array()}};
+                        for (auto& [key, value] : values) {
+                            env["env"].push_back({key, value});
+                            wipe(value);
+                        }
+                        wipe(clipboard);
+                        clipboard = env_text(env);
+                        wipe_strings(env);
+                        wipe(login.password);
+                    }
+                    if (reply) {
+                        wipe_strings(reply->result);
+                        reply->result = nlohmann::json();
+                    }
+                    break;
                 case Command::Kind::LoadTemplates: {
                     std::optional<core::protocol::Reply> got;
                     std::string why;
@@ -490,6 +535,7 @@ void ServiceWorker::run(const std::stop_token& stop) {
         std::optional<core::protocol::Reply> databases;
         std::optional<core::protocol::Reply> installed;
         std::optional<core::protocol::Reply> log;
+        std::optional<core::protocol::Reply> shared;
         if (client) {
             list = client->call("projects.list");
             status = list ? client->call("status") : std::nullopt;
@@ -502,7 +548,9 @@ void ServiceWorker::run(const std::stop_token& stop) {
             if (databases && !selected.empty()) {
                 log = client->call("projects.log", {{"name", selected}, {"lines", kLogLines}});
             }
-            if (!databases) {
+            // Shared sites' settings and state, never their folders.
+            shared = databases ? client->call("shared.get", {{"folders", false}}) : std::nullopt;
+            if (!databases || !shared) {
                 client.reset();
             }
             ++polls;
@@ -553,6 +601,12 @@ void ServiceWorker::run(const std::stop_token& stop) {
                 }
                 if (auto fresh = client->call("projects.list"); fresh) {
                     list = std::move(fresh);
+                }
+                // Shared sites too, or their Download button comes back once.
+                if (shared) {
+                    if (auto fresh = client->call("shared.get", {{"folders", false}}); fresh) {
+                        shared = std::move(fresh);
+                    }
                 }
             }
         }
@@ -635,6 +689,8 @@ void ServiceWorker::run(const std::stop_token& stop) {
             latest_.footer = footer_text(latest_.rows, status->ok ? &status->result : nullptr,
                                          web->ok ? &web->result : nullptr, lang_);
             latest_.databases = databases->ok ? databases->result : nlohmann::json();
+            // An older service doesn't know shared.get: the row isn't shown.
+            latest_.shared = shared && shared->ok ? shared_from_reply(shared->result) : SharedSites{};
             if (installed && installed->ok) {
                 latest_.installed = installed_from_list(installed->result);
                 latest_.has_installed = true;

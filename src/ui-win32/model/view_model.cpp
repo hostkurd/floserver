@@ -751,4 +751,133 @@ std::string free_project_name(const std::string& base, const std::vector<Project
     return base;
 }
 
+// --- Shared sites (D19) ------------------------------------------------------------
+
+SharedSites shared_from_reply(const json& result) {
+    SharedSites out;
+    out.known = true;
+    out.on = flag_of(result, "on");
+    out.dir = text_of(result, "dir");
+    out.php = text_of(result, "php");
+    out.web = text_of(result, "web") == "nginx" ? "nginx" : "apache";
+    out.database = text_of(result, "database");
+    if (result.is_object() && result.contains("status") && result["status"].is_object()) {
+        const json& status = result["status"];
+        out.address = text_of(status, "address");
+        out.run = text_of(status, "run");
+        out.state = text_of(status, "state");
+        out.problem = text_of(status, "problem");
+        if (status.contains("missing") && status["missing"].is_array()) {
+            for (const json& m : status["missing"]) {
+                if (m.is_string() && !m.get_ref<const std::string&>().empty()) {
+                    out.missing.push_back(m.get<std::string>());
+                }
+            }
+        }
+    }
+    return out;
+}
+
+bool is_shared_address(std::string_view address) {
+    constexpr std::string_view kHost = "http://localhost";
+    if (!address.starts_with(kHost)) {
+        return false;
+    }
+    std::string_view rest = address.substr(kHost.size());
+    if (rest.ends_with("/")) {
+        rest.remove_suffix(1);
+    }
+    if (rest.empty()) {
+        return true;
+    }
+    if (rest.front() != ':' || rest.size() < 2 || rest.size() > 6) {
+        return false;
+    }
+    unsigned value = 0;
+    for (const char c : rest.substr(1)) {
+        if (c < '0' || c > '9') {
+            return false;
+        }
+        value = value * 10 + static_cast<unsigned>(c - '0');
+    }
+    return value > 0 && value <= 65535;
+}
+
+SharedRow shared_row(const SharedSites& shared, const Installed& installed, Lang lang) {
+    SharedRow row;
+    // "localhost:8080", or "localhost" when there's no address yet (off).
+    std::string host = "localhost";
+    if (is_shared_address(shared.address)) {
+        host = shared.address.substr(std::string_view("http://").size());
+        if (host.ends_with("/")) {
+            host.pop_back();
+        }
+    }
+    if (!shared.on) {
+        row.state = RowState::Off;
+        row.detail = fill(lang, Str::SharedHint, {shared.dir, host + "/<folder>/"});
+    } else if (shared.state == "needs_download") {
+        row.state = RowState::NeedsDownload;
+        std::string missing;
+        for (const std::string& m : shared.missing) {
+            missing += (missing.empty() ? "" : ", ") + m;
+        }
+        row.detail = fill(lang, Str::Needs, {missing});
+    } else if (shared.state == "problem" || shared.run == "failed") {
+        row.state = RowState::Problem;
+        // The service's reason is in English for now.
+        row.detail = shared.problem.empty() ? std::string(text(lang, Str::SharedCantStart)) : code(shared.problem, lang);
+    } else {
+        row.state = shared.run == "sleeping"   ? RowState::Asleep
+                    : shared.run == "starting" ? RowState::Waking
+                                               : RowState::On;
+        row.detail = code(shared.dir, lang);
+        if (is_shared_address(shared.address)) {
+            row.address = host;
+        }
+    }
+    // The PHP they get: the setting, else the newest installed series.
+    std::string php = shared.php;
+    if (php.empty()) {
+        const std::vector<std::string> series = series_of(installed, "php");
+        php = series.empty() ? std::string() : series.front();
+    }
+    if (!php.empty()) {
+        row.chips.push_back("PHP " + php);
+    }
+    row.chips.emplace_back(shared.web == "nginx" ? "nginx" : "Apache");
+    return row;
+}
+
+std::vector<Download> shared_downloads(const SharedSites& shared, const Installed& installed) {
+    if (!shared.on || shared.state != "needs_download") {
+        return {};
+    }
+    ProjectRow row;
+    row.missing = shared.missing;
+    return downloads_for(row, installed);
+}
+
+std::vector<VersionField> shared_fields(const SharedSites& shared, const Installed& installed, Lang lang) {
+    // PHP and Database as a PHP project's; the Web server with what each one means here.
+    ProjectRow row;
+    row.wants.known = true;
+    row.wants.php = shared.php;
+    row.wants.database = shared.database;
+    row.wants.web = shared.web;
+    std::vector<VersionField> out;
+    for (VersionField& f : version_fields(row, installed, lang)) {
+        if (f.field == Field::Php || f.field == Field::Database) {
+            out.push_back(std::move(f));
+        }
+    }
+    out.push_back({Field::Web,
+                   "web",
+                   std::string(text(lang, Str::FieldWeb)),
+                   {{std::string(text(lang, Str::WebApacheChoice)), "apache"},
+                    {std::string(text(lang, Str::WebNginxChoice)), "nginx"}},
+                   shared.web == "nginx" ? 1U : 0U});
+    return out;
+}
+
 }  // namespace floserver::ui

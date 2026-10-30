@@ -60,6 +60,19 @@ private:
         WizCancel,
         WizBack,
         WizNext,
+        // The Shared sites row pinned under the list (D19).
+        SharedRow,
+        SharedSwitch,
+        SharedEnd,       // the address, or the Download button
+        SharedOpen,      // Open folder
+        SharedGear,      // its settings page
+        // The Shared sites settings page; `row` is the field's index.
+        WwwSwitch,
+        WwwChange,
+        WwwOpen,
+        WwwField,
+        WwwCopyEnv,
+        WwwClose,
     };
     enum class PanelAction : std::uint8_t { Browser, Folder, Terminal, Studio, Download };
     [[nodiscard]] static constexpr bool is_panel_part(Part part) {
@@ -142,6 +155,40 @@ private:
         // Kept from the card at step 0 -> 1: the card list may change later.
         std::string template_id;
         bool studio = false;
+    };
+    // The Shared sites row's pieces, from the last paint; empty when it isn't shown.
+    struct SharedGeometry {
+        RECT row{};
+        RECT toggle{};
+        RECT icon{};
+        RECT name{};
+        RECT state{};  // the pill after the title
+        RECT line2{};
+        std::vector<RECT> chips;  // the first chips.size() of the row's chips that fit
+        // The address, a Download button or an install's progress; empty when there's none.
+        enum class End : std::uint8_t { None, Address, Download, Progress } end = End::None;
+        RECT end_rect{};
+        std::string end_text;
+        RECT open{};
+        RECT gear{};
+    };
+    // The Shared sites settings page's pieces, from the last paint.
+    struct WwwGeometry {
+        RECT area{};
+        RECT title{};
+        RECT toggle{};
+        RECT hint{};
+        RECT folder_label{};
+        RECT folder_box{};
+        RECT change{};
+        RECT open{};
+        std::vector<std::pair<RECT, RECT>> fields;  // label, box; one per www_fields_ entry
+        RECT db_box{};
+        RECT db_title{};
+        RECT db_detail{};
+        RECT copy_env{};  // empty when there's no database
+        RECT footer{};
+        RECT close{};
     };
     // Step 3 and the job not finished yet (also before its first answer).
     [[nodiscard]] bool wizard_running() const;
@@ -237,6 +284,7 @@ private:
     void paint_panel(Canvas& c, HDC dc, bool text_pass) const;
     void paint_switch(Canvas& c, const RECT& r, bool on, bool hover) const;
     void paint_button(Canvas& c, const RECT& r, bool hover, bool focused) const;
+    void paint_gear(Canvas& c, const RECT& r, Rgb color) const;  // 16 px, centred in `r`
 
     // --- New project (main_window_wizard.cpp) ---
     [[nodiscard]] bool wizard_open() const;
@@ -255,6 +303,31 @@ private:
     void on_wizard_click(const Hit& hit);
     void on_wizard_key(WPARAM key);
     void paint_wizard(Canvas& c, HDC dc, bool text_pass) const;
+
+    // --- Shared sites (main_window_shared.cpp) ---
+    [[nodiscard]] bool shows_shared() const;  // the row is there: shared.get has answered
+    [[nodiscard]] bool shared_switch_value() const;
+    [[nodiscard]] SharedGeometry shared_geometry(HDC dc) const;
+    [[nodiscard]] Hit shared_hit_test(int x, int y) const;
+    [[nodiscard]] std::vector<Part> shared_focus_order() const;
+    void toggle_shared();
+    void run_shared_part(Part part);
+    void start_shared_downloads();
+    void open_shared_address();
+    void on_shared_key(WPARAM key);
+    void paint_shared_row(Canvas& c, HDC dc, bool text_pass) const;
+    [[nodiscard]] bool www_open() const { return www_open_; }
+    [[nodiscard]] WwwGeometry www_geometry(HDC dc) const;
+    [[nodiscard]] Hit www_hit_test(int x, int y) const;
+    [[nodiscard]] std::vector<Hit> www_focus_order() const;
+    [[nodiscard]] std::size_t www_field_value(const VersionField& field) const;
+    void open_www();
+    void close_www();
+    void www_change_folder();
+    void www_field_menu(std::size_t index);
+    void on_www_click(const Hit& hit);
+    void on_www_key(WPARAM key);
+    void paint_www(Canvas& c, HDC dc, bool text_pass) const;
     static LRESULT CALLBACK name_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, UINT_PTR id, DWORD_PTR self);
     void show_window();
     void quit();
@@ -326,6 +399,15 @@ private:
     std::string query_;
     std::vector<std::size_t> visible_;  // indexes into snap_.rows that match query_
     mutable std::vector<RowGeometry> geometry_;  // from the last paint
+
+    // Shared sites (D19): the row's geometry and keyboard focus, and the settings page.
+    mutable SharedGeometry shared_geometry_;
+    bool shared_focused_ = false;  // the keys are on the row (focus_ is then -1)
+    int shared_part_ = 0;          // index into shared_focus_order()
+    bool www_open_ = false;
+    int www_focus_ = -1;           // index into www_focus_order(); -1: none shown
+    std::vector<VersionField> www_fields_;
+    mutable WwwGeometry www_geometry_;
 
     int scroll_ = 0;
     Hit hover_;

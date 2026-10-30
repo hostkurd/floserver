@@ -18,6 +18,7 @@ add_executable(floserver_ui WIN32
     main.cpp
     main_window.cpp
     main_window_panel.cpp
+    main_window_shared.cpp
     main_window_wizard.cpp
     canvas.cpp
     service_worker.cpp

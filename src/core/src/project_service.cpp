@@ -237,7 +237,8 @@ std::optional<fs::path> ProjectService::folder(const std::string& name, ServiceR
     return std::nullopt;
 }
 
-std::optional<json> ProjectService::describe_shared(const AppConfig& config, ServiceRefusal& refusal) const {
+std::optional<json> ProjectService::describe_shared(const AppConfig& config, ServiceRefusal& refusal,
+                                                    bool folders) const {
     std::string error;
     const auto shared = read_shared_config(config, error);
     if (!shared) {
@@ -256,30 +257,33 @@ std::optional<json> ProjectService::describe_shared(const AppConfig& config, Ser
     if (shared->database) {
         out["database"] = shared->database->family + "-" + shared->database->version;
     }
-    json folders = json::array();
+    if (!folders) {
+        return out;  // the www folder isn't read
+    }
+    json list = json::array();
     if (dir) {
         for (const SharedFolder& f : scan_shared_folders(*dir, config)) {
             json j = {{"name", f.name}, {"kind", shared_kind_name(f.kind)}, {"host", f.host_name}};
             if (f.clash) {
                 j["clash"] = *f.clash;
             }
-            folders.push_back(std::move(j));
+            list.push_back(std::move(j));
         }
     }
-    out["folders"] = std::move(folders);
+    out["folders"] = std::move(list);
     return out;
 }
 
-std::optional<json> ProjectService::shared(ServiceRefusal& refusal) const {
+std::optional<json> ProjectService::shared(ServiceRefusal& refusal, bool folders) const {
     const std::lock_guard lock(mutex_);
     const auto config = load(refusal);
     if (!config) {
         return std::nullopt;
     }
-    return describe_shared(*config, refusal);
+    return describe_shared(*config, refusal, folders);
 }
 
-std::optional<json> ProjectService::set_shared(const json& changes, ServiceRefusal& refusal) {
+std::optional<json> ProjectService::set_shared(const json& changes, ServiceRefusal& refusal, bool folders) {
     const std::lock_guard lock(mutex_);
     auto config = load(refusal);
     if (!config) {
@@ -362,7 +366,7 @@ std::optional<json> ProjectService::set_shared(const json& changes, ServiceRefus
     if (!save(*config, refusal)) {
         return std::nullopt;
     }
-    return describe_shared(*config, refusal);
+    return describe_shared(*config, refusal, folders);
 }
 
 }  // namespace floserver::core
