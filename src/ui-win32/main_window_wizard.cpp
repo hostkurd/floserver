@@ -177,10 +177,13 @@ void MainWindow::wizard_next() {
             break;
         }
         case 2: {
-            // Documents\FloServer is made the first time; a folder the user
-            // picked with Browse is there already.
+            // The projects folder (FloServer\projects) doesn't exist until the
+            // first project, and a typed folder may not either: make it. Only a
+            // full local path ("C:\..."); a \\server\share one is left to the
+            // service to refuse.
             const std::wstring parent = w(wizard_.parent);
-            if (wizard_.parent == default_parent() && GetFileAttributesW(parent.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            const bool local_full = parent.size() >= 3 && parent[1] == L':' && (parent[2] == L'\\' || parent[2] == L'/');
+            if (local_full && GetFileAttributesW(parent.c_str()) == INVALID_FILE_ATTRIBUTES) {
                 (void)SHCreateDirectoryExW(nullptr, parent.c_str(), nullptr);
             }
             std::map<std::string, std::optional<std::string>> versions;

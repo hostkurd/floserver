@@ -712,6 +712,51 @@ std::vector<TemplateCard> cards_from_list(const json& result, Lang lang) {
     return out;
 }
 
+namespace {
+
+// A template's versions are the ones it was tried with, not a requirement:
+// WordPress runs on any MariaDB from 10.6 and any PHP 8. When the named
+// series isn't installed but the same or a newer one is, that one is picked
+// (the newest), so a new project doesn't download a second MariaDB or PHP.
+// The named one stays in the list, to pick by hand. An older installed
+// series isn't picked: the template may need something it doesn't have.
+void prefer_installed(VersionField& f, const Installed& installed) {
+    const char* runtime = nullptr;
+    std::string_view prefix;
+    switch (f.field) {
+        case Field::Php: runtime = "php"; break;
+        case Field::Database: runtime = "mariadb"; prefix = "mariadb-"; break;
+        case Field::Node: runtime = "node"; break;
+        case Field::Python: runtime = "python"; break;
+        default: return;
+    }
+    if (f.current >= f.choices.size()) {
+        return;
+    }
+    const std::optional<std::string>& value = f.choices[f.current].value;
+    if (!value || !value->starts_with(prefix)) {
+        return;  // "none", or a database that isn't MariaDB
+    }
+    const std::string wanted = value->substr(prefix.size());
+    const std::vector<std::string> have = series_of(installed, runtime);
+    if (wanted.empty() || std::find(have.begin(), have.end(), wanted) != have.end()) {
+        return;
+    }
+    for (std::size_t i = 0; i < f.choices.size(); ++i) {
+        const std::optional<std::string>& v = f.choices[i].value;
+        if (!v || !v->starts_with(prefix)) {
+            continue;
+        }
+        const std::string s = v->substr(prefix.size());
+        if (std::find(have.begin(), have.end(), s) != have.end() && !newer(wanted, s)) {
+            f.current = i;  // choices list the installed series newest first
+            return;
+        }
+    }
+}
+
+}  // namespace
+
 std::vector<VersionField> template_fields(const TemplateCard& card, const Installed& installed, Lang lang) {
     ProjectRow row;
     row.wants = card.config;
@@ -724,6 +769,7 @@ std::vector<VersionField> template_fields(const TemplateCard& card, const Instal
                           (f.field == Field::Node && !card.config.node.empty()) ||
                           (f.field == Field::Python && !card.config.python.empty());
         if (keep) {
+            prefer_installed(f, installed);
             out.push_back(std::move(f));
         }
     }

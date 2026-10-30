@@ -467,12 +467,33 @@ TEST_CASE("template cards come from templates.list in the window's language") {
     const Installed installed = {{"php", {"8.5.12"}}, {"node", {"24.22.1"}}};
     const auto wp = template_fields(cards[0], installed, Lang::En);
     REQUIRE(wp.size() == 3);  // PHP, Database, Web server
-    CHECK(wp[0].choices[wp[0].current].label == "8.4 (not installed)");
+    // The template names PHP 8.4; 8.5 is installed and newer, so it's picked
+    // and 8.4 stays in the list to download by hand.
+    CHECK(wp[0].choices[wp[0].current].label == "8.5");
+    CHECK(wp[0].choices.back().label == "8.4 (not installed)");
+    CHECK(wp[1].choices[wp[1].current].label == "MariaDB 11.4 (not installed)");  // none installed
     CHECK(wp[2].current == 1);  // Apache
     const auto node = template_fields(cards[1], installed, Lang::En);
     REQUIRE(node.size() == 1);
     CHECK(node[0].key == "node");
     CHECK(node[0].choices[node[0].current].label == "24");
+}
+
+TEST_CASE("template versions: an installed same-or-newer series is picked, an older one isn't") {
+    TemplateCard wp;
+    wp.uses_php = true;
+    wp.config.php = "8.4";
+    wp.config.database = "mariadb-11.4";
+    // MariaDB 12.1 installed on the first run: WordPress uses it, no download.
+    auto f = template_fields(wp, {{"php", {"8.4.20"}}, {"mariadb", {"12.1.2", "11.8.5"}}}, Lang::En);
+    REQUIRE(f.size() == 3);
+    CHECK(f[0].choices[f[0].current].label == "8.4");
+    CHECK(f[1].choices[f[1].current].value == "mariadb-12.1");
+    CHECK(f[1].choices.back().label == "MariaDB 11.4 (not installed)");
+    // Only an older series: the template's own is kept, to download.
+    f = template_fields(wp, {{"php", {"8.3.9"}}, {"mariadb", {"10.11.9"}}}, Lang::En);
+    CHECK(f[0].choices[f[0].current].label == "8.4 (not installed)");
+    CHECK(f[1].choices[f[1].current].label == "MariaDB 11.4 (not installed)");
 }
 
 TEST_CASE("new project names") {
