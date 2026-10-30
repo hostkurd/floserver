@@ -75,11 +75,11 @@ TEST_CASE("the request log is read from the end of the file") {
     // A 64 KiB tail after older lines still ends on the newest one.
     std::string exact;
     std::size_t line_count = 0;
-    while (exact.size() < 64 * 1024) {
+    while (exact.size() < std::size_t{64} * 1024) {
         exact += "1793306687.000 200 0.001 GET /p/" + std::to_string(line_count++) + "\n";
     }
     const std::string head = "1793306687.000 200 0.001 GET /before\n";
-    test_util::write_file(file, head + exact.substr(exact.size() - 64 * 1024));
+    test_util::write_file(file, head + exact.substr(exact.size() - std::size_t{64} * 1024));
     const auto tail = read_request_log(file, 100000);
     REQUIRE_FALSE(tail.empty());
     CHECK(tail.back().uri == "/p/" + std::to_string(line_count - 1));

@@ -542,7 +542,11 @@ std::string env_text(const json& login) {
     out.reserve(size);
     for (const json& pair : login["env"]) {
         if (pair.is_array() && pair.size() == 2 && pair[0].is_string() && pair[1].is_string()) {
-            out += pair[0].get<std::string>() + "=" + pair[1].get<std::string>() + "\r\n";
+            // Appended piece by piece: no temporary copies of the password.
+            out.append(pair[0].get_ref<const std::string&>())
+                .append("=")
+                .append(pair[1].get_ref<const std::string&>())
+                .append("\r\n");
         }
     }
     return out;
