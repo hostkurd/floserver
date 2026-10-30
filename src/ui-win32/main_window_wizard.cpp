@@ -380,6 +380,10 @@ LRESULT CALLBACK MainWindow::name_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARA
     auto* self = win::int_to_ptr<MainWindow*>(self_ptr);
     switch (msg) {
         case WM_KEYDOWN:
+            if (wparam == VK_OEM_COMMA && (GetKeyState(VK_CONTROL) & 0x8000) != 0) {
+                self->open_settings();  // Ctrl+, from the name box too
+                return 0;
+            }
             if (wparam == VK_RETURN) {
                 if ((static_cast<std::uintptr_t>(lparam) & (1U << 30U)) == 0) {  // not a held key's repeats
                     self->wizard_next();

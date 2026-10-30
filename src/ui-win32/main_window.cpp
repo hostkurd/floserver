@@ -414,6 +414,10 @@ void MainWindow::open_settings() {
     if (!worker_ || quitting_) {
         return;
     }
+    // An earlier open's answers mustn't show before this one's arrive.
+    snap_.runtimes_error.clear();
+    snap_.runtimes_refresh = false;
+    snap_.settings_error.clear();
     settings_ = std::make_unique<SettingsWindow>(instance_, lang_, *worker_, hwnd_, kSettingsClosedMessage);
     if (!settings_->create(settings_placement_)) {
         settings_.reset();
@@ -980,6 +984,10 @@ LRESULT CALLBACK MainWindow::search_proc(HWND hwnd, UINT msg, WPARAM wparam, LPA
     auto* self = win::int_to_ptr<MainWindow*>(self_ptr);
     switch (msg) {
         case WM_KEYDOWN:
+            if (wparam == VK_OEM_COMMA && (GetKeyState(VK_CONTROL) & 0x8000) != 0) {
+                self->open_settings();  // Ctrl+, works with the search box focused too
+                return 0;
+            }
             if (wparam == VK_ESCAPE) {
                 if (GetWindowTextLengthW(hwnd) > 0) {
                     SetWindowTextW(hwnd, L"");

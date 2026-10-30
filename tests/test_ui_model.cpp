@@ -648,7 +648,10 @@ TEST_CASE("Settings > Runtimes: the stored default, and what the poll says is in
     REQUIRE(rows.size() == 3);  // 8.4.16 isn't on offer, so its row goes
     CHECK(rows[1].version == "8.3.29");
     CHECK(rows[1].installed);
-    CHECK(rows[1].folder == "8.3.29");
+    // Its folder isn't known until the next list reply (it could be a
+    // variant build), so it can't be removed yet.
+    CHECK(rows[1].folder.empty());
+    CHECK(rows[1].action == RowAction::None);
     CHECK(rows[1].used_by.empty());
     // Node and Apache are gone; Python only to download.
     CHECK(later.groups[2].rows[0].action == RowAction::Download);

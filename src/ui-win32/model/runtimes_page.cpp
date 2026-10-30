@@ -189,10 +189,13 @@ RuntimesPage runtimes_page(const json& reply, const Installed* installed, const 
                     RuntimeRow row;
                     row.name = name;
                     row.version = v;
-                    row.folder = v;
+                    // No folder yet: the poll has the version only, and a
+                    // variant build ("8.3.36-ts") would send the wrong one.
+                    // No Remove until the next list reply, which follows
+                    // every finished install.
                     row.label = v;
                     row.installed = true;
-                    by_folder[row.folder] = std::move(row);
+                    by_folder[v] = std::move(row);
                 }
             }
         }
@@ -221,7 +224,9 @@ RuntimesPage runtimes_page(const json& reply, const Installed* installed, const 
         if (const auto it = rows.find(name); it != rows.end()) {
             for (auto& [folder, row] : it->second) {
                 if (!row.name.empty()) {
-                    row.action = row.installed ? RowAction::Remove : RowAction::Download;
+                    row.action = !row.installed       ? RowAction::Download
+                                 : row.folder.empty() ? RowAction::None
+                                                      : RowAction::Remove;
                     out.push_back(std::move(row));
                 }
             }
