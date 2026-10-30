@@ -10,7 +10,8 @@
 // change it are refused until it's fixed.
 
 #include "floserver/core/project_registry.h"
-#include "floserver/core/runtime_service.h"  // ServiceRefusal
+#include "floserver/core/runtime_service.h"
+#include "floserver/core/runtime_store.h"  // ServiceRefusal
 
 #include <nlohmann/json.hpp>
 
@@ -64,6 +65,22 @@ public:
     // The reply is shared()'s, with or without the folders.
     [[nodiscard]] std::optional<nlohmann::json> set_shared(const nlohmann::json& changes, ServiceRefusal& refusal,
                                                            bool folders = true);
+
+    // Settings (D20): who uses each installed runtime, as runtime_users()
+    // says it: {"php/8.5.12": ["blog", "shop"], ...}. Reads every project's
+    // floserver.json: for a request, never a timer.
+    [[nodiscard]] std::optional<nlohmann::json> runtime_users(const std::vector<InstalledRuntime>& installed,
+                                                              ServiceRefusal& refusal) const;
+
+    // The series new projects start with (D20), from config.json's
+    // "defaults": {"php": "8.5", "mariadb": "11.8", "node": "24", "python": "3.13"}.
+    // A runtime that isn't there has no default (the newest installed).
+    [[nodiscard]] std::optional<nlohmann::json> defaults(ServiceRefusal& refusal) const;
+    // Sets one ("php", "mariadb", "node" or "python") to a series such as
+    // "8.5", or clears it with nothing. Returns all of them.
+    [[nodiscard]] std::optional<nlohmann::json> set_default(const std::string& runtime,
+                                                            const std::optional<std::string>& series,
+                                                            ServiceRefusal& refusal);
 
     // The registered folder of a project, or nothing.
     [[nodiscard]] std::optional<std::filesystem::path> folder(const std::string& name, ServiceRefusal& refusal) const;

@@ -125,6 +125,17 @@ using ConfigReader = std::function<ConfigResult(const Project&)>;
                                  const std::vector<InstalledRuntime>& installed,
                                  const std::optional<std::string>& default_php);
 
+// Which installed runtimes the projects and shared sites use (D20), so
+// Settings can show it and a removal can be refused: "php/8.5.12" (name /
+// install folder) -> {"blog", "shop", "_shared"}, sorted. Projects that are
+// off count too (turning one on would need it again), so they're planned
+// as if on; shared sites count only while they're on. The newest nginx is
+// always in use, by "FloServer". Reads every project's floserver.json, so
+// it's for a request, not a timer.
+[[nodiscard]] std::map<std::string, std::vector<std::string>> runtime_users(
+    const AppConfig& config, const ConfigReader& read_config, const std::vector<InstalledRuntime>& installed,
+    const std::optional<std::string>& default_php);
+
 inline constexpr Port kFirstPoolPort = 9100;
 inline constexpr std::size_t kPhpWorkers = 4;  // one slow request doesn't hold up the rest
 

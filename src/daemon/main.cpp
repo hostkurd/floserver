@@ -19,6 +19,7 @@
 #include "floserver/core/request_log.h"
 #include "floserver/core/shared_sites.h"
 #include "floserver/core/runtime_service.h"
+#include "floserver/core/runtime_store.h"
 #include "floserver/core/trust_store.h"
 #include "floserver/core/database_service.h"
 #include "floserver/core/mariadb.h"
@@ -231,7 +232,38 @@ struct Service {
         if (r.method == "runtimes.list") {
             const bool refresh = r.params.contains("refresh") && r.params["refresh"].is_boolean() &&
                                  r.params["refresh"].get<bool>();
-            return protocol::make_result(r.id, runtimes->list(refresh, bool_param(r.params, "installed_only").value_or(false)));
+            const bool installed_only = bool_param(r.params, "installed_only").value_or(false);
+            json out = runtimes->list(refresh, installed_only, bool_param(r.params, "cached").value_or(false));
+            // Settings (D20): who uses each install, and the defaults. Not
+            // for the window's 2 s poll (installed_only): it reads every
+            // project's floserver.json.
+            if (!installed_only && projects && data) {
+                floserver::core::ServiceRefusal ignored;
+                const auto users = projects->runtime_users(
+                    floserver::core::list_installed(floserver::core::runtimes_dir(*data)), ignored);
+                for (json& entry : out["installed"]) {
+                    const std::string key = entry.value("name", std::string()) + "/" + entry.value("folder", std::string());
+                    entry["used_by"] = users && users->contains(key) ? (*users)[key] : json::array();
+                }
+                if (const auto defaults = projects->defaults(ignored)) {
+                    out["defaults"] = *defaults;
+                }
+            }
+            return protocol::make_result(r.id, out);
+        }
+        if (r.method == "runtimes.default") {
+            if (!projects) {
+                return protocol::make_error(r.id, "no_data_folder", "FloServer can't find its data folder");
+            }
+            std::optional<std::string> series;
+            if (r.params.contains("series") && r.params["series"].is_string()) {
+                series = r.params["series"].get<std::string>();
+            } else if (r.params.contains("series") && !r.params["series"].is_null()) {
+                return protocol::make_error(r.id, "bad_params", R"("series" is a version such as "8.5", or null)");
+            }
+            const auto result = projects->set_default(string_param(r.params, "name"), series, refusal);
+            return result ? protocol::make_result(r.id, {{"defaults", *result}})
+                          : protocol::make_error(r.id, refusal.code, refusal.message);
         }
         if (r.method == "runtimes.install") {
             const auto id = runtimes->install(string_param(r.params, "name"), string_param(r.params, "version"),
@@ -240,6 +272,28 @@ struct Service {
                       : protocol::make_error(r.id, refusal.code, refusal.message);
         }
         if (r.method == "runtimes.remove") {
+            // A runtime a project or shared sites use isn't removed (D20):
+            // that project would stop working, or ask to download it again.
+            if (projects && data) {
+                const std::string name = string_param(r.params, "name");
+                const std::string version = string_param(r.params, "version");
+                const auto users = projects->runtime_users(
+                    floserver::core::list_installed(floserver::core::runtimes_dir(*data)), refusal);
+                if (!users) {
+                    return protocol::make_error(r.id, refusal.code, refusal.message);
+                }
+                const std::string key = name + "/" + version;
+                if (users->contains(key) && !(*users)[key].empty()) {
+                    std::string who;
+                    for (const json& u : (*users)[key]) {
+                        const std::string n = u.get<std::string>();
+                        who += (who.empty() ? "" : ", ") + (n == floserver::core::kSharedSiteName ? std::string("shared sites") : n);
+                    }
+                    return protocol::make_error(r.id, "in_use",
+                                                name + " " + version + " is used by " + who +
+                                                    "; give them another version first");
+                }
+            }
             return runtimes->remove(string_param(r.params, "name"), string_param(r.params, "version"), refusal)
                        ? protocol::make_result(r.id, json::object())
                        : protocol::make_error(r.id, refusal.code, refusal.message);
@@ -564,7 +618,8 @@ struct Service {
             } else if (request->method == "status") {
                 reply = protocol::make_result(request->id, status());
             } else if (request->method == "runtimes.list" || request->method == "runtimes.install" ||
-                       request->method == "runtimes.remove" || request->method == "jobs.get" ||
+                       request->method == "runtimes.remove" || request->method == "runtimes.default" ||
+                       request->method == "jobs.get" ||
                        request->method == "jobs.cancel") {
                 reply = runtime_request(*request);
             } else if (request->method == "projects.list" || request->method == "projects.add" ||

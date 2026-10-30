@@ -174,7 +174,7 @@ std::optional<RuntimeService::CachedList> RuntimeService::get_list(bool refresh,
     return got ? list_ : std::nullopt;
 }
 
-json RuntimeService::list(bool refresh, bool installed_only) {
+json RuntimeService::list(bool refresh, bool installed_only, bool cached_only) {
     json out = {{"platform", config_.platform}, {"installed", json::array()}, {"available", json::array()}};
     for (const InstalledRuntime& r : list_installed(runtimes_root())) {
         out["installed"].push_back({{"name", r.name},
@@ -190,7 +190,26 @@ json RuntimeService::list(bool refresh, bool installed_only) {
         return out;
     }
     std::string error;
-    const auto cached = get_list(refresh, error);
+    std::optional<CachedList> cached;
+    if (cached_only && !refresh) {
+        // Settings (D20) opens without going online: the list in hand, even
+        // if old, else the last signed list kept on disk.
+        {
+            const std::lock_guard lock(list_mutex_);
+            cached = list_;
+        }
+        if (!cached) {
+            const std::lock_guard lock(offline_mutex_);
+            if (auto kept = open_kept_list(read_small_file(kept_manifest_file(config_.data_dir), kMaxManifestBytes),
+                                           read_small_file(kept_signature_file(config_.data_dir), kMaxSignatureBytes))) {
+                cached = CachedList{std::move(*kept), {}, {}, std::chrono::steady_clock::now()};
+            } else {
+                error = "there's no runtime list on this computer yet";
+            }
+        }
+    } else {
+        cached = get_list(refresh, error);
+    }
     if (!cached) {
         out["list"] = nullptr;
         out["list_error"] = error;
@@ -232,6 +251,27 @@ std::optional<std::vector<ProjectTemplate>> RuntimeService::templates(std::strin
     return offline_templates(error);
 }
 
+std::optional<Manifest> RuntimeService::open_kept_list(const std::optional<std::string>& list,
+                                                       const std::optional<std::string>& sig) const {
+    if (!list || !sig) {
+        return std::nullopt;
+    }
+    ManifestCheck check;
+    check.trusted_keys = config_.keys;
+    check.now = config_.now();
+    check.last_sequences = load_last_sequences(manifest_state_file(config_.data_dir));
+    // An expired copy still opens: what it lists is checked against a fresh
+    // list before anything is downloaded.
+    const json doc = json::parse(*list, nullptr, false);
+    if (doc.is_object() && doc.contains("expires") && doc["expires"].is_string()) {
+        if (const auto expires = parse_utc_time(doc["expires"].get<std::string>()); expires && check.now >= *expires) {
+            check.now = *expires - std::chrono::seconds{1};
+        }
+    }
+    auto opened = open_manifest(*list, *sig, check);
+    return opened.manifest ? std::move(opened.manifest) : std::nullopt;
+}
+
 std::optional<std::vector<ProjectTemplate>> RuntimeService::offline_templates(std::string& error) {
     const std::lock_guard lock(offline_mutex_);
     if (offline_) {
@@ -243,21 +283,9 @@ std::optional<std::vector<ProjectTemplate>> RuntimeService::offline_templates(st
     //    fresh list when it's downloaded.
     const auto list = read_small_file(kept_manifest_file(config_.data_dir), kMaxManifestBytes);
     const auto sig = read_small_file(kept_signature_file(config_.data_dir), kMaxSignatureBytes);
-    if (list && sig) {
-        ManifestCheck check;
-        check.trusted_keys = config_.keys;
-        check.now = config_.now();
-        check.last_sequences = load_last_sequences(manifest_state_file(config_.data_dir));
-        const json doc = json::parse(*list, nullptr, false);
-        if (doc.is_object() && doc.contains("expires") && doc["expires"].is_string()) {
-            if (const auto expires = parse_utc_time(doc["expires"].get<std::string>()); expires && check.now >= *expires) {
-                check.now = *expires - std::chrono::seconds{1};
-            }
-        }
-        if (auto opened = open_manifest(*list, *sig, check); opened.manifest && !opened.manifest->templates.empty()) {
-            offline_ = std::move(opened.manifest->templates);
-            return offline_;
-        }
+    if (auto kept = open_kept_list(list, sig); kept && !kept->templates.empty()) {
+        offline_ = std::move(kept->templates);
+        return offline_;
     }
     // The built-in ones aren't kept for later while a kept pair exists: it
     // may only have been mid-rewrite.

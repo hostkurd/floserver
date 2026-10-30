@@ -128,3 +128,37 @@ TEST_CASE("a damaged config.json is never overwritten") {
     CHECK(refusal.code == "config_unreadable");
     CHECK(test_util::read_file(app_config_file(data.path())) == "{ hand edited, broken");
 }
+
+TEST_CASE("Settings: who uses each runtime, and the defaults for new projects (D20)") {
+    const TempDir data;
+    const fs::path shop = data.path() / "work" / "shop";
+    test_util::write_file(shop / "floserver.json", R"({"php": "8.4", "database": "mariadb-11.4"})");
+    test_util::write_file(shop / "index.php", "<?php");
+    fake_install(data.path(), "php", "8.4.27");
+    fake_install(data.path(), "php", "8.5.12");
+    fake_install(data.path(), "mariadb", "11.4.13");
+    ProjectService s(data.path());
+    ServiceRefusal refusal;
+    REQUIRE(s.add(shop, "shop", refusal));
+    REQUIRE(s.set("shop", false, std::nullopt, refusal));  // off still counts
+
+    const auto installed = list_installed(runtimes_dir(data.path()));
+    const auto users = s.runtime_users(installed, refusal);
+    REQUIRE(users);
+    CHECK((*users)["php/8.4.27"] == nlohmann::json{"shop"});
+    CHECK((*users)["mariadb/11.4.13"] == nlohmann::json{"shop"});
+    CHECK_FALSE(users->contains("php/8.5.12"));
+
+    CHECK(*s.defaults(refusal) == nlohmann::json::object());
+    auto d = s.set_default("php", "8.5", refusal);
+    REQUIRE(d);
+    d = s.set_default("mariadb", "11.4", refusal);
+    REQUIRE(d);
+    CHECK(*d == nlohmann::json{{"php", "8.5"}, {"mariadb", "11.4"}});
+    CHECK(*s.set_default("php", std::nullopt, refusal) == nlohmann::json{{"mariadb", "11.4"}});
+    CHECK_FALSE(s.set_default("apache", "2.4", refusal));
+    CHECK(refusal.code == "bad_params");
+    CHECK_FALSE(s.set_default("php", "eight", refusal));
+    // Kept in config.json beside the projects.
+    CHECK(*ProjectService(data.path()).defaults(refusal) == nlohmann::json{{"mariadb", "11.4"}});
+}

@@ -366,6 +366,25 @@ TEST_CASE("templates work offline: the kept signed list, else the built-in ones"
         list = s.templates(error, false);
         REQUIRE(list);
         CHECK(list->size() == 1);
+
+        // Settings (D20) lists runtimes from the kept list without going
+        // online; asking for the network still fails offline.
+        const int before = offline->total_requests();
+        const auto cached = s.list(false, false, true);
+        CHECK(cached["list"]["sequence"] == 3);
+        CHECK_FALSE(cached["available"].empty());
+        CHECK(offline->total_requests() == before);
+        CHECK(s.list(true, false, true)["list"].is_null());  // refresh wins: tried online
+        CHECK(offline->total_requests() > before);
+    }
+
+    SUBCASE("cached only, nothing kept: no list and no request") {
+        auto quiet = std::make_shared<FakeTransport>();
+        RuntimeService s(config, quiet);
+        const auto out = s.list(false, false, true);
+        CHECK(out["list"].is_null());
+        CHECK(out["list_error"] == "there's no runtime list on this computer yet");
+        CHECK(quiet->total_requests() == 0);
     }
 
     SUBCASE("a damaged kept pair is ignored") {

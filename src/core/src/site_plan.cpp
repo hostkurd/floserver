@@ -401,4 +401,84 @@ bool assign_app_ports(WebPlan& plan, const std::map<std::string, Port>& previous
     return true;
 }
 
+std::map<std::string, std::vector<std::string>> runtime_users(const AppConfig& config, const ConfigReader& read_config,
+                                                              const std::vector<InstalledRuntime>& installed,
+                                                              const std::optional<std::string>& default_php) {
+    AppConfig all_on = config;
+    for (Project& p : all_on.projects) {
+        p.on = true;
+    }
+    const WebPlan plan = plan_sites(all_on, read_config, installed, default_php);
+
+    std::map<std::string, std::set<std::string>> users;
+    const auto use = [&users](const std::string& name, const fs::path& dir, const std::string& who) {
+        if (!dir.empty()) {
+            users[name + "/" + path_to_utf8(dir.filename())].insert(who);
+        }
+    };
+    for (const PhpPool& pool : plan.pools) {
+        for (const std::string& site : pool.sites) {
+            use("php", pool.php_dir, site);
+        }
+    }
+    for (const AppSpec& app : plan.apps) {
+        if (app.kind == AppKind::Node) {
+            use("node", app.runtime_dir, app.name);
+        } else if (app.kind == AppKind::Python) {
+            use("python", app.runtime_dir, app.name);
+            use("node", app.node_dir, app.name);
+        }
+    }
+    // What each project names, whatever state the plan left it in: one that
+    // waits for a download (or has a problem such as a missing folder) still
+    // needs the rest, and removing one of those would mean two downloads.
+    const auto named = [&](const ProjectConfig& pc, const std::string& who) {
+        if (pc.php) {
+            if (const InstalledRuntime* r = best_installed(installed, "php", *pc.php)) {
+                use("php", r->dir, who);
+            }
+        }
+        if (pc.node) {
+            if (const InstalledRuntime* r = best_installed(installed, "node", *pc.node)) {
+                use("node", r->dir, who);
+            }
+        }
+        if (pc.python) {
+            if (const InstalledRuntime* r = best_installed(installed, "python", *pc.python)) {
+                use("python", r->dir, who);
+            }
+        }
+        if (pc.database && pc.database->family == "mariadb") {
+            if (const InstalledRuntime* r = best_installed(installed, "mariadb", pc.database->version)) {
+                use("mariadb", r->dir, who);
+            }
+        }
+        if (pc.web == WebServer::Apache) {
+            if (const InstalledRuntime* r = best_installed(installed, "apache", "")) {
+                use("apache", r->dir, who);
+            }
+        }
+    };
+    for (const PlannedSite& site : plan.sites) {
+        if (site.config) {
+            named(*site.config, site.name);
+        }
+    }
+    // Shared sites while on, from config.json's own settings (the plan
+    // doesn't record them when one is missing). No PHP named: the newest.
+    std::string shared_error;
+    if (const auto shared = read_shared_config(config, shared_error); shared && shared->on) {
+        named(shared_project_config(*shared, shared->php.value_or("")), std::string(kSharedSiteName));
+    }
+    if (const InstalledRuntime* nginx = best_installed(installed, "nginx", "")) {
+        use("nginx", nginx->dir, "FloServer");
+    }
+
+    std::map<std::string, std::vector<std::string>> out;
+    for (auto& [key, who] : users) {
+        out[key] = {who.begin(), who.end()};
+    }
+    return out;
+}
+
 }  // namespace floserver::core
