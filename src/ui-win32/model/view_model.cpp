@@ -421,6 +421,8 @@ Installed installed_from_list(const json& result) {
     return out;
 }
 
+bool is_newer_version(std::string_view a, std::string_view b) { return newer(std::string(a), std::string(b)); }
+
 std::string version_series(std::string_view runtime, std::string_view version) {
     const std::size_t first = version.find('.');
     if (runtime == "node" || first == std::string_view::npos) {
@@ -755,9 +757,60 @@ void prefer_installed(VersionField& f, const Installed& installed) {
     }
 }
 
+// Settings' default for the field's runtime (D20), when it's installed and
+// not older than what the template names: a template tried with PHP 8.3 runs
+// on the default 8.5, but isn't handed an older default 8.2.
+void prefer_default(VersionField& f, const std::string& named, const Installed& installed, const Defaults& defaults) {
+    const char* runtime = nullptr;
+    std::string prefix;
+    switch (f.field) {
+        case Field::Php: runtime = "php"; break;
+        case Field::Database: runtime = "mariadb"; prefix = "mariadb-"; break;
+        case Field::Node: runtime = "node"; break;
+        case Field::Python: runtime = "python"; break;
+        default: return;
+    }
+    const auto it = defaults.find(runtime);
+    if (it == defaults.end() || f.current >= f.choices.size()) {
+        return;
+    }
+    // A template without a database (or with another kind) isn't given one;
+    // PHP's "Newest installed" takes the default.
+    const std::optional<std::string>& value = f.choices[f.current].value;
+    if (f.field != Field::Php && (!value || !value->starts_with(prefix))) {
+        return;
+    }
+    const std::vector<std::string> have = series_of(installed, runtime);
+    if (std::find(have.begin(), have.end(), it->second) == have.end()) {
+        return;
+    }
+    if (!named.empty() && newer(version_series(runtime, named), it->second)) {
+        return;
+    }
+    for (std::size_t i = 0; i < f.choices.size(); ++i) {
+        if (f.choices[i].value == prefix + it->second) {
+            f.current = i;
+            return;
+        }
+    }
+}
+
 }  // namespace
 
-std::vector<VersionField> template_fields(const TemplateCard& card, const Installed& installed, Lang lang) {
+Defaults defaults_from_list(const json& result) {
+    Defaults out;
+    if (result.is_object() && result.contains("defaults") && result["defaults"].is_object()) {
+        for (const auto& [name, series] : result["defaults"].items()) {
+            if (series.is_string() && !series.get<std::string>().empty()) {
+                out[name] = series.get<std::string>();
+            }
+        }
+    }
+    return out;
+}
+
+std::vector<VersionField> template_fields(const TemplateCard& card, const Installed& installed, Lang lang,
+                                          const Defaults& defaults) {
     ProjectRow row;
     row.wants = card.config;
     std::vector<VersionField> all = version_fields(row, installed, lang);
@@ -770,6 +823,12 @@ std::vector<VersionField> template_fields(const TemplateCard& card, const Instal
                           (f.field == Field::Python && !card.config.python.empty());
         if (keep) {
             prefer_installed(f, installed);
+            const std::string& db = card.config.database;
+            const std::string named = f.field == Field::Php        ? card.config.php
+                                      : f.field == Field::Database ? (db.starts_with("mariadb-") ? db.substr(8) : std::string())
+                                      : f.field == Field::Node     ? card.config.node
+                                                                   : card.config.python;
+            prefer_default(f, named, installed, defaults);
             out.push_back(std::move(f));
         }
     }

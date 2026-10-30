@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <exception>
 #include <map>
 #include <optional>
 #include <set>
@@ -140,6 +141,73 @@ void ServiceWorker::create_project(const std::string& template_id, const std::st
     }
     push({Command::Kind::CreateProject, name, false, {}, std::nullopt, {}, std::move(params)});
 }
+void ServiceWorker::list_runtimes(bool refresh) {
+    if (refresh) {
+        start_refresh();  // off the polling path: see RefreshBox
+        return;
+    }
+    // Cached is quick: the service copies the list in hand under its lock,
+    // or reads the kept file, and never waits on a fetch that's running
+    // (get_list() keeps its lock released during the download).
+    push({Command::Kind::ListRuntimes, {}, false, {}, std::nullopt, {}, {}});
+}
+
+void ServiceWorker::start_refresh() {
+    {
+        const std::lock_guard lock(refresh_->mutex);
+        if (refresh_->running) {
+            return;  // one check at a time; its answer is on its way
+        }
+        refresh_->running = true;
+        refresh_->done = false;
+    }
+    std::thread([box = refresh_, window = window_, message = message_, lost = std::string(text(lang_, Str::ConnectionLost))] {
+        std::optional<nlohmann::json> reply;
+        std::string error;
+        try {
+            const std::string instance = core::ipc::default_instance();
+            if (auto client = core::ServiceClient::connect(instance, error, kRequestTimeout)) {
+                if (auto got = client->call("runtimes.list", {{"refresh", true}}); !got) {
+                    error = lost;
+                } else if (!got->ok) {
+                    error = got->error_message;
+                } else {
+                    reply = std::move(got->result);
+                }
+            } else if (error.empty()) {
+                error = lost;  // not running: the main window says so and offers to start it
+            }
+        } catch (const std::exception& e) {
+            error = e.what();
+        }
+        {
+            const std::lock_guard lock(box->mutex);
+            box->reply = std::move(reply);
+            box->error = std::move(error);
+            box->done = true;
+            box->running = false;
+        }
+        // Gone windows ignore it; the box lives as long as this thread needs it.
+        PostMessageW(window, message, 0, 0);
+    }).detach();
+}
+void ServiceWorker::watch_runtimes(bool on) { push({Command::Kind::WatchRuntimes, {}, on, {}, std::nullopt, {}, {}}); }
+void ServiceWorker::remove_runtime(const std::string& name, const std::string& folder) {
+    push({Command::Kind::RemoveRuntime, name, false, folder, std::nullopt, {}, {}});
+}
+void ServiceWorker::set_default(const std::string& name, const std::optional<std::string>& series) {
+    push({Command::Kind::SetDefault, name, false, {}, series, {}, {}});
+}
+void ServiceWorker::cancel_job(std::int64_t id) {
+    push({Command::Kind::CancelJob, {}, false, {}, std::nullopt, {}, nlohmann::json(id)});
+}
+void ServiceWorker::load_defaults() {
+    {
+        const std::lock_guard lock(mutex_);
+        latest_.defaults_loaded = false;
+    }
+    push({Command::Kind::LoadDefaults, {}, false, {}, std::nullopt, {}, {}});
+}
 void ServiceWorker::select(const std::string& project) {
     push({Command::Kind::Select, project, false, {}, std::nullopt, {}, {}});
 }
@@ -156,9 +224,25 @@ Snapshot ServiceWorker::take() {
     latest_.clipboard.clear();
     Snapshot out = latest_;
     out.clipboard = std::move(clipboard);
+    {
+        const std::lock_guard refresh_lock(refresh_->mutex);
+        // A cached answer waiting in this snapshot goes first; the check's follows.
+        if (refresh_->done && !out.runtimes) {
+            refresh_->done = false;
+            out.runtimes_refresh = true;
+            out.runtimes = std::move(refresh_->reply);
+            out.runtimes_error = std::move(refresh_->error);
+            refresh_->reply.reset();
+            refresh_->error.clear();
+        }
+    }
     latest_.settled.clear();
     latest_.change_error.clear();
     latest_.added.clear();
+    latest_.runtimes.reset();
+    latest_.runtimes_error.clear();
+    latest_.runtimes_refresh = false;
+    latest_.settings_error.clear();
     latest_.quit_done = false;
     latest_.quit_error.clear();
     return out;
@@ -191,6 +275,7 @@ void ServiceWorker::run(const std::stop_token& stop) {
     };
     std::vector<Job> jobs;
     std::int64_t create_job = 0;  // the project being made, followed until it ends
+    bool watching = false;        // Settings is open (D20)
 
     const auto set_link = [this](Link link, std::string error = {}) {
         const std::lock_guard lock(mutex_);
@@ -283,8 +368,32 @@ void ServiceWorker::run(const std::stop_token& stop) {
             }
         }
 
+        const std::string lost(text(lang_, Str::ConnectionLost));
         std::vector<std::string> settled;
         std::string change_error;
+        // Settings (D20): its messages stay in its own window.
+        std::string settings_error;
+        std::optional<nlohmann::json> runtimes;
+        std::string runtimes_error;
+        bool refetch_runtimes = false;  // a change Settings shows is done: ask again
+        std::optional<Defaults> defaults;
+        const auto list_runtimes_now = [&](bool refresh) {
+            if (!client) {
+                runtimes_error = lost;
+                return;
+            }
+            const auto got = client->call("runtimes.list", refresh ? nlohmann::json{{"refresh", true}}
+                                                                   : nlohmann::json{{"cached", true}});
+            if (!got) {
+                client.reset();
+                runtimes_error = lost;
+            } else if (!got->ok) {
+                runtimes_error = got->error_message;
+            } else {
+                runtimes = got->result;
+                runtimes_error.clear();
+            }
+        };
         std::string clipboard;
         std::string added;
         // "Couldn't change <project>: <reason>". The project name keeps its
@@ -294,7 +403,6 @@ void ServiceWorker::run(const std::stop_token& stop) {
             return fill_pattern(text(lang_, Str::ChangeFailed), false,
                                 {rtl ? isolate_auto(project) : project, rtl && english ? isolate_ltr(reason) : reason});
         };
-        const std::string lost(text(lang_, Str::ConnectionLost));
         const std::string shared_name(text(lang_, Str::SharedSites));  // "Couldn't change Shared sites: ..."
         // One request for a change: false when the connection is gone.
         const auto send = [&](const std::string& project, const char* method, const nlohmann::json& params,
@@ -408,8 +516,9 @@ void ServiceWorker::run(const std::stop_token& stop) {
                     }
                     break;
                 }
-                case Command::Kind::Install:
+                case Command::Kind::Install: {
                     settled.push_back(install_key(c.project));
+                    std::string& install_error = is_settings_key(c.project) ? settings_error : change_error;
                     for (const Download& d : c.downloads) {
                         const std::string label = runtime_label(d.name) + (d.version.empty() ? "" : " " + d.version);
                         nlohmann::json params = {{"name", d.name}};
@@ -418,19 +527,19 @@ void ServiceWorker::run(const std::stop_token& stop) {
                         }
                         std::optional<core::protocol::Reply> started;
                         if (!client) {
-                            change_error = fill(lang_, Str::DownloadFailed, {label, lost});
+                            install_error = fill(lang_, Str::DownloadFailed, {label, lost});
                             break;
                         }
                         started = client->call("runtimes.install", params);
                         if (!started) {
                             client.reset();
-                            change_error = fill(lang_, Str::DownloadFailed, {label, lost});
+                            install_error = fill(lang_, Str::DownloadFailed, {label, lost});
                             break;
                         }
                         if (!started->ok || !started->result.contains("job") ||
                             !started->result["job"].is_number_integer()) {
                             const std::string why = started->ok ? std::string("no job") : started->error_message;
-                            change_error = fill(lang_, Str::DownloadFailed, {label, why});
+                            install_error = fill(lang_, Str::DownloadFailed, {label, why});
                             continue;
                         }
                         const auto id = started->result["job"].get<std::int64_t>();
@@ -442,6 +551,7 @@ void ServiceWorker::run(const std::stop_token& stop) {
                         }
                     }
                     break;
+                }
                 case Command::Kind::SetShared: {
                     settled.push_back(c.key);
                     nlohmann::json params = c.params;
@@ -521,6 +631,67 @@ void ServiceWorker::run(const std::stop_token& stop) {
                     latest_.create = std::move(made);
                     break;
                 }
+                case Command::Kind::ListRuntimes:
+                    list_runtimes_now(false);  // cached only; a refresh has its own thread
+                    break;
+                case Command::Kind::WatchRuntimes:
+                    watching = c.flag;
+                    break;
+                case Command::Kind::RemoveRuntime: {
+                    settled.push_back(remove_key(c.project, c.key));
+                    const std::string label = runtime_label(c.project) + " " + c.key;
+                    const bool rtl = is_rtl(lang_);
+                    if (!client) {
+                        settings_error = fill(lang_, Str::SettingsRemoveFailed, {label, lost});
+                    } else if (reply = client->call("runtimes.remove", {{"name", c.project}, {"version", c.key}}); !reply) {
+                        client.reset();
+                        settings_error = fill(lang_, Str::SettingsRemoveFailed, {label, lost});
+                    } else if (!reply->ok) {
+                        // The service's words, such as who still uses it (in_use).
+                        settings_error = fill_pattern(text(lang_, Str::SettingsRemoveFailed), false,
+                                                      {rtl ? isolate_ltr(label) : label,
+                                                       rtl ? isolate_ltr(reply->error_message) : reply->error_message});
+                    } else {
+                        need_installed = true;
+                        refetch_runtimes = refetch_runtimes || watching;
+                    }
+                    break;
+                }
+                case Command::Kind::SetDefault: {
+                    settled.push_back(default_key(c.project));
+                    const nlohmann::json params = {{"name", c.project},
+                                                   {"series", c.value ? nlohmann::json(*c.value) : nlohmann::json(nullptr)}};
+                    if (!client) {
+                        settings_error = fill(lang_, Str::SettingsDefaultFailed, {lost});
+                    } else if (reply = client->call("runtimes.default", params); !reply) {
+                        client.reset();
+                        settings_error = fill(lang_, Str::SettingsDefaultFailed, {lost});
+                    } else if (!reply->ok) {
+                        settings_error = fill(lang_, Str::SettingsDefaultFailed, {reply->error_message});
+                    } else {
+                        refetch_runtimes = refetch_runtimes || watching;
+                    }
+                    break;
+                }
+                case Command::Kind::CancelJob:
+                    if (client && c.params.is_number_integer()) {
+                        if (reply = client->call("jobs.cancel", {{"id", c.params.get<std::int64_t>()}}); !reply) {
+                            client.reset();
+                        }
+                    }
+                    break;
+                case Command::Kind::LoadDefaults: {
+                    // The wizard waits for nothing: without an answer it keeps today's picks.
+                    std::optional<core::protocol::Reply> got;
+                    if (client) {
+                        got = client->call("runtimes.list", {{"cached", true}});
+                        if (!got) {
+                            client.reset();
+                        }
+                    }
+                    defaults = got && got->ok ? defaults_from_list(got->result) : Defaults{};
+                    break;
+                }
                 case Command::Kind::Select:
                 case Command::Kind::Start:
                 case Command::Kind::Refresh:
@@ -557,6 +728,7 @@ void ServiceWorker::run(const std::stop_token& stop) {
         }
         // The installs' progress; a finished one makes the window ask what's installed.
         std::map<std::string, std::string> downloads;
+        std::vector<RuntimeJob> runtime_jobs;
         if (client && !jobs.empty()) {
             std::vector<Job> running;
             bool any_done = false;
@@ -577,8 +749,14 @@ void ServiceWorker::run(const std::stop_token& stop) {
                     any_done = true;
                     need_installed = true;
                 } else if (state == "failed") {
-                    change_error = fill(lang_, Str::DownloadFailed, {j.label, string_field(got->result, "message")});
+                    // Settings' own installs say so in Settings; the rest in the main window.
+                    const bool settings_only = std::all_of(j.projects.begin(), j.projects.end(), is_settings_key);
+                    (settings_only ? settings_error : change_error) =
+                        fill(lang_, Str::DownloadFailed, {j.label, string_field(got->result, "message")});
                 } else if (state != "cancelled") {
+                    if (auto job = runtime_job(got->result)) {
+                        runtime_jobs.push_back(std::move(*job));
+                    }
                     std::string progress = job_progress_text(got->result, lang_);
                     if (progress.empty()) {
                         progress = fill(lang_, Str::Installing, {j.label});
@@ -590,6 +768,7 @@ void ServiceWorker::run(const std::stop_token& stop) {
                 }
             }
             jobs = std::move(running);
+            refetch_runtimes = refetch_runtimes || (any_done && watching);
             if (any_done && client) {
                 // Served at once rather than at the service's next look (5 s),
                 // and the list asked again, so a finished project doesn't show
@@ -609,6 +788,10 @@ void ServiceWorker::run(const std::stop_token& stop) {
                     }
                 }
             }
+        }
+        // Settings shows who uses what: asked again once a change is done.
+        if (refetch_runtimes && client && !runtimes) {
+            list_runtimes_now(false);
         }
         // The project being made.
         std::optional<Snapshot::Create> create;
@@ -677,6 +860,18 @@ void ServiceWorker::run(const std::stop_token& stop) {
         }
         latest_.panel = panel;
         latest_.downloads = std::move(downloads);
+        latest_.runtime_jobs = std::move(runtime_jobs);
+        if (!settings_error.empty()) {
+            latest_.settings_error = settings_error;
+        }
+        if (runtimes || !runtimes_error.empty()) {
+            latest_.runtimes = std::move(runtimes);
+            latest_.runtimes_error = runtimes_error;
+        }
+        if (defaults) {
+            latest_.defaults = std::move(*defaults);
+            latest_.defaults_loaded = true;
+        }
         if (create) {
             latest_.create = std::move(*create);
         }

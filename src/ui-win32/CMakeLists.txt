@@ -3,7 +3,8 @@
 add_library(floserver_ui_model STATIC
     model/theme.cpp
     model/ui_strings.cpp
-    model/view_model.cpp)
+    model/view_model.cpp
+    model/runtimes_page.cpp)
 target_include_directories(floserver_ui_model PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(floserver_ui_model PUBLIC floserver_third_party)
 floserver_code_rules(floserver_ui_model)
@@ -22,6 +23,8 @@ add_executable(floserver_ui WIN32
     main_window_wizard.cpp
     canvas.cpp
     service_worker.cpp
+    settings_window.cpp
+    window_style.cpp
     FloServer.rc)
 set_target_properties(floserver_ui PROPERTIES OUTPUT_NAME FloServer)
 target_link_libraries(floserver_ui PRIVATE floserver_core floserver_ui_model

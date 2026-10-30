@@ -48,6 +48,11 @@ struct Palette {
     Rgb log;            // the Log box: dark in both themes, as in the mockups
     Rgb log_text;
     Rgb log_subtle;     // the time column
+    // Settings (D20).
+    Rgb nav_selected;   // the open section in the sidebar
+    Rgb button_disabled;
+    Rgb button_disabled_text;
+    Rgb bar_track;      // under a download's progress
     StateColors on;
     StateColors asleep;
     StateColors waking;
@@ -56,6 +61,7 @@ struct Palette {
     StateColors problem;
     StateColors banner_info;
     StateColors banner_error;
+    StateColors chip_default;  // "Default" in Settings > Runtimes
 };
 
 [[nodiscard]] const Palette& palette(bool dark);

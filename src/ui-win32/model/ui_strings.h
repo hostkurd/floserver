@@ -129,6 +129,36 @@ enum class Str : std::uint8_t {
     WebApacheChoice,
     WebNginxChoice,
     SharedDatabaseDetail,  // {0}: "127.0.0.1:3306", {1}: the user, {2}: the prefix "www_"
+    // Settings (D20): its own window; Runtimes is its first section.
+    SettingsTitle,
+    SettingsRuntimes,
+    SettingsRuntimesHint,
+    SettingsListFrom,      // {0}: the list's number, {1}: the date it's good until
+    SettingsNoList,
+    SettingsLoading,
+    SettingsCheckUpdates,
+    SettingsChecking,
+    SettingsCheckFailed,   // {0}: the service's reason
+    SettingsReadFailed,    // {0}: the service's reason
+    SettingsDefaultFor,
+    SettingsDefaultChip,
+    SettingsInstalledChip,
+    SettingsAlwaysUsed,
+    SettingsWebServers,
+    SettingsOneProject,
+    SettingsProjects,      // {0}: how many
+    SettingsUsedBy,        // {0}: the projects, and Shared sites
+    SettingsRunningOnPort, // {0}: the port
+    SettingsOnPort,        // {0}: the port
+    SettingsDownload,
+    SettingsRemove,
+    SettingsStarting,
+    SettingsDownloadingOf, // {0}: "19.0 MB", {1}: "31.0 MB"
+    SettingsDownloadingDots,
+    SettingsInstallingDots,
+    SettingsRemoving,
+    SettingsRemoveFailed,  // {0}: "PHP 8.4.16", {1}: the service's reason
+    SettingsDefaultFailed, // {0}: the service's reason
     Count_,
 };
 

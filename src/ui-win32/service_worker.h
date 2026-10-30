@@ -8,6 +8,7 @@
 // project's log. The UI thread never waits on the pipe: the worker keeps the
 // latest snapshot and posts a message to the window when it changes.
 
+#include "model/runtimes_page.h"
 #include "model/ui_strings.h"
 #include "model/view_model.h"
 
@@ -19,6 +20,7 @@
 #include <cstdint>
 #include <deque>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -58,6 +60,8 @@ struct Snapshot {
     PanelData panel;
     // Projects with installs running from the window: the progress line.
     std::map<std::string, std::string> downloads;
+    // Every install the worker follows, for Settings' rows (D20).
+    std::vector<RuntimeJob> runtime_jobs;
     std::string projects_dir;  // projects.list's, or empty
     SharedSites shared;        // Shared sites (D19): shared.get's answer
     // New project (D9): the templates, once asked for.
@@ -73,7 +77,15 @@ struct Snapshot {
         std::string project;
         std::string error;
     } create;
+    // New project: the defaults from Settings (D20), once asked for.
+    bool defaults_loaded = false;
+    Defaults defaults;
     // Taken once by the UI:
+    // Settings (D20): runtimes.list's full answer, or why it couldn't be had.
+    std::optional<nlohmann::json> runtimes;
+    std::string runtimes_error;
+    bool runtimes_refresh = false;  // the answer to "Check for updates"
+    std::string settings_error;     // a change in Settings failed
     std::vector<std::string> settled;  // change keys whose command finished (see ServiceWorker)
     std::string change_error;          // "Couldn't change shop: ..."
     std::string clipboard;             // .env lines to put on the clipboard
@@ -110,6 +122,19 @@ public:
     void set_shared(const nlohmann::json& changes, const std::string& key);
     // Puts shared sites' database login on the clipboard as .env lines (shared.login).
     void copy_shared_env();
+    // Settings (D20). runtimes.list's full answer: the list in hand or on
+    // disk (no network), or a fresh one when `refresh`. Handed over once.
+    void list_runtimes(bool refresh);
+    // While Settings is open, a finished install, remove or default change
+    // makes the worker ask runtimes.list again (cached). Never a timer.
+    void watch_runtimes(bool on);
+    // runtimes.remove; settled reports remove_key(name, folder).
+    void remove_runtime(const std::string& name, const std::string& folder);
+    // runtimes.default; nothing clears it. settled reports default_key(name).
+    void set_default(const std::string& name, const std::optional<std::string>& series);
+    void cancel_job(std::int64_t id);
+    // New project: runtimes.list (cached) once, for its defaults.
+    void load_defaults();
     // Asks for the templates (templates.list).
     void load_templates();
     // Makes a project from a template (projects.create) and follows the job.
@@ -127,6 +152,10 @@ public:
     [[nodiscard]] static std::string on_key(const std::string& project) { return "on\n" + project; }
     [[nodiscard]] static std::string keep_key(const std::string& project) { return "keep\n" + project; }
     [[nodiscard]] static std::string install_key(const std::string& project) { return "install\n" + project; }
+    [[nodiscard]] static std::string remove_key(const std::string& name, const std::string& folder) {
+        return "remove-runtime\n" + name + "\n" + folder;
+    }
+    [[nodiscard]] static std::string default_key(const std::string& name) { return "default\n" + name; }
     [[nodiscard]] static std::string use_key(const std::string& project, const std::string& key) {
         return "use\n" + project + "\n" + key;
     }
@@ -148,6 +177,12 @@ private:
             CopySharedEnv,
             LoadTemplates,
             CreateProject,
+            ListRuntimes,
+            WatchRuntimes,
+            RemoveRuntime,
+            SetDefault,
+            CancelJob,
+            LoadDefaults,
             Select,
             Start,
             Refresh,
@@ -161,9 +196,23 @@ private:
         nlohmann::json params;  // CreateProject: projects.create's parameters; SetShared: the changes
     };
 
+    // "Check for updates" (runtimes.list {"refresh": true}) can take as long
+    // as the network does. It runs on its own short-lived thread and pipe
+    // connection, never on the 2 s polling path, so the main window keeps
+    // updating during a slow or offline fetch. The thread is detached and
+    // shares only this box; take() hands its answer over.
+    struct RefreshBox {
+        std::mutex mutex;
+        bool running = false;
+        bool done = false;
+        std::optional<nlohmann::json> reply;
+        std::string error;
+    };
+
     void push(Command command);
     void run(const std::stop_token& stop);
     void publish();
+    void start_refresh();
 
     HWND window_;
     UINT message_;
@@ -173,6 +222,7 @@ private:
     std::deque<Command> commands_;
     Snapshot latest_;
     bool posted_ = false;
+    std::shared_ptr<RefreshBox> refresh_ = std::make_shared<RefreshBox>();
     std::jthread thread_;  // last: it starts after everything above exists
 };
 

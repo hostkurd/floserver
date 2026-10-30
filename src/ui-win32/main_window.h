@@ -8,7 +8,9 @@
 #include "canvas.h"
 #include "model/ui_strings.h"
 #include "service_worker.h"
+#include "settings_window.h"
 #include "win_util.h"
+#include "window_style.h"
 
 #include <windows.h>
 #include <shellapi.h>
@@ -194,17 +196,7 @@ private:
     [[nodiscard]] bool wizard_running() const;
     // False for a template with nothing to choose (no Versions page).
     [[nodiscard]] bool wizard_has_versions() const;
-    struct Fonts {
-        win::UniqueFont title;
-        win::UniqueFont panel_title;
-        win::UniqueFont mono;
-        win::UniqueFont body;
-        win::UniqueFont body_bold;
-        win::UniqueFont caption;  // not "small": the Windows headers #define small
-        win::UniqueFont small_bold;
-        win::UniqueFont button;
-        win::UniqueFont button_bold;
-    };
+    using Fonts = UiFonts;
     struct Notice {
         std::string text;
         bool error = false;
@@ -329,6 +321,8 @@ private:
     void on_www_key(WPARAM key);
     void paint_www(Canvas& c, HDC dc, bool text_pass) const;
     static LRESULT CALLBACK name_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, UINT_PTR id, DWORD_PTR self);
+    // Settings (D20): its own window, one at a time.
+    void open_settings();
     void show_window();
     void quit();
     void add_tray_icon();
@@ -408,6 +402,10 @@ private:
     int www_focus_ = -1;           // index into www_focus_order(); -1: none shown
     std::vector<VersionField> www_fields_;
     mutable WwwGeometry www_geometry_;
+
+    // Settings (D20): only while it's open; where it was, for next time.
+    std::unique_ptr<SettingsWindow> settings_;
+    std::optional<WINDOWPLACEMENT> settings_placement_;
 
     int scroll_ = 0;
     Hit hover_;
