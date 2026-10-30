@@ -392,6 +392,25 @@ TEST_CASE("templates work offline: the kept signed list, else the built-in ones"
         CHECK(list->size() == builtin.size());
     }
 
+    SUBCASE("offline after a fetch: the list in hand, as a project job sees it") {
+        w.publish(3, one);
+        auto fresh_always = config;
+        fresh_always.list_max_age = minutes{0};  // every call asks the CDN again
+        RuntimeService s(fresh_always, w.transport);
+        std::string error;
+        REQUIRE(s.templates(error)->size() == 1);
+        // The CDN goes away; the kept pair goes too, so only the list in
+        // hand can give the signed templates.
+        w.transport->serve(kSource.manifest_url, {0, "", "offline"});
+        fs::remove(kept_manifest_file(w.tmp.path()));
+        const auto wizard = s.templates(error, true);
+        const auto job = s.templates(error, false);
+        REQUIRE(wizard);
+        REQUIRE(job);
+        CHECK(wizard->size() == 1);
+        CHECK(job->size() == 1);
+    }
+
     SUBCASE("nothing at all: an error") {
         RuntimeService s(w.config(), nullptr);
         std::string error;

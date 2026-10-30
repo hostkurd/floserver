@@ -611,7 +611,7 @@ void MainWindow::paint_wizard(Canvas& c, HDC dc, bool text_pass) const {
                 continue;  // a template with nothing to choose has two steps
             }
             const std::wstring s = w(text(lang_, label));
-            const bool current = std::min(wizard_.step, 2) == index;
+            const bool current = std::min(wizard_.step, versions ? 2 : 1) == index;
             const int sw = Canvas::measure(dc, s, (current ? fonts_.button_bold : fonts_.button).get(), rtl_) + px(4);
             c.text({x, g.steps.top, x + sw, g.steps.bottom}, s, current ? fonts_.button_bold.get() : fonts_.button.get(),
                    current ? p.accent : p.text_subtle, Align::Start, false);

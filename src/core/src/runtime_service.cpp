@@ -143,10 +143,14 @@ std::optional<RuntimeService::CachedList> RuntimeService::get_list(bool refresh,
             // Kept for offline use (the templates). The pair is checked
             // again when read back, so a half-written pair is just ignored.
             if (!fetched.manifest->templates.empty()) {
+                // Under offline_mutex_, so an offline read never sees half a
+                // pair; a later fallback reads this newest pair.
+                const std::lock_guard offline_lock(offline_mutex_);
                 std::string keep_error;
                 (void)(write_file_atomically(kept_manifest_file(config_.data_dir), fetched.manifest_bytes, keep_error) &&
                        write_file_atomically(kept_signature_file(config_.data_dir), fetched.signature_bytes,
                                              keep_error));
+                offline_.reset();
             }
             fresh = CachedList{std::move(*fetched.manifest), std::move(fetched.key_id), std::move(fetched.warnings),
                                std::chrono::steady_clock::now()};
@@ -216,7 +220,10 @@ std::optional<std::vector<ProjectTemplate>> RuntimeService::templates(std::strin
         if (const auto cached = get_list(false, fetch_error); cached && !cached->manifest.templates.empty()) {
             return cached->manifest.templates;
         }
-    } else {
+    }
+    // The list in hand, even if stale: the same one a project job reads, so
+    // the wizard and the job always agree.
+    {
         const std::lock_guard lock(list_mutex_);
         if (list_ && !list_->manifest.templates.empty()) {
             return list_->manifest.templates;
@@ -252,12 +259,18 @@ std::optional<std::vector<ProjectTemplate>> RuntimeService::offline_templates(st
             return offline_;
         }
     }
+    // The built-in ones aren't kept for later while a kept pair exists: it
+    // may only have been mid-rewrite.
+    const bool kept_pair = list.has_value() || sig.has_value();
     // 2. The templates built into FloServer.
     const json builtin = json::parse(config_.builtin_templates_json, nullptr, false);
     if (builtin.is_array()) {
         std::vector<std::string> warnings;
         auto parsed = parse_templates(builtin, warnings);
         if (!parsed.empty()) {
+            if (kept_pair) {
+                return parsed;
+            }
             offline_ = std::move(parsed);
             return offline_;
         }
