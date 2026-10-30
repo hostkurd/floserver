@@ -259,7 +259,7 @@ struct Service {
             if (r.params.contains("series") && r.params["series"].is_string()) {
                 series = r.params["series"].get<std::string>();
             } else if (r.params.contains("series") && !r.params["series"].is_null()) {
-                return protocol::make_error(r.id, "bad_params", "\"series\" is a version such as \"8.5\", or null");
+                return protocol::make_error(r.id, "bad_params", R"("series" is a version such as "8.5", or null)");
             }
             const auto result = projects->set_default(string_param(r.params, "name"), series, refusal);
             return result ? protocol::make_result(r.id, {{"defaults", *result}})

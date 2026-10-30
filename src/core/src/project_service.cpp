@@ -286,14 +286,17 @@ constexpr std::array<std::string_view, 4> kDefaultRuntimes = {"php", "mariadb", 
 // config.json's "defaults", keeping only what this version understands.
 json read_defaults(const AppConfig& config) {
     json out = json::object();
-    const auto it = config.other.find("defaults");
-    if (it == config.other.end() || !it->is_object()) {
+    // A copy (it's a few keys): GCC's -O3 null-dereference check trips on
+    // iterators into nlohmann::json.
+    const json stored = config.other.is_object() && config.other.contains("defaults") ? config.other.at("defaults")
+                                                                                      : json();
+    if (!stored.is_object()) {
         return out;
     }
     for (const std::string_view name : kDefaultRuntimes) {
         const std::string key(name);
-        if (it->contains(key) && (*it)[key].is_string() && Version::parse((*it)[key].get<std::string>())) {
-            out[key] = (*it)[key];
+        if (stored.contains(key) && stored.at(key).is_string() && Version::parse(stored.at(key).get<std::string>())) {
+            out[key] = stored.at(key);
         }
     }
     return out;
