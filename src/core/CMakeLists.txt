@@ -52,6 +52,7 @@ add_library(floserver_core STATIC
     src/project_registry.cpp
     src/project_service.cpp
     src/site_plan.cpp
+    src/shared_sites.cpp
     src/protocol.cpp
     src/request_log.cpp
     src/trust_store.cpp

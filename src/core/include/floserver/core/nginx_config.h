@@ -40,6 +40,23 @@ struct NginxSite {
     std::filesystem::path request_log;  // every request, for the window's Log box; empty for none
 };
 
+// Shared sites (D19), on the http port: the www folder at localhost/<folder>/
+// and each folder at <folder>.localhost (a project's name wins: exact names
+// come before nginx's regex). With Apache everything goes to it; without,
+// nginx serves the files and sends PHP to the pool. localhost/ shows
+// `list_page` when the www folder has no index file of its own.
+struct NginxShared {
+    std::filesystem::path dir;
+    std::filesystem::path list_page;
+    std::vector<Port> php_ports;            // nginx serves (web nginx)
+    std::filesystem::path php_access_log;   // the pool's idle log
+    std::optional<Port> app_port;           // the shared Apache serves (web apache)
+    std::filesystem::path request_log;      // every request; empty for none
+    // Projects that aren't served now (off, waiting for a download, a
+    // problem): their <name>.localhost stays theirs, a 404, never a www folder.
+    std::vector<std::string> reserved;
+};
+
 struct NginxSpec {
     std::filesystem::path nginx_dir;  // the installed nginx (its conf/mime.types, conf/fastcgi_params)
     std::filesystem::path work_dir;   // our folder: logs/, temp/, the pid file
@@ -54,6 +71,7 @@ struct NginxSpec {
     // service can tell when nginx serves this config after a reload.
     std::string config_id;
     std::vector<NginxSite> sites;
+    std::optional<NginxShared> shared;
 };
 
 // The config text, or nothing (with `error`) when a name or path can't be

@@ -44,6 +44,7 @@ constexpr Module kModules[] = {  // NOLINT(modernize-avoid-c-arrays)
     {"version_module", "mod_version.so"},
     {"proxy_module", "mod_proxy.so"},
     {"proxy_fcgi_module", "mod_proxy_fcgi.so"},
+    {"vhost_alias_module", "mod_vhost_alias.so"},
 };
 
 // The last digit of the client's port (the service's relay, a new one for
@@ -152,6 +153,10 @@ public:
                 return std::nullopt;
             }
         }
+        // Last: its *.localhost must not take a project's name.
+        if (spec_.shared && !write_shared(*spec_.shared)) {
+            return std::nullopt;
+        }
         return out_.str();
     }
 
@@ -204,17 +209,82 @@ private:
              << "        CGIPassAuth On\n"
              << "    </Directory>\n";
         if (!site.php_ports.empty()) {
+            write_php(site.php_ports, bare);
+        }
+        out_ << "</VirtualHost>\n";
+        return true;
+    }
+
+    // Shared sites: localhost (the www folder, with the list page when it
+    // has no index file of its own) and *.localhost (each folder its own root).
+    bool write_shared(const ApacheShared& shared) {
+        const auto root = path(shared.dir);
+        const auto list = path(shared.list_page);
+        if (!root || !list) {
+            return false;
+        }
+        // The root goes into a regex and into VirtualDocumentRoot, where % is special.
+        if (root->find_first_of("|%") != std::string::npos) {
+            error_ = "Apache can't use the path " + path_to_utf8(shared.dir) + " (it has a | or %)";
+            return false;
+        }
+        const std::string bare = root->substr(1, root->size() - 2);
+        const auto directory = [&](const std::string& index) {
+            out_ << "    <Directory " << *root << ">\n"
+                 << "        Options FollowSymLinks\n"
+                 << "        AllowOverride All\n"
+                 << "        Require all granted\n"
+                 << "        CGIPassAuth On\n"
+                 << "        DirectoryIndex " << index << "\n"
+                 << "    </Directory>\n";
+        };
+        out_ << "\n# Shared sites: the www folder\n"
+             << "<VirtualHost 127.0.0.1:" << kApachePortPlaceholder << ">\n"
+             << "    ServerName localhost\n"
+             << "    DocumentRoot " << *root << "\n";
+        directory("index.php index.html index.htm " + std::string(kSharedListPath));
+        // Folders inside keep the usual index files only.
+        out_ << "    <Directory \"" << bare << "/*\">\n"
+             << "        DirectoryIndex index.php index.html index.htm\n"
+             << "    </Directory>\n"
+             << "    Alias \"" << kSharedListPath << "\" " << *list << "\n"
+             << "    <Files \"" << shared.list_page.filename().string() << "\">\n"
+             << "        Require all granted\n"
+             << "    </Files>\n";
+        if (!shared.php_ports.empty()) {
+            write_php(shared.php_ports, bare);
+        }
+        out_ << "</VirtualHost>\n"
+             << "\n# Shared sites: each folder at <folder>.localhost\n"
+             << "<VirtualHost 127.0.0.1:" << kApachePortPlaceholder << ">\n"
+             << "    ServerName floserver-shared.localhost\n"
+             << "    ServerAlias *.localhost\n"
+             << "    VirtualDocumentRoot \"" << bare << "/%1\"\n";
+        directory("index.php index.html index.htm");
+        if (!shared.php_ports.empty()) {
+            // In the quoted expression a backslash is written twice, as \\Q and \\E are around it.
+            write_php(shared.php_ports, bare + R"(\\E/[^/]+\\Q)");
+        }
+        out_ << "</VirtualHost>\n";
+        return true;
+    }
+
+    // PHP for the files under a document root, through the pool's workers.
+    // `root_regex` is the root as it goes between \Q and \E (SCRIPT_NAME is
+    // what follows it).
+    void write_php(const std::vector<Port>& php_ports, const std::string& root_regex) {
+        {
             // Caseless: on a disk that ignores case, x.PHP is x.php and must
             // run, never be sent as source. Only files that exist go to PHP.
             out_ << "    <FilesMatch \"(?i)\\.php$\">\n";
-            const auto groups = digit_groups(site.php_ports.size());
+            const auto groups = digit_groups(php_ports.size());
             for (std::size_t i = 0; i < groups.size(); ++i) {
                 const bool last = i + 1 == groups.size();
                 out_ << "        <" << (i == 0 ? "If" : "ElseIf") << " \"-f %{REQUEST_FILENAME}"
                      << (last ? std::string() : " && %{REMOTE_PORT} =~ /" + groups[i] + "$/") << "\">\n"
                      // The '/': Apache adds the script's path, which on Windows
                      // starts with a drive letter ("D:/..."), not '/'.
-                     << "            SetHandler \"proxy:fcgi://127.0.0.1:" << site.php_ports[i] << "/\"\n"
+                     << "            SetHandler \"proxy:fcgi://127.0.0.1:" << php_ports[i] << "/\"\n"
                      << "        </" << (i == 0 ? "If" : "ElseIf") << ">\n";
             }
             out_ << "    </FilesMatch>\n"
@@ -232,11 +302,9 @@ private:
                  << R"x(    ProxyFCGISetEnvIf "true" !REDIRECT_URL)x" << "\n"
                  << R"x(    ProxyFCGISetEnvIf "reqenv('PATH_INFO') == reqenv('SCRIPT_FILENAME')" !PATH_INFO)x" << "\n"
                  << R"x(    ProxyFCGISetEnvIf "reqenv('SCRIPT_NAME') =~ m#^/.*?\\.php(/.*)$#i" PATH_INFO "$1")x" << "\n"
-                 << R"x(    ProxyFCGISetEnvIf "reqenv('SCRIPT_FILENAME') =~ m|^\\Q)x" << bare
+                 << R"x(    ProxyFCGISetEnvIf "reqenv('SCRIPT_FILENAME') =~ m|^\\Q)x" << root_regex
                  << R"x(\\E(/.*)$|i" SCRIPT_NAME "$1")x" << "\n";
         }
-        out_ << "</VirtualHost>\n";
-        return true;
     }
 
     const ApacheSpec& spec_;

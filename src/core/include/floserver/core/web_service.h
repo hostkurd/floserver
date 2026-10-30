@@ -58,6 +58,9 @@ struct WebServiceConfig {
 
 [[nodiscard]] std::filesystem::path web_dir(const std::filesystem::path& data);
 
+// The page localhost/ shows when the www folder has no index file (D19).
+[[nodiscard]] std::filesystem::path shared_list_page(const std::filesystem::path& web);
+
 // The nginx program in an nginx install, or nothing when it has none.
 [[nodiscard]] std::optional<std::filesystem::path> nginx_program(const std::filesystem::path& nginx_dir);
 
@@ -116,6 +119,8 @@ private:
     void stop_leftover_nginx() const;
     [[nodiscard]] nlohmann::json status_locked() const;
     void trim_request_logs_locked() const;
+    // FloServer's list of the www folder's folders (D19), rewritten when it changes.
+    void write_shared_list_locked(const PlannedSite& shared, const AppConfig& app);
 
     WebServiceConfig config_;
     CertStore& certs_;
@@ -142,6 +147,8 @@ private:
     std::string rejected_text_;   // the last config nginx -t refused
     std::string rejected_error_;
     bool stopped_ = false;
+    std::string shared_list_key_;  // what the list page was last made from
+    std::chrono::steady_clock::time_point shared_list_written_;
 
     std::atomic<bool> stopping_{false};
     std::thread thread_;

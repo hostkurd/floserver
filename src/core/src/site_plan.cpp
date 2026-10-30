@@ -2,6 +2,7 @@
 
 #include "floserver/core/nginx_config.h"
 #include "floserver/core/paths.h"
+#include "floserver/core/shared_sites.h"
 #include "floserver/core/version.h"
 
 #include <algorithm>
@@ -119,6 +120,95 @@ ConfigResult read_project_config_file(const Project& project) {
     return result;
 }
 
+namespace {
+
+// The pool for this PHP install and these extensions, made when new; the
+// site joins it.
+std::size_t add_to_pool(WebPlan& plan, const InstalledRuntime& php, std::vector<std::string> extensions,
+                        const std::string& site, bool keep_running) {
+    std::sort(extensions.begin(), extensions.end());
+    extensions.erase(std::unique(extensions.begin(), extensions.end()), extensions.end());
+    const std::string key = pool_key(php.version, extensions);
+    auto it = std::find_if(plan.pools.begin(), plan.pools.end(), [&key](const PhpPool& p) { return p.key == key; });
+    if (it == plan.pools.end()) {
+        plan.pools.push_back({key, php.version, php.dir, extensions, {}, false, {}});
+        it = std::prev(plan.pools.end());
+    }
+    it->sites.push_back(site);
+    it->keep_running = it->keep_running || keep_running;
+    return static_cast<std::size_t>(it - plan.pools.begin());
+}
+
+// Shared sites (D19): one site for the whole www folder, PHP from a pool
+// like any project's, Apache or nginx as the settings say.
+void plan_shared(WebPlan& plan, const AppConfig& config, const std::vector<InstalledRuntime>& installed,
+                 const std::optional<std::string>& default_php) {
+    PlannedSite site;
+    site.name = std::string(kSharedSiteName);
+    std::string error;
+    const auto shared = read_shared_config(config, error);
+    if (!shared) {
+        site.state = SiteState::Problem;
+        site.problem = "config.json: " + error;
+        plan.shared = std::move(site);
+        return;
+    }
+    if (!shared->on) {
+        return;
+    }
+    const auto dir = shared_dir(*shared);
+    if (!dir) {
+        site.state = SiteState::Problem;
+        site.problem = "there's no home folder for the www folder; choose one in Settings";
+        plan.shared = std::move(site);
+        return;
+    }
+    site.dir = *dir;
+    site.doc_root = *dir;
+    site.database = shared->database;
+    const bool apache = shared->web == WebServer::Apache;
+    if (!nginx_quoted_path(site.doc_root)) {
+        site.state = SiteState::Problem;
+        site.problem = "the www folder's path has a $ or \" in it, which nginx can't use; choose another folder";
+        plan.shared = std::move(site);
+        return;
+    }
+    if (apache && path_to_utf8(site.doc_root).find_first_of("[]*?|%") != std::string::npos) {
+        site.state = SiteState::Problem;
+        site.problem = "the www folder's path has one of [ ] * ? | % in it, which Apache can't use; choose another folder";
+        plan.shared = std::move(site);
+        return;
+    }
+    const std::string wanted_php = shared->php.value_or(default_php.value_or(""));
+    const InstalledRuntime* php = best_installed(installed, "php", wanted_php);
+    if (php == nullptr) {
+        site.missing.push_back(wanted_php.empty() ? "php" : "php " + wanted_php);
+    }
+    const InstalledRuntime* apache_runtime = apache ? best_installed(installed, "apache", "") : nullptr;
+    if (apache && apache_runtime == nullptr) {
+        site.missing.emplace_back("apache");
+    }
+    if (shared->database && best_installed(installed, shared->database->family, shared->database->version) == nullptr) {
+        site.missing.push_back(shared->database->family + " " + shared->database->version);
+    }
+    site.config = shared_project_config(*shared, php != nullptr ? php->version : wanted_php);
+    if (!site.missing.empty() || php == nullptr) {
+        site.state = SiteState::NeedsDownload;
+        plan.shared = std::move(site);
+        return;
+    }
+    site.pool = add_to_pool(plan, *php, {}, site.name, false);
+    site.state = SiteState::Ready;
+    if (apache) {
+        site.apache = true;
+        plan.apache_dir = apache_runtime->dir;
+        plan.apache_version = apache_runtime->version;
+    }
+    plan.shared = std::move(site);
+}
+
+}  // namespace
+
 WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
                    const std::vector<InstalledRuntime>& installed, const std::optional<std::string>& default_php) {
     WebPlan plan;
@@ -235,18 +325,7 @@ WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
             continue;
         }
 
-        std::vector<std::string> extensions = pc.extensions;
-        std::sort(extensions.begin(), extensions.end());
-        extensions.erase(std::unique(extensions.begin(), extensions.end()), extensions.end());
-        const std::string key = pool_key(php->version, extensions);
-        auto it = std::find_if(plan.pools.begin(), plan.pools.end(), [&key](const PhpPool& p) { return p.key == key; });
-        if (it == plan.pools.end()) {
-            plan.pools.push_back({key, php->version, php->dir, extensions, {}, false, {}});
-            it = std::prev(plan.pools.end());
-        }
-        it->sites.push_back(project.name);
-        it->keep_running = it->keep_running || project.keep_running;
-        site.pool = static_cast<std::size_t>(it - plan.pools.begin());
+        site.pool = add_to_pool(plan, *php, pc.extensions, project.name, project.keep_running);
         site.state = SiteState::Ready;
         if (apache) {
             site.apache = true;
@@ -255,6 +334,7 @@ WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
         }
         plan.sites.push_back(std::move(site));
     }
+    plan_shared(plan, config, installed, default_php);
     return plan;
 }
 

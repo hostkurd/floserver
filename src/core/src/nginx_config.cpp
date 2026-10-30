@@ -80,7 +80,14 @@ public:
         // the service, so a connection never fails; max_fails=0 keeps nginx
         // from setting one aside.
         std::set<Port> written;
-        for (const NginxSite& site : spec_.sites) {
+        std::vector<NginxSite> with_shared = spec_.sites;
+        if (spec_.shared) {
+            NginxSite s;
+            s.php_ports = spec_.shared->php_ports;
+            s.app_port = spec_.shared->app_port;
+            with_shared.push_back(std::move(s));
+        }
+        for (const NginxSite& site : with_shared) {
             if (site.php_ports.empty() || !written.insert(site.php_ports.front()).second) {
                 continue;
             }
@@ -95,7 +102,7 @@ public:
         // header passed on only for WebSocket upgrades.
         bool any_app = false;
         std::set<Port> app_ports;  // Apache projects share one
-        for (const NginxSite& site : spec_.sites) {
+        for (const NginxSite& site : with_shared) {
             if (site.app_port && app_ports.insert(*site.app_port).second) {
                 any_app = true;
                 out_ << "\n    upstream " << app_upstream_name(*site.app_port) << " {\n"
@@ -135,6 +142,9 @@ public:
             if (!write_site(site)) {
                 return std::nullopt;
             }
+        }
+        if (spec_.shared && !write_shared(*spec_.shared)) {
+            return std::nullopt;
         }
         out_ << "}\n";
         return out_.str();
@@ -272,29 +282,152 @@ private:
                  << "        location / {\n"
                  << "            try_files $uri $uri/ /index.php$is_args$args;\n"
                  << "        }\n"
-                 << R"(        location ~* [^/]\.php(/|$) {
+;
+            write_php_location(site.php_ports, site.tls.has_value(), idle_log, request_log);
+        }
+        out_ << "    }\n";
+        return true;
+    }
+
+    // PHP files under the server's root go to the pool.
+    void write_php_location(const std::vector<Port>& php_ports, bool https, const std::optional<std::string>& idle_log,
+                            const std::string& request_log) {
+        out_ << R"(        location ~* [^/]\.php(/|$) {
             fastcgi_split_path_info ^(.+?\.php)(/.*)$;
             # try_files empties $fastcgi_path_info, so keep a copy first.
             set $floserver_path_info $fastcgi_path_info;
             try_files $fastcgi_script_name =404;
 )"
-                 << "            include " << fastcgi_params_ << ";\n"
-                 << "            fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;\n"
-                 << "            fastcgi_param PATH_INFO $floserver_path_info;\n";
-            if (site.tls) {
-                out_ << "            fastcgi_param HTTPS on;\n";
+             << "            include " << fastcgi_params_ << ";\n"
+             << "            fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;\n"
+             << "            fastcgi_param PATH_INFO $floserver_path_info;\n";
+        if (https) {
+            out_ << "            fastcgi_param HTTPS on;\n";
+        }
+        out_ << "            fastcgi_pass " << upstream_name(php_ports) << ";\n"
+             << "            fastcgi_read_timeout 300s;\n";
+        if (idle_log) {
+            out_ << "            access_log " << *idle_log << " floserver_idle;\n";
+            if (!request_log.empty()) {
+                out_ << "            " << request_log;
             }
-            out_ << "            fastcgi_pass " << upstream_name(site.php_ports) << ";\n"
-                 << "            fastcgi_read_timeout 300s;\n";
-            if (idle_log) {
-                out_ << "            access_log " << *idle_log << " floserver_idle;\n";
-                if (!request_log.empty()) {
-                    out_ << "            " << request_log;
+        }
+        out_ << "        }\n";
+    }
+
+    // Shared sites (D19): localhost and <folder>.localhost on the http port.
+    bool write_shared(const NginxShared& shared) {
+        const auto root = path(shared.dir);
+        const auto list = path(shared.list_page);
+        if (!root || !list) {
+            return false;
+        }
+        std::optional<std::string> idle_log;
+        if (!shared.php_access_log.empty()) {
+            idle_log = path(shared.php_access_log);
+            if (!idle_log) {
+                return false;
+            }
+        }
+        std::string request_log;
+        if (!shared.request_log.empty()) {
+            const auto quoted = path(shared.request_log);
+            if (!quoted) {
+                return false;
+            }
+            request_log = "access_log " + *quoted + " floserver_requests;\n";
+        }
+        const std::string bare = root->substr(1, root->size() - 2);
+        const auto list_dir = path(shared.list_page.parent_path());
+        if (!list_dir) {
+            return false;
+        }
+        const std::string list_name = shared.list_page.filename().string();
+        const auto server = [&](bool by_folder) {
+            out_ << "    server {\n";
+            listen(spec_.ports.http, "");
+            if (by_folder) {
+                // Each folder its own root, like a project; a project of the
+                // same name wins (exact names come first).
+                out_ << "        server_name \"~^(?<floserver_folder>[a-z0-9]([a-z0-9-]*[a-z0-9])?)\\.localhost$\";\n"
+                     << "        root \"" << bare << "/$floserver_folder\";\n";
+            } else {
+                out_ << "        server_name localhost;\n"
+                     << "        root " << *root << ";\n";
+            }
+            if (!request_log.empty()) {
+                out_ << "        " << request_log;
+            }
+            out_ << R"(        location ~* /\.(?!well-known/) {
+            return 404;
+        }
+)";
+            out_ << "        index index.php index.html index.htm;\n";
+            if (!by_folder) {
+                // The www folder's own index file (an internal redirect, so
+                // index.php runs), else FloServer's list.
+                out_ << "        location = / {\n"
+                     << "            error_page 403 404 = @floserver_shared_list;\n"
+                     << "        }\n"
+                     << "        location @floserver_shared_list {\n"
+                     << "            root " << *list_dir << ";\n"
+                     << "            rewrite ^ /" << list_name << " break;\n"
+                     << "        }\n";
+            }
+            if (shared.app_port) {
+                out_ << "        location / {\n"
+                     << "            proxy_pass http://" << app_upstream_name(*shared.app_port) << ";\n"
+                     << "            proxy_http_version 1.1;\n"
+                     << "            proxy_set_header Host $http_host;\n"
+                     << "            proxy_set_header Upgrade $http_upgrade;\n"
+                     << "            proxy_set_header Connection $floserver_connection;\n"
+                     << "            proxy_set_header X-Forwarded-For $remote_addr;\n"
+                     << "            proxy_set_header X-Forwarded-Proto $scheme;\n"
+                     << "            proxy_set_header X-Forwarded-Host $http_host;\n"
+                     << "            proxy_set_header X-Forwarded-Port $server_port;\n"
+                     << "            proxy_buffering off;\n"
+                     << "            proxy_read_timeout 300s;\n";
+                if (idle_log) {
+                    out_ << "            access_log " << *idle_log << " floserver_idle;\n";
+                    if (!request_log.empty()) {
+                        out_ << "            " << request_log;
+                    }
+                }
+                out_ << "        }\n";
+            } else {
+                out_ << "        location / {\n"
+                     // A folder of its own is an app with a front controller;
+                     // under localhost/ a missing file is just missing.
+                     << "            try_files $uri $uri/ " << (by_folder ? "/index.php$is_args$args" : "=404") << ";\n"
+                     << "        }\n";
+                if (!shared.php_ports.empty()) {
+                    write_php_location(shared.php_ports, false, idle_log, request_log);
                 }
             }
-            out_ << "        }\n";
+            out_ << "    }\n";
+        };
+        out_ << "\n    # Shared sites\n";
+        server(false);
+        server(true);
+        if (!shared.reserved.empty()) {
+            out_ << "    # Projects not served now keep their names.\n"
+                 << "    server {\n";
+            listen(spec_.ports.http, "");
+            out_ << "        server_name";
+            for (const std::string& name : shared.reserved) {
+                if (const auto problem = project_name_problem(name)) {
+                    error_ = "the project name " + name + " can't be used: " + *problem;
+                    return false;
+                }
+                out_ << " " << name << ".localhost";
+            }
+            out_ << ";\n"
+                 << "        default_type text/plain;\n"
+                 << "        location / {\n"
+                 << "            return 404 \"There's no FloServer project at this address.\\n\";\n"
+                 << "        }\n"
+                 << "    }\n";
         }
-        out_ << "    }\n";
         return true;
     }
 

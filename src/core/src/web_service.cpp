@@ -1,5 +1,7 @@
 #include "floserver/core/web_service.h"
 
+#include "floserver/core/shared_sites.h"
+
 #include "floserver/core/apache_config.h"
 #include "floserver/core/request_log.h"
 #include "floserver/core/nginx_config.h"
@@ -80,6 +82,44 @@ const char* pool_state_name(PoolState s) {
 }  // namespace
 
 fs::path web_dir(const fs::path& data) { return data / "web"; }
+
+fs::path shared_list_page(const fs::path& web) { return web / "shared" / "shared-sites-list.html"; }
+
+void WebService::write_shared_list_locked(const PlannedSite& shared, const AppConfig& app) {
+    if (!ports_) {
+        return;
+    }
+    // A big www folder isn't read every few seconds: again when the folder
+    // itself, the projects or the ports change, or every 30 seconds (for
+    // index files added inside a folder).
+    std::error_code ec;
+    const auto modified = fs::last_write_time(shared.doc_root, ec);
+    std::string key = path_to_utf8(shared.doc_root) + "|" + std::to_string(ports_->http) + "|" +
+                      std::to_string(ec ? 0 : modified.time_since_epoch().count()) + "|" +
+                      (shared.config && shared.config->php ? *shared.config->php : std::string()) + "|" +
+                      (shared.apache ? "a" : "n");
+    for (const Project& p : app.projects) {
+        key += "|" + p.name;
+    }
+    const auto now = Clock::now();
+    if (key == shared_list_key_ && now - shared_list_written_ < std::chrono::seconds{30}) {
+        return;
+    }
+    shared_list_key_ = key;
+    shared_list_written_ = now;
+    const auto folders = scan_shared_folders(shared.doc_root, app);
+    const std::string php = shared.config && shared.config->php ? *shared.config->php : std::string();
+    const WebServer web = shared.apache ? WebServer::Apache : WebServer::Nginx;
+    const std::string page =
+        shared_index_page(folders, shared.doc_root, php, web, shared_address(*ports_), shared_port_suffix(*ports_));
+    const fs::path file = shared_list_page(work_);
+    if (const auto old = read_small_file(file, std::size_t{4} * 1024 * 1024); old && *old == page) {
+        return;
+    }
+    fs::create_directories(file.parent_path(), ec);
+    std::string error;
+    (void)write_file_atomically(file, page, error);
+}
 
 std::optional<fs::path> nginx_program(const fs::path& nginx_dir) {
 #ifdef _WIN32
@@ -319,7 +359,12 @@ void WebService::reload_locked() {
                 keep = keep || (project != nullptr && project->keep_running);
             }
         }
-        if (!as.sites.empty()) {
+        const bool shared_apache = plan.shared && plan.shared->state == SiteState::Ready && plan.shared->apache;
+        if (shared_apache) {
+            as.shared = ApacheShared{plan.shared->doc_root, plan.pools.at(*plan.shared->pool).ports,
+                                     shared_list_page(work_)};
+        }
+        if (!as.sites.empty() || as.shared) {
             as.server_root = apache_server_root(plan.apache_dir);
             as.modules_dir = as.server_root / "modules";
             as.work_dir = work_;
@@ -521,7 +566,69 @@ void WebService::reload_locked() {
         sites[p.name] = site;
     }
 
-    if (serve.empty()) {
+    // Shared sites (D19): one more site, on the http port, by localhost.
+    std::optional<NginxShared> shared_spec;
+    if (plan.shared) {
+        const PlannedSite& p = *plan.shared;
+        Site site;
+        if (p.state == SiteState::Problem) {
+            site.state_override = "problem";
+            site.problem = p.problem;
+        } else if (p.state == SiteState::NeedsDownload) {
+            site.state_override = "needs_download";
+            site.missing = p.missing;
+        } else if (nginx == nullptr) {
+            site.state_override = "needs_download";
+            site.missing = {"nginx"};
+        } else {
+            const PhpPool& pool = plan.pools.at(*p.pool);
+            std::string why;
+            if (const auto e = pool_errors.find(pool.key); e != pool_errors.end()) {
+                why = e->second;
+            }
+            NginxShared ns;
+            ns.dir = p.doc_root;
+            ns.list_page = shared_list_page(work_);
+            if (p.apache) {
+                const auto spec = std::find_if(plan.apps.begin(), plan.apps.end(),
+                                               [](const AppSpec& a) { return a.name == kApacheAppName; });
+                if (why.empty()) {
+                    why = apache_error;
+                }
+                if (why.empty() && spec != plan.apps.end()) {
+                    if (const auto e = app_errors.find(spec->name); e != app_errors.end()) {
+                        why = e->second;
+                    }
+                }
+                if (why.empty() && spec == plan.apps.end()) {
+                    why = "Apache can't be set up";
+                }
+                if (spec != plan.apps.end()) {
+                    ns.app_port = spec->port;
+                    site.app = true;
+                    site.app_kind = "apache";
+                    site.app_name = spec->name;
+                }
+            } else {
+                ns.php_ports = pool.ports;
+                site.pool_key = pool.key;
+            }
+            if (!why.empty()) {
+                site.state_override = "problem";
+                site.problem = why;
+                site.app = false;
+                site.pool_key.reset();
+            } else {
+                ns.php_access_log = pools.at(pool.key)->access_log();
+                ns.request_log = request_log_file(work_, kSharedSiteName);
+                site.address = "http";
+                shared_spec = std::move(ns);
+            }
+        }
+        sites[std::string(kSharedSiteName)] = site;
+    }
+
+    if (serve.empty() && !shared_spec) {
         stop_nginx_locked();  // nothing to serve: free the ports and the memory
         pools_ = std::move(pools);
         replace_apps_locked(std::move(apps));
@@ -545,9 +652,14 @@ void WebService::reload_locked() {
         }
     }
     for (auto& [name, site] : sites) {
-        if (!site.address.empty()) {
+        if (name == kSharedSiteName) {
+            site.address = site.address.empty() ? std::string() : shared_address(*ports_);
+        } else if (!site.address.empty()) {
             site.address = site_address(name, *ports_, site.address == "https");
         }
+    }
+    if (shared_spec) {
+        write_shared_list_locked(*plan.shared, *app);
     }
 
     NginxSpec spec;
@@ -563,6 +675,16 @@ void WebService::reload_locked() {
     for (NginxSite& site : spec.sites) {
         site.request_log = request_log_file(work_, site.name);
     }
+    if (shared_spec) {
+        for (const Project& p : app->projects) {
+            const bool served = std::any_of(spec.sites.begin(), spec.sites.end(),
+                                            [&p](const NginxSite& s) { return s.name == p.name; });
+            if (!served) {
+                shared_spec->reserved.push_back(p.name);
+            }
+        }
+    }
+    spec.shared = std::move(shared_spec);
     // The id comes from the config itself, so the same config has the same
     // id and an unchanged one still compares equal.
     auto text = make_nginx_config(spec, error);
@@ -769,6 +891,7 @@ json WebService::status_locked() const {
         apps[name] = r->describe();
     }
     json sites = json::object();
+    json shared = nullptr;
     for (const auto& [name, s] : sites_) {
         json j = json::object();
         if (!s.address.empty()) {
@@ -802,7 +925,11 @@ json WebService::status_locked() const {
         if (!s.problem.empty()) {
             j["problem"] = s.problem;
         }
-        sites[name] = std::move(j);
+        if (name == kSharedSiteName) {
+            shared = std::move(j);
+        } else {
+            sites[name] = std::move(j);
+        }
     }
     json nginx = {{"running", nginx_ != nullptr}, {"version", nginx_version_}, {"tls", tls_}};
     if (nginx_) {
@@ -819,6 +946,8 @@ json WebService::status_locked() const {
                 {"pools", pools},
                 {"apps", apps},
                 {"sites", sites},
+                // Shared sites (D19): null when they're off.
+                {"shared", shared},
                 // How long a project waits for a request before it sleeps (the window says it).
                 {"idle_after_s", config_.idle_after.count()}};
     if (!error_.empty()) {

@@ -17,6 +17,7 @@
 #include "floserver/core/project_service.h"
 #include "floserver/core/protocol.h"
 #include "floserver/core/request_log.h"
+#include "floserver/core/shared_sites.h"
 #include "floserver/core/runtime_service.h"
 #include "floserver/core/trust_store.h"
 #include "floserver/core/database_service.h"
@@ -275,9 +276,26 @@ struct Service {
             }
             return result ? protocol::make_result(r.id, *result) : protocol::make_error(r.id, refusal.code, refusal.message);
         }
+        if (r.method == "shared.get" || r.method == "shared.set") {
+            // Shared sites (D19): the settings, the folders and how they run.
+            if (r.method == "shared.get") {
+                result = projects->shared(refusal);
+            } else {
+                result = projects->set_shared(r.params.is_object() ? r.params : json::object(), refusal);
+                if (result && databases) {
+                    (void)databases->reload();
+                }
+            }
+            if (result && web) {
+                const json status = r.method == "shared.set" ? web->reload() : web->status();
+                const json& run = status.value("shared", json());
+                (*result)["status"] = run.is_object() ? run : json(nullptr);
+            }
+            return result ? protocol::make_result(r.id, *result) : protocol::make_error(r.id, refusal.code, refusal.message);
+        }
         if (r.method == "projects.log") {
-            // Only a registered project's log, never a path from the request.
-            if (!projects->folder(name, refusal)) {
+            // Only a registered project's log (or shared sites'), never a path from the request.
+            if (name != core::kSharedSiteName && !projects->folder(name, refusal)) {
                 return protocol::make_error(r.id, refusal.code, refusal.message);
             }
             std::size_t lines = 50;
@@ -531,7 +549,8 @@ struct Service {
                 reply = runtime_request(*request);
             } else if (request->method == "projects.list" || request->method == "projects.add" ||
                        request->method == "projects.remove" || request->method == "projects.set" ||
-                       request->method == "projects.use" || request->method == "projects.log") {
+                       request->method == "projects.use" || request->method == "projects.log" ||
+                       request->method == "shared.get" || request->method == "shared.set") {
                 reply = project_request(*request);
             } else if (request->method == "certs.status" || request->method == "certs.ensure_ca" ||
                        request->method == "certs.remove") {

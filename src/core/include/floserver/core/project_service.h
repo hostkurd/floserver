@@ -51,6 +51,17 @@ public:
     [[nodiscard]] std::optional<nlohmann::json> use(const std::string& name, const std::string& key,
                                                     const std::optional<std::string>& value, ServiceRefusal& refusal);
 
+    // Shared sites (D19): the settings and the www folder's folders:
+    //   {"on", "dir", "default_dir"?, "php"?, "web": "apache"|"nginx", "database"?,
+    //    "folders": [{"name", "kind": "php"|"static"|"node"|"python"|"empty", "host", "clash"?}]}
+    [[nodiscard]] std::optional<nlohmann::json> shared(ServiceRefusal& refusal) const;
+
+    // Changes some of {"on", "dir", "php", "web", "database"} (null resets
+    // dir, php and database to their defaults). Turning them on makes the
+    // default www folder when it isn't there; another folder must exist.
+    // The reply is shared()'s.
+    [[nodiscard]] std::optional<nlohmann::json> set_shared(const nlohmann::json& changes, ServiceRefusal& refusal);
+
     // The registered folder of a project, or nothing.
     [[nodiscard]] std::optional<std::filesystem::path> folder(const std::string& name, ServiceRefusal& refusal) const;
 
@@ -58,6 +69,7 @@ private:
     [[nodiscard]] std::optional<AppConfig> load(ServiceRefusal& refusal) const;
     [[nodiscard]] bool save(const AppConfig& config, ServiceRefusal& refusal) const;
     [[nodiscard]] nlohmann::json describe(const AppConfig& config, const std::string& name) const;
+    [[nodiscard]] std::optional<nlohmann::json> describe_shared(const AppConfig& config, ServiceRefusal& refusal) const;
 
     std::filesystem::path data_dir_;
     mutable std::mutex mutex_;  // one change at a time: load, change, save
