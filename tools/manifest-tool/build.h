@@ -46,6 +46,16 @@ struct BuildResult {
 
 [[nodiscard]] BuildResult build_manifest(std::string_view report_json, const BuildOptions& options);
 
+// A path on the CDN, <runtime>/<version>/<file>, read by the catalog's rules.
+struct CdnPath {
+    std::string runtime;
+    std::string version;
+    std::string file;
+    bool listable = false;  // the list can carry it
+    std::string problem;    // why not, when it can't ("<path>: ...")
+};
+[[nodiscard]] CdnPath describe_cdn_path(std::string_view path);
+
 // "YYYY-MM-DDTHH:MM:SSZ"
 [[nodiscard]] std::string format_utc_time(std::chrono::sys_seconds t);
 

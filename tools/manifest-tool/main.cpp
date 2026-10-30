@@ -16,6 +16,7 @@
 // Keep the file on an offline machine.
 
 #include "build.h"
+#include "signing.h"
 #include "templates_json.h"
 #include "floserver/core/builtin.h"
 #include "floserver/core/encoding.h"
@@ -159,25 +160,8 @@ bool write_new_private_file(const fs::path& file, std::string_view content) {
 #endif
 }
 
-bool is_key_id(std::string_view id) {
-    return !id.empty() && id.size() <= 32 && std::all_of(id.begin(), id.end(), [](char c) {
-        return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
-    });
-}
-
-// The secret key file has two lines: the key id, then the 32-byte seed in
-// base64. Plain text, so no parser keeps copies of the seed.
-struct SecretKey {
-    std::string id;
-    std::array<std::uint8_t, 64> secret{};  // monocypher's seed + public key
-    std::array<std::uint8_t, 32> public_key{};
-    SecretKey() = default;
-    SecretKey(const SecretKey&) = delete;
-    SecretKey& operator=(const SecretKey&) = delete;
-    SecretKey(SecretKey&&) = delete;
-    SecretKey& operator=(SecretKey&&) = delete;
-    ~SecretKey() { crypto_wipe(secret.data(), secret.size()); }
-};
+using floserver::manifest_tool::is_key_id;
+using floserver::manifest_tool::SecretKey;
 
 bool load_secret(const fs::path& file, SecretKey& key) {
     auto read = read_file(file);
@@ -185,25 +169,10 @@ bool load_secret(const fs::path& file, SecretKey& key) {
         std::cerr << "Can't read the secret key file.\n";
         return false;
     }
-    WipedString text(std::move(*read));
-    const std::string& t = text.get();
-    const std::size_t nl = t.find('\n');
-    const std::size_t end = nl == std::string::npos ? nl : t.find('\n', nl + 1);
-    if (nl == std::string::npos || end == std::string::npos || end + 1 != t.size()) {
+    if (!floserver::manifest_tool::parse_secret_key(*read, key)) {  // wipes *read
         std::cerr << "The secret key file is damaged.\n";
         return false;
     }
-    const std::string id = t.substr(0, nl);
-    auto seed = from_base64(std::string_view(t).substr(nl + 1, end - nl - 1));
-    if (!is_key_id(id) || !seed || seed->size() != 32) {
-        if (seed) {
-            crypto_wipe(seed->data(), seed->size());
-        }
-        std::cerr << "The secret key file is damaged.\n";
-        return false;
-    }
-    key.id = id;
-    crypto_ed25519_key_pair(key.secret.data(), key.public_key.data(), seed->data());  // wipes seed
     return true;
 }
 
@@ -241,31 +210,16 @@ int sign(const fs::path& manifest_file, const fs::path& key_file) {
     if (!load_secret(key_file, key)) {
         return 1;
     }
-    std::array<std::uint8_t, 64> signature{};
-    crypto_ed25519_sign(signature.data(), key.secret.data(),
-                        reinterpret_cast<const std::uint8_t*>(bytes->data()), bytes->size());
-
-    // Check what we're about to publish opens, so a bad file never ships.
-    ManifestCheck check;
-    check.trusted_keys = {{key.id, key.public_key}};
-    check.now = std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
-    const std::string sig_file =
-        nlohmann::json{{"key", key.id}, {"signature", to_base64(signature)}}.dump() + "\n";
-    const auto result = open_manifest(*bytes, sig_file, check);
-    if (!result.manifest) {
-        std::cerr << "Not signed: " << result.message << "\n";
-        return 1;
-    }
-    if (result.manifest->expires - check.now >
-        std::chrono::days{floserver::manifest_tool::kMaxExpiryDays}) {
-        std::cerr << "Not signed: \"expires\" is more than "
-                  << floserver::manifest_tool::kMaxExpiryDays
-                  << " days ahead. A stale list must not stay valid for long.\n";
+    const auto now = std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
+    const auto result = floserver::manifest_tool::sign_manifest(*bytes, key, now);
+    if (!result.signature_file) {
+        std::cerr << result.error << "\n";
         return 1;
     }
     for (const auto& w : result.warnings) {
         std::cerr << "warning: " << w << "\n";
     }
+    const std::string& sig_file = *result.signature_file;
     fs::path out_path = manifest_file;
     out_path += ".sig";
     std::ofstream out(out_path, std::ios::binary | std::ios::trunc);
@@ -275,8 +229,8 @@ int sign(const fs::path& manifest_file, const fs::path& key_file) {
         std::cerr << "Can't write the .sig file.\n";
         return 1;
     }
-    std::cout << "Signed " << result.manifest->runtimes.size() << " runtimes, sequence "
-              << result.manifest->sequence << ".\n";
+    std::cout << "Signed " << result.runtime_count << " runtimes, sequence " << result.sequence
+              << ".\n";
     return 0;
 }
 

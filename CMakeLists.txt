@@ -33,6 +33,9 @@ add_subdirectory(src/ui-win32)
 
 if(FLOSERVER_BUILD_TOOLS)
     add_subdirectory(tools/manifest-tool)
+    if(WIN32)
+        add_subdirectory(tools/publisher)
+    endif()
 endif()
 
 if(FLOSERVER_BUILD_TESTS)
