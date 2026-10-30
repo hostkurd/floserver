@@ -703,7 +703,7 @@ json describe_server_json(json j) {
         json projects = json::array();
         bool shared = false;
         for (const json& p : j["projects"]) {
-            if (p == kSharedSiteName) {
+            if (p.is_string() && p.get<std::string>() == kSharedSiteName) {
                 shared = true;
             } else {
                 projects.push_back(p);

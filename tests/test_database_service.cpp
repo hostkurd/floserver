@@ -201,8 +201,9 @@ TEST_CASE("a project's database runs on the real MariaDB, sleeps when idle and w
         const auto servers = db.status()["servers"];
         REQUIRE(servers.size() == 1);
         CHECK(servers[0]["shared"] == true);
-        CHECK(std::find(servers[0]["projects"].begin(), servers[0]["projects"].end(), "_shared") ==
-              servers[0]["projects"].end());
+        for (const auto& name : servers[0]["projects"]) {
+            CHECK(name.get<std::string>() != "_shared");
+        }
 
         // A project from before shared sites with a www name stops the shared login.
         const fs::path old = tmp.path() / "www-blog";
