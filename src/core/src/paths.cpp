@@ -73,6 +73,8 @@ std::optional<fs::path> data_dir() {
 fs::path runtimes_dir(const fs::path& data) { return data / "runtimes"; }
 fs::path downloads_dir(const fs::path& data) { return data / "downloads"; }
 fs::path manifest_state_file(const fs::path& data) { return data / "state" / "manifest-state.json"; }
+fs::path kept_manifest_file(const fs::path& data) { return data / "state" / "manifest.json"; }
+fs::path kept_signature_file(const fs::path& data) { return data / "state" / "manifest.json.sig"; }
 
 std::string error_text(const std::error_code& ec) {
 #ifdef _WIN32

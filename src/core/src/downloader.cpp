@@ -100,6 +100,9 @@ ManifestFetch attempt(HttpTransport& transport, const ManifestSource& source, co
     if (out.manifest_error != ManifestError::None) {
         out.error = FetchError::Manifest;
         out.manifest.reset();
+    } else {
+        out.manifest_bytes = list.body;
+        out.signature_bytes = sig.body;
     }
     return out;
 }

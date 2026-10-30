@@ -145,6 +145,8 @@ private:
     };
     // Step 3 and the job not finished yet (also before its first answer).
     [[nodiscard]] bool wizard_running() const;
+    // False for a template with nothing to choose (no Versions page).
+    [[nodiscard]] bool wizard_has_versions() const;
     struct Fonts {
         win::UniqueFont title;
         win::UniqueFont panel_title;

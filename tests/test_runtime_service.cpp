@@ -1,3 +1,4 @@
+#include "floserver/core/builtin_templates.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/runtime_service.h"
 
@@ -59,14 +60,17 @@ struct World {
         return e;
     }
 
-    void publish(std::int64_t sequence) {
-        const nlohmann::json doc = {
+    void publish(std::int64_t sequence, const nlohmann::json& templates = nullptr) {
+        nlohmann::json doc = {
             {"schema", 1},
             {"sequence", sequence},
             {"expires", "2026-12-01T00:00:00Z"},
             {"runtimes",
              {entry("php", "8.5.12", php85), entry("php", "8.4.27", php84),
               entry("php", "8.5.12", php85, "linux-x64"), composer()}}};
+        if (!templates.is_null()) {
+            doc["templates"] = templates;
+        }
         const std::string bytes = doc.dump();
         transport->serve(kSource.manifest_url, {200, bytes});
         transport->serve(kSource.signature_url, {200, kKey.sign(bytes, kKeyId)});
@@ -310,4 +314,107 @@ TEST_CASE("waiting installs are capped") {
     }
     CHECK(accepted == 16);
     CHECK(refusal.code == "busy");
+}
+
+TEST_CASE("templates work offline: the kept signed list, else the built-in ones") {
+    World w;
+    // The signed list carries only the static-site template, so it can be
+    // told apart from the eight built-in ones.
+    const auto builtin = nlohmann::json::parse(kBuiltInTemplatesJson);
+    nlohmann::json one = nlohmann::json::array();
+    for (const auto& t : builtin) {
+        if (t["id"] == "static-site") {
+            one.push_back(t);
+        }
+    }
+    REQUIRE(one.size() == 1);
+    auto config = w.config();
+    config.builtin_templates_json = std::string(kBuiltInTemplatesJson);
+
+    SUBCASE("first run offline: the built-in templates") {
+        RuntimeService s(config, w.transport);  // the transport serves nothing
+        std::string error;
+        const auto list = s.templates(error);
+        REQUIRE_MESSAGE(list, error);
+        CHECK(list->size() == builtin.size());
+        CHECK(s.templates(error, false)->size() == builtin.size());
+    }
+
+    SUBCASE("online once, then offline: the kept list") {
+        w.publish(3, one);
+        {
+            RuntimeService s(config, w.transport);
+            std::string error;
+            const auto list = s.templates(error);
+            REQUIRE_MESSAGE(list, error);
+            CHECK(list->size() == 1);
+        }
+        CHECK(fs::exists(kept_manifest_file(w.tmp.path())));
+        CHECK(fs::exists(kept_signature_file(w.tmp.path())));
+
+        auto offline = std::make_shared<FakeTransport>();
+        auto later = config;
+        // Long after the kept list expired: its templates still serve.
+        later.now = [] { return *parse_utc_time("2027-06-01T00:00:00Z"); };
+        RuntimeService s(later, offline);
+        std::string error;
+        auto list = s.templates(error);
+        REQUIRE_MESSAGE(list, error);
+        CHECK(list->size() == 1);
+        CHECK(list->front().id == "static-site");
+        // A project job (no fetch) gets the same.
+        list = s.templates(error, false);
+        REQUIRE(list);
+        CHECK(list->size() == 1);
+    }
+
+    SUBCASE("a damaged kept pair is ignored") {
+        w.publish(3, one);
+        {
+            RuntimeService s(config, w.transport);
+            std::string error;
+            REQUIRE(s.templates(error));
+        }
+        std::string error;
+        REQUIRE(write_file_atomically(kept_signature_file(w.tmp.path()), "{}", error));
+        RuntimeService s(config, std::make_shared<FakeTransport>());
+        const auto list = s.templates(error);
+        REQUIRE(list);
+        CHECK(list->size() == builtin.size());
+    }
+
+    SUBCASE("a list without templates falls back too") {
+        w.publish(2);
+        RuntimeService s(config, w.transport);
+        std::string error;
+        const auto list = s.templates(error);
+        REQUIRE(list);
+        CHECK(list->size() == builtin.size());
+    }
+
+    SUBCASE("offline after a fetch: the list in hand, as a project job sees it") {
+        w.publish(3, one);
+        auto fresh_always = config;
+        fresh_always.list_max_age = minutes{0};  // every call asks the CDN again
+        RuntimeService s(fresh_always, w.transport);
+        std::string error;
+        REQUIRE(s.templates(error)->size() == 1);
+        // The CDN goes away; the kept pair goes too, so only the list in
+        // hand can give the signed templates.
+        w.transport->serve(kSource.manifest_url, {0, "", "offline"});
+        fs::remove(kept_manifest_file(w.tmp.path()));
+        const auto wizard = s.templates(error, true);
+        const auto job = s.templates(error, false);
+        REQUIRE(wizard);
+        REQUIRE(job);
+        CHECK(wizard->size() == 1);
+        CHECK(job->size() == 1);
+    }
+
+    SUBCASE("nothing at all: an error") {
+        RuntimeService s(w.config(), nullptr);
+        std::string error;
+        CHECK_FALSE(s.templates(error));
+        CHECK(error.find("internet") != std::string::npos);
+    }
 }

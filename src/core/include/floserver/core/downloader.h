@@ -55,6 +55,9 @@ struct ManifestFetch {
     std::string message;                // plain English for logs and the UI
     std::vector<std::string> warnings;  // entries open_manifest() skipped
     bool clock_wrong = false;           // the server's clock disagrees with ours by more than an hour
+    // The two files as received, when the list opened (kept for offline use).
+    std::string manifest_bytes;
+    std::string signature_bytes;
 };
 
 struct ManifestFetchOptions {

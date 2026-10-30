@@ -28,6 +28,9 @@ namespace floserver::core {
 [[nodiscard]] std::filesystem::path runtimes_dir(const std::filesystem::path& data);
 [[nodiscard]] std::filesystem::path downloads_dir(const std::filesystem::path& data);
 [[nodiscard]] std::filesystem::path manifest_state_file(const std::filesystem::path& data);
+// The last signed runtime list with templates, kept for offline use (D9).
+[[nodiscard]] std::filesystem::path kept_manifest_file(const std::filesystem::path& data);
+[[nodiscard]] std::filesystem::path kept_signature_file(const std::filesystem::path& data);
 
 // path(std::string) reads the ANSI code page on Windows; these always use UTF-8.
 [[nodiscard]] std::filesystem::path path_from_utf8(std::string_view text);

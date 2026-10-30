@@ -122,6 +122,14 @@ std::string MainWindow::wizard_name() const {
     return win::narrow(text);
 }
 
+bool MainWindow::wizard_has_versions() const {
+    if (wizard_.step >= 2) {
+        return !wizard_.fields.empty();
+    }
+    const TemplateCard* card = wizard_card();
+    return card != nullptr && !template_fields(*card, snap_.installed, lang_).empty();
+}
+
 void MainWindow::wizard_next() {
     const TemplateCard* card = wizard_card();
     switch (wizard_.step) {
@@ -160,6 +168,11 @@ void MainWindow::wizard_next() {
             wizard_.step = 2;
             ShowWindow(name_edit_, SW_HIDE);
             SetFocus(hwnd_);
+            // Nothing to choose (a static site): no Versions page, make it now.
+            if (wizard_.fields.empty()) {
+                wizard_next();
+                return;
+            }
             break;
         }
         case 2: {
@@ -194,7 +207,14 @@ void MainWindow::wizard_back() {
         if (wizard_running()) {
             return;
         }
-        wizard_.step = 2;
+        if (!wizard_.fields.empty()) {
+            wizard_.step = 2;
+        } else {
+            wizard_.step = 1;  // there was no Versions page
+            ShowWindow(name_edit_, SW_SHOW);
+            layout();
+            SetFocus(name_edit_);
+        }
     } else if (wizard_.step == 2) {
         wizard_.step = 1;
         ShowWindow(name_edit_, SW_SHOW);
@@ -405,7 +425,8 @@ MainWindow::WizardGeometry MainWindow::wizard_geometry(HDC dc) const {
     };
     const bool running = wizard_running();
     const bool done = wizard_.step == 3 && snap_.create.state == "done";
-    const Str next_label = wizard_.step == 2 ? Str::WizardCreate
+    const bool create_now = wizard_.step == 2 || (wizard_.step == 1 && !wizard_has_versions());
+    const Str next_label = create_now ? Str::WizardCreate
                            : done           ? Str::WizardOpenProject
                            : wizard_.step == 3 ? Str::WizardClose
                                                : Str::WizardNext;
@@ -583,10 +604,14 @@ void MainWindow::paint_wizard(Canvas& c, HDC dc, bool text_pass) const {
     // The steps, the current one in the accent colour.
     {
         int x = g.steps.left;
+        const bool versions = wizard_.step == 0 || wizard_has_versions();
         for (const auto& [label, index] : {std::pair{Str::WizardStepTemplate, 0}, std::pair{Str::WizardStepName, 1},
                                            std::pair{Str::WizardStepVersions, 2}}) {
+            if (index == 2 && !versions) {
+                continue;  // a template with nothing to choose has two steps
+            }
             const std::wstring s = w(text(lang_, label));
-            const bool current = std::min(wizard_.step, 2) == index;
+            const bool current = std::min(wizard_.step, versions ? 2 : 1) == index;
             const int sw = Canvas::measure(dc, s, (current ? fonts_.button_bold : fonts_.button).get(), rtl_) + px(4);
             c.text({x, g.steps.top, x + sw, g.steps.bottom}, s, current ? fonts_.button_bold.get() : fonts_.button.get(),
                    current ? p.accent : p.text_subtle, Align::Start, false);

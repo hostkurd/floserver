@@ -1,6 +1,7 @@
 #include "floserver/core/runtime_service.h"
 
 #include "floserver/core/paths.h"
+#include "floserver/core/downloader.h"
 #include "floserver/core/runtime_store.h"
 #include "floserver/core/version.h"
 
@@ -139,6 +140,18 @@ std::optional<RuntimeService::CachedList> RuntimeService::get_list(bool refresh,
             // Not being able to store the sequence only weakens rollback
             // protection on this computer; the list itself is good, so use it.
             (void)store_last_sequence(state, fetched.key_id, fetched.manifest->sequence, store_error);
+            // Kept for offline use (the templates). The pair is checked
+            // again when read back, so a half-written pair is just ignored.
+            if (!fetched.manifest->templates.empty()) {
+                // Under offline_mutex_, so an offline read never sees half a
+                // pair; a later fallback reads this newest pair.
+                const std::lock_guard offline_lock(offline_mutex_);
+                std::string keep_error;
+                (void)(write_file_atomically(kept_manifest_file(config_.data_dir), fetched.manifest_bytes, keep_error) &&
+                       write_file_atomically(kept_signature_file(config_.data_dir), fetched.signature_bytes,
+                                             keep_error));
+                offline_.reset();
+            }
             fresh = CachedList{std::move(*fetched.manifest), std::move(fetched.key_id), std::move(fetched.warnings),
                                std::chrono::steady_clock::now()};
         } else {
@@ -202,19 +215,68 @@ json RuntimeService::list(bool refresh, bool installed_only) {
 }
 
 std::optional<std::vector<ProjectTemplate>> RuntimeService::templates(std::string& error, bool fetch) {
-    if (!fetch) {
-        const std::lock_guard lock(list_mutex_);
-        if (!list_) {
-            error = "the template list isn't loaded yet; open New project again";
-            return std::nullopt;
+    if (fetch) {
+        std::string fetch_error;  // offline is not an error here
+        if (const auto cached = get_list(false, fetch_error); cached && !cached->manifest.templates.empty()) {
+            return cached->manifest.templates;
         }
-        return list_->manifest.templates;
     }
-    const auto cached = get_list(false, error);
-    if (!cached) {
-        return std::nullopt;
+    // The list in hand, even if stale: the same one a project job reads, so
+    // the wizard and the job always agree.
+    {
+        const std::lock_guard lock(list_mutex_);
+        if (list_ && !list_->manifest.templates.empty()) {
+            return list_->manifest.templates;
+        }
     }
-    return cached->manifest.templates;
+    return offline_templates(error);
+}
+
+std::optional<std::vector<ProjectTemplate>> RuntimeService::offline_templates(std::string& error) {
+    const std::lock_guard lock(offline_mutex_);
+    if (offline_) {
+        return offline_;
+    }
+    // 1. The last signed list this computer used, signature checked again.
+    //    An expired copy still serves its templates: they only describe how
+    //    to make a project, and every runtime they need is checked against a
+    //    fresh list when it's downloaded.
+    const auto list = read_small_file(kept_manifest_file(config_.data_dir), kMaxManifestBytes);
+    const auto sig = read_small_file(kept_signature_file(config_.data_dir), kMaxSignatureBytes);
+    if (list && sig) {
+        ManifestCheck check;
+        check.trusted_keys = config_.keys;
+        check.now = config_.now();
+        check.last_sequences = load_last_sequences(manifest_state_file(config_.data_dir));
+        const json doc = json::parse(*list, nullptr, false);
+        if (doc.is_object() && doc.contains("expires") && doc["expires"].is_string()) {
+            if (const auto expires = parse_utc_time(doc["expires"].get<std::string>()); expires && check.now >= *expires) {
+                check.now = *expires - std::chrono::seconds{1};
+            }
+        }
+        if (auto opened = open_manifest(*list, *sig, check); opened.manifest && !opened.manifest->templates.empty()) {
+            offline_ = std::move(opened.manifest->templates);
+            return offline_;
+        }
+    }
+    // The built-in ones aren't kept for later while a kept pair exists: it
+    // may only have been mid-rewrite.
+    const bool kept_pair = list.has_value() || sig.has_value();
+    // 2. The templates built into FloServer.
+    const json builtin = json::parse(config_.builtin_templates_json, nullptr, false);
+    if (builtin.is_array()) {
+        std::vector<std::string> warnings;
+        auto parsed = parse_templates(builtin, warnings);
+        if (!parsed.empty()) {
+            if (kept_pair) {
+                return parsed;
+            }
+            offline_ = std::move(parsed);
+            return offline_;
+        }
+    }
+    error = "the project templates couldn't be loaded; connect to the internet and open New project again";
+    return std::nullopt;
 }
 
 std::optional<std::int64_t> RuntimeService::install(const std::string& name, const std::string& version,
