@@ -312,7 +312,8 @@ TEST_CASE("the window's shared sites: the settings without reading the www folde
     auto r = service.shared(refusal, false);
     REQUIRE_MESSAGE(r, refusal.message);
     CHECK((*r)["on"] == true);
-    CHECK((*r)["dir"].get<std::string>() == path_to_utf8(www));
+    // Windows runners' temp folder has a short name (RUNNER~1): the same folder.
+    CHECK(fs::equivalent(path_from_utf8((*r)["dir"].get<std::string>()), www));
     CHECK_FALSE(r->contains("folders"));
     r = service.set_shared({{"web", "nginx"}}, refusal, false);
     REQUIRE_MESSAGE(r, refusal.message);
