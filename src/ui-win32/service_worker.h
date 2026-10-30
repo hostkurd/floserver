@@ -57,6 +57,7 @@ struct Snapshot {
     std::vector<std::string> settled;  // change keys whose command finished (see ServiceWorker)
     std::string change_error;          // "Couldn't change shop: ..."
     std::string clipboard;             // .env lines to put on the clipboard
+    std::string added;                 // a project just added from the window
     bool quit_done = false;
     std::string quit_error;
 };
@@ -78,6 +79,8 @@ public:
     void use(const std::string& project, const std::string& key, const std::optional<std::string>& value);
     void copy_env(const std::string& project);
     void open_in_studio(const std::string& project);
+    // Adds a folder as a project (projects.add) and turns it on.
+    void add_folder(const std::string& path);
     // The project whose log is fetched; empty for none.
     void select(const std::string& project);
     void start_service();  // after NotRunning or Failed
@@ -95,7 +98,18 @@ public:
 
 private:
     struct Command {
-        enum class Kind : std::uint8_t { SetOn, SetKeep, Use, CopyEnv, OpenStudio, Select, Start, Refresh, Quit } kind;
+        enum class Kind : std::uint8_t {
+            SetOn,
+            SetKeep,
+            Use,
+            CopyEnv,
+            OpenStudio,
+            AddFolder,
+            Select,
+            Start,
+            Refresh,
+            Quit
+        } kind;
         std::string project;
         bool flag = false;
         std::string key;

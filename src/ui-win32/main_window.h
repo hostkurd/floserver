@@ -175,6 +175,7 @@ private:
     void show_field_menu(std::size_t index);
     void toggle_keep_running();
     void open_folder(const std::string& path);
+    void add_existing_folder();
     void open_terminal(const std::string& path);
     void paint_panel(Canvas& c, HDC dc, bool text_pass) const;
     void paint_switch(Canvas& c, const RECT& r, bool on, bool hover) const;

@@ -46,7 +46,7 @@ enum class Str : std::uint8_t {
     ServiceFailed,     // {0}: the reason, from the service
     ServiceStopped,    // clickable: starts it again
     ConnectionLost,
-    NoProjects,        // {0}: the command that adds one
+    NoProjects,
     NoMatches,         // {0}: the search text
     FooterCounts,      // {0} running, {1} asleep
     FooterNginx,       // {0} http port, {1} https port
@@ -83,6 +83,9 @@ enum class Str : std::uint8_t {
     Log,
     LogEmpty,
     OpenFailed,        // {0}: what couldn't be opened
+    // New project (step 5c starts with adding an existing folder).
+    AddExistingFolder,
+    AddFailed,         // {0}: the folder, {1}: the service's reason
     Count_,
 };
 
