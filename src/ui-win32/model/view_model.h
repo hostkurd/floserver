@@ -53,6 +53,8 @@ struct ProjectRow {
     std::string python;
     std::string database;  // "mariadb-11.4"
     Wants wants;
+    // What the service says is missing, as it says it: "php", "php 8.2", "nginx".
+    std::vector<std::string> missing;
 };
 
 // projects.list's result ({"projects": [...]}). Entries without a name are skipped.
@@ -137,6 +139,28 @@ struct LogLine {
 // hours, minutes and seconds of local time.
 [[nodiscard]] std::vector<LogLine> log_lines(const nlohmann::json& result,
                                              const std::function<void(std::int64_t ms, int& h, int& m, int& s)>& local);
+
+// --- downloads from the window (step 5c) ----------------------------------------
+
+struct Download {
+    std::string name;     // "php"
+    std::string version;  // "8.2", or empty for the newest
+    bool operator==(const Download&) const = default;
+};
+
+// What to install so a project can run: each missing runtime, and nginx
+// when none is installed (every project is served through it).
+[[nodiscard]] std::vector<Download> downloads_for(const ProjectRow& row, const Installed& installed);
+
+// The row's button: "Download PHP" or "Download 2 runtimes".
+[[nodiscard]] std::string download_button_text(const std::vector<Download>& downloads, Lang lang);
+
+// "php" -> "PHP", "mariadb" -> "MariaDB", "node" -> "Node.js"...
+[[nodiscard]] std::string runtime_label(std::string_view name);
+
+// A running install from jobs.get: "Downloading PHP 8.5.12… 42%",
+// "Installing PHP 8.5.12…", or empty when it's finished.
+[[nodiscard]] std::string job_progress_text(const nlohmann::json& job, Lang lang);
 
 // One log line as the Log box shows it: "19:41:02  GET  /cart  302  44 ms".
 [[nodiscard]] std::string log_text(const LogLine& line);

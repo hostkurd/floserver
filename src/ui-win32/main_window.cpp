@@ -228,7 +228,7 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
                 GetCursorPos(&pt);
                 ScreenToClient(hwnd_, &pt);
                 const Hit hit = hit_test(pt.x, pt.y);
-                const bool hand = hit.part == Part::Switch || hit.part == Part::Address ||
+                const bool hand = hit.part == Part::Switch || hit.part == Part::Address || hit.part == Part::Download ||
                                   hit.part == Part::PanelAddress || hit.part == Part::PanelKeep ||
                                   (hit.part == Part::Banner && banner().clickable);
                 SetCursor(LoadCursorW(nullptr, hand ? IDC_HAND : IDC_ARROW));
@@ -602,7 +602,8 @@ std::vector<MainWindow::RowGeometry> MainWindow::row_geometry(HDC dc) const {
         const int text_start = g.toggle.right + px(kRowPad);
 
         // From the end: the state label, then the chips while the text keeps room.
-        const int state_w = Canvas::measure(dc, w(text(lang_, state_label(row.state))), fonts_.small_bold.get(),
+        g.end = row_end(row, g.end_text);
+        const int state_w = Canvas::measure(dc, w(g.end_text), fonts_.small_bold.get(),
                                             rtl_) + px(20);
         g.state = {list.right - px(kRowPad) - state_w, mid - px(kStateH) / 2, list.right - px(kRowPad),
                    mid - px(kStateH) / 2 + px(kStateH)};
@@ -763,6 +764,9 @@ MainWindow::Hit MainWindow::hit_test(int x, int y) const {
         if (contains(g.toggle, x, y)) {
             return {Part::Switch, row, g.project};
         }
+        if (g.end == RowGeometry::End::Download && contains(g.state, x, y)) {
+            return {Part::Download, row, g.project};
+        }
         if (contains(g.address, x, y)) {
             return {Part::Address, row, g.project};
         }
@@ -817,6 +821,9 @@ void MainWindow::on_click(const Hit& clicked) {
             break;
         case Part::Address:
             open_address(hit.row);
+            break;
+        case Part::Download:
+            start_downloads(hit.row);
             break;
         case Part::Row:
             focus_ = hit.row;
@@ -1003,6 +1010,47 @@ void MainWindow::toggle(int visible_row) {
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
+MainWindow::RowGeometry::End MainWindow::row_end(const ProjectRow& row, std::string& end_text) const {
+    if (const auto it = snap_.downloads.find(row.name); it != snap_.downloads.end() && !it->second.empty()) {
+        end_text = it->second;
+        return RowGeometry::End::Progress;
+    }
+    if (installing_.contains(row.name)) {
+        const std::vector<Download> downloads = downloads_for(row, snap_.installed);
+        const std::string first =
+            downloads.empty() ? std::string() : runtime_label(downloads.front().name) +
+                                                     (downloads.front().version.empty() ? "" : " " + downloads.front().version);
+        end_text = fill(lang_, Str::Installing, {first});
+        return RowGeometry::End::Progress;
+    }
+    if (row.state == RowState::NeedsDownload && snap_.link == Link::Connected) {
+        const std::vector<Download> downloads = downloads_for(row, snap_.installed);
+        if (!downloads.empty()) {
+            end_text = download_button_text(downloads, lang_);
+            return RowGeometry::End::Download;
+        }
+    }
+    end_text = std::string(text(lang_, state_label(row.state)));
+    return RowGeometry::End::State;
+}
+
+void MainWindow::start_downloads(int visible_row) {
+    if (visible_row < 0 || visible_row >= static_cast<int>(visible_.size()) || snap_.link != Link::Connected ||
+        !worker_) {
+        return;
+    }
+    const ProjectRow& row = snap_.rows[visible_[static_cast<std::size_t>(visible_row)]];
+    const std::vector<Download> downloads = downloads_for(row, snap_.installed);
+    if (downloads.empty() || installing_.contains(row.name)) {
+        return;
+    }
+    installing_[row.name] = true;
+    ++outstanding_[ServiceWorker::install_key(row.name)];
+    change_error_.clear();
+    worker_->install(row.name, downloads);
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
 bool MainWindow::is_settled(const std::string& key) const { return !outstanding_.contains(key); }
 
 void MainWindow::settle(const std::vector<std::string>& keys) {
@@ -1018,6 +1066,8 @@ void MainWindow::settle(const std::vector<std::string>& keys) {
         const std::string rest = nl == std::string::npos ? std::string() : key.substr(nl + 1);
         if (kind == "on") {
             pending_.erase(rest);
+        } else if (kind == "install") {
+            installing_.erase(rest);
         } else if (kind == "keep") {
             pending_keep_.erase(rest);
         } else {
@@ -1320,7 +1370,13 @@ void MainWindow::paint_list(Canvas& c, HDC /*dc*/, bool text_pass) const {
             for (const RECT& chip : g.chips) {
                 c.round_rect(chip, pxf(10), p.chip);
             }
-            if (sc.border != sc.fill) {
+            if (g.end == RowGeometry::End::Download) {
+                // A button in the Needs download colours (mockup: "Download 2 runtimes").
+                const bool hot = hover_.row == index && hover_.part == Part::Download;
+                c.round_rect(g.state, pxf(4), hot ? p.row_hover : p.needs_download.fill, p.needs_download.border, border);
+            } else if (g.end == RowGeometry::End::Progress) {
+                c.round_rect(g.state, pxf(11), p.waking.fill);
+            } else if (sc.border != sc.fill) {
                 c.round_rect(g.state, pxf(11), sc.fill, sc.border, border);
             } else {
                 c.round_rect(g.state, pxf(11), sc.fill);
@@ -1343,8 +1399,10 @@ void MainWindow::paint_list(Canvas& c, HDC /*dc*/, bool text_pass) const {
         for (std::size_t k = 0; k < g.chips.size(); ++k) {
             c.text(g.chips[k], w(row.chips[k]), fonts_.caption.get(), p.chip_text, Align::Center, true);
         }
-        c.text(g.state, w(text(lang_, state_label(row.state))), fonts_.small_bold.get(), sc.text, Align::Center,
-               false);
+        const Rgb end_color = g.end == RowGeometry::End::Download   ? p.needs_download.text
+                              : g.end == RowGeometry::End::Progress ? p.waking.text
+                                                                    : sc.text;
+        c.text(g.state, w(g.end_text), fonts_.small_bold.get(), end_color, Align::Center, false);
     }
 
     if (!text_pass) {

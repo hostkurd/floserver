@@ -86,6 +86,12 @@ enum class Str : std::uint8_t {
     // New project (step 5c starts with adding an existing folder).
     AddExistingFolder,
     AddFailed,         // {0}: the folder, {1}: the service's reason
+    // Downloads from the window (step 5c).
+    DownloadOne,       // {0}: "PHP 8.2"
+    DownloadMany,      // {0}: how many
+    Downloading,       // {0}: "PHP 8.5.12", {1}: "42%" or empty
+    Installing,        // {0}: "PHP 8.5.12"
+    DownloadFailed,    // {0}: "PHP 8.2", {1}: the service's reason
     Count_,
 };
 

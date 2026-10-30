@@ -17,6 +17,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -53,6 +54,8 @@ struct Snapshot {
     Installed installed;
     nlohmann::json databases;   // databases.list's result, or null
     PanelData panel;
+    // Projects with installs running from the window: the progress line.
+    std::map<std::string, std::string> downloads;
     // Taken once by the UI:
     std::vector<std::string> settled;  // change keys whose command finished (see ServiceWorker)
     std::string change_error;          // "Couldn't change shop: ..."
@@ -81,6 +84,8 @@ public:
     void open_in_studio(const std::string& project);
     // Adds a folder as a project (projects.add) and turns it on.
     void add_folder(const std::string& path);
+    // Installs what a project needs (runtimes.install) and follows the jobs.
+    void install(const std::string& project, const std::vector<Download>& downloads);
     // The project whose log is fetched; empty for none.
     void select(const std::string& project);
     void start_service();  // after NotRunning or Failed
@@ -89,6 +94,7 @@ public:
 
     [[nodiscard]] static std::string on_key(const std::string& project) { return "on\n" + project; }
     [[nodiscard]] static std::string keep_key(const std::string& project) { return "keep\n" + project; }
+    [[nodiscard]] static std::string install_key(const std::string& project) { return "install\n" + project; }
     [[nodiscard]] static std::string use_key(const std::string& project, const std::string& key) {
         return "use\n" + project + "\n" + key;
     }
@@ -105,6 +111,7 @@ private:
             CopyEnv,
             OpenStudio,
             AddFolder,
+            Install,
             Select,
             Start,
             Refresh,
@@ -114,6 +121,7 @@ private:
         bool flag = false;
         std::string key;
         std::optional<std::string> value;
+        std::vector<Download> downloads;
     };
 
     void push(Command command);

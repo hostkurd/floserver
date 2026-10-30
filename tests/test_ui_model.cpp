@@ -403,3 +403,43 @@ TEST_CASE("the .env lines for the clipboard") {
     CHECK(env_text(login) == "DB_TYPE=mysql\r\nDB_NAME=my_shop\r\n");
     CHECK(env_text(json::object()).empty());
 }
+
+TEST_CASE("a row's downloads: what's missing, plus nginx when none is installed") {
+    ProjectRow row;
+    row.missing = {"php", "mariadb 11.4", "php", "bad name", "x 1;rm"};
+    Installed installed;
+    auto d = downloads_for(row, installed);
+    REQUIRE(d.size() == 3);
+    CHECK(d[0] == Download{"php", ""});
+    CHECK(d[1] == Download{"mariadb", "11.4"});
+    CHECK(d[2] == Download{"nginx", ""});
+    CHECK(download_button_text(d, Lang::En) == "Download 3 runtimes");
+
+    installed["nginx"] = {"1.30.6"};
+    row.missing = {"php 8.2"};
+    d = downloads_for(row, installed);
+    REQUIRE(d.size() == 1);
+    CHECK(download_button_text(d, Lang::En) == "Download PHP 8.2");
+
+    row.missing.clear();
+    CHECK(downloads_for(row, installed).empty());
+}
+
+TEST_CASE("install progress from jobs.get") {
+    CHECK(job_progress_text({{"state", "downloading"}, {"name", "php"}, {"version", "8.5.12"}, {"received", 50},
+                             {"total", 200}},
+                            Lang::En) == "Downloading PHP 8.5.12… 25%");
+    CHECK(job_progress_text({{"state", "queued"}, {"name", "nginx"}}, Lang::En) == "Installing nginx…");
+    CHECK(job_progress_text({{"state", "installing"}, {"name", "mariadb"}, {"version", "11.4.13"}}, Lang::En) ==
+          "Installing MariaDB 11.4.13…");
+    CHECK(job_progress_text({{"state", "done"}, {"name", "php"}}, Lang::En).empty());
+    CHECK(job_progress_text(json::object(), Lang::En).empty());
+}
+
+TEST_CASE("rows keep what's missing as the service said it") {
+    const auto rows = rows_from_list(
+        one({{"name", "x"}, {"on", true}, {"state", "needs_download"}, {"missing", json::array({"php", "nginx"})}}),
+        Lang::En);
+    REQUIRE(rows.size() == 1);
+    CHECK(rows[0].missing == std::vector<std::string>{"php", "nginx"});
+}
