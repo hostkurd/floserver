@@ -329,8 +329,10 @@ OfficialSource official_source(std::string_view path) {
         s.name = "cpython-" + v + "+" + p.file.substr(head.size());
         s.urls = {"https://github.com/astral-sh/python-build-standalone/releases/download/" + date +
                   "/SHA256SUMS"};
+    } else if (p.runtime == "apache") {
+        // Apache Lounge publishes no checksum list.
+        s.kind = Kind::ByHand;
     }
-    // apache: Apache Lounge publishes no checksum list.
     return s;
 }
 
@@ -485,7 +487,11 @@ void check_file(CheckContext& ctx, PublishFile& file) {
         }
     }
 
-    if (source.kind == OfficialSource::Kind::ByHand) {
+    if (source.kind == OfficialSource::Kind::Unknown) {
+        file.state = CheckState::Failed;
+        file.detail = "FloServer Publisher doesn't know where this runtime's official checksums are; "
+                      "add it to official_source() in tools/manifest-tool/publish.cpp.";
+    } else if (source.kind == OfficialSource::Kind::ByHand) {
         // Only a project that publishes no checksum at all (Apache Lounge).
         file.state = CheckState::ByHand;
         file.detail = "Its project publishes no checksum list. Compare its SHA-256 with the one on its "

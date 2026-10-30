@@ -156,6 +156,23 @@ BOOL CALLBACK set_font(HWND child, LPARAM font) {
     return TRUE;
 }
 
+// A folder in Documents\FloServer Publisher holding a list with this sequence.
+std::optional<fs::path> made_before(std::int64_t sequence) {
+    const fs::path base = documents_folder() / L"FloServer Publisher";
+    const std::wstring tag = L" sequence " + std::to_wstring(sequence);
+    std::error_code ec;
+    for (fs::directory_iterator it(base, ec), end; !ec && it != end; it.increment(ec)) {
+        const std::wstring name = it->path().filename().wstring();
+        const auto at = name.find(tag);
+        const std::size_t after = at == std::wstring::npos ? at : at + tag.size();
+        if (at != std::wstring::npos && (after == name.size() || name[after] == L' ') &&
+            fs::exists(it->path() / L"manifest.json.sig")) {
+            return it->path();
+        }
+    }
+    return std::nullopt;
+}
+
 class Publisher {
 public:
     Publisher() = default;
@@ -1203,8 +1220,10 @@ void Publisher::publish() {
         return;
     }
     if (!live_notes_.empty()) {
-        MessageBoxW(hwnd_, widen(live_notes_.front() + ". FloServer Publisher only carries over runtimes on the CDN; "
-                                 "publish this list with floserver-manifest.").c_str(),
+        MessageBoxW(hwnd_,
+                    widen("The live list has a runtime that isn't on the CDN (" + live_notes_.front() +
+                          "). FloServer Publisher only makes lists whose runtimes are all on the CDN; "
+                          "make this one with floserver-manifest.").c_str(),
                     L"Not published", MB_OK | MB_ICONWARNING);
         return;
     }
@@ -1213,10 +1232,23 @@ void Publisher::publish() {
         MessageBoxW(hwnd_,
                     (L"Sequence " + std::to_wstring(signed_sequence_) +
                      L" was already made in this window. Upload it and invalidate, then press Check live; it "
-                     L"must show that sequence before the next one is made.")
+                     L"must show that sequence before the next one is made.\n\nIf you won't upload it, delete "
+                     L"its folder in Documents\\FloServer Publisher and open the Publisher again.")
                         .c_str(),
                     L"Not published", MB_OK | MB_ICONWARNING);
         return;
+    }
+    // Also made in an earlier window? Two different lists must never both get out.
+    if (const auto earlier = made_before(live_->sequence + 1)) {
+        const std::wstring q =
+            L"A list with sequence " + std::to_wstring(live_->sequence + 1) + L" was already made:\n" +
+            earlier->wstring() +
+            L"\n\nIf it was uploaded, wait for the invalidation and press Check live instead. Make a new one "
+            L"only if that list was never uploaded, and delete its folder afterwards.\n\nMake a new one anyway?";
+        if (MessageBoxW(hwnd_, q.c_str(), L"FloServer Publisher", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) !=
+            IDYES) {
+            return;
+        }
     }
     const mt::SuccessorCheck successor = mt::check_successor(*live_, mt::kBuiltInTemplates, now_utc());
     if (!successor.stop.empty()) {

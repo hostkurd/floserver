@@ -89,7 +89,8 @@ struct AddResult {
 
 // Where the official checksum comes from.
 struct OfficialSource {
-    enum class Kind : std::uint8_t { Sums, Original, ByHand } kind = Kind::ByHand;
+    // Unknown: a runtime with no source set here yet; its files fail.
+    enum class Kind : std::uint8_t { Unknown, Sums, Original, ByHand } kind = Kind::Unknown;
     std::vector<std::string> urls;  // checksum lists to try in order, or the original file
     std::string name;               // the file's name in the checksum list
 };

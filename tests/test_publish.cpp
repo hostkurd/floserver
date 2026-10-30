@@ -245,6 +245,7 @@ TEST_CASE("publisher: nginx and WordPress are compared with their original downl
                          "https://github.com/astral-sh/python-build-standalone/releases/download/20261120/SHA256SUMS"});
     CHECK(official_source("apache/2.4.69/httpd-2.4.69-261002-Win64-VS18.zip").kind ==
           OfficialSource::Kind::ByHand);
+    CHECK(official_source("ruby/3.4.0/ruby.zip").kind == OfficialSource::Kind::Unknown);
 }
 
 TEST_CASE("publisher: official checksums are read from the usual list formats") {
