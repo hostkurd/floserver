@@ -663,7 +663,7 @@ std::uint32_t colour_of(const std::string& hex) {
 
 std::string text_in(const json& texts, Lang lang) {
     const char* code = lang == Lang::Ar ? "ar" : lang == Lang::Ku ? "ku" : "en";
-    std::string out = text_of(texts, code);
+    const std::string out = text_of(texts, code);
     return out.empty() ? text_of(texts, "en") : out;
 }
 

@@ -530,7 +530,9 @@ void TemplateService::run(const std::shared_ptr<Job>& job, const CreateRequest& 
     // 5. floserver.json: the template's keys over whatever the steps wrote.
     const fs::path config_file = dir / path_from_utf8(kProjectConfigFileName);
     if (fs::exists(config_file, ec)) {
-        for (const auto& [key, value] : nlohmann::ordered_json::parse(config_text).items()) {
+        // Kept in a variable: items() of a temporary would outlive it.
+        const nlohmann::ordered_json wanted = nlohmann::ordered_json::parse(config_text, nullptr, false);
+        for (const auto& [key, value] : wanted.items()) {
             const auto parsed_key = parse_config_key(key);
             if (parsed_key && value.is_string() &&
                 !set_project_config_file_value(dir, *parsed_key, key, value.get<std::string>(), error)) {
