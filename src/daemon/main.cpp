@@ -15,6 +15,7 @@
 #include "floserver/core/process.h"
 #include "floserver/core/project_service.h"
 #include "floserver/core/protocol.h"
+#include "floserver/core/request_log.h"
 #include "floserver/core/runtime_service.h"
 #include "floserver/core/trust_store.h"
 #include "floserver/core/database_service.h"
@@ -225,7 +226,7 @@ struct Service {
         if (r.method == "runtimes.list") {
             const bool refresh = r.params.contains("refresh") && r.params["refresh"].is_boolean() &&
                                  r.params["refresh"].get<bool>();
-            return protocol::make_result(r.id, runtimes->list(refresh));
+            return protocol::make_result(r.id, runtimes->list(refresh, bool_param(r.params, "installed_only").value_or(false)));
         }
         if (r.method == "runtimes.install") {
             const auto id = runtimes->install(string_param(r.params, "name"), string_param(r.params, "version"),
@@ -270,6 +271,26 @@ struct Service {
             }
             return result ? protocol::make_result(r.id, *result) : protocol::make_error(r.id, refusal.code, refusal.message);
         }
+        if (r.method == "projects.log") {
+            // Only a registered project's log, never a path from the request.
+            if (!projects->folder(name, refusal)) {
+                return protocol::make_error(r.id, refusal.code, refusal.message);
+            }
+            std::size_t lines = 50;
+            if (r.params.contains("lines") && r.params["lines"].is_number_unsigned()) {
+                lines = std::min<std::size_t>(r.params["lines"].get<std::size_t>(), core::kRequestLogMaxEntries);
+            }
+            json entries = json::array();
+            for (const core::RequestLogEntry& e :
+                 core::read_request_log(core::request_log_file(core::web_dir(data.value_or(std::filesystem::path())), name), lines)) {
+                entries.push_back({{"t", e.time_ms},
+                                   {"status", e.status},
+                                   {"ms", e.duration_ms},
+                                   {"method", e.method},
+                                   {"uri", e.uri}});
+            }
+            return protocol::make_result(r.id, {{"entries", std::move(entries)}});
+        }
         if (r.method == "projects.add") {
             const std::filesystem::path dir = core::path_from_utf8(string_param(r.params, "path"));
             if (!dir.is_absolute()) {
@@ -279,7 +300,20 @@ struct Service {
         } else if (r.method == "projects.remove") {
             if (projects->remove(name, refusal)) {
                 result = json::object();
+                // Its request log goes too, so a new project with the name starts empty.
+                if (data) {
+                    std::error_code ec;
+                    std::filesystem::remove(core::request_log_file(core::web_dir(*data), name), ec);
+                }
             }
+        } else if (r.method == "projects.use") {
+            std::optional<std::string> value;
+            if (r.params.contains("value") && r.params["value"].is_string()) {
+                value = r.params["value"].get<std::string>();
+            } else if (r.params.contains("value") && !r.params["value"].is_null()) {
+                return protocol::make_error(r.id, "bad_params", "value is a string, or null to remove the key");
+            }
+            result = projects->use(name, string_param(r.params, "key"), value, refusal);
         } else {  // projects.set
             result = projects->set(name, bool_param(r.params, "on"), bool_param(r.params, "keep_running"), refusal);
         }
@@ -439,7 +473,8 @@ struct Service {
                        request->method == "jobs.cancel") {
                 reply = runtime_request(*request);
             } else if (request->method == "projects.list" || request->method == "projects.add" ||
-                       request->method == "projects.remove" || request->method == "projects.set") {
+                       request->method == "projects.remove" || request->method == "projects.set" ||
+                       request->method == "projects.use" || request->method == "projects.log") {
                 reply = project_request(*request);
             } else if (request->method == "certs.status" || request->method == "certs.ensure_ca" ||
                        request->method == "certs.remove") {

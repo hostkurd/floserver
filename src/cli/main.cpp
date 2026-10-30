@@ -628,32 +628,10 @@ int use(const std::vector<std::string>& args) {
         file = floserver::core::find_project_config(here).value_or(here / name);
     }
 
-    nlohmann::ordered_json doc = nlohmann::ordered_json::object();
-    std::error_code ec;
-    if (fs::exists(file, ec)) {
-        const auto text = floserver::core::read_small_file(file, std::size_t{64} * 1024);
-        if (text) {
-            doc = nlohmann::ordered_json::parse(*text, nullptr, false);
-        }
-        if (!text || doc.is_discarded() || !doc.is_object()) {
-            std::cerr << shown(file) << " isn't valid; fix it first (flo check shows what's wrong).\n";
-            return 1;
-        }
-    }
-    if (args[1] == "mariadb") {
-        doc["database"] = "mariadb-" + version->to_string();
-    } else {
-        doc[args[1]] = version->to_string();
-    }
-    const std::string out = doc.dump(2, ' ', false, nlohmann::ordered_json::error_handler_t::replace) + "\n";
-    const auto parsed = parse_project_config(out);
-    if (!parsed.config) {
-        std::cerr << shown(file) << " has an error; fix it first (flo check shows what's wrong).\n";
-        return 1;
-    }
     std::string error;
-    if (!floserver::core::write_file_atomically(file, out, error)) {
-        std::cerr << error << "\n";
+    const auto key = floserver::core::parse_config_key(args[1]);
+    if (!key || !floserver::core::set_project_config_file_value(file.parent_path(), *key, args[1], args[2], error)) {
+        std::cerr << shown(file) << ": " << error << "\n";
         return 1;
     }
     std::cout << shown(file) << ": " << args[1] << " " << version->to_string() << "\n";

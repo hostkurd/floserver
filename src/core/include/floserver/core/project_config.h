@@ -74,4 +74,28 @@ find_project_config(const std::filesystem::path& start);
 
 inline constexpr std::string_view kProjectConfigFileName = "floserver.json";
 
+// The keys the window and `flo use` change one at a time.
+enum class ConfigKey : std::uint8_t { Php, Node, Python, Database, Web };
+
+// "php", "node", "python", "database" (also "mariadb", as in `flo use
+// mariadb 11.4`), "web". Nothing for anything else.
+[[nodiscard]] std::optional<ConfigKey> parse_config_key(std::string_view name);
+
+// Sets one key in the text of a floserver.json, keeping every other key and
+// its order; nothing for `value` removes the key. Versions are checked
+// (Version::parse); "database" takes "mariadb-11.4", and "mariadb" takes the
+// version alone; "web" takes "nginx" (the default, so the key is removed) or
+// "apache". Empty text is an empty file. Returns the new text, or nothing
+// with `error` (plain English) when the old text or the new value is wrong.
+[[nodiscard]] std::optional<std::string> set_project_config_value(std::string_view text, ConfigKey key,
+                                                                  std::string_view key_name,
+                                                                  const std::optional<std::string>& value,
+                                                                  std::string& error);
+
+// The same for `dir`/floserver.json, written atomically. A missing file is
+// made; one that isn't a plain file, or is over 64 KiB, is refused.
+[[nodiscard]] bool set_project_config_file_value(const std::filesystem::path& dir, ConfigKey key,
+                                                 std::string_view key_name,
+                                                 const std::optional<std::string>& value, std::string& error);
+
 }  // namespace floserver::core

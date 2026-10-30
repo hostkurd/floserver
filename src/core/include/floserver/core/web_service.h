@@ -114,6 +114,7 @@ private:
     [[nodiscard]] std::optional<std::string> test_nginx_config(const std::string& conf_name, std::string& error) const;
     void stop_leftover_nginx() const;
     [[nodiscard]] nlohmann::json status_locked() const;
+    void trim_request_logs_locked() const;
 
     WebServiceConfig config_;
     CertStore& certs_;

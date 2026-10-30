@@ -1,8 +1,9 @@
 #pragma once
 
-// FloServer's main window (step 5a): the project list with its On/Off
-// switches, the top bar and the footer, in a tray icon's keeping (D2).
-// Everything it shows comes from floserverd through ServiceWorker.
+// FloServer's main window: the project list with its On/Off switches, the
+// top bar and the footer (step 5a), and the project panel beside the list
+// (step 5b), in a tray icon's keeping (D2). Everything it shows comes from
+// floserverd through ServiceWorker.
 
 #include "canvas.h"
 #include "model/ui_strings.h"
@@ -13,6 +14,7 @@
 #include <shellapi.h>
 
 #include <map>
+#include <optional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -34,10 +36,30 @@ public:
     [[nodiscard]] bool create(int show);
 
 private:
-    enum class Part : std::uint8_t { None, Row, Switch, Address, NewProject, Settings, Banner };
+    enum class Part : std::uint8_t {
+        None,
+        Row,
+        Switch,
+        Address,
+        NewProject,
+        Settings,
+        Banner,
+        // The project panel; `row` is the item's index where there are several.
+        PanelClose,
+        PanelAddress,
+        PanelButton,
+        PanelField,
+        PanelCopyEnv,
+        PanelKeep,
+    };
+    enum class PanelAction : std::uint8_t { Browser, Folder, Terminal, Studio };
+    [[nodiscard]] static constexpr bool is_panel_part(Part part) {
+        return part == Part::PanelClose || part == Part::PanelAddress || part == Part::PanelButton ||
+               part == Part::PanelField || part == Part::PanelCopyEnv || part == Part::PanelKeep;
+    }
     struct Hit {
         Part part = Part::None;
-        int row = -1;         // index into visible_ when it was hit
+        int row = -1;         // index into visible_ when it was hit (a panel part: its index)
         std::string project;  // the row's project: the list may change before the click ends
         bool operator==(const Hit&) const = default;
     };
@@ -51,14 +73,42 @@ private:
         RECT state{};
         std::vector<RECT> chips;  // the first chips.size() of the row's chips that fit
     };
+    // The panel's pieces, from the last paint (logical coordinates).
+    struct PanelGeometry {
+        std::string project;
+        RECT panel{};
+        RECT close{};
+        RECT title{};
+        RECT line2{};    // the address, or the folder
+        RECT address{};  // the address text itself; empty when there's nothing to open
+        std::vector<std::pair<RECT, PanelAction>> buttons;
+        RECT versions{};
+        std::vector<std::pair<RECT, RECT>> fields;  // label, box; one per fields_ entry
+        RECT saved_in{};
+        RECT db_box{};
+        RECT db_title{};
+        RECT db_detail{};
+        RECT copy_env{};  // empty when the project has no database
+        RECT keep_title{};
+        RECT keep_detail{};
+        RECT keep_switch{};
+        RECT log_label{};
+        RECT log_box{};
+    };
     struct Fonts {
         win::UniqueFont title;
+        win::UniqueFont panel_title;
+        win::UniqueFont mono;
         win::UniqueFont body;
         win::UniqueFont body_bold;
         win::UniqueFont caption;  // not "small": the Windows headers #define small
         win::UniqueFont small_bold;
         win::UniqueFont button;
         win::UniqueFont button_bold;
+    };
+    struct Notice {
+        std::string text;
+        bool error = false;
     };
     struct BannerText {
         std::string text;
@@ -101,6 +151,34 @@ private:
     [[nodiscard]] bool switch_value(const ProjectRow& row) const;
     void toggle(int visible_row);
     void open_address(int visible_row);
+    [[nodiscard]] bool is_settled(const std::string& key) const;
+    void settle(const std::vector<std::string>& keys);
+    void show_notice(std::string text, bool error);
+    void put_on_clipboard(std::string& text);
+
+    // --- the project panel (main_window_panel.cpp) ---
+    [[nodiscard]] const ProjectRow* selected_row() const;
+    [[nodiscard]] bool panel_open() const;
+    [[nodiscard]] bool panel_beside_list() const;  // else it takes the list's place
+    [[nodiscard]] RECT panel_rect() const;
+    [[nodiscard]] PanelGeometry panel_geometry(HDC dc) const;
+    [[nodiscard]] std::vector<Hit> panel_focus_order() const;
+    [[nodiscard]] Hit panel_hit_test(int x, int y) const;
+    [[nodiscard]] bool keep_value(const ProjectRow& row) const;
+    [[nodiscard]] std::size_t field_value(const VersionField& field) const;
+    void select(const std::string& project);
+    void close_panel();
+    void update_fields();
+    void on_panel_click(const Hit& hit);
+    void on_panel_key(WPARAM key);
+    void run_panel_action(PanelAction action);
+    void show_field_menu(std::size_t index);
+    void toggle_keep_running();
+    void open_folder(const std::string& path);
+    void open_terminal(const std::string& path);
+    void paint_panel(Canvas& c, HDC dc, bool text_pass) const;
+    void paint_switch(Canvas& c, const RECT& r, bool on, bool hover) const;
+    void paint_button(Canvas& c, const RECT& r, bool hover, bool focused) const;
     void show_window();
     void quit();
     void add_tray_icon();
@@ -149,9 +227,18 @@ private:
 
     std::unique_ptr<ServiceWorker> worker_;
     Snapshot snap_;
-    std::map<std::string, bool> pending_;  // switches flipped, waiting for the service
-    std::map<std::string, int> outstanding_;  // On/Off commands not yet finished, per project
+    // What the user chose, shown until the service has done it.
+    std::map<std::string, bool> pending_;       // On/Off, per project
+    std::map<std::string, bool> pending_keep_;  // Keep running, per project
+    std::map<std::string, std::optional<std::string>> pending_use_;  // ServiceWorker::use_key -> value
+    std::map<std::string, int> outstanding_;    // commands not yet finished, per ServiceWorker key
     std::string change_error_;
+    Notice notice_;  // a short message in the banner ("copied")
+
+    std::string selected_;  // the project whose panel is open
+    std::vector<VersionField> fields_;
+    mutable PanelGeometry panel_geometry_;  // from the last paint
+    int panel_focus_ = -1;  // keyboard focus among panel_focus_order(); -1: in the list
     std::string query_;
     std::vector<std::size_t> visible_;  // indexes into snap_.rows that match query_
     mutable std::vector<RowGeometry> geometry_;  // from the last paint

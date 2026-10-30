@@ -69,7 +69,7 @@ public:
 
     // Installed runtimes and the ones the list offers for this platform.
     // With `refresh`, the list is fetched again even when it's fresh.
-    [[nodiscard]] nlohmann::json list(bool refresh);
+    [[nodiscard]] nlohmann::json list(bool refresh, bool installed_only = false);
 
     // Queues an install of the newest `name` matching `version` ("8.5",
     // "8.5.12", or empty for the newest). Returns the job id; the same request

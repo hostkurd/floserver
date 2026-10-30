@@ -14,6 +14,7 @@ add_executable(floserver_tests
     test_project_registry.cpp
     test_project_service.cpp
     test_protocol.cpp
+    test_request_log.cpp
     test_runtime_service.cpp
     test_runtime_store.cpp
     test_service.cpp

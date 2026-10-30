@@ -118,7 +118,8 @@ TEST_CASE("Node projects show their version and a server that can't start") {
                                         {"node", "24.22.1"}, {"error", "npm run dev ended (exit 1)"}}})}},
         Lang::En);
     REQUIRE(rows.size() == 2);
-    CHECK(rows[0].state == RowState::On);  // starting shows as On
+    CHECK(rows[0].state == RowState::Waking);  // its own server is starting
+    CHECK(rows[0].address == "http://web.localhost");
     CHECK(rows[0].chips == std::vector<std::string>{"Node 24.22.1"});
     CHECK(rows[1].state == RowState::Problem);
     CHECK(rows[1].detail == "The project's server can't start");
@@ -253,12 +254,152 @@ TEST_CASE("colours: both themes are readable") {
         CHECK(contrast(p.accent_text, p.accent) >= 4.5);
         CHECK(contrast(p.chip_text, p.chip) >= 4.5);
         for (const RowState s :
-             {RowState::On, RowState::Asleep, RowState::Off, RowState::NeedsDownload, RowState::Problem}) {
+             {RowState::On, RowState::Asleep, RowState::Waking, RowState::Off, RowState::NeedsDownload,
+              RowState::Problem}) {
             CAPTURE(static_cast<int>(s));
             CHECK(contrast(state_colors(p, s).text, state_colors(p, s).fill) >= 4.5);
         }
         CHECK(contrast(p.banner_info.text, p.banner_info.fill) >= 4.5);
         CHECK(contrast(p.banner_error.text, p.banner_error.fill) >= 4.5);
+        CHECK(contrast(p.text, p.selected) >= 4.5);
+        CHECK(contrast(p.link, p.selected) >= 4.5);
+        CHECK(contrast(p.text_subtle, p.panel_box) >= 4.5);
+        CHECK(contrast(p.log_text, p.log) >= 4.5);
+        CHECK(contrast(p.log_subtle, p.log) >= 4.5);
     }
     CHECK(palette(false).window != palette(true).window);
+}
+
+TEST_CASE("rows carry what floserver.json asks for, and an nginx chip") {
+    const auto rows = rows_from_list(
+        one({{"name", "shop"}, {"on", true}, {"state", "ready"}, {"run", "running"}, {"php", "8.4.27"},
+             {"database", "mariadb-11.4"}, {"path", "C:/sites/shop"},
+             {"wants", {{"web", "nginx"}, {"php", "8.4"}, {"database", "mariadb-11.4"}}}}),
+        Lang::En);
+    REQUIRE(rows.size() == 1);
+    CHECK(rows[0].chips == std::vector<std::string>{"PHP 8.4.27", "MariaDB 11.4", "nginx"});
+    CHECK(rows[0].wants.known);
+    CHECK(rows[0].wants.php == "8.4");
+    CHECK(rows[0].wants.web == "nginx");
+    CHECK(rows[0].path == "C:/sites/shop");
+    CHECK(rows[0].php == "8.4.27");
+}
+
+TEST_CASE("the panel's idle time comes from web.status") {
+    const std::vector<ProjectRow> rows;
+    CHECK(footer_text(rows, nullptr, nullptr, Lang::En).idle_minutes == 0);
+    const json web = {{"idle_after_s", 600}};
+    CHECK(footer_text(rows, nullptr, &web, Lang::En).idle_minutes == 10);
+    const json quick = {{"idle_after_s", 2}};
+    CHECK(footer_text(rows, nullptr, &quick, Lang::En).idle_minutes == 1);
+}
+
+TEST_CASE("version series") {
+    CHECK(version_series("php", "8.4.27") == "8.4");
+    CHECK(version_series("php", "8.4") == "8.4");
+    CHECK(version_series("mariadb", "11.4.13") == "11.4");
+    CHECK(version_series("node", "24.22.1") == "24");
+    CHECK(version_series("node", "24") == "24");
+    CHECK(version_series("python", "3.13.18") == "3.13");
+}
+
+TEST_CASE("the panel's version pickers list what's installed and what's asked for") {
+    const Installed installed = installed_from_list(json{
+        {"installed",
+         json::array({{{"name", "php"}, {"version", "8.4.27"}},
+                      {{"name", "php"}, {"version", "8.10.1"}},
+                      {{"name", "php"}, {"version", "8.5.12"}},
+                      {{"name", "mariadb"}, {"version", "11.4.13"}},
+                      {{"name", "node"}, {"version", "22.23.4"}},
+                      {{"name", "node"}, {"version", "24.22.1"}},
+                      {{"name", "nginx"}, {"version", "1.30.6"}},
+                      {{"version", "1"}}})}});
+    CHECK(installed.at("php") == std::vector<std::string>{"8.10.1", "8.5.12", "8.4.27"});
+
+    ProjectRow row;
+    row.wants.known = true;
+    row.wants.php = "8.4";
+    row.wants.database = "mariadb-11.4";
+
+    auto fields = version_fields(row, installed, Lang::En);
+    REQUIRE(fields.size() == 4);  // no Python installed or asked for
+    const VersionField& php = fields[0];
+    CHECK(php.key == "php");
+    REQUIRE(php.choices.size() == 4);
+    CHECK(php.choices[0].label == "Newest installed");
+    CHECK_FALSE(php.choices[0].value);
+    CHECK(php.choices[1].label == "8.10");
+    CHECK(php.choices[3].value == std::optional<std::string>("8.4"));
+    CHECK(php.current == 3);
+
+    const VersionField& db = fields[1];
+    CHECK(db.key == "database");
+    REQUIRE(db.choices.size() == 2);
+    CHECK(db.choices[1].label == "MariaDB 11.4");
+    CHECK(db.choices[1].value == std::optional<std::string>("mariadb-11.4"));
+    CHECK(db.current == 1);
+
+    CHECK(fields[2].key == "web");
+    CHECK(fields[2].current == 0);
+    CHECK(fields[3].key == "node");
+    REQUIRE(fields[3].choices.size() == 3);
+    CHECK(fields[3].choices[1].label == "24");
+    CHECK(fields[3].current == 0);  // None
+
+    SUBCASE("asked for but not installed") {
+        row.wants.php = "7.4";
+        row.wants.python = "3.12";
+        row.wants.web = "apache";
+        fields = version_fields(row, installed, Lang::En);
+        REQUIRE(fields.size() == 5);
+        CHECK(fields[0].choices[fields[0].current].label == "7.4 (not installed)");
+        CHECK(fields[0].choices[fields[0].current].value == std::optional<std::string>("7.4"));
+        CHECK(fields[2].current == 1);
+        CHECK(fields[4].key == "python");
+        CHECK(fields[4].choices[fields[4].current].label == "3.12 (not installed)");
+    }
+    SUBCASE("a Node project without PHP says None for PHP") {
+        row.wants.php.clear();
+        row.wants.node = "24";
+        fields = version_fields(row, installed, Lang::En);
+        CHECK(fields[0].choices[0].label == "None");
+        CHECK(fields[0].current == 0);
+        CHECK(fields[3].choices[fields[3].current].label == "24");
+    }
+}
+
+TEST_CASE("the database port comes from databases.list") {
+    const json servers = {{"servers", json::array({{{"series", "11.4"}, {"version", "11.4.13"}, {"port", 3306}},
+                                                    {{"series", "11.8"}, {"version", "11.8.9"}, {"port", 3307}}})}};
+    CHECK(database_port(servers, "mariadb-11.8") == 3307);
+    CHECK(database_port(servers, "mariadb-11.4") == 3306);
+    CHECK(database_port(servers, "mariadb-10.6") == 0);
+    CHECK(database_port(json::object(), "mariadb-11.4") == 0);
+    CHECK(database_port(servers, "") == 0);
+}
+
+TEST_CASE("log lines use local time and short durations") {
+    const json result = {{"entries", json::array({{{"t", 1000}, {"status", 200}, {"ms", 38}, {"method", "GET"}, {"uri", "/"}},
+                                                  {{"t", 2000}, {"status", 302}, {"ms", 1250}, {"method", "POST"},
+                                                   {"uri", "/cart"}},
+                                                  {{"t", "x"}}})}};
+    const auto lines = log_lines(result, [](std::int64_t ms, int& h, int& m, int& s) {
+        h = 9;
+        m = 5;
+        s = static_cast<int>(ms / 1000);
+    });
+    REQUIRE(lines.size() == 2);
+    CHECK(lines[0].time == "09:05:01");
+    CHECK(lines[0].duration == "38 ms");
+    CHECK(log_text(lines[0]) == "09:05:01  GET  /  200  38 ms");
+    CHECK(lines[1].duration == "1.3 s");
+    CHECK(log_text(lines[1]) == "09:05:02  POST /cart  302  1.3 s");
+    CHECK(log_lines(json::array(), {}).empty());
+}
+
+TEST_CASE("the .env lines for the clipboard") {
+    const json login = {{"env", json::array({json::array({"DB_TYPE", "mysql"}), json::array({"DB_NAME", "my_shop"}),
+                                             json::array({1, 2})})}};
+    CHECK(env_text(login) == "DB_TYPE=mysql\r\nDB_NAME=my_shop\r\n");
+    CHECK(env_text(json::object()).empty());
 }

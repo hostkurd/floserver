@@ -32,8 +32,14 @@ constexpr Palette kLight{
     .footer = 0xFAFAFA,
     .footer_border = 0xE1E1E1,
     .footer_dot = 0x0E7A0D,
+    .selected = 0xEBF3FB,
+    .panel_box = 0xF7F7F7,
+    .log = 0x1E1E1E,
+    .log_text = 0xD4D4D4,
+    .log_subtle = 0x9D9D9D,
     .on = {0xDFF6DD, 0x0E700E, 0xDFF6DD},
     .asleep = {0xFFF4CE, 0x7A4A00, 0xFFF4CE},
+    .waking = {0xE8F1FB, 0x0B5394, 0xE8F1FB},
     .off = {0xF0F0F0, 0x5F5F5F, 0xF0F0F0},
     .needs_download = {0xFFFFFF, 0xA4262C, 0xE8A6AA},
     .problem = {0xFDE7E9, 0xA4262C, 0xFDE7E9},
@@ -66,8 +72,14 @@ constexpr Palette kDark{
     .footer = 0x1C1C1C,
     .footer_border = 0x3A3A3A,
     .footer_dot = 0x6CCB5F,
+    .selected = 0x2F3B48,
+    .panel_box = 0x333333,
+    .log = 0x161616,
+    .log_text = 0xD4D4D4,
+    .log_subtle = 0x9D9D9D,
     .on = {0x1E3A1E, 0x6CCB5F, 0x1E3A1E},
     .asleep = {0x433519, 0xFCE100, 0x433519},
+    .waking = {0x1C3550, 0x8AC7FF, 0x1C3550},
     .off = {0x3A3A3A, 0xC8C8C8, 0x3A3A3A},
     .needs_download = {0x2B2B2B, 0xFF99A4, 0x6B2B30},
     .problem = {0x442726, 0xFF99A4, 0x442726},
@@ -94,6 +106,8 @@ const StateColors& state_colors(const Palette& p, RowState state) {
             return p.on;
         case RowState::Asleep:
             return p.asleep;
+        case RowState::Waking:
+            return p.waking;
         case RowState::Off:
             return p.off;
         case RowState::NeedsDownload:

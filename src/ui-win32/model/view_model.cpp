@@ -90,6 +90,8 @@ ProjectRow row_from(const json& p, Lang lang) {
             const bool own_server =
                 !text_of(p, "node").empty() || !text_of(p, "python").empty() || text_of(p, "web") == "apache";
             row.detail = std::string(text(lang, own_server ? Str::ServerCantStart : Str::PhpCantStart));
+        } else if (run == "starting") {
+            row.state = RowState::Waking;
         } else {
             row.state = run == "sleeping" ? RowState::Asleep : RowState::On;
         }
@@ -107,7 +109,7 @@ ProjectRow row_from(const json& p, Lang lang) {
         row.detail = code(text_of(p, "problem"), lang);
     }
 
-    if (row.state == RowState::On || row.state == RowState::Asleep) {
+    if (row.state == RowState::On || row.state == RowState::Asleep || row.state == RowState::Waking) {
         row.address = text_of(p, "address");
     }
     if (row.address.empty() && row.detail.empty() && !path.empty()) {
@@ -126,12 +128,30 @@ ProjectRow row_from(const json& p, Lang lang) {
     if (!node.empty()) {
         row.chips.push_back("Node " + node);
     }
-    if (text_of(p, "web") == "apache") {
-        row.chips.emplace_back("Apache");
-    }
     const std::string database = text_of(p, "database");
     if (!database.empty()) {
         row.chips.push_back(database_chip(database));
+    }
+    row.path = path;
+    row.php = php;
+    row.node = node;
+    row.python = python;
+    row.database = database;
+    if (p.contains("wants") && p["wants"].is_object()) {
+        const json& want = p["wants"];
+        row.wants.known = true;
+        row.wants.php = text_of(want, "php");
+        row.wants.node = text_of(want, "node");
+        row.wants.python = text_of(want, "python");
+        row.wants.database = text_of(want, "database");
+        row.wants.web = text_of(want, "web") == "apache" ? "apache" : "nginx";
+    }
+    // The web server last, as in the mockup. nginx only when floserver.json
+    // could be read (it serves every project that isn't Apache's).
+    if (text_of(p, "web") == "apache") {
+        row.chips.emplace_back("Apache");
+    } else if (row.wants.known && row.wants.web == "nginx") {
+        row.chips.emplace_back("nginx");
     }
     return row;
 }
@@ -158,6 +178,8 @@ Str state_label(RowState state) {
             return Str::StateOn;
         case RowState::Asleep:
             return Str::StateAsleep;
+        case RowState::Waking:
+            return Str::StateWaking;
         case RowState::Off:
             return Str::StateOff;
         case RowState::NeedsDownload:
@@ -266,7 +288,7 @@ FooterText footer_text(const std::vector<ProjectRow>& rows, const json* status, 
     std::size_t running = 0;
     std::size_t asleep = 0;
     for (const ProjectRow& r : rows) {
-        running += r.state == RowState::On ? 1U : 0U;
+        running += r.state == RowState::On || r.state == RowState::Waking ? 1U : 0U;
         asleep += r.state == RowState::Asleep ? 1U : 0U;
     }
     out.any_running = running > 0;
@@ -286,10 +308,241 @@ FooterText footer_text(const std::vector<ProjectRow>& rows, const json* status, 
             out.nginx = std::string(text(lang, Str::FooterNginxOff));
         }
     }
+    if (web != nullptr) {
+        if (const auto idle = count_of(*web, "idle_after_s")) {
+            out.idle_minutes = std::max<std::uint64_t>(1, (*idle + 59) / 60);
+        }
+    }
 
     if (status != nullptr) {
         if (const auto memory = count_of(*status, "memory_bytes")) {
             out.memory = fill(lang, Str::FooterMemory, {human_bytes(*memory)});
+        }
+    }
+    return out;
+}
+
+// --- the project panel -------------------------------------------------------
+
+namespace {
+
+// Newest first by version, compared number by number ("8.10" after "8.9").
+bool newer(const std::string& a, const std::string& b) {
+    std::size_t i = 0;
+    std::size_t j = 0;
+    while (i < a.size() || j < b.size()) {
+        std::uint64_t x = 0;
+        std::uint64_t y = 0;
+        while (i < a.size() && a[i] >= '0' && a[i] <= '9') {
+            x = x * 10 + static_cast<std::uint64_t>(a[i++] - '0');
+        }
+        while (j < b.size() && b[j] >= '0' && b[j] <= '9') {
+            y = y * 10 + static_cast<std::uint64_t>(b[j++] - '0');
+        }
+        if (x != y) {
+            return x > y;
+        }
+        // Past the separator ('.', or anything else), on to the next number.
+        if (i < a.size()) {
+            ++i;
+        }
+        if (j < b.size()) {
+            ++j;
+        }
+    }
+    return false;
+}
+
+// One choice per installed series, newest first; the series is the value.
+std::vector<std::string> series_of(const Installed& installed, const std::string& runtime) {
+    std::vector<std::string> out;
+    const auto it = installed.find(runtime);
+    if (it == installed.end()) {
+        return out;
+    }
+    for (const std::string& v : it->second) {
+        const std::string s = version_series(runtime, v);
+        if (std::find(out.begin(), out.end(), s) == out.end()) {
+            out.push_back(s);
+        }
+    }
+    std::stable_sort(out.begin(), out.end(), newer);
+    return out;
+}
+
+// Adds a choice per series and picks the one matching `wanted` (as written
+// in floserver.json; "8.4" or "8.4.27"). A wanted series that isn't
+// installed is still listed, so the picker shows the truth.
+void add_series(VersionField& f, const Installed& installed, const std::string& runtime, const std::string& wanted,
+                const std::string& value_prefix, const std::string& label_prefix, Lang lang) {
+    const std::string want = wanted.empty() ? std::string() : version_series(runtime, wanted);
+    bool found = false;
+    for (const std::string& s : series_of(installed, runtime)) {
+        f.choices.push_back({label_prefix + s, value_prefix + s});
+        if (!want.empty() && s == want) {
+            f.current = f.choices.size() - 1;
+            found = true;
+        }
+    }
+    if (!want.empty() && !found) {
+        f.choices.push_back({fill(lang, Str::NotInstalled, {label_prefix + want}), value_prefix + want});
+        f.current = f.choices.size() - 1;
+    }
+}
+
+}  // namespace
+
+Installed installed_from_list(const json& result) {
+    Installed out;
+    if (!result.is_object() || !result.contains("installed") || !result["installed"].is_array()) {
+        return out;
+    }
+    for (const json& r : result["installed"]) {
+        const std::string name = text_of(r, "name");
+        const std::string version = text_of(r, "version");
+        if (!name.empty() && !version.empty()) {
+            out[name].push_back(version);
+        }
+    }
+    for (auto& [name, versions] : out) {
+        std::stable_sort(versions.begin(), versions.end(), newer);
+    }
+    return out;
+}
+
+std::string version_series(std::string_view runtime, std::string_view version) {
+    const std::size_t first = version.find('.');
+    if (runtime == "node" || first == std::string_view::npos) {
+        return std::string(version.substr(0, first));
+    }
+    const std::size_t second = version.find('.', first + 1);
+    return std::string(version.substr(0, second));
+}
+
+std::vector<VersionField> version_fields(const ProjectRow& row, const Installed& installed, Lang lang) {
+    std::vector<VersionField> out;
+    const Wants& w = row.wants;
+
+    // PHP: without the key, a PHP project gets the newest installed; a Node
+    // or Python project gets none.
+    VersionField php{Field::Php, "php", std::string(text(lang, Str::FieldPhp)), {}, 0};
+    const bool own_server = w.php.empty() && (!w.node.empty() || !w.python.empty());
+    php.choices.push_back({std::string(text(lang, own_server ? Str::ChoiceNone : Str::ChoiceNewest)), std::nullopt});
+    add_series(php, installed, "php", w.php, "", "", lang);
+    out.push_back(std::move(php));
+
+    VersionField db{Field::Database, "database", std::string(text(lang, Str::FieldDatabase)), {}, 0};
+    db.choices.push_back({std::string(text(lang, Str::ChoiceNone)), std::nullopt});
+    std::string wanted_db;
+    if (w.database.starts_with("mariadb-")) {
+        wanted_db = w.database.substr(8);
+    }
+    add_series(db, installed, "mariadb", wanted_db, "mariadb-", "MariaDB ", lang);
+    if (!w.database.empty() && wanted_db.empty()) {
+        // Another family (a newer FloServer's): shown, not offered.
+        db.choices.push_back({database_chip(w.database), w.database});
+        db.current = db.choices.size() - 1;
+    }
+    out.push_back(std::move(db));
+
+    VersionField web{Field::Web, "web", std::string(text(lang, Str::FieldWeb)), {{"nginx", "nginx"}, {"Apache", "apache"}},
+                     w.web == "apache" ? 1U : 0U};
+    out.push_back(std::move(web));
+
+    VersionField node{Field::Node, "node", std::string(text(lang, Str::FieldNode)), {}, 0};
+    node.choices.push_back({std::string(text(lang, Str::ChoiceNone)), std::nullopt});
+    add_series(node, installed, "node", w.node, "", "", lang);
+    out.push_back(std::move(node));
+
+    if (!w.python.empty() || installed.contains("python")) {
+        VersionField python{Field::Python, "python", std::string(text(lang, Str::FieldPython)), {}, 0};
+        python.choices.push_back({std::string(text(lang, Str::ChoiceNone)), std::nullopt});
+        add_series(python, installed, "python", w.python, "", "", lang);
+        out.push_back(std::move(python));
+    }
+    return out;
+}
+
+std::uint16_t database_port(const json& databases, std::string_view database) {
+    const std::size_t dash = database.find('-');
+    if (dash == std::string_view::npos || !databases.is_object() || !databases.contains("servers") ||
+        !databases["servers"].is_array()) {
+        return 0;
+    }
+    const std::string series = version_series(database.substr(0, dash), database.substr(dash + 1));
+    for (const json& server : databases["servers"]) {
+        if (version_series("mariadb", text_of(server, "series")) == series ||
+            version_series("mariadb", text_of(server, "version")) == series) {
+            const auto port = count_of(server, "port");
+            if (port && *port > 0 && *port <= 65535) {
+                return static_cast<std::uint16_t>(*port);
+            }
+        }
+    }
+    return 0;
+}
+
+std::vector<LogLine> log_lines(const json& result, const std::function<void(std::int64_t, int&, int&, int&)>& local) {
+    std::vector<LogLine> out;
+    if (!result.is_object() || !result.contains("entries") || !result["entries"].is_array()) {
+        return out;
+    }
+    const auto two = [](int v) {
+        const std::string s = std::to_string(std::clamp(v, 0, 99));
+        return s.size() < 2 ? "0" + s : s;
+    };
+    for (const json& e : result["entries"]) {
+        const auto t = count_of(e, "t");
+        const auto status = count_of(e, "status");
+        const auto ms = count_of(e, "ms");
+        if (!t || !status || !ms || *status > 999) {
+            continue;
+        }
+        LogLine line;
+        int h = 0;
+        int m = 0;
+        int sec = 0;
+        local(static_cast<std::int64_t>(*t), h, m, sec);
+        line.time = two(h) + ":" + two(m) + ":" + two(sec);
+        line.method = text_of(e, "method");
+        line.uri = text_of(e, "uri");
+        line.status = static_cast<int>(*status);
+        if (*ms < 1000) {
+            line.duration = std::to_string(*ms) + " ms";
+        } else {
+            const std::uint64_t tenths = (*ms + 50) / 100;
+            line.duration = std::to_string(tenths / 10) + "." + std::to_string(tenths % 10) + " s";
+        }
+        out.push_back(std::move(line));
+    }
+    return out;
+}
+
+std::string log_text(const LogLine& line) {
+    std::string method = line.method;
+    if (method.size() < 4) {
+        method.append(4 - method.size(), ' ');
+    }
+    return line.time + "  " + method + " " + line.uri + "  " + std::to_string(line.status) + "  " + line.duration;
+}
+
+std::string env_text(const json& login) {
+    std::string out;
+    if (!login.is_object() || !login.contains("env") || !login["env"].is_array()) {
+        return out;
+    }
+    // One allocation: the text holds the password, and a grown string would
+    // leave partial copies behind in freed memory.
+    std::size_t size = 0;
+    for (const json& pair : login["env"]) {
+        if (pair.is_array() && pair.size() == 2 && pair[0].is_string() && pair[1].is_string()) {
+            size += pair[0].get_ref<const std::string&>().size() + pair[1].get_ref<const std::string&>().size() + 3;
+        }
+    }
+    out.reserve(size);
+    for (const json& pair : login["env"]) {
+        if (pair.is_array() && pair.size() == 2 && pair[0].is_string() && pair[1].is_string()) {
+            out += pair[0].get<std::string>() + "=" + pair[1].get<std::string>() + "\r\n";
         }
     }
     return out;

@@ -37,6 +37,7 @@ struct NginxSite {
     std::filesystem::path php_access_log;  // the pool's idle log; empty for none
     std::optional<NginxTls> tls;
     std::optional<Port> app_port;       // set: everything goes to this server instead
+    std::filesystem::path request_log;  // every request, for the window's Log box; empty for none
 };
 
 struct NginxSpec {

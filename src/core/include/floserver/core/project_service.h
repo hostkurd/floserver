@@ -29,7 +29,8 @@ public:
     //   {"projects": [{"name", "path", "on", "keep_running",
     //                  "state": "off" | "ready" | "needs_download" | "problem",
     //                  "php"?: "8.4.27", "missing": ["php 8.2"], "problem"?: "...",
-    //                  "database"?: "mariadb-11.4"}],
+    //                  "database"?: "mariadb-11.4",
+    //                  "wants"?: {"web": "nginx" | "apache", "php"?, "node"?, "python"?, "database"?}}],
     //    "projects_dir": "..."}
     [[nodiscard]] std::optional<nlohmann::json> list(ServiceRefusal& refusal) const;
 
@@ -43,6 +44,15 @@ public:
     // Turns a project On or Off, or Keep running on or off.
     [[nodiscard]] std::optional<nlohmann::json> set(const std::string& name, std::optional<bool> on,
                                                     std::optional<bool> keep_running, ServiceRefusal& refusal);
+
+    // Sets one key of the project's floserver.json ("php", "node",
+    // "python", "database", "web"; nothing for `value` removes it), keeping
+    // the file's other keys. The reply is that project.
+    [[nodiscard]] std::optional<nlohmann::json> use(const std::string& name, const std::string& key,
+                                                    const std::optional<std::string>& value, ServiceRefusal& refusal);
+
+    // The registered folder of a project, or nothing.
+    [[nodiscard]] std::optional<std::filesystem::path> folder(const std::string& name, ServiceRefusal& refusal) const;
 
 private:
     [[nodiscard]] std::optional<AppConfig> load(ServiceRefusal& refusal) const;

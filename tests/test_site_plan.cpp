@@ -405,12 +405,27 @@ TEST_CASE("the nginx config serves PHP and static sites on loopback") {
     spec.ports = {80, 443, false};
     spec.ipv6 = true;
     spec.sites = {{"shop", kBase / "projects" / "shop" / "public", {9101, 9102}, kBase / "web" / "logs" / "php-8.4.27.log",
-                   NginxTls{kBase / "certs" / "shop.pem", kBase / "certs" / "shop.key"}, std::nullopt},
-                  {"docs", kBase / "projects" / "docs", {}, {}, std::nullopt, std::nullopt}};
+                   NginxTls{kBase / "certs" / "shop.pem", kBase / "certs" / "shop.key"}, std::nullopt, {}},
+                  {"docs", kBase / "projects" / "docs", {}, {}, std::nullopt, std::nullopt, {}}};
+    spec.sites[0].request_log = kBase / "web" / "logs" / "sites" / "shop.log";
     std::string error;
     const auto text = make_nginx_config(spec, error);
     REQUIRE(text);
     const auto has = [&text](const std::string& s) { return text->find(s) != std::string::npos; };
+    const auto count = [&text](const std::string& s) {
+        std::size_t n = 0;
+        for (auto at = text->find(s); at != std::string::npos; at = text->find(s, at + 1)) {
+            ++n;
+        }
+        return n;
+    };
+
+    // Every request goes to the window's log: at the server and again in the
+    // PHP location, which has its own access_log and so inherits none.
+    CHECK(has("log_format floserver_requests '$msec $status $request_time $request_method $request_uri';"));
+    const std::string request_log = "access_log \"" + kBase.generic_string() + "/web/logs/sites/shop.log\" floserver_requests;";
+    CHECK(count(request_log) == 2);
+    CHECK(count("floserver_requests;") == 2);  // docs has no log set
 
     CHECK(has("listen 127.0.0.1:80 default_server;"));
     CHECK(has("listen [::1]:80 default_server;"));

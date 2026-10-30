@@ -123,6 +123,7 @@ WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
             continue;
         }
         const ProjectConfig& pc = *result.config;
+        site.config = pc;
         site.doc_root = pc.root == "." ? project.dir : (project.dir / path_from_utf8(pc.root)).lexically_normal();
         site.database = pc.database;
         // One unusable folder name must not stop nginx for every project.

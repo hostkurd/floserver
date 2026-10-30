@@ -1,5 +1,6 @@
 #include "floserver/core/project_config.h"
 
+#include "floserver/core/paths.h"
 #include "floserver/core/version.h"
 
 #include <nlohmann/json.hpp>
@@ -306,6 +307,133 @@ std::optional<std::filesystem::path> find_project_config(const std::filesystem::
         }
         dir = std::move(parent);
     }
+}
+
+std::optional<ConfigKey> parse_config_key(std::string_view name) {
+    if (name == "php") {
+        return ConfigKey::Php;
+    }
+    if (name == "node") {
+        return ConfigKey::Node;
+    }
+    if (name == "python") {
+        return ConfigKey::Python;
+    }
+    if (name == "database" || name == "mariadb") {
+        return ConfigKey::Database;
+    }
+    if (name == "web") {
+        return ConfigKey::Web;
+    }
+    return std::nullopt;
+}
+
+namespace {
+
+const char* config_key_name(ConfigKey key) {
+    switch (key) {
+        case ConfigKey::Php:
+            return "php";
+        case ConfigKey::Node:
+            return "node";
+        case ConfigKey::Python:
+            return "python";
+        case ConfigKey::Database:
+            return "database";
+        case ConfigKey::Web:
+            break;
+    }
+    return "web";
+}
+
+}  // namespace
+
+std::optional<std::string> set_project_config_value(std::string_view text, ConfigKey key, std::string_view key_name,
+                                                    const std::optional<std::string>& value, std::string& error) {
+    nlohmann::ordered_json doc = nlohmann::ordered_json::object();
+    if (text.find_first_not_of(" \t\r\n") != std::string_view::npos) {
+        doc = nlohmann::ordered_json::parse(text, nullptr, false);
+        if (doc.is_discarded() || !doc.is_object()) {
+            error = "floserver.json isn't valid JSON; fix it first (flo check shows what's wrong)";
+            return std::nullopt;
+        }
+    }
+    const char* const name = config_key_name(key);
+    std::optional<std::string> stored;
+    switch (key) {
+        case ConfigKey::Php:
+        case ConfigKey::Node:
+        case ConfigKey::Python:
+            if (value) {
+                const auto v = Version::parse(*value);
+                if (!v) {
+                    error = "\"" + *value + "\" is not a version such as 8.4 or 8.4.27";
+                    return std::nullopt;
+                }
+                stored = v->to_string();
+            }
+            break;
+        case ConfigKey::Database:
+            if (value) {
+                // `flo use mariadb 11.4` gives the version alone.
+                if (key_name == "mariadb") {
+                    const auto v = Version::parse(*value);
+                    if (!v) {
+                        error = "\"" + *value + "\" is not a version such as 11.4";
+                        return std::nullopt;
+                    }
+                    stored = "mariadb-" + v->to_string();
+                } else {
+                    stored = *value;
+                }
+            }
+            break;
+        case ConfigKey::Web:
+            if (value && *value == "apache") {
+                stored = "apache";
+            } else if (value && *value != "nginx") {
+                error = "the web server is nginx or apache, not \"" + *value + "\"";
+                return std::nullopt;
+            }
+            break;
+    }
+    if (stored) {
+        doc[name] = *stored;
+    } else {
+        doc.erase(name);
+    }
+    std::string out = doc.dump(2, ' ', false, nlohmann::ordered_json::error_handler_t::replace) + "\n";
+    const ConfigResult parsed = parse_project_config(out);
+    if (!parsed.config) {
+        const ConfigProblem& first = parsed.errors.empty() ? ConfigProblem{"", "can't be read"} : parsed.errors.front();
+        error = "floserver.json: " + (first.key.empty() ? std::string() : first.key + " ") + first.message;
+        return std::nullopt;
+    }
+    return out;
+}
+
+bool set_project_config_file_value(const std::filesystem::path& dir, ConfigKey key, std::string_view key_name,
+                                   const std::optional<std::string>& value, std::string& error) {
+    namespace fs = std::filesystem;
+    constexpr std::size_t kMaxBytes = std::size_t{64} * 1024;
+    const fs::path file = dir / kProjectConfigFileName;
+    std::error_code ec;
+    const fs::file_status status = fs::symlink_status(file, ec);
+    std::string text;
+    if (fs::exists(status)) {
+        if (!fs::is_regular_file(status)) {
+            error = "floserver.json isn't a plain file, so FloServer won't change it";
+            return false;
+        }
+        const auto read = read_small_file(file, kMaxBytes);
+        if (!read) {
+            error = "floserver.json can't be read, or is larger than 64 KB";
+            return false;
+        }
+        text = *read;
+    }
+    const auto out = set_project_config_value(text, key, key_name, value, error);
+    return out && write_file_atomically(file, *out, error);
 }
 
 }  // namespace floserver::core
