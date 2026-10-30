@@ -287,6 +287,9 @@ ManifestResult open_manifest(std::string_view manifest_bytes, std::string_view s
     } else {
         result.warnings.emplace_back("the runtime list has no runtimes");
     }
+    if (const auto templates = doc.find("templates"); templates != doc.end()) {
+        m.templates = parse_templates(*templates, result.warnings);
+    }
     result.key_id = key_id;
     result.manifest = std::move(m);
     return result;

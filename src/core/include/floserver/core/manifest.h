@@ -24,13 +24,15 @@
 //         "license": "PHP-3.01",
 //         "urls": ["https://mirror.hostkurd.net/...", "https://windows.php.net/..."]
 //       }
-//     ]
+//     ],
+//     "templates": [...]                    // project templates, see templates.h
 //   }
 //
 // Unknown keys are ignored so newer manifests still open in older apps. An
 // entry that fails its checks is skipped with a warning, not the whole file.
 
 #include "floserver/core/sha256.h"
+#include "floserver/core/templates.h"
 
 #include <array>
 #include <chrono>
@@ -67,6 +69,7 @@ struct Manifest {
     std::int64_t sequence = 0;
     std::chrono::sys_seconds expires;
     std::vector<RuntimeFile> runtimes;
+    std::vector<ProjectTemplate> templates;  // "templates" (D9), in card order
 };
 
 enum class ManifestError : std::uint8_t {

@@ -36,6 +36,11 @@ enum class SiteState : std::uint8_t {
     Problem,        // floserver.json has an error, the folder is gone, or it asks for what this version can't run
 };
 
+// The newest install of `name` matching `wanted` ("8.2"), or the newest of
+// all when `wanted` is empty; PHP only counts NTS builds (the pools' kind).
+[[nodiscard]] const InstalledRuntime* best_installed(const std::vector<InstalledRuntime>& installed,
+                                                     const std::string& name, const std::string& wanted);
+
 struct PlannedSite {
     std::string name;
     std::filesystem::path dir;

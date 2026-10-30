@@ -1,4 +1,5 @@
 #include "build.h"
+#include "templates_json.h"
 
 #include "floserver/core/manifest.h"
 
@@ -259,4 +260,45 @@ TEST_CASE("UTC times are written in the manifest's format") {
           "2028-02-29T23:59:59Z");
     CHECK(format_utc_time(*floserver::core::parse_utc_time("2026-01-05T03:04:05Z")) ==
           "2026-01-05T03:04:05Z");
+}
+
+TEST_CASE("the built-in templates go into the list, and their runtimes must be there") {
+    auto report = real_report();
+    report["files"].push_back({{"path", "wordpress/7.1.4/wordpress-7.1.4.zip"},
+                               {"size", 27000000},
+                               {"sha256", std::string(64, 'a')},
+                               {"result", "ok"}});
+    BuildOptions o = options();
+    o.templates_json = std::string(kBuiltInTemplates);
+    const auto r = build_manifest(report.dump(), o);
+    INFO((r.errors.empty() ? std::string() : r.errors.front()));
+    REQUIRE(r.manifest_json);
+    CHECK(r.template_count == 8);
+    const json doc = json::parse(*r.manifest_json);
+    REQUIRE(doc["templates"].size() == 8);
+    CHECK(doc["templates"][0]["id"] == "php-app");
+    // WordPress is listed for every platform, from the CDN with wordpress.org behind it.
+    bool wordpress = false;
+    for (const json& rt : doc["runtimes"]) {
+        if (rt["name"] == "wordpress") {
+            wordpress = true;
+            CHECK(rt["platform"] == "any");
+            CHECK(rt["urls"][1] == "https://wordpress.org/wordpress-7.1.4.zip");
+        }
+    }
+    CHECK(wordpress);
+
+    SUBCASE("a template whose runtime isn't listed is refused") {
+        const auto without = build_manifest(real_report().dump(), o);  // no WordPress file
+        CHECK_FALSE(without.manifest_json);
+        CHECK(has_error_with(without, "template wordpress needs wordpress"));
+    }
+    SUBCASE("a template the app would skip is refused") {
+        o.templates_json = R"([{"id": "Bad Id"}])";
+        const auto bad = build_manifest(report.dump(), o);
+        CHECK_FALSE(bad.manifest_json);
+        CHECK(has_error_with(bad, "template entry 0"));
+        o.templates_json = "{}";
+        CHECK(has_error_with(build_manifest(report.dump(), o), "aren't a JSON array"));
+    }
 }

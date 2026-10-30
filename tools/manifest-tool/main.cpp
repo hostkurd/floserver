@@ -1,7 +1,7 @@
 // floserver-manifest: makes the signing key and signs manifest.json (D5).
 // For HostKurd's release process, not shipped to users.
 //
-//   floserver-manifest build  <report.json> --sequence N [--days D] [--accept PATH]... [--out FILE]
+//   floserver-manifest build  <report.json> --sequence N [--days D] [--accept PATH]... [--out FILE] [--templates FILE]
 //     (the CDN address comes from the report: the one the files were checked on)
 //   floserver-manifest keygen <secret-key-file> <key-id>
 //   floserver-manifest sign   <manifest.json> <secret-key-file>
@@ -16,6 +16,7 @@
 // Keep the file on an offline machine.
 
 #include "build.h"
+#include "templates_json.h"
 #include "floserver/core/builtin.h"
 #include "floserver/core/encoding.h"
 #include "floserver/core/manifest.h"
@@ -331,6 +332,7 @@ bool parse_count(const std::string& text, long long low, long long high, long lo
 int build(const std::vector<std::string>& args) {
     namespace mt = floserver::manifest_tool;
     mt::BuildOptions options;
+    options.templates_json = std::string(mt::kBuiltInTemplates);
     options.now = std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
     fs::path out = "manifest.json";
     bool have_sequence = false;
@@ -349,6 +351,14 @@ int build(const std::vector<std::string>& args) {
             options.accepted.insert(args[++i]);
         } else if (a == "--out" && has_value) {
             out = args[++i];
+        } else if (a == "--templates" && has_value) {
+            // Another templates file instead of the built-in one (for trying one out).
+            const auto text = read_file(args[++i]);
+            if (!text) {
+                std::cerr << "Can't read the templates file.\n";
+                return 2;
+            }
+            options.templates_json = *text;
         } else {
             std::cerr << "Unknown or incomplete option: " << a << "\n";
             return 2;
@@ -375,13 +385,14 @@ int build(const std::vector<std::string>& args) {
         return 1;
     }
     std::ofstream file(out, std::ios::binary | std::ios::trunc);
-    file << *result.manifest_json;
+    file << result.manifest_json.value_or(std::string());
     file.close();
     if (!file) {
         std::cerr << "Can't write the manifest file.\n";
         return 1;
     }
-    std::cout << "Wrote " << result.runtime_count << " runtimes, sequence " << options.sequence
+    std::cout << "Wrote " << result.runtime_count << " runtimes and " << result.template_count
+              << " templates, sequence " << options.sequence
               << ", expires " << mt::format_utc_time(options.now + std::chrono::days{options.days})
               << ".\nNext: sign it on the offline computer.\n";
     return 0;
@@ -404,7 +415,7 @@ int run(const std::vector<std::string>& args) {
         return verify(args[1], "", "");
     }
     std::cerr << "Usage:\n"
-              << "  floserver-manifest build  <report.json> --sequence N [--days D] [--accept PATH]... [--out FILE]\n"
+              << "  floserver-manifest build  <report.json> --sequence N [--days D] [--accept PATH]... [--out FILE] [--templates FILE]\n"
               << "  floserver-manifest keygen <secret-key-file> <key-id>\n"
               << "  floserver-manifest sign   <manifest.json> <secret-key-file>\n"
               << "  floserver-manifest verify <manifest.json> [<public-key-base64> <key-id>]\n";

@@ -71,6 +71,10 @@ public:
     // With `refresh`, the list is fetched again even when it's fresh.
     [[nodiscard]] nlohmann::json list(bool refresh, bool installed_only = false);
 
+    // The project templates of the list (D9), fetching it when there's no
+    // fresh copy; nothing (with `error`) when it can't be had.
+    [[nodiscard]] std::optional<std::vector<ProjectTemplate>> templates(std::string& error);
+
     // Queues an install of the newest `name` matching `version` ("8.5",
     // "8.5.12", or empty for the newest). Returns the job id; the same request
     // while one is still waiting or running returns that job's id.

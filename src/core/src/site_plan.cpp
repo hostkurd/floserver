@@ -21,8 +21,16 @@ bool is_pool_php(const InstalledRuntime& r) {
     return r.name == "php" && (r.variant.empty() || r.variant == "nts");
 }
 
-// The newest install of `name` matching `wanted` ("8.2"), or the newest of all
-// when `wanted` is empty.
+std::string pool_key(const std::string& version, const std::vector<std::string>& extensions) {
+    std::string key = "php-" + version;
+    for (const std::string& e : extensions) {
+        key += "+" + e;
+    }
+    return key;
+}
+
+}  // namespace
+
 const InstalledRuntime* best_installed(const std::vector<InstalledRuntime>& installed, const std::string& name,
                                        const std::string& wanted) {
     const std::optional<Version> want = wanted.empty() ? std::nullopt : Version::parse(wanted);
@@ -46,16 +54,6 @@ const InstalledRuntime* best_installed(const std::vector<InstalledRuntime>& inst
     }
     return best;
 }
-
-std::string pool_key(const std::string& version, const std::vector<std::string>& extensions) {
-    std::string key = "php-" + version;
-    for (const std::string& e : extensions) {
-        key += "+" + e;
-    }
-    return key;
-}
-
-}  // namespace
 
 ConfigResult read_project_config_file(const Project& project) {
     std::error_code ec;

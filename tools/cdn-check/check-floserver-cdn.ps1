@@ -43,6 +43,7 @@ $files = @(
     @{ Path = "node/22.23.4/node-v22.23.4-win-x64.zip";         Sums = "https://nodejs.org/dist/v22.23.4/SHASUMS256.txt" },
     @{ Path = "composer/2.10.3/composer.phar";                  Sums = "https://getcomposer.org/download/2.10.3/composer.phar.sha256sum" },
     @{ Path = "nginx/1.30.6/nginx-1.30.6.zip";                  Orig = "https://nginx.org/download/nginx-1.30.6.zip" },
+    @{ Path = "wordpress/7.1.4/wordpress-7.1.4.zip";            Orig = "https://wordpress.org/wordpress-7.1.4.zip" },
     @{ Path = "apache/2.4.69/httpd-2.4.69-261002-Win64-VS18.zip"; Orig = "https://www.apachelounge.com/download/VS18/binaries/httpd-2.4.69-261002-Win64-VS18.zip" },
     # python-build-standalone names its files with "+"; on the CDN it is "-" (S3 may read "+" in a URL as a space).
     # Name = the file name in the official checksum list.
