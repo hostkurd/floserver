@@ -1,6 +1,7 @@
 #include "floserver/core/web_service.h"
 
 #include "floserver/core/apache_config.h"
+#include "floserver/core/request_log.h"
 #include "floserver/core/nginx_config.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/process.h"
@@ -547,6 +548,9 @@ void WebService::reload_locked() {
     spec.http2_directive = !v || !http2_on || !(*v < *http2_on);
     spec.user = running_as_root() ? "root" : "";
     spec.sites = std::move(serve);
+    for (NginxSite& site : spec.sites) {
+        site.request_log = request_log_file(work_, site.name);
+    }
     // The id comes from the config itself, so the same config has the same
     // id and an unchanged one still compares equal.
     auto text = make_nginx_config(spec, error);
@@ -572,7 +576,7 @@ void WebService::reload_locked() {
     }
 
     std::error_code ec;
-    fs::create_directories(work_ / "logs", ec);
+    fs::create_directories(work_ / "logs" / "sites", ec);
     fs::create_directories(work_ / "temp", ec);
     if (!write_file_atomically(work_ / "nginx.next.conf", *text, error)) {
         error_ = error;
@@ -709,6 +713,20 @@ void WebService::supervise() {
         if (now - last_reload >= config_.reload_every) {
             last_reload = now;
             reload_locked();
+            trim_request_logs_locked();
+        }
+    }
+}
+
+// Each project's request log only feeds the window's last lines, so it's
+// emptied when it grows past kRequestLogLimit (nginx keeps appending to it).
+void WebService::trim_request_logs_locked() const {
+    for (const auto& [name, site] : sites_) {
+        std::error_code ec;
+        const fs::path log = request_log_file(work_, name);
+        const std::uintmax_t size = fs::file_size(log, ec);
+        if (!ec && size > kRequestLogLimit) {
+            fs::resize_file(log, 0, ec);
         }
     }
 }
@@ -782,7 +800,12 @@ json WebService::status_locked() const {
     if (!nginx_error_.empty()) {
         nginx["error"] = nginx_error_;
     }
-    json out = {{"nginx", nginx}, {"pools", pools}, {"apps", apps}, {"sites", sites}};
+    json out = {{"nginx", nginx},
+                {"pools", pools},
+                {"apps", apps},
+                {"sites", sites},
+                // How long a project waits for a request before it sleeps (the window says it).
+                {"idle_after_s", config_.idle_after.count()}};
     if (!error_.empty()) {
         out["error"] = error_;
     }

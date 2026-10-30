@@ -43,8 +43,14 @@ struct Palette {
     Rgb footer;
     Rgb footer_border;
     Rgb footer_dot;
+    Rgb selected;       // the row whose panel is open
+    Rgb panel_box;      // the database box in the panel
+    Rgb log;            // the Log box: dark in both themes, as in the mockups
+    Rgb log_text;
+    Rgb log_subtle;     // the time column
     StateColors on;
     StateColors asleep;
+    StateColors waking;
     StateColors off;
     StateColors needs_download;
     StateColors problem;

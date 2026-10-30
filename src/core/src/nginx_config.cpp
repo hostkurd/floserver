@@ -1,6 +1,7 @@
 #include "floserver/core/nginx_config.h"
 
 #include "floserver/core/project_registry.h"
+#include "floserver/core/request_log.h"
 
 #include <algorithm>
 #include <set>
@@ -69,7 +70,8 @@ public:
              << "    fastcgi_temp_path " << *fastcgi << ";\n"
              << "    uwsgi_temp_path " << *uwsgi << ";\n"
              << "    scgi_temp_path " << *scgi << ";\n"
-             << "    log_format floserver_idle '$msec';\n";
+             << "    log_format floserver_idle '$msec';\n"
+             << "    " << kRequestLogFormat << "\n";
 
         const bool any_tls = std::any_of(spec_.sites.begin(), spec_.sites.end(),
                                          [](const NginxSite& s) { return s.tls.has_value(); });
@@ -181,6 +183,16 @@ private:
                 return false;
             }
         }
+        // Every request, for the window's Log box. A location with its own
+        // access_log doesn't inherit the server's, so those repeat it.
+        std::string request_log;
+        if (!site.request_log.empty()) {
+            const auto quoted = path(site.request_log);
+            if (!quoted) {
+                return false;
+            }
+            request_log = "access_log " + *quoted + " floserver_requests;\n";
+        }
         const std::string host = site.name + ".localhost";
 
         out_ << "\n    # Project " << site.name << "\n";
@@ -201,6 +213,9 @@ private:
             listen(spec_.ports.http, "");
         }
         out_ << "        server_name " << host << ";\n";
+        if (!request_log.empty()) {
+            out_ << "        " << request_log;
+        }
         if (site.app_port) {
             // The app decides what it serves, dot paths included (Vite
             // serves /node_modules/.vite/).
@@ -229,6 +244,9 @@ private:
                     return false;
                 }
                 out_ << "            access_log " << *idle << " floserver_idle;\n";
+                if (!request_log.empty()) {
+                    out_ << "            " << request_log;
+                }
             }
             out_ << "        }\n"
                  << "    }\n";
@@ -270,6 +288,9 @@ private:
                  << "            fastcgi_read_timeout 300s;\n";
             if (idle_log) {
                 out_ << "            access_log " << *idle_log << " floserver_idle;\n";
+                if (!request_log.empty()) {
+                    out_ << "            " << request_log;
+                }
             }
             out_ << "        }\n";
         }

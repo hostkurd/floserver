@@ -47,6 +47,9 @@ struct PlannedSite {
     std::vector<std::string> missing;   // "php 8.2", "mariadb 11.4"
     std::string problem;                // plain English, when state is Problem
     std::optional<DatabaseSpec> database;
+    // What floserver.json asks for, when it could be read: the window shows
+    // and changes these (versions as written there, "8.4", not "8.4.27").
+    std::optional<ProjectConfig> config;
 };
 
 struct PhpPool {

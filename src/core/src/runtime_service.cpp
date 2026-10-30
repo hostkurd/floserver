@@ -161,7 +161,7 @@ std::optional<RuntimeService::CachedList> RuntimeService::get_list(bool refresh,
     return got ? list_ : std::nullopt;
 }
 
-json RuntimeService::list(bool refresh) {
+json RuntimeService::list(bool refresh, bool installed_only) {
     json out = {{"platform", config_.platform}, {"installed", json::array()}, {"available", json::array()}};
     for (const InstalledRuntime& r : list_installed(runtimes_root())) {
         out["installed"].push_back({{"name", r.name},
@@ -171,6 +171,10 @@ json RuntimeService::list(bool refresh) {
                                     {"license", r.license},
                                     {"folder", path_to_utf8(r.dir.filename())},
                                     {"path", path_to_utf8(r.dir)}});
+    }
+    // The window asks often and only needs what's installed: no download.
+    if (installed_only) {
+        return out;
     }
     std::string error;
     const auto cached = get_list(refresh, error);

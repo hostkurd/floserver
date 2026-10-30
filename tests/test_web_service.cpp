@@ -11,6 +11,7 @@
 #include "floserver/core/paths.h"
 #include "floserver/core/process.h"
 #include "floserver/core/project_registry.h"
+#include "floserver/core/request_log.h"
 #include "floserver/core/web_service.h"
 #include "test_util.h"
 
@@ -189,6 +190,15 @@ TEST_CASE("projects run with real nginx and php-cgi, sleep when idle and wake on
         REQUIRE(eventually([&] { return web.status()["pools"][0]["state"] == "running"; }));
         const auto php_pid = web.status()["pools"][0]["pid"].get<std::uint32_t>();
 
+        // Each project's requests go to its own log, for the window (step 5b).
+        const auto shop_log = [&] { return read_request_log(request_log_file(web_dir(data), "shop"), 10); };
+        REQUIRE(eventually([&] { return !shop_log().empty(); }));
+        const auto logged = shop_log();
+        CHECK(logged.back().method == "GET");
+        CHECK(logged.back().uri == "/cart?x=1");
+        CHECK(logged.back().status == 200);
+        CHECK(read_request_log(request_log_file(web_dir(data), "api"), 10).size() == 1);
+
         // Every request to a running pool is answered, whichever worker takes
         // it (on Windows, php-cgi's own workers left 3 in 4 unanswered).
         CHECK(web.status()["pools"][0]["pids"].size() == 4);
@@ -361,6 +371,10 @@ TEST_CASE("a Node project is forwarded to its own server, WebSockets included, a
 
     CHECK(get(http, "web.localhost", "/cart?x=1") == "200 node /cart?x=1 web.localhost http");
     CHECK(service.status()["sites"]["web"]["run"] == "running");
+    CHECK(eventually([&] {
+        const auto entries = read_request_log(request_log_file(web_dir(data), "web"), 10);
+        return !entries.empty() && entries.back().uri == "/cart?x=1";
+    }));
     const auto pid = service.status()["apps"]["web"]["pid"].get<std::uint32_t>();
 
     // An upgraded connection passes both ways through nginx and the relay.

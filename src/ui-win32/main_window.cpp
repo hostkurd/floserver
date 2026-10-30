@@ -1,5 +1,6 @@
 #include "main_window.h"
 
+#include "main_window_layout.h"
 #include "model/theme.h"
 #include "model/view_model.h"
 
@@ -8,6 +9,7 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <cstring>
 #include <cwchar>
 #include <iterator>
 #include <string_view>
@@ -15,12 +17,16 @@
 
 namespace floserver::ui {
 
+using namespace layout;
+
 namespace {
 
 constexpr UINT kSnapshotMessage = WM_APP + 2;
 constexpr UINT kTrayMessage = WM_APP + 3;
 constexpr UINT_PTR kErrorTimer = 1;
 constexpr UINT kErrorShownMs = 8000;
+constexpr UINT_PTR kNoticeTimer = 2;
+constexpr UINT kNoticeShownMs = 4000;
 constexpr UINT kTrayId = 1;
 constexpr UINT_PTR kSearchSubclass = 1;
 constexpr UINT_PTR kTipNewProject = 1;
@@ -33,30 +39,6 @@ constexpr DWORD kDwmDarkMode = 20;       // DWMWA_USE_IMMERSIVE_DARK_MODE
 constexpr DWORD kDwmDarkModeOld = 19;    // the same before Windows 10 20H1
 constexpr DWORD kDwmCaptionColor = 35;   // DWMWA_CAPTION_COLOR, Windows 11
 
-// Sizes in device-independent pixels, from the mockups.
-constexpr int kWindowW = 960;
-constexpr int kWindowH = 640;
-constexpr int kMinW = 560;
-constexpr int kMinH = 380;
-constexpr int kTopBarH = 56;
-constexpr int kPad = 20;
-constexpr int kGap = 12;
-constexpr int kControlH = 32;
-constexpr int kSearchW = 240;
-constexpr int kSearchMinLeft = 170;
-constexpr int kBannerH = 32;
-constexpr int kFooterH = 28;
-constexpr int kRowH = 60;
-constexpr int kRowPad = 16;
-constexpr int kSwitchW = 40;
-constexpr int kSwitchH = 20;
-constexpr int kChipH = 20;
-constexpr int kStateH = 22;
-constexpr int kMinTextW = 140;
-
-bool contains(const RECT& r, int x, int y) { return x >= r.left && x < r.right && y >= r.top && y < r.bottom; }
-int height_of(const RECT& r) { return static_cast<int>(r.bottom - r.top); }
-int width_of(const RECT& r) { return static_cast<int>(r.right - r.left); }
 
 // Windows' app theme, unless FLOSERVER_THEME says "light" or "dark" (for
 // screenshots and tests).
@@ -114,15 +96,21 @@ bool MainWindow::create(int show) {
         return false;
     }
     const auto system_dpi = static_cast<int>(GetDpiForSystem());
+    RECT work{};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    const bool roomy = MulDiv(kWindowW + 40, system_dpi, 96) <= width_of(work) &&
+                       MulDiv(kWindowH + 40, system_dpi, 96) <= height_of(work);
+    const int open_w = roomy ? kWindowW : kSmallWindowW;
+    const int open_h = roomy ? kWindowH : kSmallWindowH;
     if (CreateWindowExW(rtl_ ? WS_EX_LAYOUTRTL : 0, class_name_.c_str(), L"FloServer",
                         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
-                        MulDiv(kWindowW, system_dpi, 96), MulDiv(kWindowH, system_dpi, 96), nullptr, nullptr,
-                        instance_, this) == nullptr) {
+                        MulDiv(open_w, system_dpi, 96), MulDiv(open_h, system_dpi, 96), nullptr, nullptr, instance_,
+                        this) == nullptr) {
         return false;
     }
     // The window may have opened on a monitor with another scale.
     if (std::cmp_not_equal(dpi_, system_dpi)) {
-        SetWindowPos(hwnd_, nullptr, 0, 0, px(kWindowW), px(kWindowH), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(hwnd_, nullptr, 0, 0, px(open_w), px(open_h), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     }
     ShowWindow(hwnd_, show);
     UpdateWindow(hwnd_);
@@ -241,6 +229,7 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
                 ScreenToClient(hwnd_, &pt);
                 const Hit hit = hit_test(pt.x, pt.y);
                 const bool hand = hit.part == Part::Switch || hit.part == Part::Address ||
+                                  hit.part == Part::PanelAddress || hit.part == Part::PanelKeep ||
                                   (hit.part == Part::Banner && banner().clickable);
                 SetCursor(LoadCursorW(nullptr, hand ? IDC_HAND : IDC_ARROW));
                 return TRUE;
@@ -275,9 +264,9 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         case WM_TIMER:
-            if (wparam == kErrorTimer) {
-                KillTimer(hwnd_, kErrorTimer);
-                change_error_.clear();
+            if (wparam == kErrorTimer || wparam == kNoticeTimer) {
+                KillTimer(hwnd_, wparam);
+                (wparam == kErrorTimer ? change_error_ : notice_.text).clear();
                 layout();
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
@@ -340,6 +329,7 @@ void MainWindow::on_create() {
 
 void MainWindow::on_destroy() {
     KillTimer(hwnd_, kErrorTimer);
+    KillTimer(hwnd_, kNoticeTimer);
     if (tray_added_) {
         NOTIFYICONDATAW nid{};
         nid.cbSize = sizeof nid;
@@ -357,16 +347,14 @@ void MainWindow::on_snapshot() {
         return;
     }
     Snapshot s = worker_->take();
-    // A switch shows the user's choice until its last command has finished.
-    for (const std::string& name : s.settled) {
-        if (const auto it = outstanding_.find(name); it != outstanding_.end() && --it->second <= 0) {
-            outstanding_.erase(it);
-            pending_.erase(name);
-        }
-    }
+    // A switch or picker shows the user's choice until its last command has finished.
+    settle(s.settled);
     if (!s.change_error.empty()) {
         change_error_ = s.change_error;
         SetTimer(hwnd_, kErrorTimer, kErrorShownMs, nullptr);
+    }
+    if (!s.clipboard.empty()) {
+        put_on_clipboard(s.clipboard);
     }
     const bool quit_done = s.quit_done;
     const std::string quit_error = s.quit_error;
@@ -377,6 +365,11 @@ void MainWindow::on_snapshot() {
     }
     snap_ = std::move(s);
     update_visible();
+    // The panel's project may have been removed (flo remove).
+    if (!selected_.empty() && shows_rows() && selected_row() == nullptr) {
+        close_panel();
+    }
+    update_fields();
     if (!focused.empty()) {
         if (const int again = visible_index(focused); again >= 0) {
             focus_ = again;
@@ -465,12 +458,24 @@ void MainWindow::make_fonts() {
         return win::UniqueFont(CreateFontIndirectW(&lf));
     };
     fonts_.title = make(20, true);
+    fonts_.panel_title = make(18, true);
     fonts_.body = make(14, false);
     fonts_.body_bold = make(14, true);
     fonts_.caption = make(12, false);
     fonts_.small_bold = make(12, true);
     fonts_.button = make(13, false);
     fonts_.button_bold = make(13, true);
+    {
+        // The Log box: Cascadia Mono (Windows 11) or Consolas, 11.5 px.
+        LOGFONTW lf{};
+        lf.lfHeight = -MulDiv(23, static_cast<int>(dpi_), 192);
+        lf.lfWeight = FW_NORMAL;
+        lf.lfCharSet = DEFAULT_CHARSET;
+        lf.lfQuality = CLEARTYPE_QUALITY;
+        lf.lfPitchAndFamily = FIXED_PITCH | FF_MODERN;
+        set_face(lf, font_exists(L"Cascadia Mono") ? L"Cascadia Mono" : L"Consolas");
+        fonts_.mono = win::UniqueFont(CreateFontIndirectW(&lf));
+    }
 
     if (search_ != nullptr) {
         SendMessageW(search_, WM_SETFONT, reinterpret_cast<WPARAM>(fonts_.button.get()), TRUE);
@@ -540,7 +545,14 @@ RECT MainWindow::banner_rect() const {
 RECT MainWindow::card_rect() const {
     const RECT b = banner_rect();
     const int top = b.bottom > 0 ? b.bottom + px(8) : px(kTopBarH);
-    return {px(kPad), top, width_ - px(kPad), std::max(top, height_ - px(kFooterH) - px(kGap))};
+    const int bottom = std::max(top, height_ - px(kFooterH) - px(kGap));
+    if (panel_open()) {
+        if (!panel_beside_list()) {
+            return {px(kPad), top, px(kPad), bottom};  // the panel takes the list's place
+        }
+        return {px(kPad), top, panel_rect().left - px(kGap), bottom};
+    }
+    return {px(kPad), top, width_ - px(kPad), bottom};
 }
 
 RECT MainWindow::list_rect() const {
@@ -682,6 +694,9 @@ MainWindow::BannerText MainWindow::banner() const {
     if (!change_error_.empty()) {
         return {change_error_, true, false};
     }
+    if (!notice_.text.empty()) {
+        return {notice_.text, notice_.error, false};
+    }
     switch (snap_.link) {
         case Link::Connecting:
             return {std::string(text(lang_, Str::Connecting)), false, false};
@@ -719,6 +734,9 @@ MainWindow::Hit MainWindow::hit_test(int x, int y) const {
     }
     if (contains(banner_rect(), x, y)) {
         return {Part::Banner, -1, {}};
+    }
+    if (panel_open() && contains(panel_geometry_.panel, x, y)) {
+        return panel_hit_test(x, y);
     }
     if (!contains(list_rect(), x, y)) {
         return {};
@@ -769,7 +787,7 @@ void MainWindow::on_click(const Hit& clicked) {
     // The row is found again by its project: a new list may have arrived
     // since the screen the user clicked on was painted.
     Hit hit = clicked;
-    if (!hit.project.empty()) {
+    if (!hit.project.empty() && !is_panel_part(hit.part)) {
         hit.row = visible_index(hit.project);
         if (hit.row < 0) {
             return;
@@ -787,7 +805,17 @@ void MainWindow::on_click(const Hit& clicked) {
         case Part::Row:
             focus_ = hit.row;
             show_focus_ = false;
+            panel_focus_ = -1;
+            select(hit.project);
             InvalidateRect(hwnd_, nullptr, FALSE);
+            break;
+        case Part::PanelClose:
+        case Part::PanelAddress:
+        case Part::PanelButton:
+        case Part::PanelField:
+        case Part::PanelCopyEnv:
+        case Part::PanelKeep:
+            on_panel_click(hit);
             break;
         case Part::Banner:
             if (banner().clickable && worker_) {
@@ -802,6 +830,10 @@ void MainWindow::on_click(const Hit& clicked) {
 }
 
 void MainWindow::on_key(WPARAM key) {
+    if (panel_open() && (panel_focus_ >= 0 || !panel_beside_list())) {
+        on_panel_key(key);
+        return;
+    }
     const int count = static_cast<int>(visible_.size());
     const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
     const int page = std::max(1, height_of(list_rect()) / px(kRowH));
@@ -831,11 +863,21 @@ void MainWindow::on_key(WPARAM key) {
             }
             break;
         case VK_RETURN:
+            // Opens the project's panel; its first button opens the address.
             if (focus_ >= 0) {
-                open_address(focus_);
+                select(snap_.rows[visible_[static_cast<std::size_t>(focus_)]].name);
             }
             break;
+        case VK_ESCAPE:
+            close_panel();
+            return;
         case VK_TAB:
+            if ((GetKeyState(VK_SHIFT) & 0x8000) == 0 && panel_open() && !panel_focus_order().empty()) {
+                panel_focus_ = 0;
+                show_focus_ = true;
+                InvalidateRect(hwnd_, nullptr, FALSE);
+                return;
+            }
             SetFocus(search_);
             return;
         case VK_F5:
@@ -937,10 +979,81 @@ void MainWindow::toggle(int visible_row) {
     const ProjectRow& row = snap_.rows[visible_[static_cast<std::size_t>(visible_row)]];
     const bool value = !switch_value(row);
     pending_[row.name] = value;
-    ++outstanding_[row.name];
+    ++outstanding_[ServiceWorker::on_key(row.name)];
     change_error_.clear();
     worker_->set_on(row.name, value);
     InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+bool MainWindow::is_settled(const std::string& key) const { return !outstanding_.contains(key); }
+
+void MainWindow::settle(const std::vector<std::string>& keys) {
+    for (const std::string& key : keys) {
+        const auto it = outstanding_.find(key);
+        if (it == outstanding_.end() || --it->second > 0) {
+            continue;
+        }
+        outstanding_.erase(it);
+        // The key is "<kind>\n<project>[\n<field>]".
+        const std::size_t nl = key.find('\n');
+        const std::string kind = key.substr(0, nl);
+        const std::string rest = nl == std::string::npos ? std::string() : key.substr(nl + 1);
+        if (kind == "on") {
+            pending_.erase(rest);
+        } else if (kind == "keep") {
+            pending_keep_.erase(rest);
+        } else {
+            pending_use_.erase(key);
+        }
+    }
+}
+
+void MainWindow::show_notice(std::string message, bool error) {
+    notice_ = {std::move(message), error};
+    SetTimer(hwnd_, kNoticeTimer, kNoticeShownMs, nullptr);
+    layout();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+// The .env lines hold the database password: they're kept out of Windows'
+// clipboard history and cloud clipboard, and wiped from memory once copied.
+void MainWindow::put_on_clipboard(std::string& value) {
+    std::wstring wide = w(value);
+    SecureZeroMemory(value.data(), value.size());
+    value.clear();
+    bool done = false;
+    if (OpenClipboard(hwnd_) != FALSE) {
+        EmptyClipboard();
+        const std::size_t bytes = (wide.size() + 1) * sizeof(wchar_t);
+        if (HGLOBAL text = GlobalAlloc(GMEM_MOVEABLE, bytes); text != nullptr) {
+            if (void* to = GlobalLock(text); to != nullptr) {
+                std::memcpy(to, wide.c_str(), bytes);
+                GlobalUnlock(text);
+                done = SetClipboardData(CF_UNICODETEXT, text) != nullptr;
+            }
+            if (!done) {
+                GlobalFree(text);
+            }
+        }
+        for (const wchar_t* name : {L"CanIncludeInClipboardHistory", L"CanUploadToCloudClipboard",
+                                    L"ExcludeClipboardContentFromMonitorProcessing"}) {
+            const UINT format = RegisterClipboardFormatW(name);
+            if (HGLOBAL zero = GlobalAlloc(GMEM_MOVEABLE, sizeof(DWORD)); format != 0 && zero != nullptr) {
+                if (auto* d = static_cast<DWORD*>(GlobalLock(zero)); d != nullptr) {
+                    *d = 0;
+                    GlobalUnlock(zero);
+                }
+                if (SetClipboardData(format, zero) == nullptr) {
+                    GlobalFree(zero);
+                }
+            }
+        }
+        CloseClipboard();
+    }
+    SecureZeroMemory(wide.data(), wide.size() * sizeof(wchar_t));
+    show_notice(done ? std::string(text(lang_, Str::EnvCopied))
+                     : fill(lang_, Str::OpenFailed, {"clipboard"}),
+                !done);
 }
 
 void MainWindow::open_address(int visible_row) {
@@ -1058,6 +1171,7 @@ void MainWindow::on_paint() {
             SetLayout(mem.get(), 0);
             const win::Selected selected(mem.get(), bitmap.get());
             geometry_ = row_geometry(mem.get());
+            panel_geometry_ = panel_open() ? panel_geometry(mem.get()) : PanelGeometry{};
             {
                 Canvas canvas(mem.get(), width_, rtl_);
                 canvas.fill({0, 0, width_, height_}, palette(dark_).window);
@@ -1068,6 +1182,7 @@ void MainWindow::on_paint() {
                     paint_top_bar(canvas, mem.get(), text_pass);
                     paint_banner(canvas, text_pass);
                     paint_list(canvas, mem.get(), text_pass);
+                    paint_panel(canvas, mem.get(), text_pass);
                     paint_footer(canvas, mem.get(), text_pass);
                 }
             }
@@ -1138,7 +1253,7 @@ void MainWindow::paint_list(Canvas& c, HDC /*dc*/, bool text_pass) const {
     const float border = std::max(1.0F, pxf(1.0F));
     const RECT card = card_rect();
     const RECT list = list_rect();
-    if (height_of(card) <= 0) {
+    if (height_of(card) <= 0 || width_of(card) <= px(2)) {
         return;
     }
     if (!text_pass) {
@@ -1173,23 +1288,17 @@ void MainWindow::paint_list(Canvas& c, HDC /*dc*/, bool text_pass) const {
         const bool on = switch_value(row);
 
         if (!text_pass) {
-            if (hover_.row == index && hover_.part != Part::None) {
+            const bool selected = row.name == selected_ && panel_open();
+            if (selected) {
+                c.fill(g.row, p.selected);
+                c.fill({g.row.left, g.row.top, g.row.left + px(3), g.row.bottom}, p.accent);
+            } else if (hover_.row == index && hover_.part != Part::None && !is_panel_part(hover_.part)) {
                 c.fill(g.row, p.row_hover);
             }
             if (i + 1 < geometry_.size()) {
                 c.fill({g.row.left, g.row.bottom - static_cast<int>(border), g.row.right, g.row.bottom}, p.divider);
             }
-            // The switch: 40 x 20, a 10 px knob 4 px from the edge (Fluent).
-            const float radius = static_cast<float>(height_of(g.toggle)) / 2.0F;
-            const float knob = pxf(hover_.row == index && hover_.part == Part::Switch ? 6.0F : 5.0F);
-            const float cy = static_cast<float>(g.toggle.top) + radius;
-            if (on) {
-                c.round_rect(g.toggle, radius, p.accent);
-                c.ellipse(static_cast<float>(g.toggle.right) - pxf(9), cy, knob, p.switch_on_knob);
-            } else {
-                c.round_rect(g.toggle, radius, p.switch_off_fill, p.switch_off_border, border);
-                c.ellipse(static_cast<float>(g.toggle.left) + pxf(9), cy, knob, p.switch_off_knob);
-            }
+            paint_switch(c, g.toggle, on, hover_.row == index && hover_.part == Part::Switch);
             for (const RECT& chip : g.chips) {
                 c.round_rect(chip, pxf(10), p.chip);
             }
@@ -1198,7 +1307,7 @@ void MainWindow::paint_list(Canvas& c, HDC /*dc*/, bool text_pass) const {
             } else {
                 c.round_rect(g.state, pxf(11), sc.fill);
             }
-            if (show_focus_ && has_focus && focus_ == index) {
+            if (show_focus_ && has_focus && focus_ == index && panel_focus_ < 0) {
                 RECT ring = g.row;
                 InflateRect(&ring, -px(2), -px(2));
                 c.round_outline(ring, pxf(4), p.focus, pxf(2));

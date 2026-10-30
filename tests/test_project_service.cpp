@@ -69,6 +69,53 @@ TEST_CASE("the project service adds, describes, switches and removes projects") 
     CHECK(fs::is_regular_file(shop / "floserver.json"));
 }
 
+TEST_CASE("the window changes one version in a project's floserver.json") {
+    const TempDir data;
+    const fs::path shop = data.path() / "work" / "shop";
+    test_util::write_file(shop / "floserver.json", R"({"root": "public", "php": "8.4", "x-note": "kept"})");
+    fake_install(data.path(), "php", "8.4.27");
+    fake_install(data.path(), "php", "8.2.35");
+
+    ProjectService service(data.path());
+    ServiceRefusal refusal;
+    REQUIRE(service.add(shop, "", refusal));
+    REQUIRE(service.set("shop", true, std::nullopt, refusal));
+
+    const auto listed = service.list(refusal);
+    REQUIRE(listed);
+    // As floserver.json says it, next to what it resolved to.
+    CHECK((*listed)["projects"][0]["wants"] == nlohmann::json{{"web", "nginx"}, {"php", "8.4"}});
+    CHECK((*listed)["projects"][0]["php"] == "8.4.27");
+
+    const auto changed = service.use("shop", "php", std::string("8.2"), refusal);
+    REQUIRE(changed);
+    CHECK((*changed)["php"] == "8.2.35");
+    CHECK((*changed)["wants"]["php"] == "8.2");
+    const auto text = read_small_file(shop / "floserver.json", 4096);
+    REQUIRE(text);
+    CHECK(text->find("\"x-note\": \"kept\"") != std::string::npos);
+    CHECK(text->find("\"root\": \"public\"") < text->find("\"php\""));
+
+    const auto web = service.use("shop", "web", std::string("apache"), refusal);
+    REQUIRE(web);
+    CHECK((*web)["wants"]["web"] == "apache");
+    const auto none = service.use("shop", "database", std::nullopt, refusal);
+    REQUIRE(none);
+    CHECK_FALSE((*none)["wants"].contains("database"));
+
+    CHECK_FALSE(service.use("nope", "php", std::string("8.4"), refusal));
+    CHECK(refusal.code == "unknown_project");
+    CHECK_FALSE(service.use("shop", "root", std::string("/"), refusal));
+    CHECK(refusal.code == "bad_params");
+    CHECK_FALSE(service.use("shop", "php", std::string("newest"), refusal));
+    CHECK(refusal.code == "config_refused");
+    // Kept with its real, long name (Windows runners have a short temp path).
+    const auto folder = service.folder("shop", refusal);
+    REQUIRE(folder);
+    CHECK(fs::equivalent(*folder, shop));
+    CHECK_FALSE(service.folder("nope", refusal));
+}
+
 TEST_CASE("a damaged config.json is never overwritten") {
     const TempDir data;
     fs::create_directories(data.path() / "shop");

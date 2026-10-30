@@ -56,6 +56,33 @@ enum class Str : std::uint8_t {
     TrayOpen,
     TrayQuit,
     Stopping,
+    // The project panel (step 5b).
+    StateWaking,
+    OpenInBrowser,
+    OpenFolder,
+    OpenTerminal,
+    OpenInStudio,
+    ClosePanel,
+    Versions,
+    FieldPhp,
+    FieldDatabase,
+    FieldWeb,
+    FieldNode,
+    FieldPython,
+    ChoiceNone,
+    ChoiceNewest,
+    NotInstalled,      // {0}: "8.1"
+    SavedIn,           // {0}: "floserver.json"
+    DatabaseTitle,     // {0}: the database name
+    DatabaseDetail,    // {0}: "127.0.0.1:3306", {1}: the user
+    CopyEnv,
+    EnvCopied,
+    KeepRunning,
+    KeepRunningOff,    // {0}: minutes
+    KeepRunningOn,
+    Log,
+    LogEmpty,
+    OpenFailed,        // {0}: what couldn't be opened
     Count_,
 };
 

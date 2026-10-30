@@ -1,5 +1,7 @@
 #include "floserver/core/project_config.h"
 
+#include "floserver/core/paths.h"
+
 #include <doctest/doctest.h>
 #include <nlohmann/json.hpp>
 
@@ -229,4 +231,73 @@ TEST_CASE("find_project_config walks up to the nearest file") {
     const auto again = find_project_config(deep);
     REQUIRE(again.has_value());
     CHECK(fs::equivalent(*again, project / "floserver.json"));
+}
+
+TEST_CASE("one key of floserver.json is set or removed, the rest kept in order") {
+    std::string error;
+    const std::string text = R"({"root": "public", "php": "8.2", "extensions": ["gd"], "x-team": 1})";
+
+    SUBCASE("a version") {
+        const auto out = set_project_config_value(text, ConfigKey::Php, "php", std::string("8.4.27"), error);
+        REQUIRE(out);
+        CHECK(*out == "{\n  \"root\": \"public\",\n  \"php\": \"8.4.27\",\n  \"extensions\": [\n    \"gd\"\n  ],\n"
+                      "  \"x-team\": 1\n}\n");
+    }
+    SUBCASE("a new key goes last") {
+        const auto out = set_project_config_value(text, ConfigKey::Node, "node", std::string("22"), error);
+        REQUIRE(out);
+        CHECK(out->find("\"x-team\": 1,\n  \"node\": \"22\"\n}") != std::string::npos);
+    }
+    SUBCASE("removed") {
+        const auto out = set_project_config_value(text, ConfigKey::Php, "php", std::nullopt, error);
+        REQUIRE(out);
+        CHECK(out->find("php") == std::string::npos);
+        CHECK(out->find("x-team") != std::string::npos);
+    }
+    SUBCASE("database, both ways") {
+        auto out = set_project_config_value(text, ConfigKey::Database, "database", std::string("mariadb-11.4"), error);
+        REQUIRE(out);
+        CHECK(out->find("\"database\": \"mariadb-11.4\"") != std::string::npos);
+        out = set_project_config_value(text, ConfigKey::Database, "mariadb", std::string("11.8"), error);
+        REQUIRE(out);
+        CHECK(out->find("\"database\": \"mariadb-11.8\"") != std::string::npos);
+    }
+    SUBCASE("web server: nginx is the default, so the key goes") {
+        auto out = set_project_config_value(text, ConfigKey::Web, "web", std::string("apache"), error);
+        REQUIRE(out);
+        CHECK(out->find("\"web\": \"apache\"") != std::string::npos);
+        out = set_project_config_value(*out, ConfigKey::Web, "web", std::string("nginx"), error);
+        REQUIRE(out);
+        CHECK(out->find("web") == std::string::npos);
+    }
+    SUBCASE("an empty file") {
+        const auto out = set_project_config_value("", ConfigKey::Python, "python", std::string("3.13"), error);
+        REQUIRE(out);
+        CHECK(*out == "{\n  \"python\": \"3.13\"\n}\n");
+    }
+    SUBCASE("refused") {
+        CHECK_FALSE(set_project_config_value(text, ConfigKey::Php, "php", std::string("latest"), error));
+        CHECK(error.find("not a version") != std::string::npos);
+        CHECK_FALSE(set_project_config_value(text, ConfigKey::Web, "web", std::string("iis"), error));
+        CHECK_FALSE(set_project_config_value(text, ConfigKey::Database, "database", std::string("oracle-1"), error));
+        CHECK(error.starts_with("floserver.json: database"));
+        CHECK_FALSE(set_project_config_value("[1, 2]", ConfigKey::Php, "php", std::string("8.4"), error));
+        CHECK_FALSE(set_project_config_value("{\"php\": ", ConfigKey::Php, "php", std::string("8.4"), error));
+        CHECK(error.find("isn't valid JSON") != std::string::npos);
+    }
+    CHECK(parse_config_key("mariadb") == ConfigKey::Database);
+    CHECK_FALSE(parse_config_key("root"));
+}
+
+TEST_CASE("setting a key writes the project's own floserver.json") {
+    const TempDir dir;
+    std::string error;
+    REQUIRE(set_project_config_file_value(dir.path(), ConfigKey::Php, "php", std::string("8.4"), error));
+    const auto written = read_small_file(dir.path() / "floserver.json", 4096);
+    CHECK(written == std::optional<std::string>("{\n  \"php\": \"8.4\"\n}\n"));
+    // A folder where the file should be isn't replaced.
+    const TempDir other;
+    fs::create_directories(other.path() / "floserver.json");
+    CHECK_FALSE(set_project_config_file_value(other.path(), ConfigKey::Php, "php", std::string("8.4"), error));
+    CHECK(error.find("plain file") != std::string::npos);
 }

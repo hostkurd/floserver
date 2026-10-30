@@ -127,6 +127,11 @@ TEST_CASE("the service lists, installs the newest match, and remembers the seque
     listed = s.list(false);
     REQUIRE(listed["installed"].size() == 1);
     CHECK(listed["installed"][0]["version"] == "8.5.12");
+    // The window's frequent ask: what's installed, without the list.
+    const auto installed_only = s.list(false, true);
+    CHECK(installed_only["installed"].size() == 1);
+    CHECK_FALSE(installed_only.contains("list"));
+    CHECK(installed_only["available"].empty());
     CHECK(read_file(w.tmp.path() / "runtimes" / "php" / "8.5.12" / "php-cgi.exe") == "MZ 8.5");
     CHECK(fs::is_empty(downloads_dir(w.tmp.path())));
     CHECK(read_file(manifest_state_file(w.tmp.path())).find("\"svc-test\": 7") != std::string::npos);

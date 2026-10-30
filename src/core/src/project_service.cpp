@@ -50,6 +50,24 @@ json site_json(const Project& project, const PlannedSite& site, const WebPlan& p
     if (site.database) {
         out["database"] = site.database->family + "-" + site.database->version;
     }
+    // As floserver.json says it: the window's version choices start here.
+    if (site.config) {
+        const ProjectConfig& c = *site.config;
+        json wants = {{"web", c.web == WebServer::Apache ? "apache" : "nginx"}};
+        if (c.php) {
+            wants["php"] = *c.php;
+        }
+        if (c.node) {
+            wants["node"] = *c.node;
+        }
+        if (c.python) {
+            wants["python"] = *c.python;
+        }
+        if (c.database) {
+            wants["database"] = c.database->family + "-" + c.database->version;
+        }
+        out["wants"] = std::move(wants);
+    }
     return out;
 }
 
@@ -172,6 +190,46 @@ std::optional<json> ProjectService::set(const std::string& name, std::optional<b
         return std::nullopt;
     }
     return describe(*config, name);
+}
+
+std::optional<json> ProjectService::use(const std::string& name, const std::string& key,
+                                        const std::optional<std::string>& value, ServiceRefusal& refusal) {
+    const std::lock_guard lock(mutex_);
+    const auto config = load(refusal);
+    if (!config) {
+        return std::nullopt;
+    }
+    const auto parsed_key = parse_config_key(key);
+    if (!parsed_key || key == "mariadb") {
+        refusal = {"bad_params", "the key is php, node, python, database or web"};
+        return std::nullopt;
+    }
+    const Project* project = find_project(*config, name);
+    if (project == nullptr) {
+        refusal = {"unknown_project", "there's no project called " + name};
+        return std::nullopt;
+    }
+    std::string error;
+    if (!set_project_config_file_value(project->dir, *parsed_key, key, value, error)) {
+        refusal = {"config_refused", error};
+        return std::nullopt;
+    }
+    return describe(*config, name);
+}
+
+std::optional<fs::path> ProjectService::folder(const std::string& name, ServiceRefusal& refusal) const {
+    const std::lock_guard lock(mutex_);
+    const auto config = load(refusal);
+    if (!config) {
+        return std::nullopt;
+    }
+    for (const Project& p : config->projects) {
+        if (p.name == name) {
+            return p.dir;
+        }
+    }
+    refusal = {"unknown_project", "there's no project called " + name};
+    return std::nullopt;
 }
 
 }  // namespace floserver::core

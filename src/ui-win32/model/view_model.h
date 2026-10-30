@@ -9,6 +9,8 @@
 #include <nlohmann/json.hpp>
 
 #include <cstdint>
+#include <functional>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -16,8 +18,19 @@
 
 namespace floserver::ui {
 
-// The row's state label (mockup: On / Sleeping / Off / Needs download / Problem).
-enum class RowState : std::uint8_t { On, Asleep, Off, NeedsDownload, Problem };
+// The row's state label (mockup: On / Sleeping / Waking… / Off / Needs
+// download / Problem). Waking: the project's own server is starting.
+enum class RowState : std::uint8_t { On, Asleep, Waking, Off, NeedsDownload, Problem };
+
+// What floserver.json asks for, as written there ("8.4", not "8.4.27").
+struct Wants {
+    bool known = false;  // the file could be read
+    std::string php;
+    std::string node;
+    std::string python;
+    std::string database;  // "mariadb-11.4"
+    std::string web = "nginx";
+};
 
 struct ProjectRow {
     std::string name;
@@ -32,6 +45,14 @@ struct ProjectRow {
     std::string detail;
     // "PHP 8.5.12", "MariaDB 11.4": only what the service reports.
     std::vector<std::string> chips;
+    // For the project panel (step 5b): the folder as the service gave it,
+    // what the versions resolved to, and what floserver.json asks for.
+    std::string path;
+    std::string php;       // "8.4.27"
+    std::string node;
+    std::string python;
+    std::string database;  // "mariadb-11.4"
+    Wants wants;
 };
 
 // projects.list's result ({"projects": [...]}). Entries without a name are skipped.
@@ -61,9 +82,68 @@ struct FooterText {
     std::string nginx;   // "nginx on ports 80 and 443"
     std::string memory;  // "Service memory: 23.4 MB"
     bool any_running = false;
+    // web.status's idle time in whole minutes (at least 1), for the panel's
+    // Keep running line; 0 when the service didn't say.
+    std::uint64_t idle_minutes = 0;
 };
 
 [[nodiscard]] FooterText footer_text(const std::vector<ProjectRow>& rows, const nlohmann::json* status,
                                      const nlohmann::json* web, Lang lang);
+
+// --- the project panel (step 5b) -------------------------------------------
+
+// The installed versions per runtime ("php" -> {"8.5.12", "8.4.27"}), newest
+// first, from runtimes.list's "installed".
+using Installed = std::map<std::string, std::vector<std::string>>;
+[[nodiscard]] Installed installed_from_list(const nlohmann::json& result);
+
+// "8.4.27" -> "8.4" (PHP, MariaDB, Python); Node keeps only its major: "24".
+[[nodiscard]] std::string version_series(std::string_view runtime, std::string_view version);
+
+enum class Field : std::uint8_t { Php, Database, Web, Node, Python };
+
+struct Choice {
+    std::string label;                 // in the window's language
+    std::optional<std::string> value;  // what projects.use is sent; nothing removes the key
+};
+
+struct VersionField {
+    Field field;
+    std::string key;      // projects.use's key: "php", "database", "web", "node", "python"
+    std::string label;    // "PHP", "Web server"
+    std::vector<Choice> choices;
+    std::size_t current = 0;  // index into choices
+};
+
+// The panel's version pickers for a project: PHP, Database, Web server,
+// Node.js, and Python when one is installed or asked for. Each lists what's
+// installed (one entry per series), plus what floserver.json asks for when
+// that isn't installed ("8.1 (not installed)").
+[[nodiscard]] std::vector<VersionField> version_fields(const ProjectRow& row, const Installed& installed, Lang lang);
+
+// The port the project's database server listens on, from databases.list
+// (the server whose series matches `database`, "mariadb-11.4"), or 0.
+[[nodiscard]] std::uint16_t database_port(const nlohmann::json& databases, std::string_view database);
+
+struct LogLine {
+    std::string time;    // "19:41:02"
+    std::string method;
+    std::string uri;
+    int status = 0;
+    std::string duration;  // "38 ms", "1.2 s"
+};
+
+// projects.log's entries. `local` turns a time (ms since 1970, UTC) into
+// hours, minutes and seconds of local time.
+[[nodiscard]] std::vector<LogLine> log_lines(const nlohmann::json& result,
+                                             const std::function<void(std::int64_t ms, int& h, int& m, int& s)>& local);
+
+// One log line as the Log box shows it: "19:41:02  GET  /cart  302  44 ms".
+[[nodiscard]] std::string log_text(const LogLine& line);
+
+// The .env lines from databases.login's "env" ([[key, value], ...]), one
+// "KEY=value" per line ending in "\r\n", written the way `flo env --write`
+// writes them. Empty when there are none.
+[[nodiscard]] std::string env_text(const nlohmann::json& login);
 
 }  // namespace floserver::ui

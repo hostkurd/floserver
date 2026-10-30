@@ -17,12 +17,13 @@ enable_language(RC)
 add_executable(floserver_ui WIN32
     main.cpp
     main_window.cpp
+    main_window_panel.cpp
     canvas.cpp
     service_worker.cpp
     FloServer.rc)
 set_target_properties(floserver_ui PROPERTIES OUTPUT_NAME FloServer)
 target_link_libraries(floserver_ui PRIVATE floserver_core floserver_ui_model
-    comctl32 dwmapi gdiplus shell32 ole32 advapi32 user32 gdi32)
+    comctl32 dwmapi gdiplus shell32 ole32 uuid advapi32 user32 gdi32)
 # The window starts floserverd the way the CLI does; build it alongside.
 add_dependencies(floserver_ui floserverd)
 if(MINGW)
