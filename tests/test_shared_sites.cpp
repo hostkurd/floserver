@@ -309,6 +309,10 @@ TEST_CASE("the list page's script: the www folder read when it's opened, values 
     CHECK(script.find(R"(it\'s/www';)") != std::string::npos);  // the quote escaped
     CHECK(script.find("$web = 'Apache';") != std::string::npos);
     CHECK(script.find("scandir($www)") != std::string::npos);
+    // A value that looks like a placeholder isn't replaced again.
+    const std::string odd = shared_list_script(kBase / "@CONFIG@", kBase / "c.json", WebServer::Nginx);
+    CHECK(odd.find("/@CONFIG@';") != std::string::npos);
+    CHECK(odd.find("c.json';") != std::string::npos);
 
 #ifndef _WIN32
     // Run it with this machine's php-cgi, when there is one.

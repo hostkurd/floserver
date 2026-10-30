@@ -613,6 +613,9 @@ TEST_CASE("shared sites: the www folder at localhost/<folder>/ and <folder>.loca
         CHECK(list.find("Shared sites") != std::string::npos);
         CHECK(list.find("/blog/") != std::string::npos);
         CHECK(get(http, "localhost", "/blog/") == "200 blog /blog/index.php");
+        // The list page is in shared sites' request log too.
+        const auto entries = read_request_log(request_log_file(web_dir(data), kSharedSiteName), 50);
+        CHECK(std::any_of(entries.begin(), entries.end(), [](const RequestLogEntry& e) { return e.uri == "/"; }));
         CHECK(get(http, "localhost", "/blog/about.php") == "200 about");
         CHECK(get(http, "blog.localhost") == "200 blog /index.php");
         CHECK(get(http, "site.localhost") == "200 static site");
@@ -624,9 +627,9 @@ TEST_CASE("shared sites: the www folder at localhost/<folder>/ and <folder>.loca
         CHECK(get(http, "blog.localhost", "/.env").starts_with("404 "));
         CHECK(get(http, "nothing-here.localhost").starts_with("404 "));
         // The www folder's own index replaces the list.
-        test_util::write_file(www / "index.php", "<?php echo 'my own index';");
+        test_util::write_file(www / "index.php", "<?php echo 'my own index ', $_SERVER['REQUEST_URI'];");
         fs::permissions(www / "index.php", fs::perms::others_read, fs::perm_options::add, ec);
-        CHECK(get(http, "localhost") == "200 my own index");
+        CHECK(get(http, "localhost") == "200 my own index /");  // "/", not /index.php, with Apache too
         // A project that's off keeps its name: no www folder takes it.
         app.projects.front().on = false;
         REQUIRE(save_app_config(app_config_file(data), app, error));

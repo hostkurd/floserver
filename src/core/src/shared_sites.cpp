@@ -5,6 +5,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <system_error>
 
 namespace floserver::core {
@@ -21,8 +22,6 @@ bool is_host_label(std::string_view s) {
            !s.starts_with("xn--") && std::all_of(s.begin(), s.end(), is_label_char);
 }
 
-
-// A folder name as one URL path segment.
 
 bool exists_file(const fs::path& p) {
     std::error_code ec;
@@ -218,13 +217,6 @@ std::string php_string(std::string_view s) {
     return out + "'";
 }
 
-std::string replace_once(std::string text, std::string_view from, const std::string& to) {
-    const auto at = text.find(from);
-    if (at != std::string::npos) {
-        text.replace(at, from.size(), to);
-    }
-    return text;
-}
 
 constexpr std::string_view kListScript = R"FLOPHP(<?php
 // Written by FloServer: the list of Shared sites (D19). It reads the www
@@ -294,7 +286,7 @@ p.foot{color:var(--muted);font-size:12px;margin:12px 2px}
 <ul>
 <?php foreach ($folders as $n):
     $kind = fs_kind("$www/$n");
-    $label = preg_match('/^(?!xn--)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/', $n) === 1; ?>
+    $label = preg_match('/^(?!xn--)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/D', $n) === 1; ?>
 <li><a class="name" href="<?= fs_h($base . '/' . rawurlencode($n) . '/') ?>"><?= fs_h($n) ?>/</a>
 <?php if ($kind === 'node' || $kind === 'python'): ?>
 <span class="warn"><?= $kind === 'node' ? 'Node.js' : 'Python' ?> app: make it a project in FloServer</span>
@@ -320,10 +312,36 @@ std::string shared_list_script(const fs::path& dir, const fs::path& config_json,
         const std::u8string u = p.generic_u8string();
         return std::string(u.begin(), u.end());
     };
-    std::string out(kListScript);
-    out = replace_once(std::move(out), "@WWW@", php_string(text(dir)));
-    out = replace_once(std::move(out), "@CONFIG@", php_string(text(config_json)));
-    out = replace_once(std::move(out), "@WEB@", php_string(web == WebServer::Apache ? "Apache" : "nginx"));
+    // One pass over the template: an inserted value is never searched again.
+    const std::array<std::pair<std::string_view, std::string>, 3> values = {{
+        {"@WWW@", php_string(text(dir))},
+        {"@CONFIG@", php_string(text(config_json))},
+        {"@WEB@", php_string(web == WebServer::Apache ? "Apache" : "nginx")},
+    }};
+    std::string out;
+    std::string_view rest = kListScript;
+    while (!rest.empty()) {
+        const auto at = rest.find('@');
+        if (at == std::string_view::npos) {
+            out += rest;
+            break;
+        }
+        out += rest.substr(0, at);
+        rest.remove_prefix(at);
+        bool replaced = false;
+        for (const auto& [key, value] : values) {
+            if (rest.starts_with(key)) {
+                out += value;
+                rest.remove_prefix(key.size());
+                replaced = true;
+                break;
+            }
+        }
+        if (!replaced) {
+            out += '@';
+            rest.remove_prefix(1);
+        }
+    }
     return out;
 }
 
