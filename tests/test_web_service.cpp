@@ -634,7 +634,9 @@ TEST_CASE("shared sites: the www folder at localhost/<folder>/ and <folder>.loca
         app.projects.front().on = false;
         REQUIRE(save_app_config(app_config_file(data), app, error));
         (void)service.reload();
-        CHECK(get(http, "shop.localhost").starts_with("404 There's no FloServer project"));
+        // nginx takes the new config within a moment.
+        CHECK(eventually([&] { return get(http, "shop.localhost").starts_with("404 There's no FloServer project"); }, 10s));
+        INFO(get(http, "shop.localhost"));
         CHECK(get(http, "localhost", "/shop/") == "200 www shop");
         // The list page follows new folders.
         fs::remove(www / "index.php");
