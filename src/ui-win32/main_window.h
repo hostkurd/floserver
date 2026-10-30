@@ -129,6 +129,7 @@ private:
         RECT folder_hint{};
         std::vector<std::pair<RECT, RECT>> fields;  // label, box
         RECT log_box{};
+        int columns = 1;  // of the cards, for the arrow keys
     };
     struct WizardState {
         bool open = false;
@@ -138,7 +139,12 @@ private:
         std::string parent;
         std::vector<VersionField> fields;
         std::map<std::string, std::size_t> picks;  // field key -> chosen index
+        // Kept from the card at step 0 -> 1: the card list may change later.
+        std::string template_id;
+        bool studio = false;
     };
+    // Step 3 and the job not finished yet (also before its first answer).
+    [[nodiscard]] bool wizard_running() const;
     struct Fonts {
         win::UniqueFont title;
         win::UniqueFont panel_title;

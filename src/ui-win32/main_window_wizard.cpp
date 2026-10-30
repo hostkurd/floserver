@@ -48,6 +48,11 @@ std::string default_parent() {
 
 bool MainWindow::wizard_open() const { return wizard_.open; }
 
+bool MainWindow::wizard_running() const {
+    const std::string& state = snap_.create.state;
+    return wizard_.open && wizard_.step == 3 && state != "done" && state != "failed" && state != "cancelled";
+}
+
 const TemplateCard* MainWindow::wizard_card() const {
     if (wizard_.card < snap_.templates.size()) {
         return &snap_.templates[wizard_.card];
@@ -65,19 +70,21 @@ void MainWindow::open_wizard() {
     if (!worker_ || snap_.link != Link::Connected) {
         return;
     }
-    if (wizard_.open && wizard_.step == 3 && snap_.create.state == "running") {
+    if (wizard_running()) {
         return;  // a project is being made; its page stays
     }
     wizard_ = {};
     wizard_.open = true;
     if (!snap_.templates_loaded || !snap_.templates_error.empty() || snap_.templates.empty()) {
         snap_.templates_loaded = false;
+        snap_.templates_error.clear();
         worker_->load_templates();
     }
     if (name_edit_ == nullptr) {
         name_edit_ = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL | ES_LOWERCASE, 0, 0, 0, 0,
                                      hwnd_, nullptr, instance_, nullptr);
         SetWindowSubclass(name_edit_, name_proc, kNameSubclass, reinterpret_cast<DWORD_PTR>(this));
+        SendMessageW(name_edit_, EM_LIMITTEXT, 63, 0);  // a project name's most
         SendMessageW(name_edit_, WM_SETFONT, reinterpret_cast<WPARAM>(fonts_.body.get()), TRUE);
     }
     ShowWindow(name_edit_, SW_HIDE);
@@ -122,6 +129,12 @@ void MainWindow::wizard_next() {
             if (card == nullptr) {
                 return;
             }
+            // Another template than last time: its own versions.
+            if (wizard_.template_id != card->id) {
+                wizard_.picks.clear();
+            }
+            wizard_.template_id = card->id;
+            wizard_.studio = card->studio;
             wizard_.step = 1;
             if (wizard_.parent.empty()) {
                 wizard_.parent = !snap_.projects_dir.empty() ? snap_.projects_dir : default_parent();
@@ -140,6 +153,9 @@ void MainWindow::wizard_next() {
                 return;
             }
             wizard_.name = name;
+            if (card == nullptr || card->id != wizard_.template_id) {
+                return;  // the list changed under the page
+            }
             wizard_.fields = template_fields(*card, snap_.installed, lang_);
             wizard_.step = 2;
             ShowWindow(name_edit_, SW_HIDE);
@@ -147,10 +163,11 @@ void MainWindow::wizard_next() {
             break;
         }
         case 2: {
-            // The parent folder is made when it's the default one and isn't there yet.
+            // Documents\FloServer is made the first time; a folder the user
+            // picked with Browse is there already.
             const std::wstring parent = w(wizard_.parent);
-            if (GetFileAttributesW(parent.c_str()) == INVALID_FILE_ATTRIBUTES) {
-                SHCreateDirectoryExW(nullptr, parent.c_str(), nullptr);
+            if (wizard_.parent == default_parent() && GetFileAttributesW(parent.c_str()) == INVALID_FILE_ATTRIBUTES) {
+                (void)SHCreateDirectoryExW(nullptr, parent.c_str(), nullptr);
             }
             std::map<std::string, std::optional<std::string>> versions;
             for (std::size_t i = 0; i < wizard_.fields.size(); ++i) {
@@ -163,7 +180,7 @@ void MainWindow::wizard_next() {
             snap_.create = {};
             wizard_.step = 3;
             change_error_.clear();
-            worker_->create_project(card->id, wizard_.name, wizard_.parent, versions);
+            worker_->create_project(wizard_.template_id, wizard_.name, wizard_.parent, versions);
             break;
         }
         default:
@@ -174,7 +191,7 @@ void MainWindow::wizard_next() {
 
 void MainWindow::wizard_back() {
     if (wizard_.step == 3) {
-        if (snap_.create.state == "running") {
+        if (wizard_running()) {
             return;
         }
         wizard_.step = 2;
@@ -215,6 +232,9 @@ void MainWindow::wizard_browse() {
         }
     }
     dialog->Release();
+    if (wizard_.step == 1 && name_edit_ != nullptr) {
+        SetFocus(name_edit_);
+    }
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
@@ -268,14 +288,18 @@ void MainWindow::on_wizard_click(const Hit& hit) {
             add_existing_folder();
             break;
         case Part::WizCancel:
-            close_wizard();
+            if (!wizard_running()) {
+                close_wizard();
+            }
             break;
         case Part::WizBack:
             wizard_back();
             break;
         case Part::WizNext:
             if (wizard_.step == 3) {
-                close_wizard();  // "Open project" or "Close"
+                if (!wizard_running()) {
+                    close_wizard();  // "Open project" or "Close"
+                }
             } else {
                 wizard_next();
             }
@@ -289,13 +313,13 @@ void MainWindow::on_wizard_key(WPARAM key) {
     const int count = static_cast<int>(snap_.templates.size());
     switch (key) {
         case VK_ESCAPE:
-            if (!(wizard_.step == 3 && snap_.create.state == "running")) {
+            if (!wizard_running()) {
                 close_wizard();
             }
             break;
         case VK_RETURN:
             if (wizard_.step == 3) {
-                if (snap_.create.state != "running") {
+                if (!wizard_running()) {
                     close_wizard();
                 }
             } else {
@@ -307,16 +331,19 @@ void MainWindow::on_wizard_key(WPARAM key) {
         case VK_UP:
         case VK_DOWN:
             if (wizard_.step == 0 && count > 0) {
-                int i = static_cast<int>(wizard_.card);
-                const bool forward = key == VK_DOWN || (key == VK_RIGHT) != rtl_;
-                const int stride = key == VK_UP || key == VK_DOWN ? 4 : 1;
-                i = std::clamp(i + (forward ? stride : -stride), 0, count - 1);
+                int i = std::min(static_cast<int>(wizard_.card), count - 1);
+                const int columns = std::max(1, wizard_geometry_.columns);
+                int step = 0;
+                if (key == VK_UP || key == VK_DOWN) {
+                    step = key == VK_DOWN ? columns : -columns;
+                } else {
+                    // Right moves on in left-to-right reading, back in right-to-left.
+                    step = (key == VK_RIGHT) != rtl_ ? 1 : -1;
+                }
+                i = std::clamp(i + step, 0, count - 1);
                 wizard_.card = static_cast<std::size_t>(i);
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
-            break;
-        case VK_BACK:
-            wizard_back();
             break;
         default:
             break;
@@ -328,7 +355,9 @@ LRESULT CALLBACK MainWindow::name_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARA
     switch (msg) {
         case WM_KEYDOWN:
             if (wparam == VK_RETURN) {
-                self->wizard_next();
+                if ((static_cast<std::uintptr_t>(lparam) & (1U << 30U)) == 0) {  // not a held key's repeats
+                    self->wizard_next();
+                }
                 return 0;
             }
             if (wparam == VK_ESCAPE) {
@@ -341,7 +370,7 @@ LRESULT CALLBACK MainWindow::name_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARA
                 return 0;  // no beep
             }
             // Only what a project name may hold (ES_LOWERCASE makes letters small).
-            if (wparam >= 0x20 && !((wparam >= L'a' && wparam <= L'z') || (wparam >= L'A' && wparam <= L'Z') ||
+            if (wparam >= 0x20 && wparam != 0x7F && !((wparam >= L'a' && wparam <= L'z') || (wparam >= L'A' && wparam <= L'Z') ||
                                      (wparam >= L'0' && wparam <= L'9') || wparam == L'-')) {
                 MessageBeep(MB_OK);
                 return 0;
@@ -374,7 +403,7 @@ MainWindow::WizardGeometry MainWindow::wizard_geometry(HDC dc) const {
         const int bw = Canvas::measure(dc, w(text(lang_, label)), (bold ? fonts_.button_bold : fonts_.button).get(), rtl_) + px(28);
         return RECT{right - bw, footer_mid - px(kButtonH) / 2, right, footer_mid + px(kButtonH) / 2};
     };
-    const bool running = wizard_.step == 3 && snap_.create.state == "running";
+    const bool running = wizard_running();
     const bool done = wizard_.step == 3 && snap_.create.state == "done";
     const Str next_label = wizard_.step == 2 ? Str::WizardCreate
                            : done           ? Str::WizardOpenProject
@@ -401,12 +430,16 @@ MainWindow::WizardGeometry MainWindow::wizard_geometry(HDC dc) const {
     switch (wizard_.step) {
         case 0: {
             const int cols = std::max(1, std::min(4, (x1 - x0 + px(kCardGap)) / (px(180) + px(kCardGap))));
+            g.columns = cols;
             const int card_w = (x1 - x0 - (cols - 1) * px(kCardGap)) / cols;
             for (std::size_t i = 0; i < snap_.templates.size(); ++i) {
                 const int col = static_cast<int>(i) % cols;
                 const int line = static_cast<int>(i) / cols;
                 const int cx = x0 + col * (card_w + px(kCardGap));
                 const int cy = y + line * (px(kCardH) + px(kCardGap));
+                if (cy + px(kCardH) > bottom) {
+                    break;  // no room above the footer (a small window): the arrow keys stop here too
+                }
                 g.cards.push_back({cx, cy, cx + card_w, cy + px(kCardH)});
             }
             g.message = {x0, y, x1, bottom};
@@ -577,12 +610,8 @@ void MainWindow::paint_wizard(Canvas& c, HDC dc, bool text_pass) const {
                                                      : fill(lang_, Str::WizardMaking, {wizard_.name});
             break;
     }
-    if (wizard_.step == 3 && snap_.create.state == "failed") {
-        title = std::string(text(lang_, Str::WizardFailed));
-        title = title.substr(0, title.find("{0}"));
-        while (!title.empty() && (title.back() == ' ' || title.back() == ':')) {
-            title.pop_back();
-        }
+    if (wizard_.step == 3 && (snap_.create.state == "failed" || snap_.create.state == "cancelled")) {
+        title = std::string(text(lang_, Str::WizardNotMade));
     }
     c.text(g.title, w(title), fonts_.title.get(), p.text, Align::Start, false);
 
@@ -647,7 +676,8 @@ void MainWindow::paint_wizard(Canvas& c, HDC dc, bool text_pass) const {
             c.paragraph(g.message, w(text(lang_, Str::WizardDownloads)), fonts_.caption.get(), p.text_subtle);
             break;
         default: {
-            std::string line = snap_.create.state == "failed" ? snap_.create.error : snap_.create.step;
+            std::string line = snap_.create.state == "failed" || snap_.create.state == "cancelled" ? snap_.create.error
+                                                                                                  : snap_.create.step;
             if (rtl_) {
                 line = isolate_ltr(line);
             }

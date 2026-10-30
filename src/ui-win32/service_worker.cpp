@@ -113,6 +113,11 @@ void ServiceWorker::install(const std::string& project, const std::vector<Downlo
     push({Command::Kind::Install, project, false, {}, std::nullopt, downloads, {}});
 }
 void ServiceWorker::load_templates() {
+    {
+        const std::lock_guard lock(mutex_);
+        latest_.templates_loaded = false;  // "Loading…" until the answer
+        latest_.templates_error.clear();
+    }
     push({Command::Kind::LoadTemplates, {}, false, {}, std::nullopt, {}, {}});
 }
 void ServiceWorker::create_project(const std::string& template_id, const std::string& name, const std::string& parent,
@@ -258,6 +263,16 @@ void ServiceWorker::run(const std::stop_token& stop) {
             if (client && !jobs.empty()) {
                 jobs.clear();
                 need_installed = true;
+            }
+            // A new service doesn't know the project being made.
+            if (client && create_job != 0) {
+                Snapshot::Create made;
+                made.job = create_job;
+                made.state = "failed";
+                made.error = std::string(text(lang_, Str::ConnectionLost));
+                create_job = 0;
+                const std::lock_guard lock(mutex_);
+                latest_.create = std::move(made);
             }
         }
 
@@ -436,7 +451,9 @@ void ServiceWorker::run(const std::stop_token& stop) {
                     const std::lock_guard lock(mutex_);
                     latest_.templates_loaded = true;
                     latest_.templates_error = why;
-                    latest_.templates = std::move(cards);
+                    if (why.empty()) {
+                        latest_.templates = std::move(cards);  // a failed ask keeps the cards there were
+                    }
                     break;
                 }
                 case Command::Kind::CreateProject: {
@@ -567,6 +584,12 @@ void ServiceWorker::run(const std::stop_token& stop) {
                 }
                 create = std::move(made);
             } else {
+                // Forgotten (a restarted service): the window must not wait forever.
+                Snapshot::Create made;
+                made.job = create_job;
+                made.state = "failed";
+                made.error = got->ok ? std::string("the service's answer was unreadable") : got->error_message;
+                create = std::move(made);
                 create_job = 0;
             }
         }

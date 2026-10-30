@@ -254,6 +254,9 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             return 0;
         }
         case WM_MOUSEWHEEL:
+            if (wizard_open()) {
+                return 0;  // the list under the page stays put
+            }
             scroll_to(scroll_ - GET_WHEEL_DELTA_WPARAM(wparam) * px(kRowH) / WHEEL_DELTA);
             return 0;
         case WM_KEYDOWN:
@@ -366,8 +369,7 @@ void MainWindow::on_snapshot() {
     const bool quit_done = s.quit_done;
     const std::string quit_error = s.quit_error;
     // A project made from a template that hands over to FloCMS Studio (D9, D14).
-    const bool just_made = wizard_open() && wizard_.step == 3 && snap_.create.state != "done" &&
-                           s.create.state == "done" && !s.create.project.empty();
+    const bool just_made = wizard_running() && s.create.state == "done" && !s.create.project.empty();
     // Keyboard focus stays on the same project when the list changes.
     std::string focused;
     if (focus_ >= 0 && focus_ < static_cast<int>(visible_.size())) {
@@ -386,7 +388,7 @@ void MainWindow::on_snapshot() {
         }
     }
     // A folder the user just added: its panel opens once the list has it.
-    if (!pending_added_.empty() && shows_rows() && snap_.link == Link::Connected) {
+    if (!pending_added_.empty() && !wizard_open() && shows_rows() && snap_.link == Link::Connected) {
         const bool listed = std::any_of(snap_.rows.begin(), snap_.rows.end(),
                                         [&](const ProjectRow& r) { return r.name == pending_added_; });
         if (listed) {
@@ -398,10 +400,8 @@ void MainWindow::on_snapshot() {
             pending_added_.clear();
         }
     }
-    if (just_made && worker_) {
-        if (const TemplateCard* card = wizard_card(); card != nullptr && card->studio) {
-            worker_->open_in_studio(snap_.create.project, true);
-        }
+    if (just_made && worker_ && wizard_.studio) {
+        worker_->open_in_studio(snap_.create.project, true);
     }
     layout();
     update_tray_tip();

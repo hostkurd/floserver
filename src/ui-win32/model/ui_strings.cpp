@@ -131,6 +131,7 @@ constexpr std::array kTable{
     Entry{Str::WizardMaking, "Making {0}…", "جارٍ إنشاء {0}…", "{0} دروست دەکرێت…"},
     Entry{Str::WizardDone, "{0} is ready", "{0} جاهز", "{0} ئامادەیە"},
     Entry{Str::WizardFailed, "Couldn't make the project: {0}", "تعذّر إنشاء المشروع: {0}", "نەتوانرا پڕۆژەکە دروست بکرێت: {0}"},
+    Entry{Str::WizardNotMade, "The project wasn't made", "لم يُنشأ المشروع", "پڕۆژەکە دروست نەکرا"},
     Entry{Str::WizardOpenProject, "Open project", "فتح المشروع", "کردنەوەی پڕۆژە"},
     Entry{Str::WizardClose, "Close", "إغلاق", "داخستن"},
     Entry{Str::WizardNoTemplates, "The templates come with the runtime list, which couldn't be loaded: {0}",

@@ -113,6 +113,7 @@ enum class Str : std::uint8_t {
     WizardMaking,      // {0}: the project's name
     WizardDone,        // {0}: the project's name
     WizardFailed,      // {0}: the service's reason
+    WizardNotMade,
     WizardOpenProject,
     WizardClose,
     WizardNoTemplates, // {0}: why
