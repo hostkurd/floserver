@@ -51,6 +51,14 @@ TEST_CASE("SQL is quoted and a project's database is its own") {
     CHECK(reserved_database_name(project_database_name("performance-schema")));
     CHECK(reserved_database_name("mysql"));
     CHECK_FALSE(reserved_database_name("shop"));
+    // Shared sites' (D19).
+    CHECK(reserved_database_name("www"));
+    CHECK(reserved_database_name(project_database_name("www-blog")));
+    CHECK_FALSE(reserved_database_name("wwwblog"));
+    const std::string shared = shared_database_sql("Pw'1");
+    CHECK(shared.find("CREATE DATABASE IF NOT EXISTS `www`") != std::string::npos);
+    CHECK(shared.find("GRANT ALL PRIVILEGES ON `www\\_%`.* TO 'www'@'localhost';") != std::string::npos);
+    CHECK(shared.find("IDENTIFIED BY 'Pw''1'") != std::string::npos);
     const std::string sql = project_database_sql("my_shop", "my_shop", "Pw23");
     CHECK(sql.find("CREATE DATABASE IF NOT EXISTS `my_shop` CHARACTER SET utf8mb4") != std::string::npos);
     CHECK(sql.find("GRANT ALL PRIVILEGES ON `my_shop`.* TO 'my_shop'@'localhost';") != std::string::npos);

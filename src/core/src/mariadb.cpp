@@ -195,6 +195,23 @@ std::string project_database_sql(const std::string& database, const std::string&
     return sql + "FLUSH PRIVILEGES;\n";
 }
 
+std::string shared_database_sql(const std::string& password) {
+    const std::string user(kSharedDatabaseUser);
+    const std::string pw = sql_string(password);
+    // The pattern's '_' is escaped so it means an underscore, not any character.
+    const std::string pattern = "`" + std::string(kSharedDatabaseUser) + "\\_%`";
+    std::string sql = "CREATE DATABASE IF NOT EXISTS " + sql_identifier(user) +
+                      " CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\n";
+    for (const char* host : {"localhost", "127.0.0.1"}) {
+        const std::string account = sql_string(user) + "@'" + host + "'";
+        sql.append("CREATE USER IF NOT EXISTS ").append(account).append(" IDENTIFIED BY ").append(pw).append(";\n");
+        sql.append("ALTER USER ").append(account).append(" IDENTIFIED BY ").append(pw).append(";\n");
+        sql.append("GRANT ALL PRIVILEGES ON ").append(sql_identifier(user)).append(".* TO ").append(account).append(";\n");
+        sql.append("GRANT ALL PRIVILEGES ON ").append(pattern).append(".* TO ").append(account).append(";\n");
+    }
+    return sql + "FLUSH PRIVILEGES;\n";
+}
+
 std::string project_database_name(std::string_view project) {
     std::string out(project);
     std::replace(out.begin(), out.end(), '-', '_');
@@ -204,7 +221,8 @@ std::string project_database_name(std::string_view project) {
 bool reserved_database_name(std::string_view name) {
     static constexpr std::array<std::string_view, 8> kReserved = {
         "root", "mysql", "sys", "performance_schema", "information_schema", "test", "mariadb_sys", "public"};
-    return std::find(kReserved.begin(), kReserved.end(), name) != kReserved.end();
+    return std::find(kReserved.begin(), kReserved.end(), name) != kReserved.end() || name == kSharedDatabaseUser ||
+           name.starts_with(kSharedDatabasePrefix);
 }
 
 EnvStyle env_style(const fs::path& project_dir) {

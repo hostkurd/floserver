@@ -427,6 +427,20 @@ struct Service {
         if (r.method == "databases.list") {
             return protocol::make_result(r.id, databases->status());
         }
+        if (r.method == "shared.login") {
+            // Shared sites' database login (D19): user www, databases www and www_*.
+            core::ServiceRefusal refusal;
+            const auto login = databases->shared_login(refusal);
+            if (!login) {
+                return protocol::make_error(r.id, refusal.code, refusal.message);
+            }
+            return protocol::make_result(r.id, {{"host", "127.0.0.1"},
+                                                {"port", login->port},
+                                                {"database", login->database},
+                                                {"user", login->user},
+                                                {"password", login->password},
+                                                {"prefix", std::string(core::kSharedDatabasePrefix)}});
+        }
         const std::string name = string_param(r.params, "name");
         core::ServiceRefusal refusal;
         const auto login = databases->project_login(name, refusal);
@@ -557,7 +571,8 @@ struct Service {
                 reply = cert_request(*request);
             } else if (request->method == "web.status" || request->method == "web.reload") {
                 reply = web_request(*request);
-            } else if (request->method == "databases.list" || request->method == "databases.login") {
+            } else if (request->method == "databases.list" || request->method == "databases.login" ||
+                       request->method == "shared.login") {
                 reply = database_request(*request);
             } else if (request->method == "templates.list" || request->method == "projects.create" ||
                        request->method == "create.get" || request->method == "create.cancel") {

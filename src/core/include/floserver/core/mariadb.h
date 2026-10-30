@@ -77,12 +77,24 @@ struct MariaDbFiles {
 [[nodiscard]] std::string project_database_sql(const std::string& database, const std::string& user,
                                                const std::string& password);
 
+// Shared sites' login (D19): user "www", its database "www", and it may make
+// and use any database whose name starts with "www_" (shared_database_sql).
+// No project's database can have those names (reserved_database_name).
+inline constexpr std::string_view kSharedDatabaseUser = "www";
+inline constexpr std::string_view kSharedDatabasePrefix = "www_";
+
+// The shared sites' user (@localhost and @127.0.0.1) and database, all
+// rights on "www" and on every "www_..." database, which it may create.
+// Safe to run again: it sets the password the secure store holds.
+[[nodiscard]] std::string shared_database_sql(const std::string& password);
+
 // The database and user name for a project: its name with '-' as '_'
 // ("my-shop" -> "my_shop"), so tools that don't quote names cope.
 [[nodiscard]] std::string project_database_name(std::string_view project);
 
 // Names a project's database and user can't have: MariaDB's own accounts
-// and databases ("root" would take over the root account).
+// and databases ("root" would take over the root account), and the shared
+// sites' ("www", "www_..."), which their login may use.
 [[nodiscard]] bool reserved_database_name(std::string_view name);
 
 // Which .env keys a project uses: FloCMS's (DB_TYPE, DB_NAME) or

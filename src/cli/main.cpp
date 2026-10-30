@@ -63,6 +63,7 @@ void print_help(std::ostream& out) {
         << "  db                         Show the databases and the projects using them\n"
         << "  shared [on|off]            Shared sites: every folder in the www folder at localhost (D19)\n"
         << "  shared php <v|newest>      ...their PHP version; shared web <apache|nginx>; shared dir <folder|default>\n"
+        << "  shared db <11.4|none>      ...their database; shared login [--show]: its user and password\n"
         << "  env [project] [--write]    A project's database settings as .env lines (--show: the password)\n"
         << "  trust                      Let your browsers trust FloServer's HTTPS certificates\n"
         << "  untrust                    Remove FloServer's certificate authority\n"
@@ -920,6 +921,31 @@ int shared(const std::vector<std::string>& args) {
         changes["php"] = args[2] == "newest" ? nlohmann::json(nullptr) : nlohmann::json(args[2]);
     } else if (args.size() == 3 && args[1] == "web") {
         changes["web"] = args[2];
+    } else if (args.size() == 3 && args[1] == "db") {
+        changes["database"] = args[2] == "none" ? nlohmann::json(nullptr) : nlohmann::json("mariadb-" + args[2]);
+    } else if ((args.size() == 2 || args.size() == 3) && args[1] == "login") {
+        const bool show = args.size() == 3 && args[2] == "--show";
+        if (args.size() == 3 && !show) {
+            std::cerr << "Usage: flo shared login [--show]\n";
+            return 2;
+        }
+        auto client = connect_or_start(std::chrono::seconds(120));
+        if (!client) {
+            return 1;
+        }
+        const auto reply = client->call("shared.login");
+        if (!reply || !reply->ok) {
+            return print_refusal(reply);
+        }
+        const auto& r = reply->result;
+        std::cout << "Shared sites' database login (MariaDB):\n"
+                  << "  host:     " << text_of(r, "host") << "\n"
+                  << "  port:     " << r.value("port", 0) << "\n"
+                  << "  user:     " << text_of(r, "user") << "\n"
+                  << "  password: " << (show ? text_of(r, "password") : std::string("(hidden; add --show)")) << "\n"
+                  << "  database: " << text_of(r, "database") << ", or any name starting with " << text_of(r, "prefix")
+                  << " (it can create them)\n";
+        return 0;
     } else if (args.size() == 3 && args[1] == "dir") {
         if (args[2] == "default") {
             changes["dir"] = nullptr;
@@ -930,7 +956,7 @@ int shared(const std::vector<std::string>& args) {
         }
     } else if (args.size() != 1) {
         std::cerr << "Usage: flo shared [on|off] | flo shared php <version|newest> | flo shared web <apache|nginx>"
-                     " | flo shared dir <folder|default>\n";
+                     " | flo shared dir <folder|default> | flo shared db <version|none> | flo shared login [--show]\n";
         return 2;
     }
     auto client = connect_or_start(std::chrono::seconds(60));
@@ -946,7 +972,9 @@ int shared(const std::vector<std::string>& args) {
     std::cout << "Shared sites: " << (on ? "on" : "off") << "\n"
               << "  www folder: " << (r["dir"].is_string() ? r["dir"].get<std::string>() : std::string("(none)")) << "\n"
               << "  PHP:        " << (r.contains("php") ? r["php"].get<std::string>() : std::string("newest installed")) << "\n"
-              << "  web server: " << text_of(r, "web") << "\n";
+              << "  web server: " << text_of(r, "web") << "\n"
+              << "  database:   " << (r.contains("database") ? r["database"].get<std::string>() : std::string("none"))
+              << (r.contains("database") ? "  (flo shared login)" : "") << "\n";
     const auto& status = r.value("status", nlohmann::json());
     std::string address;
     if (status.is_object()) {

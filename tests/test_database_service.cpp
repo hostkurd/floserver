@@ -9,6 +9,7 @@
 #ifndef _WIN32
 
 #include "floserver/core/database_service.h"
+#include "floserver/core/shared_sites.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/process.h"
 #include "floserver/core/project_registry.h"
@@ -136,6 +137,45 @@ TEST_CASE("a project's database runs on the real MariaDB, sleeps when idle and w
     const fs::path folder = data / "data" / "mariadb-10.11";
     const Port port = s["port"].get<Port>();
     CHECK(port != 3306);
+
+    SUBCASE("shared sites' login: www, its own databases only (D19)") {
+        ServiceRefusal refusal;
+        CHECK_FALSE(db.shared_login(refusal));
+        CHECK(refusal.code == "shared_off");
+        SharedConfig shared;
+        shared.on = true;
+        shared.dir = tmp.path() / "www";
+        fs::create_directories(*shared.dir);
+        shared.php = "8.3";
+        shared.web = WebServer::Nginx;
+        write_shared_config(app, shared);
+        REQUIRE(save_app_config(app_config_file(data), app, error));
+        CHECK_FALSE(db.shared_login(refusal));
+        CHECK(refusal.code == "no_database");
+        shared.database = DatabaseSpec{"mariadb", "10.11"};
+        write_shared_config(app, shared);
+        REQUIRE(save_app_config(app_config_file(data), app, error));
+        CHECK(server_status(db).is_object());
+
+        const auto login = db.shared_login(refusal);
+        REQUIRE_MESSAGE(login, refusal.message);
+        CHECK(login->user == "www");
+        CHECK(login->database == "www");
+        CHECK(login->port == port);
+        CHECK(query(port, "www", login->password, "USE www; CREATE TABLE t (x INT); SHOW TABLES") == "t");
+        // It makes its own www_ databases, and touches nothing else.
+        CHECK(query(port, "www", login->password, "CREATE DATABASE www_blog; USE www_blog; CREATE TABLE p (x INT); "
+                                                  "SHOW TABLES") == "p");
+        CHECK(query(port, "www", login->password, "CREATE DATABASE wwwx").starts_with("ERROR"));
+        CHECK(query(port, "www", login->password, "CREATE DATABASE blog").starts_with("ERROR"));
+        const auto shop_login = db.project_login("my-shop", refusal);
+        REQUIRE(shop_login);
+        CHECK(query(port, "www", login->password, "USE my_shop").starts_with("ERROR"));
+        CHECK(query(port, "my_shop", shop_login->password, "USE www_blog").starts_with("ERROR"));
+        const auto again = db.shared_login(refusal);
+        REQUIRE(again);
+        CHECK(again->password == login->password);
+    }
 
     SUBCASE("logins") {
         ServiceRefusal refusal;
