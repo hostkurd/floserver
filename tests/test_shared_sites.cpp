@@ -12,6 +12,8 @@
 
 #include <doctest/doctest.h>
 
+#include <cstdlib>
+
 using namespace floserver::core;
 namespace fs = std::filesystem;
 using nlohmann::json;
@@ -123,21 +125,6 @@ TEST_CASE("the www folder's folders: what each one is, and names a project has")
     CHECK_FALSE(by["blog"].clash);
     CHECK(scan_shared_folders(tmp.path() / "missing", app).empty());
 
-    const std::string page =
-        shared_index_page(folders, www, "8.5.12", WebServer::Apache, "http://localhost:8080", ":8080");
-    CHECK(page.find("href=\"http://localhost:8080/blog/\"") != std::string::npos);
-    CHECK(page.find("href=\"http://blog.localhost:8080/\"") != std::string::npos);
-    CHECK(page.find("href=\"http://localhost:8080/My%20Shop/\"") != std::string::npos);
-    CHECK(page.find("My Shop.localhost") == std::string::npos);
-    CHECK(page.find("shop.localhost is the project shop") != std::string::npos);
-    CHECK(page.find("Node.js app") != std::string::npos);
-    CHECK(page.find("PHP 8.5.12 · Apache") != std::string::npos);
-    // Names are escaped.
-    const std::vector<SharedFolder> odd = {{"<b>x", SharedKind::Static, false, std::nullopt}};
-    const std::string escaped = shared_index_page(odd, www, "8.5", WebServer::Nginx, "http://localhost", "");
-    CHECK(escaped.find("<b>x") == std::string::npos);
-    CHECK(escaped.find("&lt;b&gt;x") != std::string::npos);
-
     CHECK(shared_address(WebPorts{8080, 8443, true}) == "http://localhost:8080");
     CHECK(shared_address(WebPorts{80, 443, true}) == "http://localhost");
 }
@@ -206,7 +193,7 @@ TEST_CASE("the nginx config: localhost and <folder>.localhost, PHP or Apache beh
     spec.sites = {{"shop", kBase / "projects" / "shop", {}, {}, std::nullopt, std::nullopt, {}}};
     NginxShared shared;
     shared.dir = kBase / "www";
-    shared.list_page = kBase / "web" / "shared" / "shared-sites-list.html";
+    shared.list_script = kBase / "web" / "shared" / "shared-sites-list.php";
     shared.php_ports = {9101, 9102};
     spec.shared = shared;
     std::string error;
@@ -218,7 +205,8 @@ TEST_CASE("the nginx config: localhost and <folder>.localhost, PHP or Apache beh
     const std::string www = nginx_quoted_path(kBase / "www")->substr(1);
     CHECK(text->find("root \"" + www.substr(0, www.size() - 1) + "/$floserver_folder\";") != std::string::npos);
     CHECK(text->find("error_page 403 404 = @floserver_shared_list;") != std::string::npos);
-    CHECK(text->find("rewrite ^ /shared-sites-list.html break;") != std::string::npos);
+    CHECK(text->find("fastcgi_param SCRIPT_FILENAME " + *nginx_quoted_path(kBase / "web" / "shared" / "shared-sites-list.php")) !=
+          std::string::npos);
     CHECK(text->find("upstream floserver_php_9101") != std::string::npos);
     CHECK(text->find("try_files $uri $uri/ =404;") != std::string::npos);  // localhost/x: no front controller
     CHECK(text->find("server_name shop.localhost;") != std::string::npos);  // the project keeps its name
@@ -230,14 +218,14 @@ TEST_CASE("the nginx config: localhost and <folder>.localhost, PHP or Apache beh
     CHECK(text->find("server_name crm.localhost old.localhost;") != std::string::npos);
     spec.shared->reserved.clear();
 
-    // Apache: everything goes to it.
-    spec.shared->php_ports.clear();
+    // Apache: everything goes to it, except the list page, which runs on the pool.
     spec.shared->app_port = 9300;
     text = make_nginx_config(spec, error);
     REQUIRE_MESSAGE(text, error);
     CHECK(text->find("upstream floserver_app_9300") != std::string::npos);
     CHECK(text->find("proxy_pass http://floserver_app_9300;") != std::string::npos);
-    CHECK(text->find("fastcgi_pass") == std::string::npos);
+    CHECK(text->find("location ~* [^/]\\.php") == std::string::npos);
+    CHECK(text->find("fastcgi_pass floserver_php_9101;") != std::string::npos);
 
     // No shared sites: none of it.
     spec.shared.reset();
@@ -252,7 +240,7 @@ TEST_CASE("the Apache config: shared sites last, each folder its own root") {
     spec.modules_dir = spec.server_root / "modules";
     spec.work_dir = kBase / "web";
     spec.sites = {{"wp", kBase / "projects" / "wp", {9101}}};
-    spec.shared = ApacheShared{kBase / "www", {9105, 9106}, kBase / "web" / "shared" / "shared-sites-list.html"};
+    spec.shared = ApacheShared{kBase / "www", {9105, 9106}};
     std::string error;
     auto text = make_apache_config(spec, error);
     REQUIRE_MESSAGE(text, error);
@@ -265,8 +253,6 @@ TEST_CASE("the Apache config: shared sites last, each folder its own root") {
     const std::string www = nginx_quoted_path(kBase / "www")->substr(1);
     const std::string bare = www.substr(0, www.size() - 1);
     CHECK(text->find("VirtualDocumentRoot \"" + bare + "/%1\"") != std::string::npos);
-    CHECK(text->find("Alias \"/__floserver_shared__.html\"") != std::string::npos);
-    CHECK(text->find("DirectoryIndex index.php index.html index.htm /__floserver_shared__.html") != std::string::npos);
     CHECK(text->find("SetHandler \"proxy:fcgi://127.0.0.1:9105/\"") != std::string::npos);
     // SCRIPT_NAME under <folder>.localhost leaves the folder out.
     CHECK(text->find(bare + R"(\\E/[^/]+\\Q\\E(/.*)$|i" SCRIPT_NAME "$1")") != std::string::npos);
@@ -312,4 +298,48 @@ TEST_CASE("the service keeps shared sites settings in config.json") {
     CHECK_FALSE(service.set_shared({{"dir", path_to_utf8(tmp.path() / "missing")}}, refusal));
     CHECK_FALSE(service.set_shared({{"colour", "red"}}, refusal));
     CHECK_FALSE(service.set_shared({{"web", "iis"}}, refusal));
+}
+
+TEST_CASE("the list page's script: the www folder read when it's opened, values quoted for PHP") {
+    const std::string script =
+        shared_list_script(kBase / "it's" / "www", kBase / "data" / "config.json", WebServer::Apache);
+    CHECK(script.starts_with("<?php"));
+    CHECK(script.find("@WWW@") == std::string::npos);
+    CHECK(script.find(R"($www = ')" + path_to_utf8(kBase).substr(0, 1)) != std::string::npos);
+    CHECK(script.find(R"(it\'s/www';)") != std::string::npos);  // the quote escaped
+    CHECK(script.find("$web = 'Apache';") != std::string::npos);
+    CHECK(script.find("scandir($www)") != std::string::npos);
+
+#ifndef _WIN32
+    // Run it with this machine's php-cgi, when there is one.
+    std::error_code ec;
+    if (!fs::exists("/usr/bin/php-cgi", ec)) {
+        MESSAGE("php-cgi isn't installed here; the run skipped");
+        return;
+    }
+    const test_util::TempDir tmp;
+    const fs::path www = tmp.path() / "www";
+    test_util::write_file(www / "blog" / "index.php", "<?php");
+    test_util::write_file(www / "chat" / "package.json", "{}");
+    test_util::write_file(www / "shop" / "index.html", "x");
+    test_util::write_file(www / "My Site" / "index.html", "x");
+    test_util::write_file(www / ".git" / "x", "x");
+    test_util::write_file(tmp.path() / "config.json", R"({"projects": [{"name": "shop", "path": "/x"}]})");
+    const fs::path file = tmp.path() / "list.php";
+    test_util::write_file(file, shared_list_script(www, tmp.path() / "config.json", WebServer::Nginx));
+    const std::string command = "REDIRECT_STATUS=200 HTTP_HOST=localhost:8080 SCRIPT_FILENAME='" + file.string() +
+                                "' /usr/bin/php-cgi -q > '" + (tmp.path() / "out.html").string() + "' 2>&1";
+    REQUIRE(std::system(command.c_str()) == 0);  // NOLINT(cert-env33-c, concurrency-mt-unsafe): a test
+    const std::string out = test_util::read_file(tmp.path() / "out.html");
+    INFO(out);
+    CHECK(out.find("<title>Shared sites</title>") != std::string::npos);
+    CHECK(out.find(R"(href="http://localhost:8080/blog/")") != std::string::npos);
+    CHECK(out.find(R"(href="http://blog.localhost:8080/")") != std::string::npos);
+    CHECK(out.find(R"(href="http://localhost:8080/My%20Site/")") != std::string::npos);
+    CHECK(out.find("My Site.localhost") == std::string::npos);
+    CHECK(out.find("shop.localhost is the project shop") != std::string::npos);
+    CHECK(out.find("Node.js app") != std::string::npos);
+    CHECK(out.find(".git") == std::string::npos);
+    CHECK(out.find(" · nginx · ") != std::string::npos);
+#endif
 }

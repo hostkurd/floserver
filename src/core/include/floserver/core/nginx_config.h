@@ -43,12 +43,12 @@ struct NginxSite {
 // Shared sites (D19), on the http port: the www folder at localhost/<folder>/
 // and each folder at <folder>.localhost (a project's name wins: exact names
 // come before nginx's regex). With Apache everything goes to it; without,
-// nginx serves the files and sends PHP to the pool. localhost/ shows
-// `list_page` when the www folder has no index file of its own.
+// nginx serves the files and sends PHP to the pool. localhost/ runs
+// `list_script` on the pool when the www folder has no index file of its own.
 struct NginxShared {
     std::filesystem::path dir;
-    std::filesystem::path list_page;
-    std::vector<Port> php_ports;            // nginx serves (web nginx)
+    std::filesystem::path list_script;      // shared_list_script()
+    std::vector<Port> php_ports;            // the pool; nginx sends PHP to it unless Apache serves
     std::filesystem::path php_access_log;   // the pool's idle log
     std::optional<Port> app_port;           // the shared Apache serves (web apache)
     std::filesystem::path request_log;      // every request; empty for none

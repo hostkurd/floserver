@@ -318,8 +318,11 @@ private:
     // Shared sites (D19): localhost and <folder>.localhost on the http port.
     bool write_shared(const NginxShared& shared) {
         const auto root = path(shared.dir);
-        const auto list = path(shared.list_page);
-        if (!root || !list) {
+        const auto list = path(shared.list_script);
+        if (!root || !list || shared.php_ports.empty()) {
+            if (shared.php_ports.empty()) {
+                error_ = "shared sites have no PHP pool";
+            }
             return false;
         }
         std::optional<std::string> idle_log;
@@ -338,11 +341,6 @@ private:
             request_log = "access_log " + *quoted + " floserver_requests;\n";
         }
         const std::string bare = root->substr(1, root->size() - 2);
-        const auto list_dir = path(shared.list_page.parent_path());
-        if (!list_dir) {
-            return false;
-        }
-        const std::string list_name = shared.list_page.filename().string();
         const auto server = [&](bool by_folder) {
             out_ << "    server {\n";
             listen(spec_.ports.http, "");
@@ -369,10 +367,17 @@ private:
                 out_ << "        location = / {\n"
                      << "            error_page 403 404 = @floserver_shared_list;\n"
                      << "        }\n"
+                     // FloServer's list page, run by the pool: it reads the
+                     // www folder only when someone opens it.
                      << "        location @floserver_shared_list {\n"
-                     << "            root " << *list_dir << ";\n"
-                     << "            rewrite ^ /" << list_name << " break;\n"
-                     << "        }\n";
+                     << "            include " << fastcgi_params_ << ";\n"
+                     << "            fastcgi_param SCRIPT_FILENAME " << *list << ";\n"
+                     << "            fastcgi_param SCRIPT_NAME /;\n"
+                     << "            fastcgi_pass " << upstream_name(shared.php_ports) << ";\n";
+                if (idle_log) {
+                    out_ << "            access_log " << *idle_log << " floserver_idle;\n";
+                }
+                out_ << "        }\n";
             }
             if (shared.app_port) {
                 out_ << "        location / {\n"
@@ -400,9 +405,7 @@ private:
                      // under localhost/ a missing file is just missing.
                      << "            try_files $uri $uri/ " << (by_folder ? "/index.php$is_args$args" : "=404") << ";\n"
                      << "        }\n";
-                if (!shared.php_ports.empty()) {
-                    write_php_location(shared.php_ports, false, idle_log, request_log);
-                }
+                write_php_location(shared.php_ports, false, idle_log, request_log);
             }
             out_ << "    }\n";
         };
