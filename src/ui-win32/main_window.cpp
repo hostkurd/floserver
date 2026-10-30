@@ -3,9 +3,9 @@
 #include "main_window_layout.h"
 #include "model/theme.h"
 #include "model/view_model.h"
+#include "window_style.h"
 
 #include <commctrl.h>
-#include <dwmapi.h>
 #include <windowsx.h>
 
 #include <algorithm>
@@ -23,6 +23,7 @@ namespace {
 
 constexpr UINT kSnapshotMessage = WM_APP + 2;
 constexpr UINT kTrayMessage = WM_APP + 3;
+constexpr UINT kSettingsClosedMessage = WM_APP + 4;
 constexpr UINT_PTR kErrorTimer = 1;
 constexpr UINT kErrorShownMs = 8000;
 constexpr UINT_PTR kNoticeTimer = 2;
@@ -33,50 +34,6 @@ constexpr UINT_PTR kTipNewProject = 1;
 constexpr UINT_PTR kTipSettings = 2;
 constexpr UINT kMenuOpen = 1;
 constexpr UINT kMenuQuit = 2;
-
-// DWM attributes newer than some SDKs.
-constexpr DWORD kDwmDarkMode = 20;       // DWMWA_USE_IMMERSIVE_DARK_MODE
-constexpr DWORD kDwmDarkModeOld = 19;    // the same before Windows 10 20H1
-constexpr DWORD kDwmCaptionColor = 35;   // DWMWA_CAPTION_COLOR, Windows 11
-
-
-// Windows' app theme, unless FLOSERVER_THEME says "light" or "dark" (for
-// screenshots and tests).
-bool apps_use_dark_theme() {
-    wchar_t forced[8] = {};
-    if (GetEnvironmentVariableW(L"FLOSERVER_THEME", forced, 8) > 0) {
-        return std::wstring_view(forced) == L"dark";
-    }
-    DWORD value = 1;
-    DWORD size = sizeof value;
-    const LSTATUS status =
-        RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-                     L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &value, &size);
-    return status == ERROR_SUCCESS && value == 0;
-}
-
-int CALLBACK font_found(const LOGFONTW* /*lf*/, const TEXTMETRICW* /*tm*/, DWORD /*type*/, LPARAM found) {
-    *win::int_to_ptr<bool*>(found) = true;
-    return 0;
-}
-
-bool font_exists(const std::wstring& face) {
-    LOGFONTW lf{};
-    lf.lfCharSet = DEFAULT_CHARSET;
-    const std::size_t n = std::min(face.size(), std::size(lf.lfFaceName) - 1);
-    face.copy(std::begin(lf.lfFaceName), n);
-    bool found = false;
-    HDC dc = GetDC(nullptr);
-    EnumFontFamiliesExW(dc, &lf, font_found, reinterpret_cast<LPARAM>(&found), 0);
-    ReleaseDC(nullptr, dc);
-    return found;
-}
-
-void set_face(LOGFONTW& lf, const std::wstring& face) {
-    const std::size_t n = std::min(face.size(), std::size(lf.lfFaceName) - 1);
-    face.copy(std::begin(lf.lfFaceName), n);
-    *(std::begin(lf.lfFaceName) + n) = L'\0';
-}
 
 std::wstring w(std::string_view s) { return win::widen(s); }
 
@@ -289,6 +246,13 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
         case kShowWindowMessage:
             show_window();
             return 0;
+        case kSettingsClosedMessage:
+            // The Settings window is gone: nothing of it stays but where it was.
+            if (settings_ && !settings_->is_open()) {
+                settings_placement_ = settings_->placement();
+                settings_.reset();
+            }
+            return 0;
         default:
             break;
     }
@@ -347,6 +311,7 @@ void MainWindow::on_destroy() {
         Shell_NotifyIconW(NIM_DELETE, &nid);
         tray_added_ = false;
     }
+    settings_.reset();  // before the worker it uses
     worker_.reset();
     PostQuitMessage(0);
 }
@@ -378,6 +343,10 @@ void MainWindow::on_snapshot() {
         focused = snap_.rows[visible_[static_cast<std::size_t>(focus_)]].name;
     }
     snap_ = std::move(s);
+    if (settings_) {
+        settings_->on_snapshot(snap_);
+    }
+    snap_.runtimes.reset();  // Settings' alone; not kept once it has it
     update_visible();
     // The panel's project may have been removed (flo remove).
     if (!selected_.empty() && shows_rows() && selected_row() == nullptr) {
@@ -432,8 +401,25 @@ void MainWindow::quit() {
         return;
     }
     quitting_ = true;
+    settings_.reset();
     ShowWindow(hwnd_, SW_HIDE);
     worker_->quit_service();
+}
+
+void MainWindow::open_settings() {
+    if (settings_ && settings_->is_open()) {
+        settings_->bring_to_front();  // one at a time
+        return;
+    }
+    if (!worker_ || quitting_) {
+        return;
+    }
+    settings_ = std::make_unique<SettingsWindow>(instance_, lang_, *worker_, hwnd_, kSettingsClosedMessage);
+    if (!settings_->create(settings_placement_)) {
+        settings_.reset();
+        return;
+    }
+    settings_->on_snapshot(snap_);  // the link, what's installed, the installs running
 }
 
 void MainWindow::show_window() {
@@ -450,15 +436,8 @@ int MainWindow::px(int dip) const { return MulDiv(dip, static_cast<int>(dpi_), 9
 float MainWindow::pxf(float dip) const { return dip * static_cast<float>(dpi_) / 96.0F; }
 
 void MainWindow::apply_theme() {
-    const BOOL dark = dark_ ? TRUE : FALSE;
-    if (FAILED(DwmSetWindowAttribute(hwnd_, kDwmDarkMode, &dark, sizeof dark))) {
-        DwmSetWindowAttribute(hwnd_, kDwmDarkModeOld, &dark, sizeof dark);
-    }
-    const COLORREF caption = colorref(palette(dark_).window);
-    DwmSetWindowAttribute(hwnd_, kDwmCaptionColor, &caption, sizeof caption);  // fails quietly before Windows 11
+    apply_title_bar(hwnd_, dark_);
     input_brush_.reset(CreateSolidBrush(colorref(palette(dark_).input)));
-    SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0,
-                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     if (search_ != nullptr) {
         InvalidateRect(search_, nullptr, TRUE);
     }
@@ -466,54 +445,7 @@ void MainWindow::apply_theme() {
 }
 
 void MainWindow::make_fonts() {
-    NONCLIENTMETRICSW ncm{};
-    ncm.cbSize = sizeof ncm;
-    LOGFONTW base{};
-    if (SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof ncm, &ncm, 0, dpi_) != FALSE) {
-        base = ncm.lfMessageFont;
-    } else {
-        set_face(base, L"Segoe UI");
-    }
-    std::wstring face = std::begin(base.lfFaceName);
-    // Segoe UI Variable (Windows 11) has no Arabic letters; the Arabic and
-    // Kurdish window keeps the system's Segoe UI.
-    if (lang_ == Lang::En && font_exists(L"Segoe UI Variable Text")) {
-        face = L"Segoe UI Variable Text";
-    }
-    const std::wstring semibold = face + L" Semibold";
-    const bool has_semibold = font_exists(semibold);
-
-    const auto make = [&](int size, bool bold) {
-        LOGFONTW lf = base;
-        lf.lfHeight = -px(size);
-        lf.lfWidth = 0;
-        lf.lfItalic = 0;
-        lf.lfUnderline = 0;
-        lf.lfQuality = CLEARTYPE_QUALITY;
-        lf.lfWeight = bold && !has_semibold ? FW_SEMIBOLD : FW_NORMAL;
-        set_face(lf, bold && has_semibold ? semibold : face);
-        return win::UniqueFont(CreateFontIndirectW(&lf));
-    };
-    fonts_.title = make(20, true);
-    fonts_.panel_title = make(18, true);
-    fonts_.body = make(14, false);
-    fonts_.body_bold = make(14, true);
-    fonts_.caption = make(12, false);
-    fonts_.small_bold = make(12, true);
-    fonts_.button = make(13, false);
-    fonts_.button_bold = make(13, true);
-    {
-        // The Log box: Cascadia Mono (Windows 11) or Consolas, 11.5 px.
-        LOGFONTW lf{};
-        lf.lfHeight = -MulDiv(23, static_cast<int>(dpi_), 192);
-        lf.lfWeight = FW_NORMAL;
-        lf.lfCharSet = DEFAULT_CHARSET;
-        lf.lfQuality = CLEARTYPE_QUALITY;
-        lf.lfPitchAndFamily = FIXED_PITCH | FF_MODERN;
-        set_face(lf, font_exists(L"Cascadia Mono") ? L"Cascadia Mono" : L"Consolas");
-        fonts_.mono = win::UniqueFont(CreateFontIndirectW(&lf));
-    }
-
+    make_ui_fonts(fonts_, dpi_, lang_);
     if (name_edit_ != nullptr) {
         SendMessageW(name_edit_, WM_SETFONT, reinterpret_cast<WPARAM>(fonts_.body.get()), TRUE);
     }
@@ -931,13 +863,20 @@ void MainWindow::on_click(const Hit& clicked) {
         case Part::WwwClose:
             on_www_click(hit);
             break;
-        case Part::Settings:    // the Settings screens come later in step 5c
+        case Part::Settings:
+            open_settings();
+            break;
         case Part::None:
             break;
     }
 }
 
 void MainWindow::on_key(WPARAM key) {
+    // Ctrl+, opens Settings from anywhere in the window.
+    if (key == VK_OEM_COMMA && (GetKeyState(VK_CONTROL) & 0x8000) != 0) {
+        open_settings();
+        return;
+    }
     if (wizard_open()) {
         on_wizard_key(key);
         return;

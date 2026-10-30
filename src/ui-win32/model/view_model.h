@@ -103,6 +103,9 @@ using Installed = std::map<std::string, std::vector<std::string>>;
 // "8.4.27" -> "8.4" (PHP, MariaDB, Python); Node keeps only its major: "24".
 [[nodiscard]] std::string version_series(std::string_view runtime, std::string_view version);
 
+// Whether `a` is a newer version than `b`, number by number ("8.10" after "8.9").
+[[nodiscard]] bool is_newer_version(std::string_view a, std::string_view b);
+
 enum class Field : std::uint8_t { Php, Database, Web, Node, Python };
 
 struct Choice {
@@ -181,10 +184,18 @@ struct TemplateCard {
 // templates.list's result. Cards without an id or title are skipped.
 [[nodiscard]] std::vector<TemplateCard> cards_from_list(const nlohmann::json& result, Lang lang);
 
+// The series new projects start with (D20, set in Settings): "php" -> "8.5".
+using Defaults = std::map<std::string, std::string>;
+// runtimes.list's "defaults" (php, mariadb, node, python).
+[[nodiscard]] Defaults defaults_from_list(const nlohmann::json& result);
+
 // The wizard's version pickers for a template: the fields its config uses,
 // starting at the template's versions; versions not installed yet are
 // offered as "(not installed)" and downloaded when the project is made.
-[[nodiscard]] std::vector<VersionField> template_fields(const TemplateCard& card, const Installed& installed, Lang lang);
+// A default from Settings is picked instead when it's installed and not
+// older than the series the template names.
+[[nodiscard]] std::vector<VersionField> template_fields(const TemplateCard& card, const Installed& installed, Lang lang,
+                                                        const Defaults& defaults = {});
 
 // A free name for a new project: `base`, else base-2, base-3...
 [[nodiscard]] std::string free_project_name(const std::string& base, const std::vector<ProjectRow>& rows);

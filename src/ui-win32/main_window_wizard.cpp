@@ -81,6 +81,8 @@ void MainWindow::open_wizard() {
         snap_.templates_error.clear();
         worker_->load_templates();
     }
+    // Settings' defaults for the versions (D20): asked once per opening.
+    worker_->load_defaults();
     if (name_edit_ == nullptr) {
         name_edit_ = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL | ES_LOWERCASE, 0, 0, 0, 0,
                                      hwnd_, nullptr, instance_, nullptr);
@@ -128,7 +130,7 @@ bool MainWindow::wizard_has_versions() const {
         return !wizard_.fields.empty();
     }
     const TemplateCard* card = wizard_card();
-    return card != nullptr && !template_fields(*card, snap_.installed, lang_).empty();
+    return card != nullptr && !template_fields(*card, snap_.installed, lang_, snap_.defaults).empty();
 }
 
 void MainWindow::wizard_next() {
@@ -165,7 +167,7 @@ void MainWindow::wizard_next() {
             if (card == nullptr || card->id != wizard_.template_id) {
                 return;  // the list changed under the page
             }
-            wizard_.fields = template_fields(*card, snap_.installed, lang_);
+            wizard_.fields = template_fields(*card, snap_.installed, lang_, snap_.defaults);
             wizard_.step = 2;
             ShowWindow(name_edit_, SW_HIDE);
             SetFocus(hwnd_);
