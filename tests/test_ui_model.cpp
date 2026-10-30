@@ -688,13 +688,13 @@ TEST_CASE("Settings > Runtimes: Arabic words and isolated names") {
 }
 
 TEST_CASE("Settings > Runtimes: downloads") {
-    CHECK(size_text(512 * 1024) == "512 KB");
+    CHECK(size_text(std::uint64_t{512} * 1024U) == "512 KB");
     CHECK(size_text(8912896) == "8.5 MB");
     CHECK(size_text(8388608) == "8 MB");
-    CHECK(size_text(19 * 1024 * 1024 + 300000) == "19 MB");
+    CHECK(size_text(std::uint64_t{19} * 1024U * 1024U + 300000U) == "19 MB");
 
     const auto job = runtime_job({{"id", 7}, {"name", "php"}, {"requested", "8.3.29"}, {"version", ""},
-                                  {"state", "downloading"}, {"received", 19 * 1024 * 1024}, {"total", 31 * 1024 * 1024}});
+                                  {"state", "downloading"}, {"received", std::uint64_t{19} * 1024U * 1024U}, {"total", std::uint64_t{31} * 1024U * 1024U}});
     REQUIRE(job);
     CHECK(job->version == "8.3.29");  // what was asked for until it's known
     CHECK(job_text(*job, Lang::En) == "Downloading… 19 MB of 31 MB");
