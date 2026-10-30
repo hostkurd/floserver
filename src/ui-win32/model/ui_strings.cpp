@@ -52,8 +52,8 @@ constexpr std::array kTable{
     Entry{Str::ConnectionLost, "FloServer stopped answering. Trying again…",
           "توقف " FLO_LRI "FloServer" FLO_PDI " عن الرد. نعيد المحاولة…",
           FLO_LRI "FloServer" FLO_PDI " وەڵام ناداتەوە. هەوڵ دەدرێتەوە…"},
-    Entry{Str::NoProjects, "No projects yet. Add a folder with: {0}", "لا توجد مشاريع بعد. أضف مجلدًا بالأمر: {0}",
-          "هێشتا هیچ پڕۆژەیەک نییە. بوخچەیەک زیاد بکە بە: {0}"},
+    Entry{Str::NoProjects, "No projects yet. Click {0} to add a folder.", "لا توجد مشاريع بعد. انقر {0} لإضافة مجلد.",
+          "هێشتا هیچ پڕۆژەیەک نییە. کرتە لە {0} بکە بۆ زیادکردنی بوخچەیەک."},
     Entry{Str::NoMatches, "No project matches “{0}”", "لا يوجد مشروع يطابق «{0}»",
           "هیچ پڕۆژەیەک لەگەڵ «{0}» ناگونجێت"},
     Entry{Str::FooterCounts, "{0} running · {1} sleeping", "يعمل: {0} · نائم: {1}", "کار دەکات: {0} · خەوتووە: {1}"},
@@ -100,6 +100,8 @@ constexpr std::array kTable{
     Entry{Str::Log, "Log", "السجل", "تۆمار"},
     Entry{Str::LogEmpty, "No requests yet", "لا طلبات بعد", "هێشتا هیچ داواکارییەک نییە"},
     Entry{Str::OpenFailed, "Couldn't open {0}", "تعذّر فتح {0}", "نەتوانرا {0} بکرێتەوە"},
+    Entry{Str::AddExistingFolder, "Add an existing folder…", "إضافة مجلد موجود…", "زیادکردنی بوخچەیەکی هەبوو…"},
+    Entry{Str::AddFailed, "Couldn't add {0}: {1}", "تعذّرت إضافة {0}: {1}", "نەتوانرا {0} زیاد بکرێت: {1}"},
 };
 
 #undef FLO_LRI

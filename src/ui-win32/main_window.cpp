@@ -307,7 +307,7 @@ void MainWindow::on_create() {
     tooltip_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
                                CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, hwnd_, nullptr, instance_,
                                nullptr);
-    tip_new_project_ = w(text(lang_, Str::ComingSoon));
+    tip_new_project_ = w(text(lang_, Str::AddExistingFolder));
     tip_settings_ = w(text(lang_, Str::Settings));
     for (const auto& [id, tip] : {std::pair{kTipNewProject, &tip_new_project_}, std::pair{kTipSettings, &tip_settings_}}) {
         TOOLINFOW ti{};
@@ -356,6 +356,9 @@ void MainWindow::on_snapshot() {
     if (!s.clipboard.empty()) {
         put_on_clipboard(s.clipboard);
     }
+    if (!s.added.empty()) {
+        pending_added_ = s.added;
+    }
     const bool quit_done = s.quit_done;
     const std::string quit_error = s.quit_error;
     // Keyboard focus stays on the same project when the list changes.
@@ -373,6 +376,19 @@ void MainWindow::on_snapshot() {
     if (!focused.empty()) {
         if (const int again = visible_index(focused); again >= 0) {
             focus_ = again;
+        }
+    }
+    // A folder the user just added: its panel opens once the list has it.
+    if (!pending_added_.empty() && shows_rows() && snap_.link == Link::Connected) {
+        const bool listed = std::any_of(snap_.rows.begin(), snap_.rows.end(),
+                                        [&](const ProjectRow& r) { return r.name == pending_added_; });
+        if (listed) {
+            if (const int row = visible_index(pending_added_); row >= 0) {
+                focus_ = row;
+                ensure_visible(row);
+            }
+            select(pending_added_);
+            pending_added_.clear();
         }
     }
     layout();
@@ -822,8 +838,10 @@ void MainWindow::on_click(const Hit& clicked) {
                 worker_->start_service();
             }
             break;
-        case Part::NewProject:  // the New project flow comes after 5a; the tooltip says so
-        case Part::Settings:    // the Settings screens come after 5a
+        case Part::NewProject:
+            add_existing_folder();
+            break;
+        case Part::Settings:    // the Settings screens come later in step 5c
         case Part::None:
             break;
     }
@@ -1264,7 +1282,7 @@ void MainWindow::paint_list(Canvas& c, HDC /*dc*/, bool text_pass) const {
     if (geometry_.empty()) {
         if (text_pass && shows_rows()) {
             const std::string message =
-                snap_.rows.empty() ? fill(lang_, Str::NoProjects, {"flo add <folder>"})
+                snap_.rows.empty() ? fill_pattern(text(lang_, Str::NoProjects), false, {text(lang_, Str::NewProject)})
                                    : fill_pattern(text(lang_, Str::NoMatches), false, {isolate_auto(query_)});
             c.text(list, w(message), fonts_.body.get(), p.text_subtle, Align::Center, false);
         }

@@ -94,6 +94,9 @@ void ServiceWorker::copy_env(const std::string& project) {
 void ServiceWorker::open_in_studio(const std::string& project) {
     push({Command::Kind::OpenStudio, project, false, {}, std::nullopt});
 }
+void ServiceWorker::add_folder(const std::string& path) {
+    push({Command::Kind::AddFolder, path, false, {}, std::nullopt});
+}
 void ServiceWorker::select(const std::string& project) {
     push({Command::Kind::Select, project, false, {}, std::nullopt});
 }
@@ -112,6 +115,7 @@ Snapshot ServiceWorker::take() {
     out.clipboard = std::move(clipboard);
     latest_.settled.clear();
     latest_.change_error.clear();
+    latest_.added.clear();
     latest_.quit_done = false;
     latest_.quit_error.clear();
     return out;
@@ -214,6 +218,7 @@ void ServiceWorker::run(const std::stop_token& stop) {
         std::vector<std::string> settled;
         std::string change_error;
         std::string clipboard;
+        std::string added;
         // "Couldn't change <project>: <reason>". The project name keeps its
         // own direction; the service's reason is English (left to right).
         auto change_failed = [this](const std::string& project, const std::string& reason, bool english) {
@@ -294,6 +299,44 @@ void ServiceWorker::run(const std::stop_token& stop) {
                     }
                     break;
                 }
+                case Command::Kind::AddFolder: {
+                    // The folder's own name for the message; the path for the service.
+                    std::string shown = core::path_to_utf8(core::path_from_utf8(c.project).filename());
+                    if (shown.empty()) {
+                        shown = c.project;  // a drive or share root
+                    }
+                    const auto failed = [&](const std::string& reason, bool english) {
+                        const bool rtl = is_rtl(lang_);
+                        change_error = fill_pattern(text(lang_, Str::AddFailed), false,
+                                                    {rtl ? isolate_auto(shown) : shown,
+                                                     rtl && english ? isolate_ltr(reason) : reason});
+                    };
+                    if (!client) {
+                        failed(lost, false);
+                        break;
+                    }
+                    reply = client->call("projects.add", {{"path", c.project}});
+                    if (!reply) {
+                        client.reset();
+                        failed(lost, false);
+                    } else if (!reply->ok) {
+                        failed(reply->error_message, true);
+                    } else {
+                        const std::string name = reply->result.is_object() && reply->result.contains("name") &&
+                                                         reply->result["name"].is_string()
+                                                     ? reply->result["name"].get<std::string>()
+                                                     : std::string();
+                        if (name.empty()) {
+                            failed("the service's reply had no project name", true);
+                            break;
+                        }
+                        // Turned on at once; if that fails it stays Off and change_error says why.
+                        std::optional<core::protocol::Reply> on;
+                        (void)send(name, "projects.set", {{"name", name}, {"on", true}}, on);
+                        added = name;
+                    }
+                    break;
+                }
                 case Command::Kind::Select:
                 case Command::Kind::Start:
                 case Command::Kind::Refresh:
@@ -348,6 +391,10 @@ void ServiceWorker::run(const std::stop_token& stop) {
         }
         if (!clipboard.empty()) {
             latest_.clipboard = std::move(clipboard);
+        }
+        // The UI may not have taken an earlier one yet: that one stays.
+        if (!added.empty() && latest_.added.empty()) {
+            latest_.added = added;
         }
         latest_.panel = panel;
         if (databases) {

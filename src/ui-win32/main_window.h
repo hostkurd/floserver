@@ -175,6 +175,7 @@ private:
     void show_field_menu(std::size_t index);
     void toggle_keep_running();
     void open_folder(const std::string& path);
+    void add_existing_folder();
     void open_terminal(const std::string& path);
     void paint_panel(Canvas& c, HDC dc, bool text_pass) const;
     void paint_switch(Canvas& c, const RECT& r, bool on, bool hover) const;
@@ -236,6 +237,8 @@ private:
     Notice notice_;  // a short message in the banner ("copied")
 
     std::string selected_;  // the project whose panel is open
+    std::string pending_added_;  // a folder just added; its panel opens once its row is listed
+    bool picking_folder_ = false;  // the folder picker is open
     std::vector<VersionField> fields_;
     mutable PanelGeometry panel_geometry_;  // from the last paint
     int panel_focus_ = -1;  // keyboard focus among panel_focus_order(); -1: in the list
