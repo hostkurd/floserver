@@ -1,5 +1,7 @@
 #include "floserver/core/database_service.h"
 
+#include "floserver/core/shared_sites.h"
+
 #include "floserver/core/paths.h"
 #include "floserver/core/project_registry.h"
 #include "floserver/core/runtime_store.h"
@@ -692,6 +694,29 @@ void DatabaseService::reap_stoppers(bool all) {
     }
 }
 
+namespace {
+
+// A server's status, shared sites (D19) shown as "shared": true rather than
+// as a project named _shared.
+json describe_server_json(json j) {
+    if (j.contains("projects") && j["projects"].is_array()) {
+        json projects = json::array();
+        bool shared = false;
+        for (const json& p : j["projects"]) {
+            if (p.is_string() && p.get<std::string>() == kSharedSiteName) {
+                shared = true;
+            } else {
+                projects.push_back(p);
+            }
+        }
+        j["projects"] = std::move(projects);
+        j["shared"] = shared;
+    }
+    return j;
+}
+
+}  // namespace
+
 json DatabaseService::reload() {
     std::vector<std::shared_ptr<Server>> servers;
     {
@@ -703,7 +728,7 @@ json DatabaseService::reload() {
     }
     json list = json::array();
     for (const auto& s : servers) {
-        list.push_back(s->describe());
+        list.push_back(describe_server_json(s->describe()));
     }
     return {{"servers", list}};
 }
@@ -718,7 +743,7 @@ json DatabaseService::status() const {
     }
     json list = json::array();
     for (const auto& s : servers) {
-        list.push_back(s->describe());
+        list.push_back(describe_server_json(s->describe()));
     }
     return {{"servers", list}};
 }
@@ -757,6 +782,17 @@ void DatabaseService::reload_locked() {
         w.projects.push_back(site.name);
         if (const Project* p = find_project(*app, site.name)) {
             w.keep_running = w.keep_running || p->keep_running;
+        }
+    }
+    // Shared sites' database (D19), when they're on and ask for one.
+    if (plan.shared && plan.shared->state == SiteState::Ready && plan.shared->database &&
+        plan.shared->database->family == "mariadb") {
+        if (const InstalledRuntime* r = best_mariadb(installed, plan.shared->database->version)) {
+            Want& w = wanted[mariadb_series(r->version)];
+            if (w.runtime == nullptr || Version::parse(r->version) > Version::parse(w.runtime->version)) {
+                w.runtime = r;
+            }
+            w.projects.push_back(plan.shared->name);
         }
     }
 
@@ -921,7 +957,7 @@ std::optional<DatabaseLogin> DatabaseService::project_login(const std::string& p
     login.database = project_database_name(project);
     login.user = login.database;
     if (reserved_database_name(login.database)) {
-        refusal = {"reserved_name", "\"" + login.database + "\" is one of MariaDB's own names; rename the project "
+        refusal = {"reserved_name", "\"" + login.database + "\" is one of MariaDB's or shared sites' names; rename the project "
                                     "(flo remove " + project + ", then flo add --name <other name>)"};
         return std::nullopt;
     }
@@ -962,6 +998,79 @@ std::optional<DatabaseLogin> DatabaseService::project_login(const std::string& p
     }
     login.password = *password;
     if (!server->run_sql(project_database_sql(login.database, login.user, login.password), error)) {
+        refusal = {"database_failed", error};
+        return std::nullopt;
+    }
+    return login;
+}
+
+std::optional<DatabaseLogin> DatabaseService::shared_login(ServiceRefusal& refusal) {
+    std::string error;
+    const auto app = load_app_config(app_config_file(config_.data_dir), error);
+    const auto shared = app ? read_shared_config(*app, error) : std::nullopt;
+    if (!shared) {
+        refusal = {"config_unreadable", "FloServer's settings can't be used: " + error};
+        return std::nullopt;
+    }
+    if (!shared->on) {
+        refusal = {"shared_off", "shared sites are off: flo shared on"};
+        return std::nullopt;
+    }
+    if (!shared->database || shared->database->family != "mariadb") {
+        refusal = {"no_database", "shared sites have no database (choose one in Settings, or: flo shared db 11.4)"};
+        return std::nullopt;
+    }
+    // A project from before shared sites had a database (www, www-blog):
+    // its data must not become the shared sites'.
+    for (const Project& p : app ? app->projects : std::vector<Project>()) {
+        if (reserved_database_name(project_database_name(p.name)) && p.name.starts_with("www")) {
+            refusal = {"reserved_name", "the project " + p.name + " uses a name shared sites' database needs (" +
+                                            std::string(kSharedDatabaseUser) + ", " + std::string(kSharedDatabasePrefix) +
+                                            "...); rename it first (flo remove " + p.name +
+                                            ", then flo add --name <other name>)"};
+            return std::nullopt;
+        }
+    }
+    std::shared_ptr<Server> server;
+    {
+        const auto installed = list_installed(runtimes_dir(config_.data_dir));
+        const InstalledRuntime* r = best_mariadb(installed, shared->database->version);
+        const std::lock_guard lock(mutex_);
+        reload_locked();
+        if (r != nullptr) {
+            if (const auto it = servers_.find(mariadb_series(r->version)); it != servers_.end()) {
+                server = it->second;
+            }
+        }
+    }
+    if (!server) {
+        refusal = {"database_off", "the shared sites' MariaDB " + shared->database->version +
+                                       " isn't installed or can't run yet (flo install mariadb " +
+                                       shared->database->version + ")"};
+        return std::nullopt;
+    }
+    server->connection_opened();
+    const AtExit closed([&server] { server->connection_closed(); });
+    if (!server->ensure_running(error)) {
+        refusal = {"database_failed", error};
+        return std::nullopt;
+    }
+    const std::lock_guard lock(server->login_mutex());
+    DatabaseLogin login;
+    login.database = std::string(kSharedDatabaseUser);
+    login.user = std::string(kSharedDatabaseUser);
+    login.port = server->port();
+    const std::string secret = "mariadb-" + server->files().series + "/" + std::string(kSharedDatabaseUser);
+    auto password = secrets_.read(secret);
+    if (!password) {
+        password = generate_password();
+        if (!password || !secrets_.save(secret, *password, error)) {
+            refusal = {"secret_failed", "can't keep the password: " + error};
+            return std::nullopt;
+        }
+    }
+    login.password = *password;
+    if (!server->run_sql(shared_database_sql(login.password), error)) {
         refusal = {"database_failed", error};
         return std::nullopt;
     }

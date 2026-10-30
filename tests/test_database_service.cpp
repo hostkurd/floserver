@@ -9,6 +9,7 @@
 #ifndef _WIN32
 
 #include "floserver/core/database_service.h"
+#include "floserver/core/shared_sites.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/process.h"
 #include "floserver/core/project_registry.h"
@@ -136,6 +137,82 @@ TEST_CASE("a project's database runs on the real MariaDB, sleeps when idle and w
     const fs::path folder = data / "data" / "mariadb-10.11";
     const Port port = s["port"].get<Port>();
     CHECK(port != 3306);
+
+    SUBCASE("shared sites' login: www, its own databases only (D19)") {
+        ServiceRefusal refusal;
+        CHECK_FALSE(db.shared_login(refusal));
+        CHECK(refusal.code == "shared_off");
+        SharedConfig shared;
+        shared.on = true;
+        shared.dir = tmp.path() / "www";
+        fs::create_directories(*shared.dir);
+        shared.php = "8.3";
+        shared.web = WebServer::Nginx;
+        write_shared_config(app, shared);
+        REQUIRE(save_app_config(app_config_file(data), app, error));
+        CHECK_FALSE(db.shared_login(refusal));
+        CHECK(refusal.code == "no_database");
+        shared.database = DatabaseSpec{"mariadb", "10.11"};
+        write_shared_config(app, shared);
+        REQUIRE(save_app_config(app_config_file(data), app, error));
+        CHECK(server_status(db).is_object());
+
+        const auto login = db.shared_login(refusal);
+        REQUIRE_MESSAGE(login, refusal.message);
+        CHECK(login->user == "www");
+        CHECK(login->database == "www");
+        CHECK(login->port == port);
+        CHECK(query(port, "www", login->password, "USE www; CREATE TABLE t (x INT); SHOW TABLES") == "t");
+        // It makes its own www_ databases, and touches nothing else.
+        CHECK(query(port, "www", login->password, "CREATE DATABASE www_blog; USE www_blog; CREATE TABLE p (x INT); "
+                                                  "SHOW TABLES") == "p");
+        CHECK(query(port, "www", login->password, "CREATE DATABASE wwwx").starts_with("ERROR"));
+        CHECK(query(port, "www", login->password, "CREATE DATABASE blog").starts_with("ERROR"));
+        const auto shop_login = db.project_login("my-shop", refusal);
+        REQUIRE(shop_login);
+        CHECK(query(port, "www", login->password, "USE my_shop").starts_with("ERROR"));
+        CHECK(query(port, "my_shop", shop_login->password, "USE www_blog").starts_with("ERROR"));
+        const auto again = db.shared_login(refusal);
+        REQUIRE(again);
+        CHECK(again->password == login->password);
+
+        // '_' in a GRANT is a wildcard: a project named w-w (user w_w) must
+        // not reach www, nor my-shop another project's myashop.
+        const fs::path ww = tmp.path() / "w-w";
+        test_util::write_file(ww / "floserver.json", R"({"php": "8.3", "database": "mariadb-10.11"})");
+        REQUIRE(add_project(app, ww, "", error));
+        app.projects.back().on = true;
+        REQUIRE(save_app_config(app_config_file(data), app, error));
+        auto ww_login = db.project_login("w-w", refusal);
+        REQUIRE_MESSAGE(ww_login, refusal.message);
+        CHECK(query(port, "w_w", ww_login->password, "USE www").starts_with("ERROR"));
+        CHECK(query(port, "w_w", ww_login->password, "USE w_w; SELECT 1") == "1");
+        CHECK(query(port, "my_shop", shop_login->password, "CREATE DATABASE myashop").starts_with("ERROR"));
+        // The unescaped grant earlier versions made is removed on the next login.
+        const auto root = secrets.read("mariadb-10.11/root");
+        REQUIRE(root);
+        CHECK(query(port, "root", *root, "GRANT ALL PRIVILEGES ON w_w.* TO 'w_w'@'127.0.0.1'; FLUSH PRIVILEGES; SELECT 1") == "1");
+        CHECK(query(port, "w_w", ww_login->password, "USE www; SELECT 1") == "1");  // the old hole
+        ww_login = db.project_login("w-w", refusal);
+        REQUIRE(ww_login);
+        CHECK(query(port, "w_w", ww_login->password, "USE www").starts_with("ERROR"));
+        CHECK(query(port, "w_w", ww_login->password, "USE w_w; SELECT 1") == "1");
+        // _shared isn't listed as a project.
+        const auto servers = db.status()["servers"];
+        REQUIRE(servers.size() == 1);
+        CHECK(servers[0]["shared"] == true);
+        for (const auto& name : servers[0]["projects"]) {
+            CHECK(name.get<std::string>() != "_shared");
+        }
+
+        // A project from before shared sites with a www name stops the shared login.
+        const fs::path old = tmp.path() / "www-blog";
+        fs::create_directories(old);
+        REQUIRE(add_project(app, old, "", error));
+        REQUIRE(save_app_config(app_config_file(data), app, error));
+        CHECK_FALSE(db.shared_login(refusal));
+        CHECK(refusal.code == "reserved_name");
+    }
 
     SUBCASE("logins") {
         ServiceRefusal refusal;

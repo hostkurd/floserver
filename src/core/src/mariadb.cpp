@@ -182,6 +182,17 @@ std::string root_password_sql(const std::string& password) {
     return sql + "FLUSH PRIVILEGES;\n";
 }
 
+std::string grant_pattern(std::string_view database) {
+    std::string escaped;
+    for (const char c : database) {
+        if (c == '_' || c == '%') {
+            escaped += '\\';
+        }
+        escaped += c;
+    }
+    return sql_identifier(escaped);
+}
+
 std::string project_database_sql(const std::string& database, const std::string& user, const std::string& password) {
     const std::string db = sql_identifier(database);
     const std::string pw = sql_string(password);
@@ -190,7 +201,30 @@ std::string project_database_sql(const std::string& database, const std::string&
         const std::string account = sql_string(user) + "@'" + host + "'";
         sql.append("CREATE USER IF NOT EXISTS ").append(account).append(" IDENTIFIED BY ").append(pw).append(";\n");
         sql.append("ALTER USER ").append(account).append(" IDENTIFIED BY ").append(pw).append(";\n");
-        sql.append("GRANT ALL PRIVILEGES ON ").append(db).append(".* TO ").append(account).append(";\n");
+        // In a GRANT, '_' and '%' in the name are wildcards: escaped, so
+        // my_shop's user gets my_shop only, not myashop or another project's
+        // database. The unescaped grant earlier versions made is removed.
+        sql.append("DELETE FROM mysql.db WHERE User = ").append(sql_string(user)).append(" AND Host = '").append(host)
+            .append("' AND Db = ").append(sql_string(database)).append(";\n");
+        sql.append("FLUSH PRIVILEGES;\n");
+        sql.append("GRANT ALL PRIVILEGES ON ").append(grant_pattern(database)).append(".* TO ").append(account).append(";\n");
+    }
+    return sql + "FLUSH PRIVILEGES;\n";
+}
+
+std::string shared_database_sql(const std::string& password) {
+    const std::string user(kSharedDatabaseUser);
+    const std::string pw = sql_string(password);
+    // The pattern's '_' is escaped so it means an underscore, not any character.
+    const std::string pattern = "`" + std::string(kSharedDatabaseUser) + "\\_%`";
+    std::string sql = "CREATE DATABASE IF NOT EXISTS " + sql_identifier(user) +
+                      " CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\n";
+    for (const char* host : {"localhost", "127.0.0.1"}) {
+        const std::string account = sql_string(user) + "@'" + host + "'";
+        sql.append("CREATE USER IF NOT EXISTS ").append(account).append(" IDENTIFIED BY ").append(pw).append(";\n");
+        sql.append("ALTER USER ").append(account).append(" IDENTIFIED BY ").append(pw).append(";\n");
+        sql.append("GRANT ALL PRIVILEGES ON ").append(grant_pattern(user)).append(".* TO ").append(account).append(";\n");
+        sql.append("GRANT ALL PRIVILEGES ON ").append(pattern).append(".* TO ").append(account).append(";\n");
     }
     return sql + "FLUSH PRIVILEGES;\n";
 }
@@ -204,7 +238,8 @@ std::string project_database_name(std::string_view project) {
 bool reserved_database_name(std::string_view name) {
     static constexpr std::array<std::string_view, 8> kReserved = {
         "root", "mysql", "sys", "performance_schema", "information_schema", "test", "mariadb_sys", "public"};
-    return std::find(kReserved.begin(), kReserved.end(), name) != kReserved.end();
+    return std::find(kReserved.begin(), kReserved.end(), name) != kReserved.end() || name == kSharedDatabaseUser ||
+           name.starts_with(kSharedDatabasePrefix);
 }
 
 EnvStyle env_style(const fs::path& project_dir) {

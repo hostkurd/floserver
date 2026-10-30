@@ -72,6 +72,10 @@ public:
     // starts if it sleeps). The project must be On and ask for a database.
     [[nodiscard]] std::optional<DatabaseLogin> project_login(const std::string& project, ServiceRefusal& refusal);
 
+    // Shared sites' login (D19, user "www"), made the first time. Shared
+    // sites must be on and have a database.
+    [[nodiscard]] std::optional<DatabaseLogin> shared_login(ServiceRefusal& refusal);
+
     class Server;
     struct InternalPorts;
 
