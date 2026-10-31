@@ -27,7 +27,7 @@ enum class Lang : std::uint8_t { En, Ar, Ku };
 
 [[nodiscard]] bool is_rtl(Lang lang);
 
-enum class Str : std::uint8_t {
+enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every section it outgrows 256
     Projects,
     SearchProjects,
     NewProject,
@@ -267,6 +267,64 @@ enum class Str : std::uint8_t {
     PortsOpenFailed,  // {0}: the reason
     PortsChanging,
     PortsCertUnreadable,  // a reason, after "Not added: "
+    // Settings > Database (MariaDB).
+    SettingsDatabase,
+    DbTitle,
+    DbHint,
+    DbNoneInstalled,
+    DbServer,
+    DbStart,
+    DbStop,
+    DbRestart,
+    DbSleeping,              // {0}: the port
+    DbStopping,
+    DbFailed,                // {0}: the service's reason
+    DbNotInUse,
+    DbPortTaken,             // {0}: the port chosen, {1}: the one it's on
+    DbPort,
+    DbPortCue,
+    DbPortBad,
+    DbPortNote,
+    DbKeepRunning,
+    DbKeepRunningNote,
+    DbKeptBy,                // {0}: the projects
+    DbUsedBy,                // {0}: the projects, and shared sites
+    DbUsedByNobody,
+    DbShowFinal,
+    DbEditFull,
+    DbUnknownOption,         // {0}: "11.4", {1}: the name
+    DbUnknownOptionMaybe,    // {0}: "11.4", {1}: the name, {2}: the known name it's closest to
+    DbCustomProblems,        // {0}: the lines left out
+    DbCustomIniUsed,
+    DbProblems,              // {0}: what the service skipped
+    DbRoot,
+    DbRootPassword,
+    DbShow,
+    DbHide,
+    DbCopy,
+    DbNewPassword,
+    DbNewPasswordCue,
+    DbSetPassword,
+    DbRootNote,
+    DbDatabases,             // {0}: the projects
+    DbNoDatabases,
+    DbPasswordSet,
+    DbPasswordCopied,
+    DbPasswordFailed,        // {0}: the service's reason
+    DbRootReadFailed,        // {0}: the service's reason
+    DbPasswordShort,
+    DbPasswordLong,
+    DbPasswordChars,
+    DbApplies,               // {0}: "11.4", {1}: who: "3 projects and shared sites"
+    DbAppliesSleeping,       // {0}: "11.4"
+    DbAppliesNobody,         // {0}: "11.4"
+    DbAskSave,               // {0}: "11.4"
+    DbReadFailed,            // {0}: "11.4", {1}: the service's reason
+    DbRestarting,            // {0}: "11.4"
+    DbServerFailed,          // {0}: "11.4", {1}: the service's reason
+    DbOpenIniFailed,         // {0}: the reason
+    DbIniOpened,
+    DbFinalOpened,
     Count_,
 };
 

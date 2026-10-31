@@ -106,6 +106,15 @@ struct Snapshot {
         std::string error;  // the service's reason, or the connection's
     };
     std::vector<WebSettingsAnswer> web_settings;
+    // Settings > Database: database.* answers in the order they came.
+    struct DbAnswer {
+        std::string method;   // "database.get", "database.set", "database.server", "database.root", ...
+        std::string series;   // the series asked about
+        std::string purpose;  // what the window asked it for ("show" or "copy" root's password)
+        std::optional<nlohmann::json> reply;
+        std::string error;    // the service's reason, or the connection's
+    };
+    std::vector<DbAnswer> db;
     std::string custom_ini;        // php.custom_ini's (or php.final_ini's) path, to open in Notepad
     std::string custom_ini_error;
     bool custom_ini_final = false; // it's the final php.ini, to read, not custom.ini
@@ -169,6 +178,9 @@ public:
     void web_settings(const std::string& what, const nlohmann::json& params = nlohmann::json::object());
     // The panel's PHP part: projects.php, answered to the project.
     void project_php(const std::string& project, const nlohmann::json& params);
+    // Settings > Database: one database.* request ({"series", ...}); its
+    // answer comes back in Snapshot::db with `purpose`.
+    void database_call(const std::string& method, const nlohmann::json& params, const std::string& purpose = {});
     // New project: runtimes.list (cached) once, for its defaults.
     void load_defaults();
     // Asks for the templates (templates.list).
@@ -225,6 +237,7 @@ private:
             PhpCustomIni,
             ProjectPhp,
             WebSettings,
+            DatabaseCall,
             LoadDefaults,
             Select,
             Start,

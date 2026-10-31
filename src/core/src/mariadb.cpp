@@ -1,5 +1,6 @@
 #include "floserver/core/mariadb.h"
 
+#include "floserver/core/mariadb_settings.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/version.h"
 
@@ -96,7 +97,8 @@ MariaDbFiles mariadb_files(const fs::path& install_dir, const std::string& versi
     return f;
 }
 
-std::string mariadb_config(const MariaDbFiles& files, Port port, bool as_root, bool with_init_file) {
+std::string mariadb_config(const MariaDbFiles& files, Port port, bool as_root, bool with_init_file,
+                           const MariaDbExtras* extras) {
 #ifdef _WIN32
     const char* nl = "\r\n";
 #else
@@ -104,6 +106,32 @@ std::string mariadb_config(const MariaDbFiles& files, Port port, bool as_root, b
 #endif
     std::ostringstream c;
     c << "# Written by FloServer for its MariaDB " << files.series << ". It is rewritten at every start." << nl
+      << "[mysqld]" << nl;
+    // A development server: small memory, no name lookups (slow on some
+    // networks), utf8mb4 everywhere. Settings > Database may change these.
+    for (const auto& [key, value] : mariadb_ini_defaults()) {
+        c << key << "=" << value << nl;
+    }
+    c << "skip-name-resolve" << nl;
+    if (extras != nullptr && !extras->ini.empty()) {
+        c << nl << "# Settings > Database (config.json)" << nl;
+        for (const auto& [key, value] : extras->ini) {
+            c << key << "=" << value << nl;
+        }
+    }
+    if (extras != nullptr && !extras->custom_ini.empty()) {
+        c << nl << "# Your own lines (" << extras->custom_ini_path << ")" << nl;
+        const std::string& text = extras->custom_ini;
+        std::size_t pos = 0;
+        while (pos < text.size()) {
+            const auto end = text.find('\n', pos);
+            c << text.substr(pos, end == std::string::npos ? std::string::npos : end - pos) << nl;
+            pos = end == std::string::npos ? text.size() : end + 1;
+        }
+    }
+    // FloServer's own lines come last, in a group of their own, so nothing
+    // above (a [group] in custom.ini included) changes them.
+    c << nl << "# Set by FloServer: where MariaDB keeps its files, and 127.0.0.1 only on FloServer's port." << nl
       << "[mysqld]" << nl
 #ifndef _WIN32
       // On Windows mariadbd finds its own folder; a full path there would
@@ -130,11 +158,7 @@ std::string mariadb_config(const MariaDbFiles& files, Port port, bool as_root, b
     if (as_root) {
         c << "user=root" << nl;
     }
-    // A development server: small memory, no name lookups (slow on some
-    // networks), utf8mb4 everywhere.
-    c << "character-set-server=utf8mb4" << nl << "collation-server=utf8mb4_unicode_ci" << nl
-      << "innodb_buffer_pool_size=64M" << nl << "skip-name-resolve" << nl << nl
-      << "[client]" << nl << "port=" << port << nl;
+    c << nl << "[client]" << nl << "port=" << port << nl;
     return c.str();
 }
 

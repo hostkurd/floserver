@@ -8,6 +8,7 @@ add_executable(floserver_tests
     test_main.cpp
     test_manifest.cpp
     test_mariadb.cpp
+    test_mariadb_settings.cpp
     test_database_service.cpp
     test_ports.cpp
     test_project_config.cpp
@@ -25,6 +26,7 @@ add_executable(floserver_tests
     test_site_plan.cpp
     test_shared_sites.cpp
     test_ui_model.cpp
+    test_ui_database.cpp
     test_web_service.cpp
     test_web_settings.cpp
     test_tar.cpp

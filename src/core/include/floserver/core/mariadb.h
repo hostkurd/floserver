@@ -58,7 +58,14 @@ struct MariaDbFiles {
 // are relative (mariadbd runs in the series' folder), except basedir
 // outside Windows. `as_root`: the service runs as root (containers):
 // user=root. `with_init_file`: the first start, which sets root's password.
-[[nodiscard]] std::string mariadb_config(const MariaDbFiles& files, Port port, bool as_root, bool with_init_file);
+//
+// In order: FloServer's defaults a user may change, Settings > Database's
+// values (`extras`), the series' custom.ini (already filtered), then
+// FloServer's own lines (files, port, 127.0.0.1) in a [mysqld] group of
+// their own, so they win over anything before them.
+struct MariaDbExtras;  // mariadb_settings.h
+[[nodiscard]] std::string mariadb_config(const MariaDbFiles& files, Port port, bool as_root, bool with_init_file,
+                                         const MariaDbExtras* extras = nullptr);
 
 // install-db finished: the system database exists, and the marker written
 // only after install-db succeeded. A half-set-up folder isn't.

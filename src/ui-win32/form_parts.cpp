@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <utility>
 
 namespace floserver::ui {
@@ -80,6 +81,51 @@ void FieldEdit::set_read_only(bool read_only) {
     if (hwnd_ != nullptr) {
         SendMessageW(hwnd_, EM_SETREADONLY, read_only ? TRUE : FALSE, 0);
     }
+}
+
+void FieldEdit::set_password(bool on) {
+    if (hwnd_ != nullptr) {
+        SendMessageW(hwnd_, EM_SETPASSWORDCHAR, on ? WPARAM{0x25CF} : WPARAM{0}, 0);  // ●
+        InvalidateRect(hwnd_, nullptr, TRUE);
+    }
+}
+
+bool put_secret_on_clipboard(HWND owner, std::string& value) {
+    std::wstring wide = win::widen(value);
+    SecureZeroMemory(value.data(), value.size());
+    value.clear();
+    bool done = false;
+    if (OpenClipboard(owner) != FALSE) {
+        EmptyClipboard();
+        const std::size_t bytes = (wide.size() + 1) * sizeof(wchar_t);
+        if (HGLOBAL text = GlobalAlloc(GMEM_MOVEABLE, bytes); text != nullptr) {
+            if (void* to = GlobalLock(text); to != nullptr) {
+                std::memcpy(to, wide.c_str(), bytes);
+                GlobalUnlock(text);
+                done = SetClipboardData(CF_UNICODETEXT, text) != nullptr;
+            }
+            if (!done) {
+                GlobalFree(text);
+            }
+        }
+        // Kept out of Windows' clipboard history and cloud clipboard.
+        for (const wchar_t* name : {L"CanIncludeInClipboardHistory", L"CanUploadToCloudClipboard",
+                                    L"ExcludeClipboardContentFromMonitorProcessing"}) {
+            const UINT format = RegisterClipboardFormatW(name);
+            if (HGLOBAL zero = GlobalAlloc(GMEM_MOVEABLE, sizeof(DWORD)); format != 0 && zero != nullptr) {
+                if (auto* d = static_cast<DWORD*>(GlobalLock(zero)); d != nullptr) {
+                    *d = 0;
+                    GlobalUnlock(zero);
+                }
+                if (SetClipboardData(format, zero) == nullptr) {
+                    GlobalFree(zero);
+                }
+            }
+        }
+        CloseClipboard();
+    }
+    SecureZeroMemory(wide.data(), wide.size() * sizeof(wchar_t));
+    return done;
 }
 
 void FieldEdit::place(const RECT& box, int pad, int height, bool visible) {

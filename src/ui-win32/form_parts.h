@@ -45,6 +45,8 @@ public:
     // While a save is on its way: what's typed then would be lost. The
     // parent gets WM_CTLCOLORSTATIC instead of WM_CTLCOLOREDIT meanwhile.
     void set_read_only(bool read_only);
+    // Shows ● for each character (a password being typed).
+    void set_password(bool on);
     // Inside `box` (the parent's client coordinates, which are logical in a
     // mirrored window), `pad` from its sides; hidden when `visible` is false.
     void place(const RECT& box, int pad, int height, bool visible);
@@ -65,6 +67,11 @@ private:
     bool setting_ = false;
     bool clipped_ = false;  // a window region cuts it at a scrolling part's edge
 };
+
+// Puts a secret (a password, .env lines with one) on the clipboard, kept
+// out of Windows' clipboard history and cloud clipboard; `value` is wiped
+// from memory. False when the clipboard couldn't be had.
+bool put_secret_on_clipboard(HWND owner, std::string& value);
 
 enum class SaveChoice : std::uint8_t { Save, DontSave, Cancel };
 
