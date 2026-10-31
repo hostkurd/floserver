@@ -124,16 +124,18 @@ struct VersionField {
     std::string label;    // "PHP", "Web server"
     std::vector<Choice> choices;
     std::size_t current = 0;  // index into choices
+    // `current` is what's in effect without the key in the file: picking it
+    // still writes it (PHP only).
+    bool implicit = false;
 };
 
 // The panel's version pickers for a project: PHP, Database, Web server,
 // Node.js, and Python when one is installed or asked for. Each lists what's
 // installed (one entry per series), plus what floserver.json asks for when
-// that isn't installed ("8.1 (not installed)"). PHP starts with Automatic
-// (removes the key; without one it's shown as "Automatic (None)" for a
-// static, Node or Python project, "Automatic (Newest installed)" for a PHP
-// one), then None (sends "none": false in the file) and Newest installed
-// ("newest").
+// that isn't installed ("8.1 (not installed)"). PHP starts with None (sends
+// "none": false in the file) and Newest installed ("newest"). Without the
+// key, the one in effect is ticked (None for a static, Node or Python
+// project, Newest installed for a PHP one) and marked `implicit`.
 [[nodiscard]] std::vector<VersionField> version_fields(const ProjectRow& row, const Installed& installed, Lang lang);
 
 // The note under the panel's pickers when PHP is off and the folder has
@@ -246,7 +248,7 @@ struct SharedSites {
 // shared.get's or shared.set's result; `known` is set.
 [[nodiscard]] SharedSites shared_from_reply(const nlohmann::json& result);
 
-// Only "http://localhost", with an optional port and a single "/" after it:
+// Only "http://localhost" or "https://localhost", with an optional port and a single "/" after it:
 // shared sites' own address. Anything else is never handed to the shell.
 [[nodiscard]] bool is_shared_address(std::string_view address);
 

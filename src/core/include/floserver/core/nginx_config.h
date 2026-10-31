@@ -5,8 +5,9 @@
 //
 // Each project that is On and ready gets <name>.localhost (D7) on the web
 // ports, loopback only (D12): 127.0.0.1, and [::1] when the machine has IPv6.
-// With a certificate the http port redirects to https; without one (no local
-// certificate authority yet) the site is served on http.
+// With a certificate the http port redirects to https (302, not 301: a
+// browser keeps a 301, and HTTPS can be turned off in Settings); without one
+// (no local certificate authority yet, or HTTPS off) the site is served on http.
 //
 // PHP requests go to the project's pool (site_plan.h) and are logged to that
 // pool's access log, one line per request, which is how the service measures
@@ -42,7 +43,8 @@ struct NginxSite {
 
 // Shared sites (D19), on the http port: the www folder at localhost/<folder>/
 // and each folder at <folder>.localhost (a project's name wins: exact names
-// come before nginx's regex). With Apache everything goes to it; without,
+// come before nginx's regex). With `tls`, localhost alone moves to the https
+// port (http://localhost redirects there); <folder>.localhost stays http. With Apache everything goes to it; without,
 // nginx serves the files and sends PHP to the pool. localhost/ runs
 // `list_script` on the pool when the www folder has no index file of its own.
 struct NginxShared {
@@ -52,6 +54,7 @@ struct NginxShared {
     std::filesystem::path php_access_log;   // the pool's idle log
     std::optional<Port> app_port;           // the shared Apache serves (web apache)
     std::filesystem::path request_log;      // every request; empty for none
+    std::optional<NginxTls> tls;            // the certificate for "localhost"
     // Projects that aren't served now (off, waiting for a download, a
     // problem): their <name>.localhost stays theirs, a 404, never a www folder.
     std::vector<std::string> reserved;

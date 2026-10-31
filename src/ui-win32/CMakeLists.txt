@@ -5,7 +5,8 @@ add_library(floserver_ui_model STATIC
     model/ui_strings.cpp
     model/view_model.cpp
     model/runtimes_page.cpp
-    model/php_page.cpp)
+    model/php_page.cpp
+    model/ports_page.cpp)
 target_include_directories(floserver_ui_model PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(floserver_ui_model PUBLIC floserver_third_party)
 floserver_code_rules(floserver_ui_model)
@@ -27,6 +28,7 @@ add_executable(floserver_ui WIN32
     service_worker.cpp
     settings_window.cpp
     settings_php.cpp
+    settings_ports.cpp
     form_parts.cpp
     window_style.cpp
     FloServer.rc)

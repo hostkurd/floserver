@@ -13,6 +13,7 @@
 #include "floserver/core/sha256.h"
 #include "floserver/core/trust_store.h"
 #include "floserver/core/version.h"
+#include "floserver/core/web_settings.h"
 
 #include <algorithm>
 #include <system_error>
@@ -164,6 +165,11 @@ json WebService::status() const {
     return status_locked();
 }
 
+std::optional<WebPorts> WebService::ports_in_use() const {
+    const std::lock_guard lock(mutex_);
+    return nginx_ ? ports_ : std::nullopt;
+}
+
 // Runs nginx once in the web folder (-t, -s reload, -s stop) and waits for
 // it. Paths on its command line are relative to that folder: nginx for
 // Windows reads its arguments in the ANSI code page, which can't hold every
@@ -290,6 +296,9 @@ void WebService::reload_locked() {
         error_ = "the project list can't be read: " + error;  // keep running what runs
         return;
     }
+    // Settings > Ports & HTTPS (web_settings.h); unusable settings are the defaults.
+    std::string settings_error;
+    const WebSettings settings = read_web_settings(*app, settings_error).value_or(WebSettings{});
     const auto installed = list_installed(runtimes_dir(config_.data_dir));
     // Each PHP series' custom.ini is read here, on every reload, so an edit
     // by hand reaches the pools within reload_every; only series in use are read.
@@ -310,9 +319,21 @@ void WebService::reload_locked() {
         error_ = "there's no free port for PHP from 9100 upwards";
         return;
     }
-    // HTTPS once the local CA exists and isn't known to be untrusted.
+    // HTTPS once the local CA exists and isn't known to be untrusted, for
+    // projects unless it's turned off, for shared sites only when asked.
     const auto ca = certs_.load_ca(error);
-    const bool tls = ca.has_value() && ca_trust_state(ca->der) != TrustState::NotTrusted;
+    const bool trusted = ca.has_value() && ca_trust_state(ca->der) != TrustState::NotTrusted;
+    const bool tls = trusted && settings.https;
+    https_off_ = !settings.https;
+    std::optional<NginxTls> shared_tls;
+    if (trusted && settings.shared_https && plan.shared && plan.shared->state == SiteState::Ready) {
+        std::string cert_error;
+        if (const auto cert = certs_.ensure_localhost(cert_error)) {
+            shared_tls = NginxTls{cert->certificate, cert->key};
+        } else {
+            error_ = "no certificate for localhost: " + cert_error;
+        }
+    }
 
     // The shared Apache (D6), for the projects that ask for it: one more
     // app, under a name no project can have, PHP from the same pools.
@@ -330,7 +351,7 @@ void WebService::reload_locked() {
         }
         const bool shared_apache = plan.shared && plan.shared->state == SiteState::Ready && plan.shared->apache;
         if (shared_apache) {
-            as.shared = ApacheShared{plan.shared->doc_root, plan.pools.at(*plan.shared->pool).ports};
+            as.shared = ApacheShared{plan.shared->doc_root, plan.pools.at(*plan.shared->pool).ports, shared_tls.has_value()};
         }
         if (!as.sites.empty() || as.shared) {
             as.server_root = apache_server_root(plan.apache_dir);
@@ -593,7 +614,8 @@ void WebService::reload_locked() {
             } else {
                 ns.php_access_log = pools.at(pool.key)->access_log();
                 ns.request_log = request_log_file(work_, kSharedSiteName);
-                site.address = "http";
+                ns.tls = shared_tls;
+                site.address = ns.tls ? "https" : "http";
                 shared_spec = std::move(ns);
             }
         }
@@ -615,17 +637,49 @@ void WebService::reload_locked() {
         keep_both();  // it failed a moment ago; the supervisor tries again
         return;
     }
+    // Other ports asked for in Settings: nginx starts again on them (a
+    // reload can't always move its listening sockets, on Windows above all).
+    const auto wanted = wanted_web_ports(settings);
+    std::optional<WebPorts> released;
+    if (wanted != wanted_ports_) {
+        wanted_ports_ = wanted;
+        if (ports_ && !config_.fixed_ports) {
+            released = ports_;
+            stop_nginx_locked();
+        }
+    } else if (ports_ && !ports_taken_.empty() && wanted && !config_.fixed_ports && config_.probe(wanted->http) &&
+               config_.probe(wanted->https)) {
+        // The ports asked for were taken and are free now (the other program
+        // ended, or a closed connection let go of them): nginx moves there.
+        stop_nginx_locked();
+    }
     if (!ports_) {
-        ports_ = config_.fixed_ports ? config_.fixed_ports : pick_web_ports(config_.probe);
+        if (config_.fixed_ports) {
+            ports_ = config_.fixed_ports;
+            ports_taken_.clear();
+        } else {
+            // The ports nginx has just let go of are free for it (a closed
+            // connection can still hold them for a while, which nginx's own
+            // listening sockets don't mind).
+            const PortProbe probe = [&](Port p) {
+                return (released && (p == released->http || p == released->https)) || config_.probe(p);
+            };
+            ChosenWebPorts chosen = choose_web_ports(settings, probe);
+            ports_ = chosen.ports;
+            ports_taken_ = std::move(chosen.taken);
+        }
         if (!ports_) {
             error_ = "ports 80/443 and 8080-8099/8443-8462 are all taken by other programs";
             keep_both();
             return;
         }
     }
+    if (!settings_error.empty() && error_.empty()) {
+        error_ = "config.json's \"web\" settings can't be used, so the defaults are: " + settings_error;
+    }
     for (auto& [name, site] : sites) {
         if (name == kSharedSiteName) {
-            site.address = site.address.empty() ? std::string() : shared_address(*ports_);
+            site.address = site.address.empty() ? std::string() : shared_address(*ports_, site.address == "https");
         } else if (!site.address.empty()) {
             site.address = site_address(name, *ports_, site.address == "https");
         }
@@ -634,7 +688,8 @@ void WebService::reload_locked() {
         // The list page's script: it changes only with the settings, and it
         // reads the www folder only when the page is opened.
         const std::string script = shared_list_script(shared_spec->dir, app_config_file(config_.data_dir),
-                                                      plan.shared->apache ? WebServer::Apache : WebServer::Nginx);
+                                                      plan.shared->apache ? WebServer::Apache : WebServer::Nginx,
+                                                      ports_->http);
         if (script != shared_script_text_) {
             const fs::path file = shared_list_script_file(work_);
             std::error_code dir_ec;
@@ -916,12 +971,18 @@ json WebService::status_locked() const {
         }
     }
     json nginx = {{"running", nginx_ != nullptr}, {"version", nginx_version_}, {"tls", tls_}};
+    if (https_off_) {
+        nginx["https_off"] = true;  // turned off in Settings > Ports & HTTPS
+    }
     if (nginx_) {
         nginx["pid"] = nginx_->pid();
     }
     if (ports_) {
         nginx["http_port"] = ports_->http;
         nginx["https_port"] = ports_->https;
+        if (!ports_taken_.empty()) {
+            nginx["ports_taken"] = ports_taken_;  // asked for in Settings, held by another program
+        }
     }
     if (!nginx_error_.empty()) {
         nginx["error"] = nginx_error_;

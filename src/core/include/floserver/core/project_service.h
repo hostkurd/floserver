@@ -16,6 +16,7 @@
 #include <nlohmann/json.hpp>
 
 #include <filesystem>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -121,6 +122,15 @@ public:
     // goes back to the series' setting. The reply is that project.
     [[nodiscard]] std::optional<nlohmann::json> project_php(const std::string& name, const nlohmann::json& extensions,
                                                             const nlohmann::json& ini, ServiceRefusal& refusal);
+
+    // config.json as it is now, for settings kept beside the projects
+    // (Settings → Ports & HTTPS, web_settings.h).
+    [[nodiscard]] std::optional<AppConfig> config(ServiceRefusal& refusal) const;
+    // Changes config.json under the lock every other change takes, so no
+    // change is lost. `change` returns false (with `refusal`) to save
+    // nothing. The config as saved.
+    [[nodiscard]] std::optional<AppConfig> change_config(const std::function<bool(AppConfig&, ServiceRefusal&)>& change,
+                                                         ServiceRefusal& refusal);
 
     // The registered folder of a project, or nothing.
     [[nodiscard]] std::optional<std::filesystem::path> folder(const std::string& name, ServiceRefusal& refusal) const;

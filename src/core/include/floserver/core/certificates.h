@@ -12,9 +12,11 @@
 //   <data>/certs/ca.pem         the CA certificate (added to the user's trust store)
 //   <data>/certs/ca.key         the CA key: DPAPI-sealed on Windows, 0600 elsewhere
 //   <data>/certs/ca.json        fingerprint, expiry
+//   <data>/certs/ca.crt         the CA certificate again, for Windows' viewer
 //   <data>/certs/sites/<name>.pem   the project's certificate, then the CA's
 //   <data>/certs/sites/<name>.key   its key (PKCS#8 PEM, for nginx)
 //   <data>/certs/sites/<name>.json  which CA issued it, expiry
+//   <data>/certs/sites/_localhost.* the certificate for localhost (shared sites over HTTPS)
 //
 // Adding the CA to the trust store isn't done here (trust_store.h): Windows
 // shows a prompt for it, and only the window or the CLI should show prompts.
@@ -113,11 +115,22 @@ public:
     // `name` must pass project_name_problem().
     [[nodiscard]] std::optional<SiteCertificate> ensure_site(const std::string& name, std::string& error);
 
+    // The certificate for "localhost" itself (shared sites over HTTPS),
+    // kept as sites/_localhost.*, issued or renewed when needed.
+    [[nodiscard]] std::optional<SiteCertificate> ensure_localhost(std::string& error);
+
+    // The CA certificate as ca.crt, which Windows opens in its certificate
+    // viewer; written from ca.pem when it isn't there. Nothing (with `error`)
+    // when there's no CA.
+    [[nodiscard]] std::optional<std::filesystem::path> ca_viewer_file(std::string& error) const;
+
     // Deletes the CA and every project certificate (for "Remove FloServer"
     // and `flo untrust`). The trust store entry is removed separately.
     [[nodiscard]] bool remove_all(std::string& error);
 
 private:
+    [[nodiscard]] std::optional<SiteCertificate> ensure_host(const std::string& name, const std::string& host,
+                                                             std::string& error);
     [[nodiscard]] std::optional<CaInfo> create_ca(std::string& error);
     [[nodiscard]] std::optional<CaInfo> ensure_ca_locked(std::string& error);
     [[nodiscard]] std::optional<EcKeyPair> load_ca_key(std::string& error) const;

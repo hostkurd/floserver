@@ -125,7 +125,7 @@ void SettingsWindow::open_section(Section section, const std::string& series) {
         return;
     }
     if (section_ == Section::Php) {
-        if (!settle_php_changes(AfterSave::Runtimes)) {
+        if (!settle_php_changes(section == Section::Ports ? AfterSave::Ports : AfterSave::Runtimes)) {
             return;
         }
         if (GetFocus() != hwnd_) {
@@ -134,9 +134,17 @@ void SettingsWindow::open_section(Section section, const std::string& series) {
         edits_.clear();
         field_edit_.clear();
     }
+    if (section_ == Section::Ports) {
+        if (GetFocus() != hwnd_) {
+            SetFocus(hwnd_);
+        }
+        port_edits_.clear();
+        custom_open_ = false;
+        ports_problem_ = Str::Count_;
+    }
     section_ = section;
     scroll_ = 0;
-    focus_ = section == Section::Php ? 1 : 0;  // its own entry in the sidebar
+    focus_ = static_cast<int>(section);  // its own entry in the sidebar
     hover_ = {};
     message_.clear();
     if (section == Section::Php) {
@@ -152,6 +160,10 @@ void SettingsWindow::open_section(Section section, const std::string& series) {
         if (!pick.empty()) {
             load_php(pick);
         }
+    }
+    if (section == Section::Ports) {
+        make_port_edits();
+        load_ports();  // each time the section opens: one web.settings.get, nothing else
     }
     relayout();
     InvalidateRect(hwnd_, nullptr, FALSE);
@@ -224,6 +236,8 @@ bool SettingsWindow::on_php_answers(const Snapshot& snap) {
                 close_now = true;
             } else if (then == AfterSave::Runtimes) {
                 open_section(Section::Runtimes);
+            } else if (then == AfterSave::Ports) {
+                open_section(Section::Ports);
             } else if (then == AfterSave::Version && !target.empty()) {
                 load_php(target);
             }
@@ -346,6 +360,9 @@ void SettingsWindow::place_php_edits() {
 }
 
 SettingsWindow::Hit SettingsWindow::hit_of_edit(int id) const {
+    if (id >= kPortEditBase && std::cmp_less(id - kPortEditBase, port_edits_.size())) {
+        return {id == kPortEditBase ? Part::PortsHttpEdit : Part::PortsHttpsEdit, -1, -1};
+    }
     const int index = id - kEditBase;
     if (index < 0 || std::cmp_greater_equal(index, edits_.size())) {
         return {};
@@ -362,6 +379,9 @@ SettingsWindow::Hit SettingsWindow::hit_of_edit(int id) const {
 }
 
 FieldEdit* SettingsWindow::edit_of(const Hit& hit) const {
+    if ((hit.part == Part::PortsHttpEdit || hit.part == Part::PortsHttpsEdit) && port_edits_.size() == 2) {
+        return port_edits_[hit.part == Part::PortsHttpEdit ? 0 : 1].get();
+    }
     if (hit.part == Part::PhpFind && !edits_.empty()) {
         return edits_.front().get();
     }
@@ -378,7 +398,10 @@ void SettingsWindow::on_edit_change(int id) {
     if (edit == nullptr || edit->setting()) {
         return;
     }
-    if (hit.part == Part::PhpFind) {
+    if (hit.part == Part::PortsHttpEdit || hit.part == Part::PortsHttpsEdit) {
+        ports_problem_ = Str::Count_;  // being fixed
+        relayout();
+    } else if (hit.part == Part::PhpFind) {
         php_query_ = edit->text();
         relayout();
     } else if (php_ && !php_saving_) {
@@ -417,6 +440,9 @@ bool SettingsWindow::on_edit_key(int id, WPARAM key) {
         return true;
     }
     if (key == VK_RETURN) {
+        if (id >= kPortEditBase) {
+            use_custom_ports();  // Enter in a port box: Use these ports
+        }
         return true;  // the value is kept as it's typed; Save sends it
     }
     // Tab: on through the page as the window's own keys go.

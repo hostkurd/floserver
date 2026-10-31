@@ -464,23 +464,22 @@ std::vector<VersionField> fields_of(const ProjectRow& row, const Installed& inst
 
     VersionField php{Field::Php, "php", std::string(text(lang, Str::FieldPhp)), {}, 0};
     if (project) {
-        // Automatic removes the key: the folder decides. Without the key it's
-        // the one shown, with what's in effect: none for a static site or a
-        // Node or Python project, the newest for a PHP one. None and Newest
-        // installed always write the key, so either can be pinned.
-        const bool automatic = w.php.empty() && !w.php_off;
-        if (automatic) {
-            const bool none = !w.node.empty() || !w.python.empty() || row.static_site;
-            php.choices.push_back(
-                {fill(lang, Str::ChoiceAutoIs, {std::string(text(lang, none ? Str::ChoiceNone : Str::ChoiceNewest))}),
-                 std::nullopt});
-        } else {
-            php.choices.push_back({std::string(text(lang, Str::ChoiceAuto)), std::nullopt});
-        }
+        // None writes false, Newest installed "newest", a series its number.
+        // Without the key the folder decides, and what's in effect is the
+        // one ticked: None for a static site or a Node or Python project,
+        // Newest installed for a PHP one. Picking it still writes the key
+        // (`implicit`), so the project keeps it from then on.
         php.choices.push_back({std::string(text(lang, Str::ChoiceNone)), std::string(kPhpNone)});
         php.choices.push_back({std::string(text(lang, Str::ChoiceNewest)), std::string(kPhpNewest)});
+        const bool absent = w.php.empty() && !w.php_off;
+        if (absent) {
+            const bool none = !w.node.empty() || !w.python.empty() || row.static_site;
+            php.current = none ? 0U : 1U;
+            php.implicit = true;
+        } else {
+            php.current = w.php_off ? 0U : 1U;
+        }
         const bool newest = w.php == kPhpNewest;
-        php.current = automatic ? 0U : w.php_off ? 1U : 2U;
         add_series(php, installed, "php", newest ? std::string() : w.php, "", "", lang);
     } else {
         // Without the key, a PHP project gets the newest installed; a Node
@@ -941,11 +940,15 @@ SharedSites shared_from_reply(const json& result) {
 }
 
 bool is_shared_address(std::string_view address) {
-    constexpr std::string_view kHost = "http://localhost";
-    if (!address.starts_with(kHost)) {
+    // https: Settings → Ports & HTTPS can serve https://localhost/.
+    std::string_view rest;
+    if (address.starts_with("http://localhost")) {
+        rest = address.substr(std::string_view("http://localhost").size());
+    } else if (address.starts_with("https://localhost")) {
+        rest = address.substr(std::string_view("https://localhost").size());
+    } else {
         return false;
     }
-    std::string_view rest = address.substr(kHost.size());
     if (rest.ends_with("/")) {
         rest.remove_suffix(1);
     }

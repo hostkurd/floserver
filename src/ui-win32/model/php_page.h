@@ -129,7 +129,7 @@ void reset_ini(const PhpSeries& series, PhpChanges& changes, const std::string& 
 
 // What a "Save" chosen on the way out waits for: it's done only once the
 // save is answered without a refusal.
-enum class AfterSave : std::uint8_t { Stay, Close, Runtimes, Version };
+enum class AfterSave : std::uint8_t { Stay, Close, Runtimes, Version, Ports };
 
 // The php.ini key a refusal from php.set or projects.php is about
 // ("memory_limit: put the value in double quotes when…", "opcache.enable is

@@ -431,7 +431,7 @@ TEST_CASE("the nginx config serves PHP and static sites on loopback") {
     CHECK(has("listen [::1]:80 default_server;"));
     CHECK(has("ssl_reject_handshake on;"));
     CHECK(has("server_name shop.localhost;"));
-    CHECK(has("return 301 https://shop.localhost$request_uri;"));
+    CHECK(has("return 302 https://shop.localhost$request_uri;"));
     CHECK(has("listen 127.0.0.1:443 ssl;"));
     CHECK(has("upstream floserver_php_9101 {\n        server 127.0.0.1:9101 max_fails=0;\n        server 127.0.0.1:9102 max_fails=0;\n    }"));
     CHECK(has("fastcgi_pass floserver_php_9101;"));
@@ -457,7 +457,7 @@ TEST_CASE("the nginx config serves PHP and static sites on loopback") {
         spec.ipv6 = false;
         const auto t = make_nginx_config(spec, error);
         REQUIRE(t);
-        CHECK(t->find("return 301 https://shop.localhost:8443$request_uri;") != std::string::npos);
+        CHECK(t->find("return 302 https://shop.localhost:8443$request_uri;") != std::string::npos);
         CHECK(t->find("[::1]") == std::string::npos);
     }
     SUBCASE("an unsafe path or name refuses the whole config") {

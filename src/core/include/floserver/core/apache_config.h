@@ -35,6 +35,7 @@ struct ApacheSite {
 struct ApacheShared {
     std::filesystem::path dir;
     std::vector<Port> php_ports;
+    bool https = false;  // nginx serves https://localhost/: Apache's own redirects there say so
 };
 
 struct ApacheSpec {

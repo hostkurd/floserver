@@ -346,6 +346,34 @@ std::optional<SiteCertificate> CertStore::ensure_site(const std::string& name, s
         error = "can't make a certificate for \"" + name + "\": " + *problem;
         return std::nullopt;
     }
+    return ensure_host(name, name + ".localhost", error);
+}
+
+std::optional<SiteCertificate> CertStore::ensure_localhost(std::string& error) {
+    // A file name no project can have ('_'), so a project called "localhost"
+    // (localhost.localhost) keeps its own.
+    return ensure_host("_localhost", "localhost", error);
+}
+
+std::optional<std::filesystem::path> CertStore::ca_viewer_file(std::string& error) const {
+    const auto ca = load_ca(error);
+    if (!ca) {
+        if (error.empty()) {
+            error = "there's no FloServer certificate authority yet";
+        }
+        return std::nullopt;
+    }
+    // .crt opens in Windows' certificate viewer; ca.pem opens in nothing.
+    fs::path file = dir_ / "ca.crt";  // NOLINT(misc-const-correctness): moved out
+    const std::string text = der::pem("CERTIFICATE", ca->der);
+    if (read_small_file(file, text.size() + 1) != text && !write_file_atomically(file, text, error)) {
+        return std::nullopt;
+    }
+    return file;
+}
+
+std::optional<SiteCertificate> CertStore::ensure_host(const std::string& name, const std::string& host,
+                                                      std::string& error) {
     // One lock for all of it: the CA can't be removed or replaced between
     // reading it and signing with it.
     const std::lock_guard lock(mutex_);
@@ -390,7 +418,6 @@ std::optional<SiteCertificate> CertStore::ensure_site(const std::string& name, s
         return std::nullopt;
     }
     serial[0] = static_cast<std::uint8_t>((serial[0] & 0x7F) | 0x01);
-    const std::string host = name + ".localhost";
     const sys_seconds start = now() - std::chrono::days(1);
 
     CertificateFields f;

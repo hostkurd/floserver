@@ -443,7 +443,7 @@ void print_web_notes(floserver::core::ServiceClient& client) {
     if (w["nginx"].contains("error") && w["nginx"]["error"].is_string()) {
         std::cout << "nginx: " << w["nginx"]["error"].get<std::string>() << "\n";
     }
-    if (w["nginx"].value("running", false) && !w["nginx"].value("tls", false)) {
+    if (w["nginx"].value("running", false) && !w["nginx"].value("tls", false) && !w["nginx"].value("https_off", false)) {
         std::cout << "For https addresses, run: flo trust\n";
     }
 }

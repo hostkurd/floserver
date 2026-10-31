@@ -1,6 +1,7 @@
 // The window's model (src/ui-win32/model): words, rows, addresses, colours.
 
 #include "model/php_page.h"
+#include "model/ports_page.h"
 #include "model/runtimes_page.h"
 #include "model/theme.h"
 #include "model/ui_strings.h"
@@ -331,16 +332,18 @@ TEST_CASE("the panel's version pickers list what's installed and what's asked fo
     REQUIRE(fields.size() == 4);  // no Python installed or asked for
     const VersionField& php = fields[0];
     CHECK(php.key == "php");
-    REQUIRE(php.choices.size() == 6);
-    CHECK(php.choices[0].label == "Automatic");  // a version is set: Automatic removes it
-    CHECK_FALSE(php.choices[0].value);
-    CHECK(php.choices[1].label == "None");
-    CHECK(php.choices[1].value == std::optional<std::string>("none"));
-    CHECK(php.choices[2].label == "Newest installed");
-    CHECK(php.choices[2].value == std::optional<std::string>("newest"));
-    CHECK(php.choices[3].label == "8.10");
-    CHECK(php.choices[5].value == std::optional<std::string>("8.4"));
-    CHECK(php.current == 5);
+    REQUIRE(php.choices.size() == 5);  // None, Newest installed, 8.10, 8.5, 8.4
+    CHECK(php.choices[0].label == "None");
+    CHECK(php.choices[0].value == std::optional<std::string>("none"));
+    CHECK(php.choices[1].label == "Newest installed");
+    CHECK(php.choices[1].value == std::optional<std::string>("newest"));
+    CHECK(php.choices[2].label == "8.10");
+    CHECK(php.choices[4].value == std::optional<std::string>("8.4"));
+    CHECK(php.current == 4);
+    CHECK_FALSE(php.implicit);
+    for (const Choice& c : php.choices) {
+        CHECK(c.value.has_value());  // every PHP choice writes the key
+    }
     CHECK(php_off_note(row, Lang::En).empty());
 
     const VersionField& db = fields[1];
@@ -369,47 +372,53 @@ TEST_CASE("the panel's version pickers list what's installed and what's asked fo
         CHECK(fields[4].key == "python");
         CHECK(fields[4].choices[fields[4].current].label == "3.12 (not installed)");
     }
-    SUBCASE("a Node project without PHP says None for PHP") {
+    SUBCASE("a Node project without PHP has None ticked, picking it writes false") {
         row.wants.php.clear();
         row.wants.node = "24";
         fields = version_fields(row, installed, Lang::En);
-        CHECK(fields[0].choices[0].label == "Automatic (None)");
+        CHECK(fields[0].choices[0].label == "None");
         CHECK(fields[0].current == 0);
+        CHECK(fields[0].implicit);
         CHECK(fields[3].choices[fields[3].current].label == "24");
     }
-    SUBCASE("without the key: Automatic, saying what's in effect; None and Newest still write the key") {
+    SUBCASE("without the key: what's in effect is ticked and still writes the key") {
         row.wants.php.clear();
         row.static_site = true;
         fields = version_fields(row, installed, Lang::En);
-        REQUIRE(fields[0].choices.size() == 6);  // nothing "not installed" added
+        REQUIRE(fields[0].choices.size() == 5);  // nothing "not installed" added
         CHECK(fields[0].current == 0);
-        CHECK(fields[0].choices[0].label == "Automatic (None)");
-        CHECK_FALSE(fields[0].choices[0].value);
-        CHECK(fields[0].choices[1].label == "None");  // a different choice: it pins false
-        CHECK(fields[0].choices[1].value == std::optional<std::string>("none"));
+        CHECK(fields[0].implicit);
+        CHECK(fields[0].choices[0].label == "None");
+        CHECK(fields[0].choices[0].value == std::optional<std::string>("none"));
         row.static_site = false;
         fields = version_fields(row, installed, Lang::En);
-        CHECK(fields[0].current == 0);
-        CHECK(fields[0].choices[0].label == "Automatic (Newest installed)");
-        CHECK(fields[0].choices[2].value == std::optional<std::string>("newest"));
-        CHECK(version_fields(row, installed, Lang::Ar)[0].choices[0].label.find("تلقائي") == 0);
+        CHECK(fields[0].current == 1);
+        CHECK(fields[0].implicit);
+        CHECK(fields[0].choices[1].label == "Newest installed");
+        CHECK(fields[0].choices[1].value == std::optional<std::string>("newest"));
+        for (const Lang lang : {Lang::Ar, Lang::Ku}) {
+            const auto translated = version_fields(row, installed, lang);
+            for (const Choice& c : translated[0].choices) {
+                CHECK(c.value.has_value());
+            }
+        }
     }
     SUBCASE("\"php\": \"newest\" picks Newest installed, even with no .php files yet") {
         row.wants.php = "newest";
         row.static_site = false;
         fields = version_fields(row, installed, Lang::En);
-        CHECK(fields[0].choices.size() == 6);
-        CHECK(fields[0].current == 2);
-        CHECK(fields[0].choices[0].label == "Automatic");
+        CHECK(fields[0].choices.size() == 5);
+        CHECK(fields[0].current == 1);
+        CHECK_FALSE(fields[0].implicit);
     }
     SUBCASE("\"php\": false picks None, and says so when there are .php files") {
         row.wants.php.clear();
         row.wants.php_off = true;
         row.static_site = true;
         fields = version_fields(row, installed, Lang::En);
-        CHECK(fields[0].current == 1);
-        CHECK(fields[0].choices[0].label == "Automatic");
-        CHECK_FALSE(fields[0].choices[0].value);
+        CHECK(fields[0].current == 0);
+        CHECK_FALSE(fields[0].implicit);
+        CHECK(fields[0].choices[0].label == "None");
         CHECK(php_off_note(row, Lang::En).empty());
         row.php_files = true;
         CHECK(php_off_note(row, Lang::En) == "PHP is off: .php files are sent as they are, not run.");
@@ -858,7 +867,10 @@ TEST_CASE("shared sites' address: only localhost with a port") {
     CHECK(is_shared_address("http://localhost"));
     CHECK(is_shared_address("http://localhost:8080"));
     CHECK(is_shared_address("http://localhost:8080/"));
-    CHECK_FALSE(is_shared_address("https://localhost:8080"));
+    CHECK(is_shared_address("https://localhost:8443"));  // shared sites over HTTPS
+    CHECK(is_shared_address("https://localhost"));
+    CHECK_FALSE(is_shared_address("https://localhost.evil.com"));
+    CHECK_FALSE(is_shared_address("ftp://localhost"));
     CHECK_FALSE(is_shared_address("http://localhost.evil.com"));
     CHECK_FALSE(is_shared_address("http://localhost:0"));
     CHECK_FALSE(is_shared_address("http://localhost:70000"));
@@ -1164,4 +1176,107 @@ TEST_CASE("the panel's tabs: which a project has, the one shown, and their paddi
     CHECK(tab_padding({90, 30, 110, 50}, 328, 14, 4) == 6);
     CHECK(tab_padding({120, 40, 140, 60}, 328, 14, 4) == 4);
     CHECK(tab_padding({}, 328, 14, 4) == 14);
+}
+
+TEST_CASE("Settings > Ports & HTTPS: web.settings.get's answer and what the section says") {
+    const json reply = {{"ports", "standard"},
+                        {"http_port", 8000},
+                        {"https_port", nullptr},
+                        {"https", false},
+                        {"shared_https", true},
+                        {"in_use", {{"http", 8080}, {"https", 8443}}},
+                        {"taken", json::array({{{"port", 80}, {"pid", 1234}, {"program", "httpd.exe"}},
+                                               {{"port", 443}, {"pid", 4321}},
+                                               {{"port", 8443}}})},
+                        {"ca",
+                         {{"common_name", "FloServer local CA"},
+                          {"der", "MII="},
+                          {"trusted", "no"},
+                          {"viewer", "C:/Users/me/AppData/Local/FloServer/certs/ca.crt"}}}};
+    auto s = ports_settings_from_reply(reply);
+    REQUIRE(s);
+    CHECK(s->ports == "standard");
+    CHECK(port_choice_index(s->ports) == 1);
+    CHECK(s->http_port == 8000);
+    CHECK_FALSE(s->https_port);
+    CHECK_FALSE(s->https);
+    CHECK(s->shared_https);
+    CHECK(ports_in_use_text(*s, Lang::En) == "In use now: http 8080, https 8443.");
+    const auto lines = ports_taken_lines(*s, Lang::En);
+    REQUIRE(lines.size() == 4);
+    CHECK(lines[0] == "Port 80 is in use by httpd.exe.");
+    CHECK(lines[1] == "Port 443 is in use by another program (process 4321).");
+    CHECK(lines[2] == "Port 8443 is in use by another program.");
+    CHECK(lines[3].find("moves to them by itself") != std::string::npos);  // not Automatic: it moves later
+    CHECK(s->ca == CaState::NotTrusted);
+    CHECK(s->ca_name == "FloServer local CA");
+    CHECK(s->ca_viewer.ends_with("ca.crt"));
+    CHECK(ca_status_text(*s, Lang::En) == "Windows doesn't trust it yet, so projects open on http.");
+
+    // Automatic: the taken port is said, nothing about moving.
+    json automatic = reply;
+    automatic["ports"] = "auto";
+    automatic["taken"] = json::array({{{"port", 80}, {"program", "System"}}});
+    automatic["in_use"] = nullptr;
+    automatic["ca"] = nullptr;
+    s = ports_settings_from_reply(automatic);
+    REQUIRE(s);
+    CHECK(ports_taken_lines(*s, Lang::En) == std::vector<std::string>{"Port 80 is in use by System."});
+    CHECK(ports_in_use_text(*s, Lang::En) == "Nothing is served now, so no port is in use.");
+    CHECK(s->ca == CaState::None);
+    CHECK(ca_status_text(*s, Lang::En).starts_with("There isn't one yet."));
+
+    // certs.ensure_ca's answer: the CA now there, the viewer kept.
+    s->ca_viewer = "C:/x/ca.crt";
+    CHECK(apply_ca_reply(*s, {{"ca", {{"der", "MIIB"}, {"trusted", "no"}, {"common_name", "CA"}}}}));
+    CHECK(s->ca_der == "MIIB");
+    CHECK(s->ca_viewer == "C:/x/ca.crt");
+    CHECK_FALSE(apply_ca_reply(*s, {{"other", 1}}));
+
+    // A damaged CA, trusted, and an answer that isn't web.settings.get's.
+    automatic["ca"] = {{"error", "ca.json is damaged"}};
+    s = ports_settings_from_reply(automatic);
+    REQUIRE(s);
+    CHECK(s->ca == CaState::Damaged);
+    CHECK(ca_status_text(*s, Lang::En) == "It can't be read: ca.json is damaged");
+    automatic["ca"] = {{"der", "MII="}, {"trusted", "yes"}};
+    s = ports_settings_from_reply(automatic);
+    REQUIRE(s);
+    CHECK(s->ca == CaState::Trusted);
+    CHECK_FALSE(ports_settings_from_reply(json::object()));
+    CHECK_FALSE(ports_settings_from_reply(json::array()));
+    automatic["ports"] = "warp";
+    CHECK(ports_settings_from_reply(automatic)->ports == "auto");
+
+    // Every language has words for every choice; Arabic keeps the address left to right.
+    for (const Lang lang : {Lang::En, Lang::Ar, Lang::Ku}) {
+        for (std::size_t i = 0; i < kPortChoices.size(); ++i) {
+            CHECK_FALSE(port_choice_label(i, lang).empty());
+            CHECK_FALSE(port_choice_note(i, lang).empty());
+        }
+    }
+    CHECK(port_choice_note(1, Lang::En) == "Addresses without a port, such as https://shop.localhost.");
+    CHECK(port_choice_note(2, Lang::Ar).find("\xE2\x80\xAAhttps://shop.localhost:8443\xE2\x80\xAC") != std::string::npos);
+}
+
+TEST_CASE("Settings > Ports & HTTPS: custom ports as typed, and what a pick sends") {
+    Str problem = Str::Count_;
+    auto ports = parse_custom_ports(" 8000", "8001 ", problem);
+    REQUIRE(ports);
+    CHECK(ports->http == 8000);
+    CHECK(ports->https == 8001);
+    CHECK_FALSE(parse_custom_ports("", "8001", problem));
+    CHECK(problem == Str::PortsBadNumber);
+    CHECK_FALSE(parse_custom_ports("0", "8001", problem));
+    CHECK_FALSE(parse_custom_ports("65536", "8001", problem));
+    CHECK_FALSE(parse_custom_ports("80a", "8001", problem));
+    CHECK_FALSE(parse_custom_ports("-80", "8001", problem));
+    CHECK_FALSE(parse_custom_ports("8000", "8000", problem));
+    CHECK(problem == Str::PortsSameNumber);
+    CHECK(parse_custom_ports("1", "65535", problem));
+
+    CHECK(port_choice_params(0, std::nullopt) == json{{"ports", "auto"}});
+    CHECK(port_choice_params(2, std::nullopt) == json{{"ports", "alternate"}});
+    CHECK(port_choice_params(3, CustomPorts{8000, 8001}) ==
+          json{{"ports", "custom"}, {"http_port", 8000}, {"https_port", 8001}});
 }
