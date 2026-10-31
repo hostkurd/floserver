@@ -132,6 +132,7 @@ private:
     struct ApachePart {
         std::vector<std::string> modules;
         std::string custom;
+        bool operator==(const ApachePart&) const = default;
     };
     void reload_locked();
     // The shared Apache's config with Settings > Apache's modules and
@@ -141,6 +142,10 @@ private:
     [[nodiscard]] std::optional<std::string> apache_config_locked(const AppConfig& app, const ApacheSpec& spec,
                                                                   const std::filesystem::path& apache_dir,
                                                                   const std::string& version, std::string& error);
+    // Before each reload: a shared Apache that failed to start with the
+    // user's choices (or listens beyond loopback) goes back to the last
+    // choices that ran; one that runs makes its choices the ones that ran.
+    void watch_apache_locked();
     // The apps a reload settles on; those it drops are stopped.
     void replace_apps_locked(std::map<std::string, std::shared_ptr<AppRunner>> apps);
     void stop_locked();
@@ -179,9 +184,12 @@ private:
     std::chrono::steady_clock::time_point nginx_retry_after_;
     std::chrono::steady_clock::time_point nginx_started_;
     int nginx_failures_ = 0;
+    std::uint32_t apache_checked_pid_ = 0;  // the Apache whose listeners were checked (Settings > Apache)
     std::string rejected_text_;   // the last config nginx -t refused
     std::string rejected_error_;
     bool stopped_ = false;
+    bool apache_used_own_ = false;   // apache_used_ is the user's choices (not a fallback)
+    bool apache_ran_known_ = false;  // apache_ran_ is set
     std::string shared_script_text_;  // the list page's script as last written (D19)
     // phpMyAdmin's signon script and the install's stub as last written:
     // the install folder, then both texts.
@@ -195,6 +203,8 @@ private:
     std::string apache_rejected_;
     std::string apache_problem_;
     ApachePart apache_good_;
+    ApachePart apache_used_;          // the choices in the config Apache was given last
+    ApachePart apache_ran_;           // the choices of the last config Apache ran with
     std::string apache_version_;
     std::vector<std::string> apache_modules_;
 

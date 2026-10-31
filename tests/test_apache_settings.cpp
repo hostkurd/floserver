@@ -261,6 +261,46 @@ TEST_CASE("custom.conf: Apache stays on 127.0.0.1 with FloServer's files, whatev
     CHECK(apache_directive_problem("CustomLog", "\"" + mine + "/../../x.log\" common", logs));
 }
 
+TEST_CASE("custom.conf: macros, the network modules' directives and a '\\' before trailing spaces") {
+    const test_util::TempDir tmp;
+    const fs::path logs = tmp.path() / "logs";
+    // mod_macro would write lines the check never sees: "Use M Listen" is "Listen 0.0.0.0:80".
+    const FilteredApacheConf macro = filter_apache_custom_conf("<Macro M D>\n"
+                                                               "D 0.0.0.0:80\n"
+                                                               "</Macro>\n"
+                                                               "Use M Listen\n"
+                                                               "UndefMacro M\n"
+                                                               "<macro I $f>\n"
+                                                               "Include $f\n"
+                                                               "</MACRO>\n"
+                                                               "Timeout 9\n",
+                                                               logs);
+    CHECK(directives(macro.text) == std::vector<std::string>{"Timeout 9"});
+    CHECK(has_problem(macro, "line 1:", "macros"));
+    CHECK(has_problem(macro, "lines 1-3:", "left out up to its end"));
+    CHECK(has_problem(macro, "line 4:", "macros"));
+    CHECK(has_problem(macro, "line 5:", "macros"));
+    CHECK(has_problem(macro, "lines 6-8:", "left out up to its end"));
+    // The modules themselves are never loaded, nor offered.
+    for (const char* name : {"macro", "heartbeat", "heartmonitor", "lbmethod_heartbeat"}) {
+        CHECK_MESSAGE(apache_module_info(name, false).kind == ApacheModuleKind::Off, name);
+    }
+    const ApacheModulePlan plan = plan_apache_modules({{"macro", true}, {"heartmonitor", true}},
+                                                      [](const std::string&) { return true; }, false);
+    CHECK(index_of(plan.load, "macro") == -1);
+    CHECK(index_of(plan.load, "heartmonitor") == -1);
+    for (const char* line : {"HeartbeatListen 0.0.0.0:27999", "HeartbeatAddress 239.0.0.1:27999",
+                             "HeartbeatStorage C:/x"}) {
+        CHECK_MESSAGE(filter_apache_custom_conf(line, logs).problems.size() == 1, line);
+    }
+
+    // Apache trims a line's end before it looks for the '\': these join too.
+    const FilteredApacheConf spaced =
+        filter_apache_custom_conf("Header set X a \\  \t\nListen 0.0.0.0:80\nLis\\ \r\nten 0.0.0.0:81\nTimeout 9\n", logs);
+    CHECK(directives(spaced.text) == std::vector<std::string>{"Header set X a Listen 0.0.0.0:80", "Timeout 9"});
+    CHECK(has_problem(spaced, "lines 3-4:", "127.0.0.1"));
+}
+
 TEST_CASE("custom.conf is made with a header on demand; only the header is no text") {
     const test_util::TempDir tmp;
     CHECK(read_apache_custom_conf(tmp.path()).empty());

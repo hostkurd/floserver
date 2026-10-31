@@ -16,8 +16,13 @@
 // <data>/apache/custom.conf is the user's own httpd.conf lines, added at the
 // end of the config FloServer writes once filter_apache_custom_conf() has
 // checked them: Apache stays on 127.0.0.1 behind nginx, with FloServer's own
-// files, whatever the file says. The new config is tested with `httpd -t`
-// before it's used; one Apache refuses leaves the running Apache as it was.
+// files, whatever the file says. Macros (mod_macro, <Macro>, Use) are never
+// allowed: the lines they'd write wouldn't be checked. The new config is
+// tested with `httpd -t` before it's used; one Apache refuses is never
+// given to it. A running Apache restarts (stop, then start) with a config
+// that passed; when that start fails, or Apache then listens beyond
+// loopback, it's started again with the choices it last ran with, and
+// web.status says why ("refused").
 
 #include "floserver/core/project_registry.h"
 #include "floserver/core/runtime_service.h"  // ServiceRefusal

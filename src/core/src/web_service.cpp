@@ -351,6 +351,8 @@ std::optional<std::string> WebService::apache_config_locked(const AppConfig& app
         // FloServer's own choices alone (nothing of the user's to check), or checked before.
         apache_problem_.clear();
         apache_good_ = mine;
+        apache_used_ = mine;
+        apache_used_own_ = own;
         return text;
     }
     if (*text != apache_rejected_) {
@@ -371,6 +373,8 @@ std::optional<std::string> WebService::apache_config_locked(const AppConfig& app
             apache_rejected_.clear();
             apache_problem_.clear();
             apache_good_ = mine;
+            apache_used_ = mine;
+            apache_used_own_ = true;
             return text;
         }
         apache_rejected_ = *text;
@@ -387,7 +391,53 @@ std::optional<std::string> WebService::apache_config_locked(const AppConfig& app
                          {}}
             : apache_good_;
     apache_modules_ = fallback.modules;
+    apache_used_ = fallback;
+    apache_used_own_ = false;
     return build(fallback);
+}
+
+void WebService::watch_apache_locked() {
+    const auto it = apps_.find(std::string(kApacheAppName));
+    if (it == apps_.end()) {
+        return;
+    }
+    const AppState state = it->second->state();
+    // Settings > Apache's choices passed `httpd -t` but can still fail as
+    // Apache starts, or (defence in depth) make it listen beyond this
+    // computer: then the choices that last ran are used again.
+    const auto give_up = [&](const std::string& why) {
+        apache_rejected_ = it->second->app().server_config;
+        apache_tested_.clear();
+        apache_problem_ = why;
+        apache_good_ = apache_ran_known_ ? apache_ran_ : ApachePart{};
+    };
+    if (state == AppState::Running) {
+        const json described = it->second->describe();
+        const auto pid = described.contains("pid") && described.at("pid").is_number_unsigned()
+                             ? described.at("pid").get<std::uint32_t>()
+                             : 0U;
+        if (pid != 0 && pid != apache_checked_pid_) {
+            apache_checked_pid_ = pid;
+            if (const auto wide = listening_beyond_loopback(pid); !wide.empty()) {
+                std::string where;
+                for (const std::string& w : wide) {
+                    where += (where.empty() ? "" : ", ") + w;
+                }
+                give_up("Apache listened beyond this computer (" + where + "), so FloServer stopped it");
+                return;
+            }
+        }
+        apache_ran_ = apache_used_;
+        apache_ran_known_ = true;
+        return;
+    }
+    if (state == AppState::Failed && apache_used_own_ && !(apache_ran_known_ && apache_used_ == apache_ran_)) {
+        const json described = it->second->describe();
+        const std::string error = described.contains("error") && described.at("error").is_string()
+                                      ? described.at("error").get<std::string>()
+                                      : std::string("it stopped");
+        give_up("Apache didn't start with these settings, so the last ones that ran are used: " + error);
+    }
 }
 
 std::optional<std::string> WebService::apache_final_config(std::string& error) const {
@@ -487,6 +537,7 @@ void WebService::reload_locked() {
     // The shared Apache (D6), for the projects that ask for it: one more
     // app, under a name no project can have, PHP from the same pools.
     std::string apache_error;
+    watch_apache_locked();
     apache_text_.clear();
     {
         ApacheSpec as;

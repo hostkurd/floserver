@@ -642,6 +642,27 @@ TEST_CASE("an Apache project is served by the shared Apache behind nginx, .htacc
     service.stop();
 }
 
+TEST_CASE("a process listening beyond loopback is seen; one on 127.0.0.1 isn't") {
+    const auto listen_on = [](in_addr_t address) {
+        const int s = socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = 0;
+        addr.sin_addr.s_addr = htonl(address);
+        REQUIRE(bind(s, reinterpret_cast<const sockaddr*>(&addr), sizeof addr) == 0);
+        REQUIRE(listen(s, 1) == 0);
+        return s;
+    };
+    const auto self = static_cast<std::uint32_t>(getpid());
+    const int local = listen_on(INADDR_LOOPBACK);
+    CHECK(listening_beyond_loopback(self).empty());
+    const int wide = listen_on(INADDR_ANY);
+    const auto seen = listening_beyond_loopback(self);
+    CHECK(seen.size() == 1);
+    close(wide);
+    close(local);
+}
+
 TEST_CASE("Settings > Apache: a module turned on reaches .htaccess; custom.conf Apache refuses keeps the running one") {
     const auto nginx = tool("FLOSERVER_TEST_NGINX", "/usr/sbin/nginx");
     const auto apache = tool("FLOSERVER_TEST_APACHE", "/usr/sbin/apache2");
@@ -752,6 +773,28 @@ TEST_CASE("Settings > Apache: a module turned on reaches .htaccess; custom.conf 
     REQUIRE(final_text);
     CHECK(final_text->find("Header set X-Mine yes") != std::string::npos);
     CHECK(final_text->find("0.0.0.0") == std::string::npos);  // the Listen line was left out
+    // Running: it was checked for listeners beyond loopback, and has none.
+    CHECK_FALSE(service.status()["apache"].contains("refused"));
+    REQUIRE(eventually([&] { return apache_pid().has_value(); }));
+    CHECK(listening_beyond_loopback(*apache_pid()).empty());
+
+    // Lines `httpd -t` passes but Apache can't start with (a log that's a
+    // folder): the Apache that ran comes back with the choices it ran with.
+    fs::create_directories(web_dir(data) / "logs" / "a-folder");
+    test_util::write_file(apache_custom_conf_file(data),
+                          "Header set X-Mine yes\nHeader set X-Two yes\nCustomLog \"" +
+                              path_to_utf8(web_dir(data) / "logs" / "a-folder") + "\" common\n");
+    CHECK(eventually([&] {
+        const auto s = service.status();
+        return s["apache"].is_object() && s["apache"].contains("refused") &&
+               s["apache"]["refused"].get<std::string>().find("didn't start") != std::string::npos;
+    }, 20s));
+    CHECK(eventually([&] {
+        const std::string r = get_raw(http, "site.localhost", "/page.html");
+        return r.starts_with("HTTP/1.1 200") && r.find("\r\nX-Mine: yes") != std::string::npos &&
+               r.find("X-Two") == std::string::npos;
+    }, 20s));
+    CHECK(eventually([&] { return apache_pid().has_value(); }));
     service.stop();
 }
 

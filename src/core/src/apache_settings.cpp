@@ -101,13 +101,20 @@ struct Off {
     std::string_view name;
     std::string_view why;
 };
-constexpr std::array<Off, 6> kOff{{
+constexpr std::array<Off, 10> kOff{{
     {"ssl", "https"},        // nginx handles HTTPS; Apache only hears nginx, on this computer
     {"md", "https"},         // certificates come from FloServer's own authority
     {"http2", "http2"},      // nginx speaks HTTP/2 to browsers, HTTP/1.1 to Apache
     {"mpm_prefork", "mpm"},  // FloServer chooses how Apache runs
     {"mpm_worker", "mpm"},
     {"suexec", "suexec"},    // runs scripts as other users
+    // Macros write directives the custom.conf check never sees ("Use M Listen").
+    {"macro", "macro"},
+    // These listen or send on the network beyond this computer (HeartbeatListen,
+    // HeartbeatAddress), which the shared Apache never does.
+    {"heartbeat", "network"},
+    {"heartmonitor", "network"},
+    {"lbmethod_heartbeat", "network"},
 }};
 
 const Needs* needs_of(std::string_view name) {
@@ -457,6 +464,12 @@ std::optional<std::string> apache_directive_problem(std::string_view name_text, 
         (lower(args).find("prg:") != std::string::npos || args.find("${") != std::string_view::npos)) {
         return "a RewriteMap can't run a program";
     }
+    if (name == "macro" || name == "use" || name == "undefmacro") {
+        return "macros can't be used: the lines they'd write aren't here, where FloServer can check them";
+    }
+    if (name == "heartbeatlisten" || name == "heartbeataddress" || name == "heartbeatstorage") {
+        return std::string(bare) + " can't be used: the shared Apache doesn't talk to the network beyond this computer";
+    }
     if (name == "extfilterdefine") {
         return "ExtFilterDefine can't be used: it runs a program";
     }
@@ -473,8 +486,9 @@ FilteredApacheConf filter_apache_custom_conf(std::string_view text, const fs::pa
     int depth = 0;
     std::size_t skip_from = 0;
     while (pos < text.size()) {
-        // One line as Apache reads it: a '\' at the end joins the next line
-        // (CRLF too), whose leading spaces are kept.
+        // One line as Apache reads it: a '\' at the end (spaces or tabs after
+        // it don't count, nor does CRLF) joins the next line, whose leading
+        // spaces are kept.
         const std::size_t first = number + 1;
         std::string line;
         bool more = true;
@@ -486,9 +500,11 @@ FilteredApacheConf filter_apache_custom_conf(std::string_view text, const fs::pa
             if (raw.ends_with('\r')) {
                 raw.remove_suffix(1);
             }
-            more = raw.ends_with('\\');
+            // A '\' followed only by spaces or tabs joins too.
+            const auto last = raw.find_last_not_of(" \t");
+            more = last != std::string_view::npos && raw[last] == '\\';
             if (more) {
-                raw.remove_suffix(1);
+                raw = raw.substr(0, last);  // without the '\' and what follows it
             }
             line.append(raw);
             if (line.size() > kMaxLine) {
@@ -501,7 +517,8 @@ FilteredApacheConf filter_apache_custom_conf(std::string_view text, const fs::pa
                     if (r.ends_with('\r')) {
                         r.remove_suffix(1);
                     }
-                    more = r.ends_with('\\');
+                    const auto end_at = r.find_last_not_of(" \t");
+                    more = end_at != std::string_view::npos && r[end_at] == '\\';
                 }
                 break;
             }

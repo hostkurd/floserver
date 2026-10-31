@@ -592,7 +592,7 @@ void AppRunner::set_app(const AppSpec& app) {
             // The shared Apache serves many projects: a running one comes
             // back at once with its new config (Settings > Apache), rather
             // than on the next request.
-            restart = state_ == AppState::Running && app.kind == AppKind::Apache;
+            restart = app.kind == AppKind::Apache;  // a failed one too: it gets the config that ran before
             stop_process(lock);
         }
     }
