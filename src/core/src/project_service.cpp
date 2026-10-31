@@ -584,6 +584,29 @@ std::optional<json> ProjectService::php_get(const std::string& series_text, Serv
     if (!problems.empty()) {
         out["problems"] = problems;
     }
+    // The names PHP knows, so the window can warn about one it would ignore.
+    if (php != nullptr) {
+        const std::string dir = path_to_utf8(php->dir);
+        bool failed_before = false;
+        {
+            const std::lock_guard lock(known_mutex_);
+            failed_before = known_failed_.contains(dir);
+        }
+        if (!failed_before) {
+            const fs::path cache = php_custom_ini_file(data_dir_, *series).parent_path() /
+                                   path_from_utf8("known-ini-" + path_to_utf8(php->dir.filename()) + ".json");
+            std::string error;
+            bool timed_out = false;
+            if (const auto known = known_php_ini_names(php->dir, cache, error, timed_out)) {
+                out["known_ini"] = *known;
+            } else if (!timed_out) {
+                // PHP itself can't list them: not asked again while the service runs.
+                // A run that was stopped for taking too long is tried next time.
+                const std::lock_guard lock(known_mutex_);
+                known_failed_.insert(dir);
+            }
+        }
+    }
     return out;
 }
 

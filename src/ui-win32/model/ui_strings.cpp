@@ -301,6 +301,14 @@ constexpr std::array kTable{
     Entry{Str::ProjectPhpBadLine, "Write another setting as name = value.",
           "اكتب الإعداد الآخر بالشكل " FLO_LRI "name = value" FLO_PDI ".",
           "ڕێکخستنی تر بەم شێوەیە بنووسە: " FLO_LRI "name = value" FLO_PDI "."},
+    Entry{Str::PhpUnknownIni, "PHP {0} has no setting named {1}, so it would be ignored.",
+          "لا يوجد في " FLO_LRI "PHP" FLO_PDI " {0} إعداد باسم {1}، لذا سيُتجاهَل.",
+          FLO_LRI "PHP" FLO_PDI " {0} هیچ ڕێکخستنێکی بە ناوی {1} نییە، بۆیە پشتگوێ دەخرێت."},
+    Entry{Str::PhpUnknownIniMaybe, "PHP {0} has no setting named {1}. Did you mean {2}?",
+          "لا يوجد في " FLO_LRI "PHP" FLO_PDI " {0} إعداد باسم {1}. هل تقصد {2}؟",
+          FLO_LRI "PHP" FLO_PDI " {0} هیچ ڕێکخستنێکی بە ناوی {1} نییە. مەبەستت {2} بوو؟"},
+    Entry{Str::PanelTabGeneral, "General", "عام", "گشتی"},
+    Entry{Str::PanelFolder, "Project folder", "مجلد المشروع", "بوخچەی پڕۆژە"},
 };
 
 #undef FLO_LRI

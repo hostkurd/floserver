@@ -56,8 +56,10 @@ const PhpIniField& field_at(int index) { return settings_php_ini_fields()[static
 
 // --- sections, closing, loading ------------------------------------------------------
 
+// What's installed as the poll says, else as Settings' own runtimes.list
+// answer says: both read this computer only, so offline is no different.
 std::vector<std::pair<std::string, std::string>> SettingsWindow::php_versions() const {
-    return has_installed_ ? installed_php_series(installed_) : std::vector<std::pair<std::string, std::string>>{};
+    return settings_php_versions(has_installed_, installed_, reply_);
 }
 
 bool SettingsWindow::settle_php_changes(AfterSave then, const std::string& series) {
@@ -495,7 +497,7 @@ void SettingsWindow::layout_php(HDC dc, Geometry& g, int x0, int x1, int y) cons
         y += mh + px(kGap);
     }
 
-    if (!has_installed_ || (!php_ && php_loading_)) {
+    if ((!has_installed_ && !has_reply_) || (!php_ && php_loading_)) {
         pg.note = {x0, y, x1, y + px(24)};
         g.content_h = pg.note.bottom + scroll_ + px(8);
         return;
@@ -624,36 +626,62 @@ void SettingsWindow::layout_php(HDC dc, Geometry& g, int x0, int x1, int y) cons
     const int fcol_w = (avail - (fcols - 1) * px(kGap)) / fcols;
     const int cell_h = px(kLabelH) + px(4) + px(kControlH);
     const int reset_w = measure(text(lang_, Str::PhpReset), fonts_.caption.get()) + px(2);
-    // The line holding a refused field is taller: its reason goes under it.
-    int error_line = -1;
+    // Under a line of fields: a refused field's reason, then a warning for
+    // each name PHP doesn't know (it would ignore it).
     for (std::size_t i = 0; i < fields.size(); ++i) {
         if (!php_error_key_.empty() && fields[i].key == php_error_key_) {
             pg.error_field = static_cast<int>(i);
-            error_line = static_cast<int>(i) / fcols;
         }
     }
-    const int error_h = px(kNoteH);
+    std::vector<std::string> notes(fields.size());
     for (std::size_t i = 0; i < fields.size(); ++i) {
-        const int col = static_cast<int>(i) % fcols;
-        const int line = static_cast<int>(i) / fcols;
-        const int left = cx0 + col * (fcol_w + px(kGap));
-        const int cell_top = yy + line * (cell_h + px(kGap)) + (error_line >= 0 && line > error_line ? error_h : 0);
-        RECT label{left, cell_top, left + fcol_w, cell_top + px(kLabelH)};
-        RECT reset{};
-        if (ini_marked(*php_, php_changes_, fields[i].key)) {
-            reset = {left + fcol_w - reset_w, cell_top, left + fcol_w, cell_top + px(kLabelH) + px(2)};
-            label.right = reset.left - px(6);
-        }
-        pg.labels.push_back(label);
-        pg.resets.push_back(reset);
-        pg.boxes.push_back({left, cell_top + px(kLabelH) + px(4), left + fcol_w, cell_top + cell_h});
-        if (pg.error_field == static_cast<int>(i)) {
-            // From the field's start to the card's end: the reason is longer than a field.
-            pg.field_error = {left, cell_top + cell_h + px(2), cx1, cell_top + cell_h + px(2) + error_h};
+        if (const auto suggestion = unknown_ini_name(php_->known_ini, fields[i].key)) {
+            notes[i] = unknown_ini_text(php_series_, fields[i].key, *suggestion, lang_);
         }
     }
+    pg.warned.assign(fields.size(), false);
+    const int error_h = px(kNoteH);
     const int flines = (static_cast<int>(fields.size()) + fcols - 1) / fcols;
-    yy += flines * cell_h + (flines - 1) * px(kGap) + (error_line >= 0 ? error_h : 0);
+    for (int line = 0; line < flines; ++line) {
+        const int cell_top = yy;
+        for (int col = 0; col < fcols; ++col) {
+            const auto i = static_cast<std::size_t>(line * fcols + col);
+            if (i >= fields.size()) {
+                break;
+            }
+            const int left = cx0 + col * (fcol_w + px(kGap));
+            RECT label{left, cell_top, left + fcol_w, cell_top + px(kLabelH)};
+            RECT reset{};
+            if (ini_marked(*php_, php_changes_, fields[i].key)) {
+                reset = {left + fcol_w - reset_w, cell_top, left + fcol_w, cell_top + px(kLabelH) + px(2)};
+                label.right = reset.left - px(6);
+            }
+            pg.labels.push_back(label);
+            pg.resets.push_back(reset);
+            pg.boxes.push_back({left, cell_top + px(kLabelH) + px(4), left + fcol_w, cell_top + cell_h});
+            if (pg.error_field == static_cast<int>(i)) {
+                // From the field's start to the card's end: the reason is longer than a field.
+                pg.field_error = {left, cell_top + cell_h + px(2), cx1, cell_top + cell_h + px(2) + error_h};
+            }
+        }
+        yy += cell_h;
+        if (pg.error_field >= 0 && pg.error_field / fcols == line) {
+            yy += error_h;
+        }
+        for (int col = 0; col < fcols; ++col) {
+            const auto i = static_cast<std::size_t>(line * fcols + col);
+            if (i >= fields.size() || notes[i].empty()) {
+                continue;
+            }
+            const int nh = std::max(error_h, text_height(dc, w(notes[i]), fonts_.caption.get(), avail, rtl_));
+            pg.warned[i] = true;
+            pg.warnings.emplace_back(RECT{cx0, yy + px(2), cx1, yy + px(2) + nh}, notes[i]);
+            yy += px(2) + nh;
+        }
+        if (line + 1 < flines) {
+            yy += px(kGap);
+        }
+    }
     // Always said: where your own lines go and that they win over the fields.
     yy += px(10);
     pg.custom_note = {cx0, yy, cx1, yy + px(kNoteH)};
@@ -884,8 +912,11 @@ void SettingsWindow::paint_php_shapes(Canvas& c) const {
     const bool changes = php_ && !php_changes_.empty();
     const auto field_box = [&](const RECT& r, bool marked, bool hover, bool edit_focused, const Hit& hit) {
         const bool refused = hit.part == Part::PhpField && hit.row == pg.error_field;
-        c.round_rect(r, pxf(4), marked ? p.input_set : (hover ? p.row_hover : p.input),
-                     refused ? p.banner_error.text : (marked ? p.accent : p.input_border), refused ? pxf(2) : border);
+        const bool unknown = hit.part == Part::PhpField && hit.row >= 0 && std::cmp_less(hit.row, pg.warned.size()) &&
+                             pg.warned[static_cast<std::size_t>(hit.row)];
+        const Rgb outline = refused ? p.banner_error.text : unknown ? p.asleep.text : marked ? p.accent : p.input_border;
+        c.round_rect(r, pxf(4), marked ? p.input_set : (hover ? p.row_hover : p.input), outline,
+                     refused || unknown ? pxf(2) : border);
         if (edit_focused) {
             c.round_outline(r, pxf(4), p.accent, pxf(2));
         } else if (is_focused(hit)) {
@@ -1111,6 +1142,9 @@ void SettingsWindow::paint_php_text(Canvas& c) const {
     if (!is_empty(pg.field_error)) {
         c.text(pg.field_error, w(rtl_ ? isolate_ltr(php_error_) : php_error_), fonts_.caption.get(), p.banner_error.text,
                Align::Start, false);
+    }
+    for (const auto& [r, words] : pg.warnings) {
+        c.paragraph(r, w(words), fonts_.caption.get(), p.asleep.text);
     }
     if (!is_empty(pg.custom_note)) {
         c.text(pg.custom_note, w(text(lang_, Str::PhpCustomIniUsed)), fonts_.caption.get(), p.text_subtle,

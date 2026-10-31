@@ -247,12 +247,21 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             pressed_ = {};
             return 0;
         }
-        case WM_MOUSEWHEEL:
+        case WM_MOUSEWHEEL: {
             if (wizard_open() || www_open()) {
                 return 0;  // the list under the page stays put
             }
+            // The panel's content scrolls under the mouse (also from a PHP
+            // box, which hands the wheel on to this window).
+            POINT at{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+            ScreenToClient(hwnd_, &at);
+            if (panel_open() && (contains(panel_geometry_.panel, at.x, at.y) || !panel_beside_list())) {
+                panel_scroll_to(panel_scroll_ - GET_WHEEL_DELTA_WPARAM(wparam) * px(48) / WHEEL_DELTA);
+                return 0;
+            }
             scroll_to(scroll_ - GET_WHEEL_DELTA_WPARAM(wparam) * px(kRowH) / WHEEL_DELTA);
             return 0;
+        }
         case WM_KEYDOWN:
             // A held Space would queue a command per repeat.
             if (wparam == VK_SPACE && (static_cast<std::uintptr_t>(lparam) & (1U << 30U)) != 0) {
@@ -282,8 +291,18 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             show_window();
             return 0;
         case kPhpBackMessage:
-            if (leave_php_part(true)) {
-                SetFocus(hwnd_);
+            // Escape in a PHP box: the keys go back to the tab bar.
+            SetFocus(hwnd_);
+            if (panel_open()) {
+                panel_focus_ = 0;
+                show_focus_ = true;
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
+            return 0;
+        case kStepTabMessage:
+            SetFocus(hwnd_);
+            if (panel_open()) {
+                step_panel_tab(wparam == 1 ? 1 : -1);
             }
             return 0;
         case kSettingsClosedMessage:
@@ -391,6 +410,10 @@ void MainWindow::on_snapshot() {
         settings_->on_snapshot(snap_);
     }
     snap_.runtimes.reset();  // Settings' alone; not kept once it has it
+    // Nor its other one-shot answers: a Settings opened next must not get
+    // them again (Notepad would open once more).
+    snap_.custom_ini.clear();
+    snap_.custom_ini_error.clear();
     update_visible();
     // The panel's project may have been removed (flo remove).
     if (!selected_.empty() && shows_rows() && selected_row() == nullptr) {
@@ -399,7 +422,13 @@ void MainWindow::on_snapshot() {
     }
     on_project_php_answers();
     sync_project_php();
+    // The PHP tab was shown while the service wasn't there: asked now it is.
+    if (php_info_wanted_ && php_open_ && snap_.link == Link::Connected) {
+        ask_php_info();
+    }
     update_fields();
+    // A tab came or went with the project (a version picked here or in floserver.json).
+    sync_panel_tab();
     // Shared sites: the row goes when the service stops answering shared.get.
     if (!snap_.shared.known) {
         shared_focused_ = false;
@@ -691,9 +720,7 @@ void MainWindow::layout() {
         MoveWindow(name_edit_, r.left + px(10), r.top + (height_of(r) - eh) / 2, std::max(0, width_of(r) - px(20)), eh, TRUE);
     }
     if (!php_edits_.empty()) {
-        HDC dc = GetDC(hwnd_);
-        place_project_php_edits(dc);
-        ReleaseDC(hwnd_, dc);
+        place_project_php_edits();
     }
     for (const auto& [id, rect] : {std::pair{kTipNewProject, new_project_button()},
                                    std::pair{kTipSettings, settings_button()}}) {
@@ -801,10 +828,7 @@ MainWindow::Hit MainWindow::hit_test(int x, int y) const {
     if (www_open()) {
         return contains(www_geometry_.area, x, y) ? www_hit_test(x, y) : Hit{};
     }
-    if (panel_open() && php_open_ && contains(php_geometry_.panel, x, y)) {
-        return php_panel_hit_test(x, y);
-    }
-    if (panel_open() && !php_open_ && contains(panel_geometry_.panel, x, y)) {
+    if (panel_open() && contains(panel_geometry_.panel, x, y)) {
         return panel_hit_test(x, y);
     }
     if (contains(shared_geometry_.row, x, y)) {
@@ -868,6 +892,14 @@ void MainWindow::on_click(const Hit& clicked) {
             return;
         }
     }
+    // In the panel, the keys carry on from what was clicked.
+    if (is_panel_part(hit.part)) {
+        const std::vector<Hit> order = panel_focus_order();
+        if (const auto it = std::find(order.begin(), order.end(), hit); it != order.end()) {
+            panel_focus_ = static_cast<int>(it - order.begin());
+            show_focus_ = false;
+        }
+    }
     switch (hit.part) {
         case Part::Switch:
             focus_ = hit.row;
@@ -891,13 +923,13 @@ void MainWindow::on_click(const Hit& clicked) {
             break;
         case Part::PanelClose:
         case Part::PanelAddress:
+        case Part::PanelTab:
         case Part::PanelButton:
         case Part::PanelField:
         case Part::PanelCopyEnv:
         case Part::PanelKeep:
             on_panel_click(hit);
             break;
-        case Part::PanelPhpBack:
         case Part::PanelPhpSettings:
         case Part::PanelPhpChange:
         case Part::PanelPhpField:
@@ -1384,8 +1416,7 @@ void MainWindow::on_paint() {
             SetLayout(mem.get(), 0);
             const win::Selected selected(mem.get(), bitmap.get());
             geometry_ = row_geometry(mem.get());
-            panel_geometry_ = panel_open() ? panel_geometry(mem.get()) : PanelGeometry{};
-            php_geometry_ = panel_open() && php_open_ ? php_panel_geometry(mem.get()) : PhpPanelGeometry{};
+            update_panel_geometry(mem.get());
             wizard_geometry_ = wizard_open() ? wizard_geometry(mem.get()) : WizardGeometry{};
             const bool list_shown = !wizard_open() && !www_open();
             shared_geometry_ = list_shown ? shared_geometry(mem.get()) : SharedGeometry{};
@@ -1406,11 +1437,7 @@ void MainWindow::on_paint() {
                     } else {
                         paint_list(canvas, mem.get(), text_pass);
                         paint_shared_row(canvas, mem.get(), text_pass);
-                        if (php_open_) {
-                            paint_php_panel(canvas, text_pass);
-                        } else {
-                            paint_panel(canvas, mem.get(), text_pass);
-                        }
+                        paint_panel(canvas, mem.get(), text_pass);
                     }
                     paint_footer(canvas, mem.get(), text_pass);
                 }

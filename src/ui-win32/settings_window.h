@@ -143,6 +143,8 @@ private:
         std::vector<RECT> resets;   // empty when the field isn't marked
         int error_field = -1;       // the field the last refusal was about
         RECT field_error{};         // its words, under it
+        std::vector<bool> warned;   // per field: PHP doesn't know its name
+        std::vector<std::pair<RECT, std::string>> warnings;  // and what's said, under its line
         RECT custom_note{};
         RECT footer_text{};
         RECT discard{};

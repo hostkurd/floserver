@@ -39,6 +39,7 @@ struct PhpSeries {
     bool custom_ini_exists = false;
     std::vector<std::string> used_by;  // project names, and "_shared" for shared sites
     std::vector<std::string> problems;
+    std::vector<std::string> known_ini;  // every php.ini name the install knows, sorted; empty: unknown
 };
 
 // Nothing when the answer has no series.
@@ -47,6 +48,25 @@ struct PhpSeries {
 // The installed PHP series, newest first, each with its newest version:
 // {"8.5", "8.5.12"}, {"8.4", "8.4.27"}.
 [[nodiscard]] std::vector<std::pair<std::string, std::string>> installed_php_series(const Installed& installed);
+
+// Settings > PHP's version list: the installed series as the 2 s poll
+// says (`has_installed`), else as Settings' own runtimes.list answer says
+// (its "installed", read from this computer with no network), so the
+// section never waits on anything online.
+[[nodiscard]] std::vector<std::pair<std::string, std::string>> settings_php_versions(bool has_installed,
+                                                                                     const Installed& installed,
+                                                                                     const nlohmann::json& runtimes_reply);
+
+// A php.ini name PHP doesn't know is ignored by PHP without a word: the
+// window warns (Save is still allowed). Nothing when `known` is empty (PHP
+// couldn't tell) or knows `key`; else the closest known name, at most two
+// edits away and ignoring case ("disable_function" -> "disable_functions"),
+// or "" when none is that close.
+[[nodiscard]] std::optional<std::string> unknown_ini_name(const std::vector<std::string>& known, std::string_view key);
+// "PHP 8.5 has no setting named khalat." with "Did you mean …?" when
+// there's a close one.
+[[nodiscard]] std::string unknown_ini_text(std::string_view series, std::string_view key,
+                                           const std::string& suggestion, Lang lang);
 
 // The php.ini settings shown as fields. `choices` set: a picker (with what
 // the current value is added when it isn't one of them), else an edit box.
@@ -116,6 +136,20 @@ enum class AfterSave : std::uint8_t { Stay, Close, Runtimes, Version };
 // set by FloServer…"), when it's one of `keys`; else empty. The longest
 // matching key wins.
 [[nodiscard]] std::string ini_error_key(std::string_view message, const std::vector<std::string>& keys);
+
+// --- the project panel's tabs ---------------------------------------------------
+
+enum class PanelTab : std::uint8_t { General, Php, Database, Log };
+
+// The tabs the panel shows for a project, in order: General and Log always,
+// PHP when it uses PHP, Database when it has (or asks for) one.
+[[nodiscard]] std::vector<PanelTab> panel_tabs(const ProjectRow& row);
+// The tab shown: the one the user chose last (on any project), else
+// General when this project hasn't that tab.
+[[nodiscard]] PanelTab shown_panel_tab(const std::vector<PanelTab>& tabs, PanelTab chosen);
+// The space each side of a tab's label: `most` when the labels fit `width`
+// with it, else as much as fits down to `least` (then the labels are cut).
+[[nodiscard]] int tab_padding(const std::vector<int>& label_widths, int width, int most, int least);
 
 // --- the project panel's PHP part ---------------------------------------------
 

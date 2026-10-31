@@ -52,12 +52,12 @@ private:
         // The project panel; `row` is the item's index where there are several.
         PanelClose,
         PanelAddress,
+        PanelTab,      // `row`: the tab's index in PanelGeometry::tabs
         PanelButton,
         PanelField,
         PanelCopyEnv,
         PanelKeep,
-        // The panel's PHP part (D20); `row` is the field's index.
-        PanelPhpBack,
+        // The panel's PHP tab (D20); `row` is the field's index.
         PanelPhpSettings,
         PanelPhpChange,
         PanelPhpField,
@@ -86,16 +86,23 @@ private:
         WwwCopyEnv,
         WwwClose,
     };
-    enum class PanelAction : std::uint8_t { Browser, Folder, Terminal, Studio, Download, Php };
+    enum class PanelAction : std::uint8_t { Browser, Folder, Terminal, Studio, Download };
     [[nodiscard]] static constexpr bool is_panel_part(Part part) {
-        return part == Part::PanelClose || part == Part::PanelAddress || part == Part::PanelButton ||
-               part == Part::PanelField || part == Part::PanelCopyEnv || part == Part::PanelKeep || is_php_part(part);
+        return part == Part::PanelClose || part == Part::PanelAddress || part == Part::PanelTab ||
+               part == Part::PanelButton || part == Part::PanelField || part == Part::PanelCopyEnv ||
+               part == Part::PanelKeep || is_php_part(part);
     }
     [[nodiscard]] static constexpr bool is_php_part(Part part) {
-        return part == Part::PanelPhpBack || part == Part::PanelPhpSettings || part == Part::PanelPhpChange ||
-               part == Part::PanelPhpField || part == Part::PanelPhpReset || part == Part::PanelPhpDiscard ||
-               part == Part::PanelPhpSave;
+        return part == Part::PanelPhpSettings || part == Part::PanelPhpChange || part == Part::PanelPhpField ||
+               part == Part::PanelPhpReset || part == Part::PanelPhpDiscard || part == Part::PanelPhpSave;
     }
+    // What a "Save" chosen on the way out of the PHP tab was for: done once
+    // the save is answered without a refusal.
+    struct PanelAct {
+        enum class Kind : std::uint8_t { None, Tab, Project, Close } kind = Kind::None;
+        PanelTab tab = PanelTab::General;
+        std::string project;
+    };
     struct Hit {
         Part part = Part::None;
         int row = -1;         // index into visible_ when it was hit (a panel part: its index)
@@ -115,7 +122,9 @@ private:
         enum class End : std::uint8_t { State, Download, Progress } end = End::State;
         std::string end_text;
     };
-    // The panel's pieces, from the last paint (logical coordinates).
+    // The panel's pieces, from the last paint (logical coordinates). The
+    // header and the tab bar stay put; the tab's content scrolls inside
+    // `content` (its pieces are where they are drawn, scroll included).
     struct PanelGeometry {
         std::string project;
         RECT panel{};
@@ -123,6 +132,12 @@ private:
         RECT title{};
         RECT line2{};    // the address, or the folder
         RECT address{};  // the address text itself; empty when there's nothing to open
+        RECT tab_bar{};
+        std::vector<std::pair<RECT, PanelTab>> tabs;
+        RECT content{};      // the scrolling part, under the tab bar
+        int content_h = 0;   // the shown tab's content, unscrolled (General, Database, Log)
+        RECT folder_label{};
+        RECT folder{};
         std::vector<std::pair<RECT, PanelAction>> buttons;
         RECT versions{};
         std::vector<std::pair<RECT, RECT>> fields;  // label, box; one per fields_ entry
@@ -137,13 +152,13 @@ private:
         RECT log_label{};
         RECT log_box{};
     };
-    // The panel's PHP part, from the last paint (or layout()).
+    // The panel's PHP tab, from the last paint (or layout()), scroll included.
     struct PhpPanelGeometry {
         std::string project;
         RECT panel{};
-        RECT close{};
-        RECT title{};
-        RECT line2{};
+        RECT content{};     // the panel's scrolling part
+        int content_h = 0;  // unscrolled
+        RECT line2{};       // the PHP version it uses
         RECT open_settings{};
         RECT ext_title{};
         RECT ext_hint{};
@@ -154,6 +169,8 @@ private:
         RECT ini_hint{};
         std::vector<RECT> labels;          // one per php_keys_
         std::vector<RECT> boxes;
+        std::vector<int> warned;           // per php_keys_: index into warnings, or -1
+        std::vector<std::pair<RECT, std::string>> warnings;  // names PHP doesn't know
         RECT info{};
         RECT message{};
         RECT reset{};
@@ -293,6 +310,27 @@ private:
     // --- the project panel (main_window_panel.cpp) ---
     [[nodiscard]] const ProjectRow* selected_row() const;
     [[nodiscard]] bool panel_open() const;
+    // The tab shown for the selected project (General when no panel is open).
+    [[nodiscard]] PanelTab shown_tab() const;
+    // The tab that should be shown: panel_tab_, or General when the project lacks it.
+    [[nodiscard]] PanelTab wanted_tab() const;
+    // Shows wanted_tab() when it isn't shown: the project changed (a version
+    // picked, floserver.json edited) and a tab came or went. Leaving the PHP
+    // tab asks about changes not saved, as the user leaving it would.
+    void sync_panel_tab();
+    // Shows `tab`, asking first about PHP changes not saved when leaving the PHP tab.
+    void select_tab(PanelTab tab);
+    // The next tab (`by` 1) or the one before (-1), the keys on the tab bar.
+    void step_panel_tab(int by);
+    void run_panel_act(const PanelAct& act);
+    // The panel's pieces for this paint: header, tabs, the shown tab's content,
+    // with panel_scroll_ kept inside the content.
+    void update_panel_geometry(HDC dc);
+    [[nodiscard]] int panel_content_h() const;
+    void panel_scroll_to(int target);
+    // Scrolls the content so `hit` (a panel part) is in view.
+    void ensure_panel_visible(const Hit& hit);
+    [[nodiscard]] RECT panel_rect_of(const Hit& hit) const;
     [[nodiscard]] bool panel_beside_list() const;  // else it takes the list's place
     [[nodiscard]] RECT panel_rect() const;
     [[nodiscard]] PanelGeometry panel_geometry(HDC dc) const;
@@ -318,17 +356,23 @@ private:
     // drawn by hand in the shapes pass when the icon font isn't there.
     void paint_gear(Canvas& c, const RECT& r, Rgb color, bool text_pass) const;
 
-    // --- the panel's PHP part (main_window_php.cpp) ---
+    // --- the panel's PHP tab (main_window_php.cpp) ---
+    // The tab is shown for selected_: php.get is asked the first time for this
+    // project (never while the panel or tab is closed).
     void open_php_part();
     // Leaves it, asking first about changes not saved when `ask`; false: stay.
+    // A Save chosen then waits for its answer and does `then` after.
+    bool leave_php_part(bool ask, const PanelAct& then);
     bool leave_php_part(bool ask);
+    // The project changed or the panel closed: what php.get said is dropped.
+    void forget_php_info();
+    void ask_php_info();
     [[nodiscard]] bool php_dirty() const;
     [[nodiscard]] std::vector<std::pair<std::string, bool>> php_chips() const;  // name, on
     [[nodiscard]] PhpPanelGeometry php_panel_geometry(HDC dc) const;
     [[nodiscard]] Hit php_panel_hit_test(int x, int y) const;
-    [[nodiscard]] std::vector<Hit> php_panel_focus_order() const;
+    void add_php_focus_order(std::vector<Hit>& order) const;
     void on_php_panel_click(const Hit& hit);
-    void on_php_panel_key(WPARAM key);
     void php_change_menu();
     void php_display_menu(std::size_t index);
     bool save_project_php();
@@ -336,7 +380,7 @@ private:
     void on_project_php_answers();
     void sync_project_php();
     void make_project_php_edits();
-    void place_project_php_edits(HDC dc);
+    void place_project_php_edits();
     void on_php_edit_change(int id);
     void on_php_edit_focus(int id);
     bool on_php_edit_key(int id, WPARAM key);
@@ -470,12 +514,23 @@ private:
     std::vector<VersionField> www_fields_;
     mutable WwwGeometry www_geometry_;
 
-    // The panel's PHP part (D20), for selected_ while php_open_.
+    // The panel's tabs: the one the user chose (kept across projects) and
+    // how far the shown one's content is scrolled.
+    PanelTab panel_tab_ = PanelTab::General;
+    PanelTab panel_shown_ = PanelTab::General;  // the tab shown now (its enter has run)
+    bool tab_ask_declined_ = false;  // the PHP tab went away and the user chose to stay: not asked again
+    int panel_scroll_ = 0;
+
+    // The panel's PHP tab (D20), for selected_ while php_open_ (the tab is shown).
     static constexpr int kPhpEditBase = 2000;                // php_edits_[i] has id kPhpEditBase + i
-    static constexpr UINT kPhpBackMessage = WM_APP + 5;      // Escape in one of its boxes: leave it
+    static constexpr UINT kPhpBackMessage = WM_APP + 5;      // Escape in one of its boxes: back to the tabs
+    static constexpr UINT kStepTabMessage = WM_APP + 6;      // Ctrl+Tab in one: wparam 1 the next tab, 0 the one before
     bool php_open_ = false;
     std::string php_series_;             // the series its PHP comes from
     std::optional<PhpSeries> php_info_;  // php.get's answer: placeholders, the extension list
+    std::string php_info_project_;       // the project and series php_info_ (or the request on its way) is for
+    std::string php_info_series_;
+    bool php_info_wanted_ = false;       // not asked: the service wasn't there; asked once it is
     bool php_loading_ = false;
     bool php_saving_ = false;
     ProjectPhp php_before_;              // what floserver.json has
@@ -489,6 +544,7 @@ private:
     std::vector<int> php_field_edit_;    // field -> index in php_edits_, or -1 (a picker)
     mutable PhpPanelGeometry php_geometry_;
     bool php_leave_after_save_ = false;  // "Save" chosen on the way out: leave once it's answered
+    PanelAct php_then_;                  // and what for
     bool asking_ = false;                // the panel's save question is open
     bool quit_after_ask_ = false;        // Quit came meanwhile
     win::UniqueBrush input_set_brush_;

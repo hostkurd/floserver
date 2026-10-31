@@ -3,7 +3,11 @@
 #include "floserver/core/paths.h"
 #include "floserver/core/process.h"
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
+#include <atomic>
+#include <cstdint>
 #include <map>
 #include <sstream>
 #include <system_error>
@@ -152,6 +156,131 @@ PhpIniResult make_php_ini(const fs::path& php_dir, const PhpIniSettings& setting
     }
     result.text = ini.str();
     return result;
+}
+
+std::optional<fs::path> php_cli_program(const fs::path& php_dir) {
+#ifdef _WIN32
+    const char* names[] = {"php.exe"};  // NOLINT(modernize-avoid-c-arrays)
+#else
+    const char* names[] = {"bin/php", "php"};  // NOLINT(modernize-avoid-c-arrays)
+#endif
+    for (const char* n : names) {
+        std::error_code ec;
+        fs::path p = php_dir / n;
+        if (fs::is_regular_file(p, ec)) {
+            return p;
+        }
+    }
+    return std::nullopt;
+}
+
+namespace {
+
+constexpr std::size_t kMaxKnownIniBytes = std::size_t{512} * 1024;
+
+// A JSON array of names, or nothing.
+std::optional<std::vector<std::string>> names_from_json(const std::optional<std::string>& text) {
+    if (!text) {
+        return std::nullopt;
+    }
+    const nlohmann::json doc = nlohmann::json::parse(*text, nullptr, false);
+    if (!doc.is_array() || doc.empty()) {
+        return std::nullopt;
+    }
+    std::vector<std::string> out;
+    out.reserve(doc.size());
+    for (const nlohmann::json& name : doc) {
+        if (name.is_string()) {
+            out.push_back(name.get<std::string>());
+        }
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
+}  // namespace
+
+std::optional<std::vector<std::string>> known_php_ini_names(const fs::path& php_dir, const fs::path& cache_file,
+                                                            std::string& error, bool& timed_out,
+                                                            std::chrono::milliseconds limit) {
+    timed_out = false;
+    if (auto cached = names_from_json(read_small_file(cache_file, kMaxKnownIniBytes))) {
+        return cached;
+    }
+    const auto program = php_cli_program(php_dir);
+    if (!program) {
+        error = "this PHP has no php program";
+        return std::nullopt;
+    }
+    const fs::path folder = cache_file.parent_path();
+    std::error_code ec;
+    fs::create_directories(folder, ec);
+    // Files of this run alone: the window and the CLI may ask at once.
+    static std::atomic<std::uint64_t> runs{0};
+    const std::string stem = path_to_utf8(cache_file.stem()) + "." + std::to_string(current_pid()) + "-" +
+                             std::to_string(runs.fetch_add(1));
+    const fs::path ini = folder / path_from_utf8(stem + ".ini");
+    const fs::path out = folder / path_from_utf8(stem + ".out");
+    const fs::path log = folder / path_from_utf8(stem + ".log");
+    const auto ask = [&](const PhpIniSettings& settings) -> std::optional<std::vector<std::string>> {
+        const PhpIniResult made = make_php_ini(php_dir, settings, log);
+        if (!write_file_atomically(ini, made.text, error)) {
+            return std::nullopt;
+        }
+        const std::vector<std::string> args = {
+            "-c", path_to_utf8(ini), "-r",
+            "file_put_contents($argv[1], json_encode(array_keys(ini_get_all(null, false))));", path_to_utf8(out)};
+        // The exit code doesn't matter: a list written is a list.
+        (void)run_and_wait(*program, args, limit, error, &timed_out);
+        auto names = names_from_json(read_small_file(out, kMaxKnownIniBytes));
+        std::error_code ignored;
+        fs::remove(ini, ignored);
+        fs::remove(out, ignored);
+        fs::remove(log, ignored);
+        return names;
+    };
+    // A pool's php.ini with every extension the install has turned on, so
+    // their settings count as known. Ones that need other software
+    // installed first (Oracle, Firebird) are left out: they'd only fail.
+    PhpIniSettings all;
+    if (const auto available = available_php_extensions(php_dir)) {
+        for (const std::string& e : *available) {
+            const bool needs_more = e.starts_with("oci8") || e == "pdo_oci" || e == "pdo_firebird" || e == "interbase";
+            const bool base =
+                std::find(base_php_extensions().begin(), base_php_extensions().end(), e) != base_php_extensions().end();
+            if (!needs_more && !base && e != "opcache") {
+                all.extensions.push_back(e);
+            }
+        }
+    }
+    auto names = ask(all);
+    // One extension that stops PHP from starting would leave no list: once
+    // more with only the base ones (still worth having). Not after a run that
+    // got stuck: that would only wait as long again.
+    if (!names && !timed_out) {
+        names = ask(PhpIniSettings{});
+    }
+    if (!names) {
+        if (error.empty()) {
+            error = "php didn't list its settings";
+        }
+        return std::nullopt;
+    }
+    // Kept for next time; an older install's list goes.
+    std::vector<fs::path> older;
+    for (fs::directory_iterator it(folder, ec), end; !ec && it != end; it.increment(ec)) {
+        const std::string name = path_to_utf8(it->path().filename());
+        if (name.starts_with("known-ini-") && name.ends_with(".json") && it->path().filename() != cache_file.filename()) {
+            older.push_back(it->path());
+        }
+    }
+    for (const fs::path& p : older) {
+        fs::remove(p, ec);
+    }
+    std::string ignored;
+    (void)write_file_atomically(cache_file, nlohmann::json(*names).dump(), ignored);
+    return names;
 }
 
 PhpPoolRunner::PhpPoolRunner(PhpPool pool, std::vector<std::unique_ptr<LoopbackListener>> listeners, fs::path ini,

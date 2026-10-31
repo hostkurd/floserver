@@ -411,6 +411,23 @@ TEST_CASE("templates work offline: the kept signed list, else the built-in ones"
         CHECK(list->size() == builtin.size());
     }
 
+    SUBCASE("a list without templates is kept too: Settings has it offline") {
+        w.publish(2);
+        {
+            RuntimeService s(config, w.transport);
+            CHECK(s.list(true, false, false)["list"]["sequence"] == 2);
+        }
+        auto offline = std::make_shared<FakeTransport>();
+        RuntimeService s(config, offline);
+        const auto cached = s.list(false, false, true);
+        CHECK(cached["list"]["sequence"] == 2);
+        CHECK(offline->total_requests() == 0);
+        std::string error;
+        const auto list = s.templates(error, false);  // the built-in ones still
+        REQUIRE(list);
+        CHECK(list->size() == builtin.size());
+    }
+
     SUBCASE("offline after a fetch: the list in hand, as a project job sees it") {
         w.publish(3, one);
         auto fresh_always = config;
