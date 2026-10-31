@@ -708,7 +708,7 @@ std::optional<fs::path> ProjectService::php_final_ini(const std::string& series_
                              "; Change values in Settings > PHP, or add your own lines to custom.ini beside this file.\n"
                              "; A project's own changes (its floserver.json) come after all of this.\n\n" +
                              made.text;
-    const fs::path file = php_custom_ini_file(data_dir_, *series).parent_path() / "final-php.ini";
+    fs::path file = php_custom_ini_file(data_dir_, *series).parent_path() / "final-php.ini";
     std::error_code ec;
     fs::create_directories(file.parent_path(), ec);
     // Read-only, so Notepad says so on Save; made writable again to replace it.
