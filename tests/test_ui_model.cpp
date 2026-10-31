@@ -331,12 +331,17 @@ TEST_CASE("the panel's version pickers list what's installed and what's asked fo
     REQUIRE(fields.size() == 4);  // no Python installed or asked for
     const VersionField& php = fields[0];
     CHECK(php.key == "php");
-    REQUIRE(php.choices.size() == 4);
-    CHECK(php.choices[0].label == "Newest installed");
+    REQUIRE(php.choices.size() == 6);
+    CHECK(php.choices[0].label == "Automatic");  // a version is set: Automatic removes it
     CHECK_FALSE(php.choices[0].value);
-    CHECK(php.choices[1].label == "8.10");
-    CHECK(php.choices[3].value == std::optional<std::string>("8.4"));
-    CHECK(php.current == 3);
+    CHECK(php.choices[1].label == "None");
+    CHECK(php.choices[1].value == std::optional<std::string>("none"));
+    CHECK(php.choices[2].label == "Newest installed");
+    CHECK(php.choices[2].value == std::optional<std::string>("newest"));
+    CHECK(php.choices[3].label == "8.10");
+    CHECK(php.choices[5].value == std::optional<std::string>("8.4"));
+    CHECK(php.current == 5);
+    CHECK(php_off_note(row, Lang::En).empty());
 
     const VersionField& db = fields[1];
     CHECK(db.key == "database");
@@ -368,10 +373,66 @@ TEST_CASE("the panel's version pickers list what's installed and what's asked fo
         row.wants.php.clear();
         row.wants.node = "24";
         fields = version_fields(row, installed, Lang::En);
-        CHECK(fields[0].choices[0].label == "None");
+        CHECK(fields[0].choices[0].label == "Automatic (None)");
         CHECK(fields[0].current == 0);
         CHECK(fields[3].choices[fields[3].current].label == "24");
     }
+    SUBCASE("without the key: Automatic, saying what's in effect; None and Newest still write the key") {
+        row.wants.php.clear();
+        row.static_site = true;
+        fields = version_fields(row, installed, Lang::En);
+        REQUIRE(fields[0].choices.size() == 6);  // nothing "not installed" added
+        CHECK(fields[0].current == 0);
+        CHECK(fields[0].choices[0].label == "Automatic (None)");
+        CHECK_FALSE(fields[0].choices[0].value);
+        CHECK(fields[0].choices[1].label == "None");  // a different choice: it pins false
+        CHECK(fields[0].choices[1].value == std::optional<std::string>("none"));
+        row.static_site = false;
+        fields = version_fields(row, installed, Lang::En);
+        CHECK(fields[0].current == 0);
+        CHECK(fields[0].choices[0].label == "Automatic (Newest installed)");
+        CHECK(fields[0].choices[2].value == std::optional<std::string>("newest"));
+        CHECK(version_fields(row, installed, Lang::Ar)[0].choices[0].label.find("تلقائي") == 0);
+    }
+    SUBCASE("\"php\": \"newest\" picks Newest installed, even with no .php files yet") {
+        row.wants.php = "newest";
+        row.static_site = false;
+        fields = version_fields(row, installed, Lang::En);
+        CHECK(fields[0].choices.size() == 6);
+        CHECK(fields[0].current == 2);
+        CHECK(fields[0].choices[0].label == "Automatic");
+    }
+    SUBCASE("\"php\": false picks None, and says so when there are .php files") {
+        row.wants.php.clear();
+        row.wants.php_off = true;
+        row.static_site = true;
+        fields = version_fields(row, installed, Lang::En);
+        CHECK(fields[0].current == 1);
+        CHECK(fields[0].choices[0].label == "Automatic");
+        CHECK_FALSE(fields[0].choices[0].value);
+        CHECK(php_off_note(row, Lang::En).empty());
+        row.php_files = true;
+        CHECK(php_off_note(row, Lang::En) == "PHP is off: .php files are sent as they are, not run.");
+        CHECK_FALSE(php_off_note(row, Lang::Ar).empty());
+        CHECK_FALSE(project_uses_php(row));
+    }
+}
+
+TEST_CASE("projects.list's wants: php false or \"newest\"") {
+    const json list = {{"projects", json::array({{{"name", "off"}, {"static", true}, {"php_files", true},
+                                                  {"wants", {{"web", "nginx"}, {"php", false}}}},
+                                                 {{"name", "newest"}, {"php", "8.5.12"},
+                                                  {"wants", {{"web", "nginx"}, {"php", "newest"}}}}})}};
+    const auto rows = rows_from_list(list, Lang::En);
+    REQUIRE(rows.size() == 2);
+    CHECK(rows[0].wants.php_off);
+    CHECK(rows[0].wants.php.empty());
+    CHECK(rows[0].php_files);
+    CHECK_FALSE(project_uses_php(rows[0]));
+    CHECK(panel_tabs(rows[0]) == std::vector<PanelTab>{PanelTab::General, PanelTab::Log});
+    CHECK_FALSE(rows[1].wants.php_off);
+    CHECK(rows[1].wants.php == "newest");
+    CHECK(project_uses_php(rows[1]));
 }
 
 TEST_CASE("the database port comes from databases.list") {

@@ -529,6 +529,11 @@ TEST_CASE("an Apache project is served by the shared Apache behind nginx, .htacc
     test_util::write_file(blog / "floserver.json", R"({"web": "apache", "php": "8.3"})");
     test_util::write_file(blog / "index.php", "<?php echo 'blog';");
     test_util::write_file(wp / ".env", "SECRET=1");
+    // PHP off ("php": false): Apache alone, no pool; .php is sent as it is.
+    const fs::path raw = tmp.path() / "raw";
+    test_util::write_file(raw / "floserver.json", R"({"web": "apache", "php": false})");
+    test_util::write_file(raw / "index.php", "<?php echo 'ran';");
+    test_util::write_file(raw / "page.html", "raw page");
     // Apache's workers may run as nobody here (root in a container).
     for (const auto& e : fs::recursive_directory_iterator(tmp.path())) {
         fs::permissions(e.path(), fs::perms::others_read | fs::perms::others_exec, fs::perm_options::add, ec);
@@ -539,6 +544,7 @@ TEST_CASE("an Apache project is served by the shared Apache behind nginx, .htacc
     std::string error;
     REQUIRE(add_project(app, wp, "", error));
     REQUIRE(add_project(app, blog, "", error));
+    REQUIRE(add_project(app, raw, "", error));
     for (Project& p : app.projects) {
         p.on = true;
     }
@@ -576,6 +582,22 @@ TEST_CASE("an Apache project is served by the shared Apache behind nginx, .htacc
     REQUIRE(eventually([&] { return service.status()["sites"]["wp"]["run"] == "sleeping"; }, 25s));
     CHECK(eventually([&] { return service.status()["pools"][0]["state"] == "sleeping"; }, 10s));
     CHECK(get(http, "wp.localhost", "/again") == "200 wp /again /index.php - off");
+    CHECK(service.status()["sites"]["raw"]["app"] == "apache");
+    CHECK_FALSE(service.status()["sites"]["raw"].contains("pool"));
+    CHECK(get(http, "raw.localhost", "/page.html") == "200 raw page");
+    CHECK(get(http, "raw.localhost", "/index.php").find("<?php echo 'ran';") != std::string::npos);
+
+    // Only the PHP-off Apache project on: a reload with no pool at all.
+    for (Project& p : app.projects) {
+        p.on = p.name == "raw";
+    }
+    REQUIRE(save_app_config(app_config_file(data), app, error));
+    st = service.reload();
+    INFO(st.dump(2));
+    CHECK(st["pools"].empty());
+    CHECK(st["sites"]["raw"]["app"] == "apache");
+    CHECK_FALSE(st["sites"]["raw"].contains("problem"));
+    CHECK(get(http, "raw.localhost", "/page.html") == "200 raw page");
 
     for (Project& p : app.projects) {
         p.on = false;

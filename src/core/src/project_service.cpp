@@ -51,6 +51,9 @@ json site_json(const Project& project, const PlannedSite& site, const WebPlan& p
     if (site.static_site) {
         out["static"] = true;
     }
+    if (site.php_files) {
+        out["php_files"] = true;  // PHP is off and there are .php files: they're sent as they are
+    }
     if (site.app) {
         const AppSpec& app = plan.apps.at(*site.app);
         out[app.kind == AppKind::Python ? "python" : "node"] = app.version;
@@ -70,6 +73,10 @@ json site_json(const Project& project, const PlannedSite& site, const WebPlan& p
         json wants = {{"web", c.web == WebServer::Apache ? "apache" : "nginx"}};
         if (c.php) {
             wants["php"] = *c.php;
+        } else if (c.php_choice == PhpChoice::Off) {
+            wants["php"] = false;
+        } else if (c.php_choice == PhpChoice::Newest) {
+            wants["php"] = std::string(kPhpNewest);
         }
         if (c.node) {
             wants["node"] = *c.node;
@@ -446,8 +453,12 @@ std::optional<json> ProjectService::set_shared(const json& changes, ServiceRefus
                 refusal = {"bad_params", std::move(message)};
                 return std::nullopt;
             }
+            if (key == "php" && php_off(*parsed.config)) {
+                refusal = {"bad_params", "php can't be false: shared sites always have PHP"};
+                return std::nullopt;
+            }
             if (key == "php") {
-                shared->php = parsed.config->php;
+                shared->php = parsed.config->php;  // "newest": none named, the newest
             } else if (key == "web") {
                 shared->web = parsed.config->web;
             } else {

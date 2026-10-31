@@ -101,6 +101,38 @@ void read_version(const json& doc, const char* key, std::optional<std::string>& 
     out = version->to_string();  // "08.2" is stored as "8.2"
 }
 
+// "php": a version, false (never PHP) or "newest" (always PHP, the newest).
+void read_php(const json& doc, ProjectConfig& config, ConfigResult& result) {
+    const auto it = doc.find("php");
+    if (it == doc.end() || it->is_null()) {
+        return;
+    }
+    if (it->is_boolean()) {
+        if (it->get<bool>()) {
+            result.errors.push_back({"php", R"(can be false (no PHP), "newest" or a version such as "8.2", but not true)"});
+        } else {
+            config.php_choice = PhpChoice::Off;
+        }
+        return;
+    }
+    if (it->is_string() && it->get_ref<const std::string&>() == kPhpNewest) {
+        config.php_choice = PhpChoice::Newest;
+        return;
+    }
+    if (!it->is_string()) {
+        result.errors.push_back({"php", R"(must be a version in quotes such as "8.2", "newest", or false for no PHP)"});
+        return;
+    }
+    const auto& text = it->get_ref<const std::string&>();
+    const auto version = Version::parse(text);
+    if (!version) {
+        result.errors.push_back(
+            {"php", "\"" + text + R"(" is not a version such as "8.2" or "8.2.27" (or "newest", or false for no PHP))"});
+        return;
+    }
+    config.php = version->to_string();
+}
+
 void read_database(const json& doc, ProjectConfig& config, ConfigResult& result) {
     const auto it = doc.find("database");
     if (it == doc.end() || it->is_null()) {
@@ -284,7 +316,7 @@ ConfigResult parse_project_config(std::string_view json_text) {
     }
 
     ProjectConfig config;
-    read_version(doc, "php", config.php, result);
+    read_php(doc, config, result);
     read_version(doc, "node", config.node, result);
     read_version(doc, "python", config.python, result);
     read_database(doc, config, result);
@@ -304,6 +336,10 @@ std::string write_project_config(const ProjectConfig& config) {
     nlohmann::ordered_json doc = nlohmann::ordered_json::object();
     if (config.php) {
         doc["php"] = *config.php;
+    } else if (config.php_choice == PhpChoice::Off) {
+        doc["php"] = false;
+    } else if (config.php_choice == PhpChoice::Newest) {
+        doc["php"] = std::string(kPhpNewest);
     }
     if (config.node) {
         doc["node"] = *config.node;
@@ -406,9 +442,26 @@ std::optional<std::string> set_project_config_value(std::string_view text, Confi
         }
     }
     const char* const name = config_key_name(key);
-    std::optional<std::string> stored;
+    std::optional<nlohmann::ordered_json> stored;
     switch (key) {
         case ConfigKey::Php:
+            if (value && *value == kPhpNone) {
+                stored = nlohmann::ordered_json(false);
+                break;
+            }
+            if (value && *value == kPhpNewest) {
+                stored = nlohmann::ordered_json(std::string(kPhpNewest));
+                break;
+            }
+            if (value) {
+                const auto v = Version::parse(*value);
+                if (!v) {
+                    error = "\"" + *value + "\" is not a version such as 8.4 or 8.4.27, nor none or newest";
+                    return std::nullopt;
+                }
+                stored = v->to_string();
+            }
+            break;
         case ConfigKey::Node:
         case ConfigKey::Python:
             if (value) {

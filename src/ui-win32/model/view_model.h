@@ -25,7 +25,8 @@ enum class RowState : std::uint8_t { On, Asleep, Waking, Off, NeedsDownload, Pro
 // What floserver.json asks for, as written there ("8.4", not "8.4.27").
 struct Wants {
     bool known = false;  // the file could be read
-    std::string php;
+    std::string php;       // "8.4", "newest", or empty (no key, or PHP off)
+    bool php_off = false;  // "php": false
     std::string node;
     std::string python;
     std::string database;  // "mariadb-11.4"
@@ -59,6 +60,7 @@ struct ProjectRow {
     // What the service says is missing, as it says it: "php", "php 8.2", "nginx".
     std::vector<std::string> missing;
     bool static_site = false;  // HTML files served as they are, no PHP
+    bool php_files = false;    // PHP is off and the folder has .php files (sent as they are)
 };
 
 // projects.list's result ({"projects": [...]}). Entries without a name are skipped.
@@ -127,8 +129,16 @@ struct VersionField {
 // The panel's version pickers for a project: PHP, Database, Web server,
 // Node.js, and Python when one is installed or asked for. Each lists what's
 // installed (one entry per series), plus what floserver.json asks for when
-// that isn't installed ("8.1 (not installed)").
+// that isn't installed ("8.1 (not installed)"). PHP starts with Automatic
+// (removes the key; without one it's shown as "Automatic (None)" for a
+// static, Node or Python project, "Automatic (Newest installed)" for a PHP
+// one), then None (sends "none": false in the file) and Newest installed
+// ("newest").
 [[nodiscard]] std::vector<VersionField> version_fields(const ProjectRow& row, const Installed& installed, Lang lang);
+
+// The note under the panel's pickers when PHP is off and the folder has
+// .php files (they're sent as they are, not run); empty otherwise.
+[[nodiscard]] std::string php_off_note(const ProjectRow& row, Lang lang);
 
 // The port the project's database server listens on, from databases.list
 // (the server whose series matches `database`, "mariadb-11.4"), or 0.

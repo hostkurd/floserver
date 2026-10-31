@@ -40,6 +40,8 @@ enum class SiteState : std::uint8_t {
 // Whether a document root holds a .php file at its top level; true when it
 // can't be read (a folder not made yet counts as PHP, as before).
 [[nodiscard]] bool has_php_files(const std::filesystem::path& doc_root);
+// The same, but false when it can't be read: only a .php file seen counts.
+[[nodiscard]] bool has_php_files_seen(const std::filesystem::path& doc_root);
 
 // The newest install of `name` matching `wanted` ("8.2"), or the newest of
 // all when `wanted` is empty; PHP only counts NTS builds (the pools' kind).
@@ -55,6 +57,9 @@ struct PlannedSite {
     std::optional<std::size_t> app;     // index into WebPlan::apps; set when Ready (own server)
     bool apache = false;                // served by the shared Apache (D6), PHP from `pool`
     bool static_site = false;           // nginx serves its files as they are; no PHP, no server of its own
+    // PHP is off ("php": false) and the document root has a .php file, which
+    // is sent as it is. Only looked for when PHP is off.
+    bool php_files = false;
     std::vector<std::string> missing;   // "php 8.2", "mariadb 11.4"
     std::string problem;                // plain English, when state is Problem
     std::optional<DatabaseSpec> database;

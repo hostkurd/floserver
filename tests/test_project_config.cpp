@@ -233,6 +233,42 @@ TEST_CASE("find_project_config walks up to the nearest file") {
     CHECK(fs::equivalent(*again, project / "floserver.json"));
 }
 
+TEST_CASE("php can be false (never PHP) or \"newest\" (always PHP)") {
+    auto r = parse_project_config(R"({"php": false})");
+    REQUIRE(r.config);
+    CHECK_FALSE(r.config->php);
+    CHECK(r.config->php_choice == PhpChoice::Off);
+    CHECK(php_off(*r.config));
+    CHECK_FALSE(php_asked(*r.config));
+    CHECK(write_project_config(*r.config) == "{\n  \"php\": false\n}\n");
+
+    r = parse_project_config(R"({"php": "newest"})");
+    REQUIRE(r.config);
+    CHECK_FALSE(r.config->php);
+    CHECK(r.config->php_choice == PhpChoice::Newest);
+    CHECK(php_asked(*r.config));
+    CHECK_FALSE(php_off(*r.config));
+    CHECK(write_project_config(*r.config) == "{\n  \"php\": \"newest\"\n}\n");
+
+    r = parse_project_config(R"({"php": "8.4"})");
+    REQUIRE(r.config);
+    CHECK(r.config->php_choice == PhpChoice::Auto);
+    CHECK(php_asked(*r.config));
+
+    r = parse_project_config("{}");
+    REQUIRE(r.config);
+    CHECK_FALSE(php_asked(*r.config));
+    CHECK_FALSE(php_off(*r.config));
+
+    for (const char* bad : {R"({"php": true})", R"({"php": "latest"})", R"({"php": 8})", R"({"php": "none"})"}) {
+        r = parse_project_config(bad);
+        CHECK_FALSE(r.config);
+        REQUIRE(r.errors.size() == 1);
+        CHECK(r.errors[0].key == "php");
+        CHECK(r.errors[0].message.find("false") != std::string::npos);
+    }
+}
+
 TEST_CASE("one key of floserver.json is set or removed, the rest kept in order") {
     std::string error;
     const std::string text = R"({"root": "public", "php": "8.2", "extensions": ["gd"], "x-team": 1})";
@@ -269,6 +305,16 @@ TEST_CASE("one key of floserver.json is set or removed, the rest kept in order")
         out = set_project_config_value(*out, ConfigKey::Web, "web", std::string("nginx"), error);
         REQUIRE(out);
         CHECK(out->find("web") == std::string::npos);
+    }
+    SUBCASE("php none writes false, newest stays newest") {
+        auto out = set_project_config_value(text, ConfigKey::Php, "php", std::string("none"), error);
+        REQUIRE(out);
+        CHECK(out->find("\"php\": false,") != std::string::npos);
+        out = set_project_config_value(*out, ConfigKey::Php, "php", std::string("newest"), error);
+        REQUIRE(out);
+        CHECK(out->find("\"php\": \"newest\",") != std::string::npos);
+        CHECK(out->find("x-team") != std::string::npos);
+        CHECK_FALSE(set_project_config_value(text, ConfigKey::Node, "node", std::string("newest"), error));
     }
     SUBCASE("an empty file") {
         const auto out = set_project_config_value("", ConfigKey::Python, "python", std::string("3.13"), error);
