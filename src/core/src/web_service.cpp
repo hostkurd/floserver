@@ -291,7 +291,11 @@ void WebService::reload_locked() {
         return;
     }
     const auto installed = list_installed(runtimes_dir(config_.data_dir));
-    WebPlan plan = plan_sites(*app, read_project_config_file, installed, std::nullopt);
+    // Each PHP series' custom.ini is read here, on every reload, so an edit
+    // by hand reaches the pools within reload_every; only series in use are read.
+    const fs::path data = config_.data_dir;
+    WebPlan plan = plan_sites(*app, read_project_config_file, installed, std::nullopt,
+                              [&data](const std::string& series) { return read_php_custom_ini(data, series); });
 
     const InstalledRuntime* nginx = newest(installed, "nginx");
     nginx_dir_ = nginx != nullptr ? nginx->dir : fs::path();

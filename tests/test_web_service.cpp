@@ -11,6 +11,7 @@
 #include "floserver/core/paths.h"
 #include "floserver/core/process.h"
 #include "floserver/core/project_registry.h"
+#include "floserver/core/project_service.h"
 #include "floserver/core/request_log.h"
 #include "floserver/core/shared_sites.h"
 #include "floserver/core/web_service.h"
@@ -287,7 +288,7 @@ TEST_CASE("projects run with real nginx and php-cgi, sleep when idle and wake on
         // A new pool for shop (another extension list) and a config nginx
         // refuses: nginx keeps the old config, which still sends shop to the
         // old pool, so that pool must stay open.
-        test_util::write_file(shop / "floserver.json", R"({"php": "8.3", "root": "public", "extensions": ["intl"]})");
+        test_util::write_file(shop / "floserver.json", R"({"php": "8.3", "root": "public", "extensions": ["bcmath"]})");
         test_util::write_file(nginx_dir / "conf" / "mime.types", "types { broken");
         st = web.reload();
         CHECK(st["error"].get<std::string>().find("nginx refused") != std::string::npos);
@@ -318,6 +319,61 @@ TEST_CASE("projects run with real nginx and php-cgi, sleep when idle and wake on
     CHECK(st["nginx"]["running"] == false);
     CHECK(st["pools"].empty());
     CHECK(get(http, "api.localhost").empty());
+}
+
+TEST_CASE("PHP settings (D20): a series' value, its custom.ini and the project's reach PHP after a reload") {
+    const auto nginx = tool("FLOSERVER_TEST_NGINX", "/usr/sbin/nginx");
+    const auto php = tool("FLOSERVER_TEST_PHP_CGI", "/usr/bin/php-cgi");
+    if (!nginx || !php) {
+        MESSAGE("nginx or php-cgi isn't installed here; skipped");
+        return;
+    }
+    const test_util::TempDir tmp;
+    const fs::path data = tmp.path() / "data";
+    install_test_nginx(data, *nginx);
+    fake_runtime(data, "php", "8.3.6", "nts");
+    fs::create_symlink(*php, runtimes_dir(data) / "php" / "8.3.6" / "php-cgi");
+
+    const fs::path shop = tmp.path() / "shop";
+    test_util::write_file(shop / "index.php", "<?php echo ini_get('memory_limit'), ' ', ini_get('max_input_vars');");
+    test_util::write_file(shop / "floserver.json", R"({"php": "8.3"})");
+    AppConfig app;
+    std::string error;
+    REQUIRE(add_project(app, shop, "", error));
+    app.projects[0].on = true;
+    REQUIRE(save_app_config(app_config_file(data), app, error));
+
+    const auto ports = pick_web_ports([](Port p) { return p > 1024 && can_listen_on_loopback(p); });
+    REQUIRE(ports);
+    CertStore certs(data);
+    WebServiceConfig config;
+    config.data_dir = data;
+    config.fixed_ports = WebPorts{static_cast<Port>(ports->http + 21000), static_cast<Port>(ports->https + 21000), true};
+    config.reload_every = 1s;
+    WebService web(config, certs);
+    web.start();
+    const Port http = config.fixed_ports->http;
+    const auto page = [&] { return get(http, "shop.localhost"); };
+    REQUIRE(page() == "200 512M 1000");  // FloServer's default, PHP's own
+
+    // The series' value, as Settings -> PHP saves it; the daemon reloads at once.
+    ProjectService projects(data);
+    ServiceRefusal refusal;
+    REQUIRE(projects.php_set("8.3", nlohmann::json(), {{"memory_limit", "256M"}}, refusal));
+    (void)web.reload();
+    CHECK(page() == "200 256M 1000");
+
+    // custom.ini, edited by hand: picked up by the supervisor's own reloads.
+    const auto custom = projects.php_custom_ini("8.3", refusal);
+    REQUIRE(custom);
+    test_util::write_file(*custom, "max_input_vars = 4321\nmemory_limit = 300M\n");
+    CHECK(eventually([&] { return page() == "200 300M 4321"; }));
+
+    // The project's own value wins over both.
+    REQUIRE(projects.project_php("shop", nlohmann::json(), {{"memory_limit", "1024M"}}, refusal));
+    (void)web.reload();
+    CHECK(page() == "200 1024M 4321");
+    web.stop();
 }
 
 TEST_CASE("a Node project is forwarded to its own server, WebSockets included, and sleeps when idle") {

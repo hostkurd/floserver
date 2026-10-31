@@ -3,6 +3,8 @@
 #include "floserver/core/app_runner.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/php_pool.h"
+#include "floserver/core/php_settings.h"
+#include "floserver/core/project_registry.h"
 #include "floserver/core/process.h"
 #include "floserver/core/project_config.h"
 #include "floserver/core/runtime_store.h"
@@ -93,25 +95,30 @@ std::string not_installed(const std::string& shown, const std::string& name, con
     return "no " + shown + " is installed; install one with: flo install " + name;
 }
 
-// php with a php.ini for that install and these extensions, written once.
-std::optional<ShimTarget> php_target(const InstalledRuntime& php, const std::vector<std::string>& extensions,
+// php with a php.ini for that install, its series' settings (D20) and the
+// project's own, written once.
+std::optional<ShimTarget> php_target(const InstalledRuntime& php, const ProjectConfig& project,
                                      const fs::path& data_dir, std::string& error) {
     const auto program = php_cli(php.dir);
     if (!program) {
         error = "PHP " + php.version + " in " + path_to_utf8(php.dir) + " has no php program";
         return std::nullopt;
     }
-    std::vector<std::string> ext = extensions;
-    std::sort(ext.begin(), ext.end());
-    ext.erase(std::unique(ext.begin(), ext.end()), ext.end());
-    std::string key = php.version + (php.variant.empty() ? std::string() : "-" + php.variant);
-    for (const std::string& e : ext) {
-        key += "+" + e;
-    }
+    // The series' settings from config.json. One that can't be read gives
+    // none: a shim still runs PHP while the settings file is being fixed.
+    std::string ignored;
+    const auto app = load_app_config(app_config_file(data_dir), ignored);
+    const PhpSettings all = app ? read_php_settings(*app) : PhpSettings{};
+    const std::string series = php_series_of(php.version).value_or(php.version);
+    const auto found = all.find(series);
+    const PhpIniSettings settings = effective_php_settings(series, found != all.end() ? &found->second : nullptr,
+                                                           read_php_custom_ini(data_dir, series), &project);
+    const std::string key =
+        php.version + (php.variant.empty() ? std::string() : "-" + php.variant) + php_settings_key(settings);
     const fs::path folder = data_dir / "cli" / "php";  // not in the shims folder: "php" is a shim there
     const fs::path ini = folder / path_from_utf8(key + ".ini");
     // Missing listed extensions are left out here: the web reports them.
-    const PhpIniResult made = make_php_ini(php.dir, ext, folder / "php-errors.log");
+    const PhpIniResult made = make_php_ini(php.dir, settings, folder / "php-errors.log");
     if (read_small_file(ini, std::size_t{256} * 1024) != made.text) {
         std::error_code ec;
         fs::create_directories(folder, ec);
@@ -240,7 +247,7 @@ std::optional<ShimTarget> resolve_installed(const std::string& tool, const fs::p
             error = not_installed("PHP", "php", pc.php);
             return std::nullopt;
         }
-        auto t = php_target(*php, pc.extensions, data_dir, error);
+        auto t = php_target(*php, pc, data_dir, error);
         if (!t || tool == "php") {
             return guard(t, data_dir, error);
         }

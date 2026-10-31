@@ -88,7 +88,7 @@ TEST_CASE("each shim runs the version the nearest floserver.json asks for") {
     test_util::write_file(runtimes_dir(data) / "composer" / "2.10.3" / "composer.phar", "");
 
     const fs::path shop = tmp.path() / "shop";
-    test_util::write_file(shop / "floserver.json", R"({"php": "8.4", "node": "22", "extensions": ["intl"]})");
+    test_util::write_file(shop / "floserver.json", R"({"php": "8.4", "node": "22", "extensions": ["bcmath"]})");
     fs::create_directories(shop / "public" / "css");
     const fs::path here = shop / "public" / "css";  // a folder inside the project
     std::string error;
@@ -103,7 +103,7 @@ TEST_CASE("each shim runs the version the nearest floserver.json asks for") {
     CHECK(php->version == "8.4.27");
     REQUIRE(php->args.size() == 2);
     CHECK(php->args[0] == "-c");
-    CHECK(path_from_utf8(php->args[1]) == data / "cli" / "php" / "8.4.27-nts+intl.ini");
+    CHECK(path_from_utf8(php->args[1]) == data / "cli" / "php" / "8.4.27-nts+bcmath.ini");
     CHECK(fs::exists(path_from_utf8(php->args[1])));  // written for the shim
 
     const auto composer = resolve_shim("composer", here, data, error);

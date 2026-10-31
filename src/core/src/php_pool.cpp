@@ -4,6 +4,7 @@
 #include "floserver/core/process.h"
 
 #include <algorithm>
+#include <map>
 #include <sstream>
 #include <system_error>
 
@@ -34,12 +35,6 @@ bool has_ext(const fs::path& php_dir, const std::string& name) {
 
 }  // namespace
 
-const std::vector<std::string>& base_php_extensions() {
-    static const std::vector<std::string> base = {"curl",      "fileinfo",   "gd",     "intl",   "mbstring", "mysqli",
-                                                  "openssl",   "pdo_mysql",  "pdo_sqlite", "sodium", "zip"};
-    return base;
-}
-
 std::optional<fs::path> php_cgi_program(const fs::path& php_dir) {
 #ifdef _WIN32
     const char* names[] = {"php-cgi.exe"};  // NOLINT(modernize-avoid-c-arrays)
@@ -56,27 +51,58 @@ std::optional<fs::path> php_cgi_program(const fs::path& php_dir) {
     return std::nullopt;
 }
 
-PhpIniResult make_php_ini(const fs::path& php_dir, const std::vector<std::string>& extensions, const fs::path& error_log) {
+namespace {
+
+// One section of values, leaving out what FloServer manages (in case the
+// settings were written by hand around the checks).
+void write_values(std::ostringstream& ini, const std::map<std::string, std::string>& values) {
+    for (const auto& [key, value] : values) {
+        if (!php_ini_key_problem(key) && !php_ini_value_problem(value)) {
+            ini << key << " = " << value << "\n";
+        }
+    }
+}
+
+}  // namespace
+
+std::vector<std::string> php_extensions_in(const fs::path& ext_dir) {
+    std::vector<std::string> out;
+    std::error_code ec;
+    fs::directory_iterator it(ext_dir, ec);
+    for (std::size_t looked = 0; !ec && it != fs::directory_iterator() && looked < 1000; it.increment(ec), ++looked) {
+        std::string file = path_to_utf8(it->path().filename());
+        std::transform(file.begin(), file.end(), file.begin(),
+                       [](char c) { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c; });
+        if (file.size() > 8 && file.starts_with("php_") && file.ends_with(".dll")) {
+            std::string name = file.substr(4, file.size() - 8);
+            if (is_php_extension_name(name)) {
+                out.push_back(std::move(name));
+            }
+        }
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+std::optional<std::vector<std::string>> available_php_extensions(const fs::path& php_dir) {
+#ifdef _WIN32
+    return php_extensions_in(php_dir / "ext");
+#else
+    (void)php_dir;
+    return std::nullopt;
+#endif
+}
+
+PhpIniResult make_php_ini(const fs::path& php_dir, const PhpIniSettings& settings, const fs::path& error_log) {
     PhpIniResult result;
     std::ostringstream ini;
     ini << "; Written by FloServer. It is replaced whenever the pool changes, so edits here are lost.\n"
-        << "; Add extensions with \"extensions\" in the project's floserver.json.\n\n"
-        << "memory_limit = 512M\n"
-        << "max_execution_time = 300\n"
-        << "max_input_time = 300\n"
-        << "post_max_size = 512M\n"
-        << "upload_max_filesize = 512M\n"
-        << "max_file_uploads = 50\n"
-        << "display_errors = On\n"
-        << "display_startup_errors = On\n"
-        << "error_reporting = E_ALL\n"
-        << "log_errors = On\n"
-        << "error_log = " << ini_path(error_log) << "\n"
-        << "default_charset = \"UTF-8\"\n"
-        << "cgi.fix_pathinfo = 1\n"
-        << "opcache.enable = 1\n"
-        << "opcache.validate_timestamps = 1\n"
-        << "opcache.revalidate_freq = 0\n";
+        << "; Change PHP in FloServer's Settings -> PHP (or the project's own panel), or add your own\n"
+        << "; lines to the series' custom.ini (Settings -> PHP -> Edit the full php.ini).\n\n";
+    for (const auto& [key, value] : php_ini_defaults()) {
+        ini << key << " = " << value << "\n";
+    }
+    ini << "error_log = " << ini_path(error_log) << "\n";
 #ifdef _WIN32
     ini << "extension_dir = " << ini_path(php_dir / "ext") << "\n\n";
     if (has_ext(php_dir, "opcache")) {
@@ -84,11 +110,12 @@ PhpIniResult make_php_ini(const fs::path& php_dir, const std::vector<std::string
     }
     std::vector<std::string> all;
     for (const std::string& e : base_php_extensions()) {
-        if (has_ext(php_dir, e)) {
+        if (has_ext(php_dir, e) &&
+            std::find(settings.removed.begin(), settings.removed.end(), e) == settings.removed.end()) {
             all.push_back(e);
         }
     }
-    for (const std::string& e : extensions) {
+    for (const std::string& e : settings.extensions) {
         if (std::find(all.begin(), all.end(), e) != all.end()) {
             continue;
         }
@@ -99,14 +126,30 @@ PhpIniResult make_php_ini(const fs::path& php_dir, const std::vector<std::string
         }
     }
     for (const std::string& e : all) {
-        ini << "extension = " << e << "\n";
+        // Xdebug hooks into the engine, so it loads as a Zend extension.
+        ini << (e == "xdebug" ? "zend_extension = " : "extension = ") << e << "\n";
     }
 #else
     // Extensions come with the build here (the system's packages, or the
     // static builds of D5), so none are named.
     (void)php_dir;
-    (void)extensions;
 #endif
+    // Later values win in php.ini: the series', its custom.ini, the project's.
+    const std::string series = settings.series.empty() ? std::string("this PHP") : "PHP " + settings.series;
+    if (!settings.series_ini.empty()) {
+        ini << "\n; " << series << " (Settings -> PHP)\n";
+        write_values(ini, settings.series_ini);
+    }
+    if (!settings.custom_ini.empty()) {
+        ini << "\n; " << series << "'s custom.ini\n" << settings.custom_ini;
+        if (!settings.custom_ini.ends_with('\n')) {
+            ini << "\n";
+        }
+    }
+    if (!settings.project_ini.empty()) {
+        ini << "\n; The project's php_ini (floserver.json)\n";
+        write_values(ini, settings.project_ini);
+    }
     result.text = ini.str();
     return result;
 }
@@ -121,7 +164,7 @@ PhpPoolRunner::PhpPoolRunner(PhpPool pool, std::vector<std::unique_ptr<LoopbackL
 std::unique_ptr<PhpPoolRunner> PhpPoolRunner::open(const PhpPool& pool, const fs::path& work_dir, std::string& error) {
     const fs::path dir = work_dir / "pools" / path_from_utf8(pool.key);
     const fs::path logs = work_dir / "logs";
-    const auto ini = make_php_ini(pool.php_dir, pool.extensions, logs / path_from_utf8(pool.key + ".php-errors.log"));
+    const auto ini = make_php_ini(pool.php_dir, pool.settings, logs / path_from_utf8(pool.key + ".php-errors.log"));
     if (!ini.missing.empty()) {
         error = "PHP " + pool.version + " has no extension";
         error += ini.missing.size() > 1 ? "s " : " ";
