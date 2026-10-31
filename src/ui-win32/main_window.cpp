@@ -427,6 +427,8 @@ void MainWindow::on_snapshot() {
         ask_php_info();
     }
     update_fields();
+    // A tab came or went with the project (a version picked here or in floserver.json).
+    sync_panel_tab();
     // Shared sites: the row goes when the service stops answering shared.get.
     if (!snap_.shared.known) {
         shared_focused_ = false;

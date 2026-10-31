@@ -280,6 +280,7 @@ void MainWindow::on_project_php_answers() {
             const PanelAct then = std::exchange(php_then_, {});
             (void)leave_php_part(false);
             run_panel_act(then);  // what the Save was chosen on the way to
+            sync_panel_tab();     // or the tab that should be shown now
             return;               // the rest of the answers aren't this tab's any more
         }
     }

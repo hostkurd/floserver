@@ -545,10 +545,81 @@ TEST_CASE("php.get lists the php.ini names the install knows, asked of its php o
     fs::remove(program);
     fs::create_symlink(fs::canonical(php), program);
     fs::rename(cache, data.path() / "php" / "8.3" / "known-ini-8.3.1.json");
-    const auto again = known_php_ini_names(runtimes_dir(data.path()) / "php" / "8.3.6", cache, error);
+    bool timed_out = false;
+    const auto again = known_php_ini_names(runtimes_dir(data.path()) / "php" / "8.3.6", cache, error, timed_out);
     REQUIRE_MESSAGE(again, error);
     CHECK(*again == names);
     CHECK(fs::is_regular_file(cache));
     CHECK_FALSE(fs::exists(data.path() / "php" / "8.3" / "known-ini-8.3.1.json"));
 #endif
 }
+
+#ifndef _WIN32
+
+namespace {
+
+// A stand-in php program: a shell script in the install's bin folder.
+fs::path fake_php(const fs::path& data, const std::string& version, const std::string& script) {
+    fake_install(data, "php", version);
+    const fs::path program = runtimes_dir(data) / "php" / version / "bin" / "php";
+    test_util::write_file(program, "#!/bin/sh\n" + script);
+    fs::permissions(program, fs::perms::owner_all, fs::perm_options::add);
+    return program.parent_path().parent_path();
+}
+
+}  // namespace
+
+TEST_CASE("the php.ini names: a php that gets stuck is stopped, one that fails is asked once more") {
+    const TempDir data;
+    std::string error;
+    bool timed_out = false;
+
+    SUBCASE("stuck: stopped at the limit, and said so") {
+        const fs::path dir = fake_php(data.path(), "8.5.1", "exec sleep 30\n");
+        const auto started = std::chrono::steady_clock::now();
+        const auto names = known_php_ini_names(dir, data.path() / "php" / "8.5" / "known-ini-8.5.1.json", error,
+                                               timed_out, std::chrono::milliseconds{300});
+        CHECK_FALSE(names);
+        CHECK(timed_out);
+        CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds{5});  // not asked again
+    }
+
+    SUBCASE("fails once (an extension that stops it): the base list the second time") {
+        const fs::path dir = fake_php(data.path(), "8.5.1",
+                                      "d=$(dirname \"$0\")\n"
+                                      "if [ ! -e \"$d/tried\" ]; then touch \"$d/tried\"; exit 3; fi\n"
+                                      "printf '[\"memory_limit\",\"date.timezone\"]' > \"$5\"\n");
+        const fs::path cache = data.path() / "php" / "8.5" / "known-ini-8.5.1.json";
+        const auto names = known_php_ini_names(dir, cache, error, timed_out);
+        REQUIRE_MESSAGE(names, error);
+        CHECK_FALSE(timed_out);
+        CHECK(*names == std::vector<std::string>{"date.timezone", "memory_limit"});
+        CHECK(fs::is_regular_file(cache));
+        // Only the list is left behind.
+        std::size_t files = 0;
+        for (const auto& entry : fs::directory_iterator(cache.parent_path())) {
+            (void)entry;
+            ++files;
+        }
+        CHECK(files == 1);
+    }
+
+    SUBCASE("always fails: no list, and the service doesn't ask that install again") {
+        const fs::path dir = fake_php(data.path(), "8.5.1", "exit 3\n");
+        CHECK_FALSE(known_php_ini_names(dir, data.path() / "php" / "8.5" / "known-ini-8.5.1.json", error, timed_out));
+        CHECK_FALSE(timed_out);
+        const ProjectService service(data.path());
+        ServiceRefusal refusal;
+        REQUIRE(service.php_get("8.5", refusal));
+        // Fixed meanwhile: still not asked while this service runs.
+        test_util::write_file(dir / "bin" / "php", "#!/bin/sh\nprintf '[\"memory_limit\"]' > \"$5\"\n");
+        const auto got = service.php_get("8.5", refusal);
+        REQUIRE(got);
+        CHECK_FALSE(got->contains("known_ini"));
+        // A new service asks again.
+        const ProjectService fresh(data.path());
+        CHECK(fresh.php_get("8.5", refusal)->contains("known_ini"));
+    }
+}
+
+#endif

@@ -310,8 +310,14 @@ private:
     // --- the project panel (main_window_panel.cpp) ---
     [[nodiscard]] const ProjectRow* selected_row() const;
     [[nodiscard]] bool panel_open() const;
-    // The tab shown for the selected project (panel_tab_, or General when it lacks it).
+    // The tab shown for the selected project (General when no panel is open).
     [[nodiscard]] PanelTab shown_tab() const;
+    // The tab that should be shown: panel_tab_, or General when the project lacks it.
+    [[nodiscard]] PanelTab wanted_tab() const;
+    // Shows wanted_tab() when it isn't shown: the project changed (a version
+    // picked, floserver.json edited) and a tab came or went. Leaving the PHP
+    // tab asks about changes not saved, as the user leaving it would.
+    void sync_panel_tab();
     // Shows `tab`, asking first about PHP changes not saved when leaving the PHP tab.
     void select_tab(PanelTab tab);
     // The next tab (`by` 1) or the one before (-1), the keys on the tab bar.
@@ -511,6 +517,8 @@ private:
     // The panel's tabs: the one the user chose (kept across projects) and
     // how far the shown one's content is scrolled.
     PanelTab panel_tab_ = PanelTab::General;
+    PanelTab panel_shown_ = PanelTab::General;  // the tab shown now (its enter has run)
+    bool tab_ask_declined_ = false;  // the PHP tab went away and the user chose to stay: not asked again
     int panel_scroll_ = 0;
 
     // The panel's PHP tab (D20), for selected_ while php_open_ (the tab is shown).

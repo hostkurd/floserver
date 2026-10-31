@@ -1090,6 +1090,14 @@ TEST_CASE("the panel's tabs: which a project has, the one shown, and their paddi
     // The choice is kept across projects; a project without that tab shows General.
     CHECK(shown_panel_tab(tabs, PanelTab::Php) == PanelTab::General);
     CHECK(shown_panel_tab(tabs, PanelTab::Log) == PanelTab::Log);
+    // The choice stays PHP while a Node project shows General: once the
+    // project asks for PHP (a version picked), the PHP tab is the one to show,
+    // and the window enters it then (its php.get included).
+    node_app.wants.php = "8.5";
+    CHECK(shown_panel_tab(panel_tabs(node_app), PanelTab::Php) == PanelTab::Php);
+    ProjectRow static_site;
+    static_site.static_site = true;
+    CHECK(shown_panel_tab(panel_tabs(static_site), PanelTab::Database) == PanelTab::General);
     // Padding shrinks before labels are cut.
     CHECK(tab_padding({60, 30, 70, 30}, 328, 14, 4) == 14);
     CHECK(tab_padding({90, 30, 110, 50}, 328, 14, 4) == 6);

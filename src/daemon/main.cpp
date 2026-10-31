@@ -43,6 +43,10 @@
 #include <system_error>
 #include <thread>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 namespace {
 
 namespace ipc = floserver::core::ipc;
@@ -884,6 +888,13 @@ int run() {
 }  // namespace
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    // No "System Error" box for a missing DLL or an empty drive: in the
+    // service's session nobody would see it, and the program asking (the
+    // php CLI listing its settings) would wait on it forever. Programs the
+    // service starts inherit this; they report such errors themselves.
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
+#endif
     if (argc > 1 && std::string_view(argv[1]) == "--version") {
         std::cout << "floserverd " << floserver::core::kVersion << "\n";
         return 0;

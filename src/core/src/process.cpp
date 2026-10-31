@@ -15,6 +15,7 @@
 #include <psapi.h>
 #else
 #include <fcntl.h>
+#include <csignal>
 #include <spawn.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -182,7 +183,10 @@ bool spawn_detached(const fs::path& program, const std::vector<std::string>& arg
 }
 
 std::optional<int> run_and_wait(const fs::path& program, const std::vector<std::string>& args,
-                                std::chrono::milliseconds limit, std::string& error) {
+                                std::chrono::milliseconds limit, std::string& error, bool* timed_out) {
+    if (timed_out != nullptr) {
+        *timed_out = false;
+    }
     std::wstring command = win::quote(program.wstring());
     for (const std::string& a : args) {
         command += L" " + win::quote(win::widen(a));
@@ -199,11 +203,18 @@ std::optional<int> run_and_wait(const fs::path& program, const std::vector<std::
     const DWORD waited = WaitForSingleObject(info.hProcess, static_cast<DWORD>(limit.count()));
     DWORD code = 0;
     const bool done = waited == WAIT_OBJECT_0 && GetExitCodeProcess(info.hProcess, &code);
-    CloseHandle(info.hProcess);
     if (!done) {
+        // Stuck (a hidden error box, say): it would hold its files open for good.
+        TerminateProcess(info.hProcess, 1);
+        WaitForSingleObject(info.hProcess, 2000);
+        CloseHandle(info.hProcess);
         error = program.filename().string() + " didn't finish in time";
+        if (timed_out != nullptr) {
+            *timed_out = true;
+        }
         return std::nullopt;
     }
+    CloseHandle(info.hProcess);
     return static_cast<int>(code);
 }
 
@@ -243,7 +254,10 @@ bool spawn_detached(const fs::path& program, const std::vector<std::string>& arg
 }
 
 std::optional<int> run_and_wait(const fs::path& program, const std::vector<std::string>& args,
-                                std::chrono::milliseconds limit, std::string& error) {
+                                std::chrono::milliseconds limit, std::string& error, bool* timed_out) {
+    if (timed_out != nullptr) {
+        *timed_out = false;
+    }
     posix_spawn_file_actions_t actions{};
     posix_spawn_file_actions_init(&actions);
     for (const int fd : {0, 1, 2}) {
@@ -273,8 +287,18 @@ std::optional<int> run_and_wait(const fs::path& program, const std::vector<std::
         if (done == pid) {
             return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
         }
-        if (done < 0 || std::chrono::steady_clock::now() >= deadline) {
+        if (done < 0) {
+            error = "lost " + program.filename().string();
+            return std::nullopt;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            kill(pid, SIGKILL);  // stuck: it would hold its files open for good
+            int ignored = 0;
+            (void)waitpid(pid, &ignored, 0);
             error = program.filename().string() + " didn't finish in time";
+            if (timed_out != nullptr) {
+                *timed_out = true;
+            }
             return std::nullopt;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(20));

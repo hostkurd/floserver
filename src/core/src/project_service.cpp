@@ -596,9 +596,12 @@ std::optional<json> ProjectService::php_get(const std::string& series_text, Serv
             const fs::path cache = php_custom_ini_file(data_dir_, *series).parent_path() /
                                    path_from_utf8("known-ini-" + path_to_utf8(php->dir.filename()) + ".json");
             std::string error;
-            if (const auto known = known_php_ini_names(php->dir, cache, error)) {
+            bool timed_out = false;
+            if (const auto known = known_php_ini_names(php->dir, cache, error, timed_out)) {
                 out["known_ini"] = *known;
-            } else {
+            } else if (!timed_out) {
+                // PHP itself can't list them: not asked again while the service runs.
+                // A run that was stopped for taking too long is tried next time.
                 const std::lock_guard lock(known_mutex_);
                 known_failed_.insert(dir);
             }

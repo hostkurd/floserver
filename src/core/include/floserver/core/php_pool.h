@@ -58,11 +58,14 @@ struct PhpIniResult {
 // window can warn about one PHP would silently ignore. Asked of the
 // install's php CLI once, with a php.ini like a pool's and every extension
 // it has turned on (so xdebug.* and opcache.* are known too), then read
-// from `cache_file` (JSON, an array of names). Nothing (with `error`) when
-// the CLI can't run: the caller then shows no warnings.
-[[nodiscard]] std::optional<std::vector<std::string>> known_php_ini_names(const std::filesystem::path& php_dir,
-                                                                        const std::filesystem::path& cache_file,
-                                                                        std::string& error);
+// from `cache_file` (JSON, an array of names). When PHP lists nothing with
+// every extension on (one that stops it starting), it's asked once more
+// with only the base ones. Nothing (with `error`) when the CLI can't run:
+// the caller then shows no warnings. `timed_out`: it ran longer than `limit`
+// and was stopped (worth trying again later, unlike a PHP that fails).
+[[nodiscard]] std::optional<std::vector<std::string>> known_php_ini_names(
+    const std::filesystem::path& php_dir, const std::filesystem::path& cache_file, std::string& error, bool& timed_out,
+    std::chrono::milliseconds limit = std::chrono::seconds{10});
 
 enum class PoolState : std::uint8_t { Sleeping, Running, Failed };
 

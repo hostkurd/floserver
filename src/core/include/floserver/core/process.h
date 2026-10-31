@@ -30,11 +30,13 @@ namespace floserver::core {
                                   const std::vector<std::string>& args, std::string& error);
 
 // Runs `program` without a window and waits up to `limit` for it to finish.
-// Its exit code, or nothing (with `error`) if it couldn't start or ran too long
-// (it is then left running).
+// Its exit code, or nothing (with `error`) if it couldn't start or ran too
+// long; then it's killed (it may be stuck, holding files open) and
+// `timed_out`, when given, is set.
 [[nodiscard]] std::optional<int> run_and_wait(const std::filesystem::path& program,
                                               const std::vector<std::string>& args,
-                                              std::chrono::milliseconds limit, std::string& error);
+                                              std::chrono::milliseconds limit, std::string& error,
+                                              bool* timed_out = nullptr);
 
 // The name of a sibling program in the same folder as this one, with ".exe" on
 // Windows: sibling_program("floserverd").

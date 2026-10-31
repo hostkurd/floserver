@@ -157,7 +157,9 @@ void MainWindow::select(const std::string& project) {
         worker_->select(project);
     }
     update_fields();
-    if (shown_tab() == PanelTab::Php) {
+    tab_ask_declined_ = false;
+    panel_shown_ = wanted_tab();
+    if (panel_shown_ == PanelTab::Php) {
         open_php_part();  // the remembered tab: its php.get is asked now it's shown
     }
     layout();
@@ -175,6 +177,8 @@ void MainWindow::close_panel() {
     forget_php_info();
     selected_.clear();
     fields_.clear();
+    panel_shown_ = PanelTab::General;
+    tab_ask_declined_ = false;
     panel_focus_ = -1;
     panel_scroll_ = 0;
     if (worker_) {
@@ -185,7 +189,9 @@ void MainWindow::close_panel() {
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
-PanelTab MainWindow::shown_tab() const {
+PanelTab MainWindow::shown_tab() const { return selected_row() != nullptr ? panel_shown_ : PanelTab::General; }
+
+PanelTab MainWindow::wanted_tab() const {
     const ProjectRow* row = selected_row();
     return row != nullptr ? shown_panel_tab(panel_tabs(*row), panel_tab_) : PanelTab::General;
 }
@@ -196,19 +202,47 @@ void MainWindow::select_tab(PanelTab tab) {
         return;
     }
     const std::vector<PanelTab> tabs = panel_tabs(*row);
-    if (std::find(tabs.begin(), tabs.end(), tab) == tabs.end() || tab == shown_tab()) {
-        panel_tab_ = shown_panel_tab(tabs, tab);
+    if (std::find(tabs.begin(), tabs.end(), tab) == tabs.end()) {
+        return;
+    }
+    if (tab == panel_shown_) {
+        panel_tab_ = tab;  // the user's choice, kept for the next project
         return;
     }
     if (!leave_php_part(true, {PanelAct::Kind::Tab, tab, {}})) {
         return;
     }
     panel_tab_ = tab;
-    panel_scroll_ = 0;
     if (panel_focus_ >= 0) {
         panel_focus_ = 0;  // the keys stay on the tab bar
     }
-    if (tab == PanelTab::Php) {
+    sync_panel_tab();
+}
+
+void MainWindow::sync_panel_tab() {
+    if (!panel_open()) {
+        return;
+    }
+    const PanelTab want = wanted_tab();
+    if (want == panel_shown_) {
+        tab_ask_declined_ = false;
+        if (want == PanelTab::Php && !php_open_ && !php_saving_) {
+            open_php_part();  // left after a Save, and still the tab to show
+        }
+        return;
+    }
+    if (panel_shown_ == PanelTab::Php && php_open_) {
+        // The PHP tab went from under the user (the project stopped using
+        // PHP): asked once about changes not saved; a Save leaves once done.
+        if (tab_ask_declined_ || !leave_php_part(true)) {
+            tab_ask_declined_ = tab_ask_declined_ || (!php_saving_ && !asking_);
+            return;
+        }
+    }
+    tab_ask_declined_ = false;
+    panel_shown_ = want;
+    panel_scroll_ = 0;
+    if (want == PanelTab::Php) {
         open_php_part();
     }
     layout();
@@ -305,7 +339,11 @@ MainWindow::PanelGeometry MainWindow::panel_geometry(HDC dc) const {
 
     // The tabs, under the header: their labels, with the padding shrunk
     // before a label is cut when they don't all fit (Arabic, Kurdish).
-    const std::vector<PanelTab> tabs = panel_tabs(*row);
+    std::vector<PanelTab> tabs = panel_tabs(*row);
+    if (std::find(tabs.begin(), tabs.end(), panel_shown_) == tabs.end()) {
+        // Gone from the project while its unsaved changes are still shown.
+        tabs.insert(tabs.end() - 1, panel_shown_);
+    }
     std::vector<int> widths;
     widths.reserve(tabs.size());
     for (const PanelTab tab : tabs) {
