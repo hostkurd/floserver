@@ -1,4 +1,5 @@
 add_executable(floserver_tests
+    test_apache_settings.cpp
     test_app_runner.cpp
     test_builtin.cpp
     test_certificates.cpp

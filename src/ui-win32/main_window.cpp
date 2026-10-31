@@ -839,11 +839,9 @@ bool MainWindow::scroll_bar_mouse(UINT msg, int x, int y) {
             if (changed) {
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
-            if (!held && (list_bar_.hot() || panel_bar_.hot()) && hover_.part != Part::None) {
-                hover_ = {};  // the bar's, not the row's under it
-                InvalidateRect(hwnd_, nullptr, FALSE);
-            }
-            return held || list_bar_.hot() || panel_bar_.hot();
+            // Otherwise the window's own hover goes on (it sees nothing under
+            // the bar, and asks for the mouse leaving, which cools the bar).
+            return held;
         }
         default:
             return false;

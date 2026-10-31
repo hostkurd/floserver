@@ -49,6 +49,15 @@ struct ApacheSpec {
     std::string log_level = "warn";
     std::vector<ApacheSite> sites;
     std::optional<ApacheShared> shared;
+    // The modules to load by short name, in order (apache_settings.h's
+    // plan_apache_modules()); empty: the ones FloServer has always loaded.
+    std::vector<std::string> modules;
+    // FloServer's own lines after the sites (User and Group when it runs as root).
+    std::string extra;
+    // The user's custom.conf, already filtered (filter_apache_custom_conf()),
+    // last, and where it came from for the comment above it.
+    std::string custom_conf;
+    std::string custom_conf_path;
 };
 
 // The port Apache listens on is filled in when it starts.
@@ -57,6 +66,13 @@ inline constexpr std::string_view kApachePortPlaceholder = "{port}";
 // The config text with kApachePortPlaceholder where the port goes, or
 // nothing (with `error`) when a name or path can't be written safely.
 [[nodiscard]] std::optional<std::string> make_apache_config(const ApacheSpec& spec, std::string& error);
+
+// Runs `httpd -t` on `text`, written to `file` (its output beside it, as
+// <file>.log). Nothing when Apache accepts it; else what Apache said.
+[[nodiscard]] std::optional<std::string> apache_config_problem(const std::filesystem::path& program,
+                                                               const std::filesystem::path& server_root,
+                                                               const std::filesystem::path& file,
+                                                               const std::string& text);
 
 // The httpd program in an Apache install: Apache24/bin/httpd.exe, bin/httpd,
 // bin/apache2 (Debian's name). Nothing when it has none.

@@ -23,6 +23,7 @@
 // it off for projects, turn it on for https://localhost/<folder>/, and ask
 // for other ports.
 
+#include "floserver/core/apache_config.h"
 #include "floserver/core/app_runner.h"
 #include "floserver/core/certificates.h"
 #include "floserver/core/child_process.h"
@@ -104,6 +105,11 @@ public:
     //    "error"?: "..."}
     [[nodiscard]] nlohmann::json status() const;
 
+    // The httpd.conf the shared Apache runs, or would with no project
+    // (Settings > Apache's "Show the final httpd.conf"), with {port} for its
+    // port; nothing (with `error`) when no Apache is installed.
+    [[nodiscard]] std::optional<std::string> apache_final_config(std::string& error) const;
+
     // The ports nginx listens on now; nothing while it isn't running.
     [[nodiscard]] std::optional<WebPorts> ports_in_use() const;
 
@@ -122,7 +128,19 @@ private:
         bool name_taken = false;         // phpMyAdmin: a project has its address
     };
 
+    // What the user chose in Settings > Apache: modules and custom.conf's lines.
+    struct ApachePart {
+        std::vector<std::string> modules;
+        std::string custom;
+    };
     void reload_locked();
+    // The shared Apache's config with Settings > Apache's modules and
+    // custom.conf. Those are checked with `httpd -t` first (once per new
+    // text); when Apache refuses them, the last ones it accepted are used
+    // and apache_problem_ says why.
+    [[nodiscard]] std::optional<std::string> apache_config_locked(const AppConfig& app, const ApacheSpec& spec,
+                                                                  const std::filesystem::path& apache_dir,
+                                                                  const std::string& version, std::string& error);
     // The apps a reload settles on; those it drops are stopped.
     void replace_apps_locked(std::map<std::string, std::shared_ptr<AppRunner>> apps);
     void stop_locked();
@@ -170,6 +188,15 @@ private:
     std::string phpmyadmin_files_;
     // Writes them when they changed; false (with `error`) when they can't be.
     [[nodiscard]] bool write_phpmyadmin_files_locked(const std::filesystem::path& install, std::string& error);
+    // Settings > Apache: the config the shared Apache gets now, the last
+    // text `httpd -t` accepted and refused, why, and the last choices it accepted.
+    std::string apache_text_;
+    std::string apache_tested_;
+    std::string apache_rejected_;
+    std::string apache_problem_;
+    ApachePart apache_good_;
+    std::string apache_version_;
+    std::vector<std::string> apache_modules_;
 
     std::atomic<bool> stopping_{false};
     std::thread thread_;

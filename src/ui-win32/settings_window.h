@@ -17,6 +17,10 @@
 // database.set on Save; the server's state comes from the main window's
 // databases.list snapshot.
 //
+// Apache is the fifth: the shared Apache's version, its modules and the
+// user's own httpd.conf lines. apache.get once when it's opened (the service
+// reads the modules folder then), apache.set on Save.
+//
 // Nothing runs while it's closed: it's destroyed on close, and while open it
 // adds no timer or poll. Opening asks runtimes.list {"cached": true} once (no
 // network); what's installed then comes from the main window's 2 s
@@ -25,6 +29,7 @@
 
 #include "canvas.h"
 #include "form_parts.h"
+#include "model/apache_page.h"
 #include "model/database_page.h"
 #include "model/php_page.h"
 #include "model/ports_page.h"
@@ -84,7 +89,7 @@ public:
 
 private:
     // In the sidebar's order.
-    enum class Section : std::uint8_t { Runtimes, Php, Ports, Database };
+    enum class Section : std::uint8_t { Runtimes, Php, Ports, Database, Apache };
     enum class Part : std::uint8_t {
         None,
         Nav,     // row: the section
@@ -131,6 +136,16 @@ private:
         DbDiscard,
         DbSave,
         DbPhpMyAdmin,   // Open phpMyAdmin (as root, this series)
+        // Settings > Apache; `row` is the module's cell.
+        ApacheVersion,
+        ApacheRuntimes,  // "Go to Runtimes" when no Apache is installed
+        ApacheFind,      // the find box (an edit)
+        ApacheModule,
+        ApacheMore,      // "show all" / "show fewer"
+        ApacheFinalConf,
+        ApacheEditConf,
+        ApacheDiscard,
+        ApacheSave,
     };
     enum class Button : std::uint8_t { None, Remove, RemoveDisabled, Download, Cancel };
     struct Hit {
@@ -270,8 +285,36 @@ private:
         RECT discard{};
         RECT save{};
     };
+    struct ApacheGeometry {
+        RECT version_label{};
+        RECT version{};     // empty while there's nothing to pick
+        RECT note{};        // Loading…, or no Apache installed
+        RECT runtimes{};    // Go to Runtimes
+        RECT refused{};     // what httpd -t said about the last settings
+        RECT problems{};
+        RECT modules_card{};
+        RECT modules_title{};
+        RECT count{};
+        RECT find{};
+        std::vector<RECT> cells;
+        std::vector<RECT> extras;        // the note after the name; empty when none fits
+        std::vector<std::string> names;  // what each cell shows
+        std::vector<std::string> notes;
+        RECT modules_note{};
+        RECT more{};
+        RECT conf_card{};
+        RECT conf_title{};
+        RECT conf_hint{};
+        RECT final_conf{};
+        RECT edit_conf{};
+        RECT custom_problems{};
+        RECT conf_note{};
+        RECT footer_text{};
+        RECT discard{};
+        RECT save{};
+    };
     struct Geometry {
-        std::array<RECT, 4> navs{};  // Runtimes, PHP, Ports & HTTPS, Database
+        std::array<RECT, 5> navs{};  // Runtimes, PHP, Ports & HTTPS, Database, Apache
         RECT title{};
         RECT hint{};
         RECT check{};
@@ -281,6 +324,7 @@ private:
         PhpGeometry php;
         PortsGeometry ports;
         DbGeometry db;
+        ApacheGeometry apache;
         int content_h = 0;  // of the main column, unscrolled
     };
 
@@ -401,7 +445,26 @@ private:
     void set_root_password();
     void paint_db_shapes(Canvas& c) const;
     void paint_db_text(Canvas& c) const;
-    [[nodiscard]] static bool is_db_part(Part part) { return part >= Part::DbVersion; }
+    [[nodiscard]] static bool is_db_part(Part part) { return part >= Part::DbVersion && part <= Part::DbPhpMyAdmin; }
+
+    // --- Settings > Apache (settings_apache.cpp) ---
+    [[nodiscard]] bool settle_apache_changes(AfterSave then);
+    void load_apache();
+    // True when a Save chosen on the way out is done and the window should close.
+    [[nodiscard]] bool on_apache_answers(const Snapshot& snap);
+    void make_apache_edits();
+    void place_apache_edits();
+    void layout_apache(HDC dc, Geometry& g, int x0, int x1, int y) const;
+    [[nodiscard]] std::vector<ApacheModule> shown_apache_modules(std::size_t& hidden) const;
+    [[nodiscard]] const RECT* apache_rect_of(const Hit& hit) const;
+    void apache_focus_order(std::vector<Hit>& order) const;
+    void on_apache_click(const Hit& hit);
+    void apache_version_menu();
+    bool save_apache();
+    void discard_apache();
+    void paint_apache_shapes(Canvas& c) const;
+    void paint_apache_text(Canvas& c) const;
+    [[nodiscard]] static bool is_apache_part(Part part) { return part >= Part::ApacheVersion; }
 
     HINSTANCE instance_;
     Lang lang_;
@@ -490,6 +553,14 @@ private:
     std::string password_error_;
     // The port, the my.ini fields, then the new root password; only while the section is shown.
     std::vector<std::unique_ptr<FieldEdit>> db_edits_;
+    // Settings > Apache: apache.get's answer and the changes not saved yet.
+    std::optional<ApacheInfo> apache_;
+    bool apache_loading_ = false;
+    bool apache_saving_ = false;
+    ApacheChanges apache_changes_;
+    std::string apache_query_;
+    bool apache_all_ = false;  // "show all" modules
+    std::vector<std::unique_ptr<FieldEdit>> apache_edits_;  // the find box; only while the section is shown
     win::UniqueBrush input_brush_;
     win::UniqueBrush input_set_brush_;
 

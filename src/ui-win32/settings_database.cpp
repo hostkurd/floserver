@@ -123,6 +123,9 @@ void SettingsWindow::load_db(const std::string& series) {
 bool SettingsWindow::on_db_answers(const Snapshot& snap) {
     bool close_now = false;
     for (const Snapshot::DbAnswer& answer : snap.db) {
+        if (!answer.method.starts_with("database.")) {
+            continue;  // Settings > Apache's (settings_apache.cpp)
+        }
         const bool save = answer.method == "database.set";
         if (save && db_saving_) {
             db_saving_ = false;

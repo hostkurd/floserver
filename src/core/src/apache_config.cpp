@@ -1,5 +1,6 @@
 #include "floserver/core/apache_config.h"
 
+#include "floserver/core/child_process.h"
 #include "floserver/core/nginx_config.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/project_registry.h"
@@ -93,8 +94,17 @@ public:
                 return std::nullopt;
             }
         }
-        for (const Module& m : kModules) {
-            if (!load(m.id, m.file)) {
+        if (spec_.modules.empty()) {
+            for (const Module& m : kModules) {
+                if (!load(m.id, m.file)) {
+                    return std::nullopt;
+                }
+            }
+        }
+        for (const std::string& name : spec_.modules) {
+            const std::string id = name + "_module";
+            const std::string file = "mod_" + name + ".so";
+            if (!load(id.c_str(), file.c_str())) {
                 return std::nullopt;
             }
         }
@@ -156,6 +166,15 @@ public:
         // Last: its *.localhost must not take a project's name.
         if (spec_.shared && !write_shared(*spec_.shared)) {
             return std::nullopt;
+        }
+        out_ << spec_.extra;
+        if (!spec_.custom_conf.empty()) {
+            // Checked line by line (apache_settings.h): no comment, no long
+            // line, nothing that moves Apache off 127.0.0.1 or its files.
+            out_ << "\n# Your own lines, from " << spec_.custom_conf_path << "\n" << spec_.custom_conf;
+            if (spec_.custom_conf.back() != '\n') {
+                out_ << "\n";
+            }
         }
         return out_.str();
     }
@@ -309,6 +328,45 @@ bool is_file(const fs::path& p) {
 }
 
 }  // namespace
+
+std::optional<std::string> apache_config_problem(const fs::path& program, const fs::path& server_root,
+                                                 const fs::path& file, const std::string& text) {
+    std::string error;
+    std::error_code ec;
+    fs::create_directories(file.parent_path(), ec);
+    if (!write_file_atomically(file, text, error)) {
+        return error;
+    }
+    fs::path log = file;
+    log += ".log";
+    fs::remove(log, ec);
+    ChildOptions o;
+    o.program = program;
+    o.args = {"-t", "-d", path_to_utf8(server_root), "-f", path_to_utf8(file)};
+    o.working_dir = file.parent_path();
+    o.output_log = log;
+    auto child = ChildProcess::start(o, error);
+    if (!child) {
+        return "httpd -t couldn't run: " + error;
+    }
+    const auto code = child->wait(std::chrono::seconds(20));
+    if (!code) {
+        child->kill();
+        return std::string("httpd -t didn't finish in 20 seconds");
+    }
+    if (*code == 0) {
+        return std::nullopt;
+    }
+    std::string said = read_small_file(log, std::size_t{64} * 1024).value_or(std::string());
+    while (!said.empty() && (said.back() == '\n' || said.back() == '\r')) {
+        said.pop_back();
+    }
+    constexpr std::size_t kMost = 2000;
+    if (said.size() > kMost) {
+        said = "..." + said.substr(said.size() - kMost);
+    }
+    return said.empty() ? "httpd -t failed (exit " + std::to_string(*code) + ")" : said;
+}
 
 std::optional<std::string> make_apache_config(const ApacheSpec& spec, std::string& error) {
     Writer writer(spec, error);

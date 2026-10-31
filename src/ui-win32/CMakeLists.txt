@@ -8,7 +8,8 @@ add_library(floserver_ui_model STATIC
     model/php_page.cpp
     model/ports_page.cpp
     model/database_page.cpp
-    model/scrollbar.cpp)
+    model/scrollbar.cpp
+    model/apache_page.cpp)
 target_include_directories(floserver_ui_model PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(floserver_ui_model PUBLIC floserver_third_party)
 floserver_code_rules(floserver_ui_model)
@@ -32,6 +33,7 @@ add_executable(floserver_ui WIN32
     settings_php.cpp
     settings_ports.cpp
     settings_database.cpp
+    settings_apache.cpp
     form_parts.cpp
     scroll_bar.cpp
     window_style.cpp

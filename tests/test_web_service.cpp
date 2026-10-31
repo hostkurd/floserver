@@ -8,6 +8,7 @@
 
 #ifndef _WIN32
 
+#include "floserver/core/apache_settings.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/phpmyadmin.h"
 #include "floserver/core/process.h"
@@ -638,6 +639,119 @@ TEST_CASE("an Apache project is served by the shared Apache behind nginx, .htacc
     REQUIRE(save_app_config(app_config_file(data), app, error));
     st = service.reload();
     CHECK_FALSE(st["apps"].contains("_apache"));
+    service.stop();
+}
+
+TEST_CASE("Settings > Apache: a module turned on reaches .htaccess; custom.conf Apache refuses keeps the running one") {
+    const auto nginx = tool("FLOSERVER_TEST_NGINX", "/usr/sbin/nginx");
+    const auto apache = tool("FLOSERVER_TEST_APACHE", "/usr/sbin/apache2");
+    std::error_code ec;
+    const fs::path modules = get_env("FLOSERVER_TEST_APACHE_MODULES").value_or("/usr/lib/apache2/modules");
+    if (!nginx || !apache || !fs::exists(modules / "mod_expires.so", ec) || !fs::exists(modules / "mod_headers.so", ec)) {
+        MESSAGE("nginx or Apache with mod_expires isn't installed here; skipped");
+        return;
+    }
+    const test_util::TempDir tmp;
+    const fs::path data = tmp.path() / "data";
+    install_test_nginx(data, *nginx);
+    fake_runtime(data, "apache", "2.4.58", "");
+    const fs::path apache_dir = runtimes_dir(data) / "apache" / "2.4.58";
+    fs::create_directories(apache_dir / "bin");
+    fs::create_directories(apache_dir / "conf");
+    fs::create_symlink(*apache, apache_dir / "bin" / "apache2");
+    fs::create_directory_symlink(modules, apache_dir / "modules");
+    test_util::write_file(apache_dir / "conf" / "mime.types", "text/html html\ntext/plain txt\n");
+
+    // A project served by Apache alone (PHP off), whose .htaccess asks for
+    // Expires headers only when mod_expires is loaded.
+    const fs::path site = tmp.path() / "site";
+    test_util::write_file(site / "floserver.json", R"({"web": "apache", "php": false})");
+    test_util::write_file(site / "page.html", "the page");
+    test_util::write_file(site / ".htaccess", "<IfModule mod_expires.c>\nExpiresActive On\n"
+                                              "ExpiresDefault \"access plus 1 hour\"\n</IfModule>\n");
+    for (const auto& e : fs::recursive_directory_iterator(tmp.path())) {
+        fs::permissions(e.path(), fs::perms::others_read | fs::perms::others_exec, fs::perm_options::add, ec);
+    }
+    fs::permissions(tmp.path(), fs::perms::others_read | fs::perms::others_exec, fs::perm_options::add, ec);
+
+    AppConfig app;
+    std::string error;
+    REQUIRE(add_project(app, site, "", error));
+    app.projects.front().on = true;
+    app.projects.front().keep_running = true;  // Apache runs from the start
+    ApacheSettings settings;
+    settings.modules = {{"expires", false}};
+    write_apache_settings(app, settings);
+    REQUIRE(save_app_config(app_config_file(data), app, error));
+
+    const auto ports = pick_web_ports([](Port p) { return p > 1024 && can_listen_on_loopback(p); });
+    REQUIRE(ports);
+    CertStore certs(data);
+    WebServiceConfig config;
+    config.data_dir = data;
+    config.fixed_ports = WebPorts{static_cast<Port>(ports->http + 23000), static_cast<Port>(ports->https + 23000), true};
+    config.reload_every = 1s;
+    WebService service(config, certs);
+    service.start();
+    const Port http = config.fixed_ports->http;
+    const auto apache_pid = [&]() -> std::optional<std::uint32_t> {
+        const auto st = service.status();
+        if (!st["apps"].contains("_apache") || st["apps"]["_apache"]["state"] != "running" ||
+            !st["apps"]["_apache"].contains("pid")) {
+            return std::nullopt;
+        }
+        return st["apps"]["_apache"]["pid"].get<std::uint32_t>();
+    };
+    INFO(read_small_file(web_dir(data) / "apps" / "_apache.log", 1 << 20).value_or(""));
+    INFO(read_small_file(web_dir(data) / "logs" / "apache-error.log", 1 << 20).value_or(""));
+
+    // expires is off: no header.
+    std::string reply = get_raw(http, "site.localhost", "/page.html");
+    REQUIRE(reply.starts_with("HTTP/1.1 200"));
+    CHECK(reply.find("\r\nExpires:") == std::string::npos);
+    CHECK(service.status()["apache"]["modules"].dump().find("\"expires\"") == std::string::npos);
+    REQUIRE(eventually([&] { return apache_pid().has_value(); }));
+    const auto first_pid = *apache_pid();
+
+    // Turned on (Settings > Apache): the running Apache comes back with it by itself.
+    settings.modules.clear();
+    write_apache_settings(app, settings);
+    REQUIRE(save_app_config(app_config_file(data), app, error));
+    (void)service.reload();
+    CHECK(eventually([&] { return apache_pid().has_value() && *apache_pid() != first_pid; }));
+    CHECK(eventually([&] {
+        return get_raw(http, "site.localhost", "/page.html").find("\r\nExpires:") != std::string::npos;
+    }, 20s));
+    CHECK(service.status()["apache"]["modules"].dump().find("\"expires\"") != std::string::npos);
+
+    // custom.conf with a line Apache refuses: `httpd -t` says so, and the
+    // running Apache keeps its config (not restarted, still serving).
+    REQUIRE(eventually([&] { return apache_pid().has_value(); }));
+    const auto good_pid = *apache_pid();
+    test_util::write_file(apache_custom_conf_file(data), "Header set X-Mine yes\nBogusDirective on\n");
+    auto st = service.reload();
+    INFO(st.dump(2));
+    REQUIRE(st["apache"].is_object());
+    REQUIRE(st["apache"].contains("refused"));
+    CHECK(st["apache"]["refused"].get<std::string>().find("BogusDirective") != std::string::npos);
+    std::this_thread::sleep_for(1500ms);  // a reload or two by the supervisor: still the same Apache
+    CHECK(apache_pid() == good_pid);
+    reply = get_raw(http, "site.localhost", "/page.html");
+    CHECK(reply.starts_with("HTTP/1.1 200"));
+    CHECK(reply.find("\r\nExpires:") != std::string::npos);
+    CHECK(reply.find("X-Mine") == std::string::npos);
+
+    // Fixed: tested, used, and the error goes.
+    test_util::write_file(apache_custom_conf_file(data), "# mine\nHeader set X-Mine yes\nListen 0.0.0.0:1\n");
+    CHECK(eventually([&] { return get_raw(http, "site.localhost", "/page.html").find("\r\nX-Mine: yes") != std::string::npos; },
+                     20s));
+    st = service.status();
+    CHECK_FALSE(st["apache"].contains("refused"));
+    std::string final_error;
+    const auto final_text = service.apache_final_config(final_error);
+    REQUIRE(final_text);
+    CHECK(final_text->find("Header set X-Mine yes") != std::string::npos);
+    CHECK(final_text->find("0.0.0.0") == std::string::npos);  // the Listen line was left out
     service.stop();
 }
 

@@ -338,6 +338,39 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     PmaAddress,              // {0}: "https://phpmyadmin.localhost"
     PmaNameTaken,
     PmaNeedsPhp,
+    // Settings > Apache.
+    SettingsApache,
+    ApacheHint,
+    ApacheVersion,
+    ApacheNewest,            // {0}: the version
+    ApacheNoneInstalled,
+    ApacheModules,
+    ApacheModulesOn,         // {0}: on, {1}: all
+    ApacheFindModule,
+    ApacheModNeeded,
+    ApacheModHttps,
+    ApacheModHttp2,
+    ApacheModMpm,
+    ApacheModUnused,
+    ApacheModFor,            // {0}: the modules that need it
+    ApacheModulesNote,
+    ApacheNoMatch,           // {0}: what was typed
+    ApacheConfHint,
+    ApacheShowFinal,
+    ApacheEditConf,
+    ApacheConfNote,
+    ApacheCustomProblems,    // {0}: the lines left out
+    ApacheRefused,           // {0}: what Apache said
+    ApacheProblems,          // {0}: what the service skipped
+    ApacheApplies,           // {0}: who: "blog, shop and shared sites"
+    ApacheAppliesSleeping,
+    ApacheAppliesNobody,
+    ApacheAskSave,
+    ApacheReadFailed,        // {0}: the service's reason
+    ApacheRestarting,
+    ApacheOpenFailed,        // {0}: the reason
+    ApacheConfOpened,
+    ApacheFinalOpened,
     Count_,
 };
 

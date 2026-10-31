@@ -1,5 +1,6 @@
 // The window's model (src/ui-win32/model): words, rows, addresses, colours.
 
+#include "model/apache_page.h"
 #include "model/php_page.h"
 #include "model/ports_page.h"
 #include "model/runtimes_page.h"
@@ -1343,6 +1344,78 @@ TEST_CASE("the new project wizard's address follows nginx's ports and scheme") {
     const json web = {{"nginx", {{"running", true}, {"http_port", 80}, {"https_port", 443}, {"tls", true}}}};
     footer = footer_text({}, nullptr, &web, Lang::En);
     CHECK(new_project_address("shop", footer) == "https://shop.localhost");
+}
+
+TEST_CASE("Settings > Apache: modules with what they need, locked ones, what Save sends, the footer") {
+    const json reply = json::parse(R"({
+        "version": "2.4.69", "chosen": null, "versions": ["2.4.69", "2.4.66"],
+        "modules": [
+            {"name": "cache", "on": false, "kind": "optional"},
+            {"name": "cache_disk", "on": false, "kind": "optional", "needs": ["cache"]},
+            {"name": "deflate", "on": true, "kind": "default", "needs": ["filter"]},
+            {"name": "filter", "on": true, "kind": "default", "needed_by": ["deflate"]},
+            {"name": "expires", "on": true, "kind": "default"},
+            {"name": "proxy_fcgi", "on": true, "kind": "needed", "why": "fcgi"},
+            {"name": "ssl", "on": false, "kind": "off", "why": "https"},
+            {"name": "zzz", "on": false, "kind": "optional"}],
+        "custom_conf": "C:/data/apache/custom.conf", "custom_conf_exists": false,
+        "used_by": ["wp", "_shared"], "running": true, "refused": "Invalid command 'Bogus'"})");
+    const auto info = apache_info_from_reply(reply);
+    REQUIRE(info);
+    CHECK(info->refused == "Invalid command 'Bogus'");
+    CHECK_FALSE(apache_info_from_reply(json::object()));
+
+    // On first, then the popular ones, the rest, and those that don't apply last.
+    std::vector<std::string> order;
+    for (const ApacheModule& m : ordered_apache_modules(*info)) {
+        order.push_back(m.name);
+    }
+    CHECK(order == std::vector<std::string>{"deflate", "expires", "filter", "proxy_fcgi", "cache", "cache_disk", "zzz", "ssl"});
+
+    ApacheChanges changes;
+    CHECK(apache_modules_on(*info, changes) == 4);
+    // filter is on only for deflate: locked, with a note saying so.
+    const ApacheModule& filter = info->modules[3];
+    CHECK(apache_module_locked(*info, changes, filter));
+    CHECK(apache_module_note(*info, changes, filter, Lang::En) == "for deflate");
+    CHECK(apache_module_locked(*info, changes, info->modules[5]));  // FloServer's own
+    CHECK(apache_module_note(*info, changes, info->modules[5], Lang::En) == "FloServer's");
+    CHECK(apache_module_note(*info, changes, info->modules[6], Lang::En) == "nginx does HTTPS");
+    toggle_apache_module(*info, changes, "ssl");
+    toggle_apache_module(*info, changes, "filter");
+    CHECK(changes.empty());
+
+    // cache_disk on: cache comes with it, locked; off again: nothing changed.
+    toggle_apache_module(*info, changes, "cache_disk");
+    CHECK(apache_module_on(*info, changes, "cache"));
+    CHECK(apache_needed_by(*info, changes, "cache") == std::vector<std::string>{"cache_disk"});
+    CHECK(apache_module_locked(*info, changes, info->modules[0]));
+    CHECK(apache_modules_on(*info, changes) == 6);
+    // deflate off: filter goes with it, and can then be ticked by itself.
+    toggle_apache_module(*info, changes, "deflate");
+    CHECK_FALSE(apache_module_on(*info, changes, "filter"));
+    CHECK_FALSE(apache_module_locked(*info, changes, filter));
+    CHECK(apache_set_params(changes) == json{{"modules", {{"cache_disk", true}, {"deflate", false}}}});
+    toggle_apache_module(*info, changes, "cache_disk");
+    toggle_apache_module(*info, changes, "deflate");
+    CHECK(changes.empty());
+
+    // The version: the newest unless one is picked.
+    CHECK(apache_choice_label(*info, apache_shown_choice(*info, changes), Lang::En) == "Newest installed (2.4.69)");
+    changes.version = std::optional<std::string>("2.4.66");
+    CHECK(apache_choice_label(*info, apache_shown_choice(*info, changes), Lang::En) == "Apache 2.4.66");
+    CHECK(apache_set_params(changes) == json{{"version", "2.4.66"}});
+    changes.version = std::optional<std::string>();
+    CHECK(apache_set_params(changes) == json{{"version", nullptr}});
+
+    CHECK(apache_restart_text(*info, Lang::En) == "Applies when saved: Apache restarts (about a second) for wp and shared sites.");
+    ApacheInfo asleep = *info;
+    asleep.running = false;
+    CHECK(apache_restart_text(asleep, Lang::En).find("isn't running now") != std::string::npos);
+    asleep.used_by.clear();
+    CHECK(apache_restart_text(asleep, Lang::En) == "Applies when saved. No project uses Apache right now.");
+    CHECK_FALSE(apache_restart_text(*info, Lang::Ar).empty());
+    CHECK(text(Lang::Ku, Str::ApacheShowFinal).find("httpd.conf") != std::string_view::npos);
 }
 
 TEST_CASE("scroll bars: the thumb's size and place for an offset, and back") {

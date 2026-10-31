@@ -48,6 +48,11 @@ enum class SiteState : std::uint8_t {
 [[nodiscard]] const InstalledRuntime* best_installed(const std::vector<InstalledRuntime>& installed,
                                                      const std::string& name, const std::string& wanted);
 
+// The Apache the shared Apache runs: config.json's "apache" "version" when
+// it's installed (Settings > Apache), else the newest. Nothing when none is.
+[[nodiscard]] const InstalledRuntime* chosen_apache(const std::vector<InstalledRuntime>& installed,
+                                                    const AppConfig& config);
+
 struct PlannedSite {
     std::string name;
     std::filesystem::path dir;

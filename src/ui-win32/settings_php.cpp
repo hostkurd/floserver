@@ -24,6 +24,7 @@ namespace {
 
 constexpr int kEditBase = 1000;    // edits_[i] has id kEditBase + i
 constexpr int kDbEditBase = 3000;  // db_edits_[i] has id kDbEditBase + i (settings_database.cpp)
+constexpr int kApacheEditBase = 4000;  // apache_edits_[0] (settings_apache.cpp)
 constexpr UINT kFirstChoice = 100;
 constexpr int kGap = 12;
 constexpr int kCardPad = 16;
@@ -101,7 +102,8 @@ bool SettingsWindow::settle_php_changes(AfterSave then, const std::string& serie
 
 void SettingsWindow::try_close() {
     if (hwnd_ == nullptr || asking_ || (section_ == Section::Php && !settle_php_changes(AfterSave::Close)) ||
-        (section_ == Section::Database && !settle_db_changes(AfterSave::Close))) {
+        (section_ == Section::Database && !settle_db_changes(AfterSave::Close)) ||
+        (section_ == Section::Apache && !settle_apache_changes(AfterSave::Close))) {
         return;
     }
     DestroyWindow(hwnd_);
@@ -150,6 +152,15 @@ void SettingsWindow::open_section(Section section, const std::string& series) {
         root_shown_.clear();
         password_error_.clear();
     }
+    if (section_ == Section::Apache) {
+        if (!settle_apache_changes(AfterSave::Runtimes)) {
+            return;
+        }
+        if (GetFocus() != hwnd_) {
+            SetFocus(hwnd_);
+        }
+        apache_edits_.clear();
+    }
     if (section_ == Section::Ports) {
         if (GetFocus() != hwnd_) {
             SetFocus(hwnd_);
@@ -187,6 +198,10 @@ void SettingsWindow::open_section(Section section, const std::string& series) {
         if (!pick.empty()) {
             load_db(pick);
         }
+    }
+    if (section == Section::Apache) {
+        make_apache_edits();
+        load_apache();  // each time the section opens: one apache.get, nothing else
     }
     if (section == Section::Ports) {
         make_port_edits();
@@ -387,6 +402,9 @@ void SettingsWindow::place_php_edits() {
 }
 
 SettingsWindow::Hit SettingsWindow::hit_of_edit(int id) const {
+    if (id == kApacheEditBase) {
+        return apache_edits_.empty() ? Hit{} : Hit{Part::ApacheFind, -1, -1};
+    }
     if (id >= kDbEditBase) {
         // The port, the my.ini fields, then the new root password.
         const int index = id - kDbEditBase;
@@ -439,6 +457,9 @@ FieldEdit* SettingsWindow::edit_of(const Hit& hit) const {
     if (hit.part == Part::PhpFind && !edits_.empty()) {
         return edits_.front().get();
     }
+    if (hit.part == Part::ApacheFind && !apache_edits_.empty()) {
+        return apache_edits_.front().get();
+    }
     if (hit.part == Part::PhpField && hit.row >= 0 && std::cmp_less(hit.row, field_edit_.size())) {
         const int index = field_edit_[static_cast<std::size_t>(hit.row)];
         return index >= 0 ? edits_[static_cast<std::size_t>(index)].get() : nullptr;
@@ -462,6 +483,9 @@ void SettingsWindow::on_edit_change(int id) {
         relayout();
     } else if (hit.part == Part::PhpFind) {
         php_query_ = edit->text();
+        relayout();
+    } else if (hit.part == Part::ApacheFind) {
+        apache_query_ = edit->text();
         relayout();
     } else if (php_ && !php_saving_) {
         set_ini_text(*php_, php_changes_, field_at(hit.row).key, edit->text());
@@ -490,6 +514,11 @@ bool SettingsWindow::on_edit_key(int id, WPARAM key) {
         if (id == kEditBase && !php_query_.empty()) {
             edits_.front()->set_text({});
             php_query_.clear();
+            relayout();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+        } else if (id == kApacheEditBase && !apache_query_.empty() && !apache_edits_.empty()) {
+            apache_edits_.front()->set_text({});
+            apache_query_.clear();
             relayout();
             InvalidateRect(hwnd_, nullptr, FALSE);
         } else {
