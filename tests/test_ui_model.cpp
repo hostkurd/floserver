@@ -832,6 +832,16 @@ TEST_CASE("Settings > Runtimes: phpMyAdmin in the Tools card, with how it's serv
     CHECK(runtimes_page(runtimes_reply(), nullptr, json(), Lang::En).groups.size() == 5);
     CHECK_FALSE(phpmyadmin_installed({{"php", {"8.5.1"}}}));
     CHECK(phpmyadmin_installed({{"phpmyadmin", {"5.2.3"}}}));
+    // Only phpMyAdmin's own address is opened.
+    CHECK(is_phpmyadmin_url("https://phpmyadmin.localhost/floserver-signon.php?token=ab"));
+    CHECK(is_phpmyadmin_url("http://phpmyadmin.localhost:8080/floserver-signon.php?token=ab"));
+    CHECK(is_phpmyadmin_url("https://phpmyadmin.localhost"));
+    CHECK_FALSE(is_phpmyadmin_url("https://phpmyadmin.localhost.evil.example/x"));
+    CHECK_FALSE(is_phpmyadmin_url("https://phpmyadmin.localhost:x@evil.example/x"));
+    CHECK_FALSE(is_phpmyadmin_url("https://phpmyadmin.localhost:8443@evil.example/x"));
+    CHECK_FALSE(is_phpmyadmin_url("https://phpmyadmin.localhost:/x"));
+    CHECK_FALSE(is_phpmyadmin_url("file:///C:/x"));
+    CHECK_FALSE(is_phpmyadmin_url(""));
     CHECK(lang_code(Lang::Ku) == "ku");
     CHECK(lang_code(Lang::Ar) == "ar");
     CHECK(lang_code(Lang::En) == "en");

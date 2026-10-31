@@ -152,7 +152,10 @@ private:
 // site joins it.
 std::size_t add_to_pool(WebPlan& plan, const InstalledRuntime& php, PhpIniSettings settings,
                         const std::string& site, bool keep_running) {
-    const std::string key = "php-" + php.version + php_settings_key(settings);
+    std::string key = "php-" + php.version + php_settings_key(settings);
+    if (site == kPhpMyAdminSiteName) {
+        key += "-phpmyadmin";  // always a pool of its own, whatever a project's settings
+    }
     auto it = std::find_if(plan.pools.begin(), plan.pools.end(), [&key](const PhpPool& p) { return p.key == key; });
     if (it == plan.pools.end()) {
         plan.pools.push_back({key, php.version, php.dir, std::move(settings), {}, false, {}});

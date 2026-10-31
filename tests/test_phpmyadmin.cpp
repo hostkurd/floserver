@@ -249,6 +249,7 @@ TEST_CASE("phpMyAdmin is planned when installed: its own pool on the newest PHP,
     REQUIRE(plan.phpmyadmin->pool);
     const PhpPool& pool = plan.pools.at(*plan.phpmyadmin->pool);
     CHECK(pool.version == "8.4.27");  // the newest, whatever projects default to
+    CHECK(pool.key.ends_with("-phpmyadmin"));
     CHECK(pool.sites == std::vector<std::string>{"_phpmyadmin"});
     CHECK(pool.settings.project_ini.at("display_errors") == "Off");
     CHECK(pool.settings.project_ini.at("error_reporting") == "E_ALL & ~E_DEPRECATED");
@@ -264,6 +265,20 @@ TEST_CASE("phpMyAdmin is planned when installed: its own pool on the newest PHP,
     CHECK(older.settings.project_ini.at("display_errors") == "Off");
     CHECK_FALSE(older.settings.project_ini.contains("error_reporting"));
     CHECK(plan.pools.size() == 2);
+
+    // A project with phpMyAdmin's very php.ini values still gets another pool.
+    const ConfigReader same = [](const Project&) {
+        return parse_project_config(
+            R"({"php": "8.4", "php_ini": {"display_errors": "Off", "display_startup_errors": "Off",
+                "error_reporting": "E_ALL & ~E_DEPRECATED"}})");
+    };
+    plan = plan_sites(config, same, installed, std::nullopt);
+    REQUIRE(plan.phpmyadmin);
+    REQUIRE(plan.sites.front().pool);
+    REQUIRE(plan.phpmyadmin->pool);
+    CHECK(plan.pools.at(*plan.sites.front().pool).version == "8.4.27");
+    CHECK(*plan.sites.front().pool != *plan.phpmyadmin->pool);
+    CHECK(plan.pools.at(*plan.phpmyadmin->pool).sites == std::vector<std::string>{"_phpmyadmin"});
 
     // No PHP: waits for one.
     plan = plan_sites(config, defaults, {runtime("phpmyadmin", "5.2.3")}, std::nullopt);

@@ -132,6 +132,26 @@ std::string phpmyadmin_line(const json& served, Lang lang) {
     return text_of(served, "problem");  // the service's words
 }
 
+bool is_phpmyadmin_url(std::string_view url) {
+    for (const std::string_view prefix : {std::string_view("https://phpmyadmin.localhost"),
+                                          std::string_view("http://phpmyadmin.localhost")}) {
+        if (url.starts_with(prefix)) {
+            std::string_view rest = url.substr(prefix.size());
+            if (rest.starts_with(':')) {
+                // A port, digits only: "localhost:x@evil.example" would name another host.
+                rest.remove_prefix(1);
+                const std::size_t digits = std::min(rest.find_first_not_of("0123456789"), rest.size());
+                if (digits == 0 || digits > 5) {
+                    return false;
+                }
+                rest.remove_prefix(digits);
+            }
+            return rest.empty() || rest.front() == '/';
+        }
+    }
+    return false;
+}
+
 bool phpmyadmin_installed(const Installed& installed) {
     const auto it = installed.find("phpmyadmin");
     return it != installed.end() && !it->second.empty();

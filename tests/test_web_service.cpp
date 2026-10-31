@@ -1231,6 +1231,30 @@ echo $server['auth_type'], ' ', $s['PMA_single_signon_user'] ?? '-', ' ', $s['PM
     test_util::write_file(paths.tokens / (std::string(64, 'c') + ".json"), R"({"expires": 1})");
     CHECK(refused("?token=" + std::string(64, 'c')));
 
+    // Two requests with one token at the same time: only one signs in.
+    {
+        const std::string both = login(std::nullopt);
+        std::array<std::string, 2> got;
+        std::thread a([&] { got[0] = get_raw(http, host, "/floserver-signon.php?token=" + both); });
+        std::thread b([&] { got[1] = get_raw(http, host, "/floserver-signon.php?token=" + both); });
+        a.join();
+        b.join();
+        const auto won = std::count_if(got.begin(), got.end(),
+                                       [](const std::string& r) { return r.starts_with("HTTP/1.1 303"); });
+        const auto lost = std::count_if(got.begin(), got.end(),
+                                        [](const std::string& r) { return r.starts_with("HTTP/1.1 403"); });
+        CHECK(won == 1);
+        CHECK(lost == 1);
+    }
+
+    // A token nobody used is removed by the service's own reloads once it expires.
+    {
+        const std::string unused = login(std::nullopt);
+        const fs::path file = paths.tokens / (unused + ".json");
+        fs::last_write_time(file, fs::file_time_type::clock::now() - kSignonTokenLife - 5s);
+        CHECK(eventually([&] { return !fs::exists(file); }, 5s));
+    }
+
     // A project's login: its own user, its database only, replacing root's.
     const std::string project = login(std::string("shop"));
     const std::string second = get_raw(http, host, "/floserver-signon.php?token=" + project + "&lang=xx",

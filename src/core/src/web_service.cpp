@@ -314,6 +314,10 @@ void WebService::reload_locked() {
     if (stopped_) {
         return;
     }
+    // phpMyAdmin login tokens nobody used hold a password: removed once they
+    // expire, on every reload (the first is at start), installed or not. A
+    // listing of one small folder; nothing when it doesn't exist.
+    remove_expired_signon_tokens(phpmyadmin_paths(config_.data_dir).tokens);
     error_.clear();
     std::string error;
     const auto app = load_app_config(app_config_file(config_.data_dir), error);

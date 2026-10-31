@@ -398,7 +398,7 @@ void MainWindow::open_phpmyadmin_links(std::vector<Snapshot::DbAnswer>& answers)
             url = it->reply->at("url").get<std::string>();
         }
         // Only phpMyAdmin's own address is ever opened.
-        const bool ours = url.starts_with("https://phpmyadmin.localhost") || url.starts_with("http://phpmyadmin.localhost");
+        const bool ours = is_phpmyadmin_url(url);
         if (ours) {
             ShellExecuteW(hwnd_, L"open", w(url).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         }
