@@ -148,6 +148,21 @@ bool ProjectService::save(const AppConfig& config, ServiceRefusal& refusal) cons
     return true;
 }
 
+std::optional<AppConfig> ProjectService::config(ServiceRefusal& refusal) const {
+    const std::lock_guard lock(mutex_);
+    return load(refusal);
+}
+
+std::optional<AppConfig> ProjectService::change_config(const std::function<bool(AppConfig&, ServiceRefusal&)>& change,
+                                                       ServiceRefusal& refusal) {
+    const std::lock_guard lock(mutex_);
+    auto config = load(refusal);
+    if (!config || !change(*config, refusal) || !save(*config, refusal)) {
+        return std::nullopt;
+    }
+    return config;
+}
+
 json ProjectService::describe(const AppConfig& config, const std::string& name) const {
     const json all = describe_all(config, data_dir_);
     for (const json& item : all) {

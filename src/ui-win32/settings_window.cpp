@@ -253,6 +253,9 @@ LRESULT SettingsWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             for (const auto& edit : edits_) {
                 edit->set_font(fonts_.button.get());
             }
+            for (const auto& edit : port_edits_) {
+                edit->set_font(fonts_.button.get());
+            }
             const RECT& r = *win::int_to_ptr<const RECT*>(lparam);
             SetWindowPos(hwnd_, nullptr, r.left, r.top, r.right - r.left, r.bottom - r.top,
                          SWP_NOZORDER | SWP_NOACTIVATE);
@@ -269,6 +272,9 @@ LRESULT SettingsWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             } else if (wparam == SPI_SETNONCLIENTMETRICS) {
                 make_ui_fonts(fonts_, dpi_, lang_);
                 for (const auto& edit : edits_) {
+                    edit->set_font(fonts_.button.get());
+                }
+                for (const auto& edit : port_edits_) {
                     edit->set_font(fonts_.button.get());
                 }
                 relayout();
@@ -371,6 +377,7 @@ void SettingsWindow::on_destroy() {
     KillTimer(hwnd_, kMessageTimer);
     edits_.clear();
     field_edit_.clear();
+    port_edits_.clear();
     WINDOWPLACEMENT wp{};
     wp.length = sizeof wp;
     if (GetWindowPlacement(hwnd_, &wp) != FALSE) {
@@ -386,6 +393,9 @@ void SettingsWindow::apply_theme() {
     input_set_brush_.reset(CreateSolidBrush(colorref(palette(dark_).input_set)));
     for (const auto& edit : edits_) {
         edit->set_cue_color(palette(dark_).text_subtle);
+        InvalidateRect(edit->hwnd(), nullptr, TRUE);
+    }
+    for (const auto& edit : port_edits_) {
         InvalidateRect(edit->hwnd(), nullptr, TRUE);
     }
     InvalidateRect(hwnd_, nullptr, FALSE);
@@ -461,6 +471,11 @@ void SettingsWindow::on_snapshot(const Snapshot& snap) {
         !php_series_.empty()) {
         load_php(php_series_);
     }
+    // Ports & HTTPS likewise.
+    if (!was_connected && connected_ && section_ == Section::Ports && !ports_ && !ports_loading_) {
+        load_ports();
+    }
+    on_ports_answers(snap);
     const bool close_now = on_php_answers(snap);
     rebuild();
     if (close_now) {
@@ -501,6 +516,10 @@ SettingsWindow::Geometry SettingsWindow::layout(HDC dc) const {
     int y = px(4) - scroll_;
     if (section_ == Section::Php) {
         layout_php(dc, g, x0, x1, y);
+        return g;
+    }
+    if (section_ == Section::Ports) {
+        layout_ports(dc, g, x0, x1, y);
         return g;
     }
 
@@ -684,6 +703,7 @@ void SettingsWindow::relayout() {
     focus_ = std::min(focus_, count - 1);
     update_tip(hover_);
     place_php_edits();
+    place_port_edits();
 }
 
 void SettingsWindow::scroll_to(int target) {
@@ -751,6 +771,15 @@ const RECT* SettingsWindow::rect_of(const Hit& hit) const {
             return nullptr;
         case Part::None:
             break;
+        case Part::PortsChoice:
+        case Part::PortsHttpEdit:
+        case Part::PortsHttpsEdit:
+        case Part::PortsUse:
+        case Part::PortsSwitch:
+        case Part::PortsTrust:
+        case Part::PortsRemove:
+        case Part::PortsOpenCert:
+            return ports_rect_of(hit);
         default:
             return php_rect_of(hit);
     }
@@ -758,9 +787,13 @@ const RECT* SettingsWindow::rect_of(const Hit& hit) const {
 }
 
 std::vector<SettingsWindow::Hit> SettingsWindow::focus_order() const {
-    std::vector<Hit> order{{Part::Nav, 0, -1}, {Part::Nav, 1, -1}};
+    std::vector<Hit> order{{Part::Nav, 0, -1}, {Part::Nav, 1, -1}, {Part::Nav, 2, -1}};
     if (section_ == Section::Php) {
         php_focus_order(order);
+        return order;
+    }
+    if (section_ == Section::Ports) {
+        ports_focus_order(order);
         return order;
     }
     order.push_back({Part::Check, -1, -1});
@@ -862,9 +895,21 @@ void SettingsWindow::on_click(const Hit& hit) {
             run_button(hit);
             break;
         case Part::Nav:
-            open_section(hit.group == 1 ? Section::Php : Section::Runtimes);
+            open_section(hit.group == 1   ? Section::Php
+                         : hit.group == 2 ? Section::Ports
+                                          : Section::Runtimes);
             break;
         case Part::None:
+            break;
+        case Part::PortsChoice:
+        case Part::PortsHttpEdit:
+        case Part::PortsHttpsEdit:
+        case Part::PortsUse:
+        case Part::PortsSwitch:
+        case Part::PortsTrust:
+        case Part::PortsRemove:
+        case Part::PortsOpenCert:
+            on_ports_click(hit);
             break;
         default:
             on_php_click(hit);
@@ -910,6 +955,12 @@ void SettingsWindow::on_key(WPARAM key) {
             scroll_to(scroll_ - std::max(px(kRowH), height_ - px(kRowH)));
             return;
         case VK_F5:
+            if (section_ == Section::Ports) {
+                if (!ports_loading_ && ports_waiting_ == 0) {
+                    load_ports();  // the ports checked again
+                }
+                return;
+            }
             if (section_ == Section::Php) {
                 if (!php_series_.empty() && php_changes_.empty() && !php_loading_ && !php_saving_) {
                     load_php(php_series_);
@@ -1128,6 +1179,13 @@ void SettingsWindow::paint_shapes(Canvas& c) const {
             // Runtimes' icon: two stacked boxes, 16 px.
             c.round_outline({ix + px(2), iy + px(2), ix + px(14), iy + px(7)}, pxf(1), p.text, pxf(1.3F));
             c.round_outline({ix + px(2), iy + px(9), ix + px(14), iy + px(14)}, pxf(1), p.text, pxf(1.3F));
+        } else if (i == 2) {
+            // Ports & HTTPS': a padlock.
+            c.round_outline({ix + px(3), iy + px(7), ix + px(13), iy + px(14)}, pxf(1.5F), p.text, pxf(1.3F));
+            stroke(5.5F, 7, 5.5F, 4.5F);
+            stroke(10.5F, 7, 10.5F, 4.5F);
+            stroke(5.5F, 4.5F, 8, 2);
+            stroke(8, 2, 10.5F, 4.5F);
         } else {
             // PHP's: </>, as in the mockup.
             stroke(5, 5, 2, 8);
@@ -1142,6 +1200,10 @@ void SettingsWindow::paint_shapes(Canvas& c) const {
     }
     if (section_ == Section::Php) {
         paint_php_shapes(c);
+        return;
+    }
+    if (section_ == Section::Ports) {
+        paint_ports_shapes(c);
         return;
     }
 
@@ -1211,12 +1273,16 @@ void SettingsWindow::paint_text(Canvas& c) const {
     for (std::size_t i = 0; i < g.navs.size(); ++i) {
         const RECT& nav = g.navs[i];
         const bool open = static_cast<std::size_t>(section_) == i;
-        c.text({nav.left + px(38), nav.top, nav.right - px(8), nav.bottom},
-               w(text(lang_, i == 0 ? Str::SettingsRuntimes : Str::SettingsPhp)),
+        const Str label = i == 0 ? Str::SettingsRuntimes : i == 1 ? Str::SettingsPhp : Str::SettingsPorts;
+        c.text({nav.left + px(38), nav.top, nav.right - px(8), nav.bottom}, w(text(lang_, label)),
                open ? fonts_.body_bold.get() : fonts_.body.get(), p.text, Align::Start, false);
     }
     if (section_ == Section::Php) {
         paint_php_text(c);
+        return;
+    }
+    if (section_ == Section::Ports) {
+        paint_ports_text(c);
         return;
     }
 

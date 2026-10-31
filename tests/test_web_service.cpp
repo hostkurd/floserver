@@ -15,6 +15,7 @@
 #include "floserver/core/request_log.h"
 #include "floserver/core/shared_sites.h"
 #include "floserver/core/web_service.h"
+#include "floserver/core/web_settings.h"
 #include "test_util.h"
 
 #include <doctest/doctest.h>
@@ -26,7 +27,9 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <cstdio>
 #include <thread>
 
 using namespace floserver::core;
@@ -52,8 +55,8 @@ void fake_runtime(const fs::path& data, const std::string& name, const std::stri
                               .dump());
 }
 
-// GET over plain http; "<status> <body>", or "" when it couldn't connect.
-std::string get(Port port, const std::string& host, const std::string& path = "/") {
+// GET over plain http; the whole reply, headers and all, or "" when it couldn't connect.
+std::string get_raw(Port port, const std::string& host, const std::string& path = "/") {
     const int s = socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
@@ -73,6 +76,12 @@ std::string get(Port port, const std::string& host, const std::string& path = "/
         resp.append(buf, static_cast<std::size_t>(n));
     }
     close(s);
+    return resp;
+}
+
+// GET over plain http; "<status> <body>", or "" when it couldn't connect.
+std::string get(Port port, const std::string& host, const std::string& path = "/") {
+    const std::string resp = get_raw(port, host, path);
     const auto sp = resp.find(' ');
     const auto body = resp.find("\r\n\r\n");
     if (sp == std::string::npos || body == std::string::npos) {
@@ -98,6 +107,25 @@ void install_test_nginx(const fs::path& data, const fs::path& nginx) {
                                     "fastcgi_param SERVER_PROTOCOL $server_protocol;\nfastcgi_param REDIRECT_STATUS 200;\n");
         }
     }
+}
+
+// GET over https with curl, checking the certificate against FloServer's CA:
+// the body, or "" when curl isn't here or it failed.
+std::string curl_https(const fs::path& ca, const std::string& host, Port port, const std::string& path = "/") {
+    const std::string url = "https://" + host + ":" + std::to_string(port) + path;
+    const std::string cmd = "curl -s --max-time 20 --cacert '" + ca.string() + "' --resolve '" + host + ":" +
+                            std::to_string(port) + ":127.0.0.1' '" + url + "' 2>/dev/null";
+    FILE* pipe = popen(cmd.c_str(), "r");  // NOLINT(cert-env33-c): a test, with fixed arguments
+    if (pipe == nullptr) {
+        return "";
+    }
+    std::string out;
+    std::array<char, 4096> buf{};
+    for (std::size_t n = 0; (n = fread(buf.data(), 1, buf.size(), pipe)) > 0;) {
+        out.append(buf.data(), n);
+    }
+    pclose(pipe);
+    return out;
 }
 
 bool alive(std::uint32_t pid) { return ::kill(static_cast<pid_t>(pid), 0) == 0; }
@@ -731,6 +759,320 @@ TEST_CASE("shared sites: the www folder at localhost/<folder>/ and <folder>.loca
         CHECK((after.empty() || after.starts_with("404 ")));
         service.stop();
     }
+}
+
+TEST_CASE("Settings > Ports & HTTPS with real nginx: the ports asked for, http to https, https://localhost/<folder>/") {
+    const auto nginx = tool("FLOSERVER_TEST_NGINX", "/usr/sbin/nginx");
+    const auto php = tool("FLOSERVER_TEST_PHP_CGI", "/usr/bin/php-cgi");
+    if (!nginx || !php) {
+        MESSAGE("nginx or php-cgi isn't installed here; skipped");
+        return;
+    }
+    const test_util::TempDir tmp;
+    const fs::path data = tmp.path() / "data";
+    CertStore certs(data);
+    std::string error;
+    const auto ca = certs.ensure_ca(error);
+    if (!ca) {
+        MESSAGE("no certificate authority on this build (" << error << "); skipped");
+        return;
+    }
+    install_test_nginx(data, *nginx);
+    fake_runtime(data, "php", "8.3.6", "nts");
+    fs::create_symlink(*php, runtimes_dir(data) / "php" / "8.3.6" / "php-cgi");
+    const fs::path shop = tmp.path() / "shop";
+    test_util::write_file(shop / "index.php", "<?php echo 'shop ', $_SERVER['HTTPS'] ?? 'off';");
+    const fs::path www = tmp.path() / "www";
+    test_util::write_file(www / "blog" / "index.php", "<?php echo 'blog ', $_SERVER['HTTPS'] ?? 'off';");
+    std::error_code ec;
+    for (const auto& e : fs::recursive_directory_iterator(tmp.path())) {
+        fs::permissions(e.path(), fs::perms::others_read | fs::perms::others_exec, fs::perm_options::add, ec);
+    }
+    fs::permissions(tmp.path(), fs::perms::others_read | fs::perms::others_exec, fs::perm_options::add, ec);
+
+    // Two pairs nobody here uses: asked for in config.json, no fixed ports.
+    const auto free_pair = [](Port from) -> std::optional<WebPorts> {
+        for (Port http = from; http < from + 200; http = static_cast<Port>(http + 2)) {
+            const auto https = static_cast<Port>(http + 1);
+            if (can_listen_on_loopback(http) && can_listen_on_loopback(https)) {
+                return WebPorts{http, https, false};
+            }
+        }
+        return std::nullopt;
+    };
+    const auto first = free_pair(24100);
+    const auto second = free_pair(24400);
+    REQUIRE(first);
+    REQUIRE(second);
+
+    AppConfig app;
+    REQUIRE(add_project(app, shop, "", error));
+    app.projects.front().on = true;
+    SharedConfig shared;
+    shared.on = true;
+    shared.dir = www;
+    shared.web = WebServer::Nginx;
+    write_shared_config(app, shared);
+    WebSettings settings;
+    settings.ports = PortChoice::Custom;
+    settings.http_port = first->http;
+    settings.https_port = first->https;
+    settings.shared_https = true;
+    write_web_settings(app, settings);
+    REQUIRE(save_app_config(app_config_file(data), app, error));
+
+    WebServiceConfig config;
+    config.data_dir = data;
+    config.reload_every = 1s;
+    WebService service(config, certs);
+    service.start();
+    auto st = service.status();
+    INFO(st.dump(2));
+    INFO(read_small_file(web_dir(data) / "nginx.conf", 1 << 20).value_or(""));
+    REQUIRE(st["nginx"]["running"] == true);
+    CHECK(st["nginx"]["http_port"] == first->http);
+    CHECK(service.ports_in_use() == WebPorts{first->http, first->https, false});
+    const std::string https_suffix = ":" + std::to_string(first->https);
+    CHECK(st["sites"]["shop"]["address"] == "https://shop.localhost" + https_suffix);
+    CHECK(st["shared"]["address"] == "https://localhost" + https_suffix);
+
+    // http redirects to https, path and query kept; <folder>.localhost stays http.
+    std::string reply = get_raw(first->http, "shop.localhost", "/cart?x=1");
+    CHECK(reply.starts_with("HTTP/1.1 302"));
+    CHECK(reply.find("Location: https://shop.localhost" + https_suffix + "/cart?x=1\r\n") != std::string::npos);
+    reply = get_raw(first->http, "localhost", "/blog/");
+    CHECK(reply.starts_with("HTTP/1.1 302"));
+    CHECK(reply.find("Location: https://localhost" + https_suffix + "/blog/\r\n") != std::string::npos);
+    CHECK(get(first->http, "blog.localhost") == "200 blog off");
+
+    // Over https, the certificates check out against FloServer's CA.
+    const bool have_curl = fs::is_regular_file("/usr/bin/curl", ec);
+    if (have_curl) {
+        CHECK(curl_https(ca->certificate, "localhost", first->https, "/blog/") == "blog on");
+        CHECK(curl_https(ca->certificate, "shop.localhost", first->https) == "shop on");
+        // The list page links each folder's own address on the http port.
+        const std::string list = curl_https(ca->certificate, "localhost", first->https);
+        CHECK(list.find("https://localhost" + https_suffix + "/blog/") != std::string::npos);
+        CHECK(list.find("http://blog.localhost:" + std::to_string(first->http) + "/") != std::string::npos);
+    } else {
+        MESSAGE("curl isn't installed here; the https requests skipped");
+    }
+
+    // Other ports, HTTPS off: nginx moves, the addresses follow, no redirect.
+    settings.http_port = second->http;
+    settings.https_port = second->https;
+    settings.https = false;
+    settings.shared_https = false;
+    write_web_settings(app, settings);
+    REQUIRE(save_app_config(app_config_file(data), app, error));
+    st = service.reload();
+    CHECK(st["nginx"]["http_port"] == second->http);
+    CHECK(st["sites"]["shop"]["address"] == "http://shop.localhost:" + std::to_string(second->http));
+    CHECK(st["shared"]["address"] == "http://localhost:" + std::to_string(second->http));
+    CHECK(get(second->http, "shop.localhost") == "200 shop off");
+    CHECK(get(second->http, "localhost", "/blog/") == "200 blog off");
+    CHECK(eventually([&] { return get(first->http, "shop.localhost").empty(); }, 5s));
+
+    // A port asked for that another program holds: said, and nginx stays on
+    // a free pair; once it's free, nginx moves there by itself.
+    const auto third = free_pair(24700);
+    REQUIRE(third);
+    {
+        const int holder = socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(third->http);
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        REQUIRE(bind(holder, reinterpret_cast<const sockaddr*>(&addr), sizeof addr) == 0);
+        REQUIRE(listen(holder, 1) == 0);
+        settings.http_port = third->http;
+        settings.https_port = third->https;
+        write_web_settings(app, settings);
+        REQUIRE(save_app_config(app_config_file(data), app, error));
+        st = service.reload();
+        close(holder);
+        CHECK(st["nginx"]["ports_taken"] == nlohmann::json::array({third->http}));
+        CHECK(st["nginx"]["running"] == true);
+        CHECK(st["nginx"]["http_port"] != third->http);
+        const auto http = st["nginx"]["http_port"].get<Port>();
+        CHECK(get(http, "shop.localhost") == "200 shop off");
+    }
+    st = service.reload();
+    CHECK(st["nginx"]["http_port"] == third->http);
+    CHECK_FALSE(st["nginx"].contains("ports_taken"));
+    CHECK(st["sites"]["shop"]["address"] == "http://shop.localhost:" + std::to_string(third->http));
+    CHECK(get(third->http, "shop.localhost") == "200 shop off");
+    service.stop();
+}
+
+TEST_CASE("Settings > Ports & HTTPS with real nginx: a refused config keeps the old nginx; a shared port moves back") {
+    const auto nginx = tool("FLOSERVER_TEST_NGINX", "/usr/sbin/nginx");
+    const auto php = tool("FLOSERVER_TEST_PHP_CGI", "/usr/bin/php-cgi");
+    if (!nginx || !php) {
+        MESSAGE("nginx or php-cgi isn't installed here; skipped");
+        return;
+    }
+    const test_util::TempDir tmp;
+    const fs::path data = tmp.path() / "data";
+    install_test_nginx(data, *nginx);
+    const fs::path site = tmp.path() / "site";
+    test_util::write_file(site / "index.html", "site");
+    std::error_code ec;
+    for (const auto& e : fs::recursive_directory_iterator(tmp.path())) {
+        fs::permissions(e.path(), fs::perms::others_read | fs::perms::others_exec, fs::perm_options::add, ec);
+    }
+    fs::permissions(tmp.path(), fs::perms::others_read | fs::perms::others_exec, fs::perm_options::add, ec);
+
+    // Three ports in a row nobody here uses: A, A+1, A+2.
+    Port a = 0;
+    for (Port p = 25100; p < 25400; p = static_cast<Port>(p + 3)) {
+        if (can_listen_on_loopback(p) && can_listen_on_loopback(static_cast<Port>(p + 1)) &&
+            can_listen_on_loopback(static_cast<Port>(p + 2))) {
+            a = p;
+            break;
+        }
+    }
+    REQUIRE(a != 0);
+    const auto b = static_cast<Port>(a + 1);
+    const auto c = static_cast<Port>(a + 2);
+
+    AppConfig app;
+    std::string error;
+    REQUIRE(add_project(app, site, "", error));
+    app.projects.front().on = true;
+    WebSettings settings;
+    settings.ports = PortChoice::Custom;
+    settings.http_port = a;
+    settings.https_port = c;
+    write_web_settings(app, settings);
+    REQUIRE(save_app_config(app_config_file(data), app, error));
+
+    CertStore certs(data);
+    WebServiceConfig config;
+    config.data_dir = data;
+    config.reload_every = 1h;  // reloads only when the test asks
+    WebService service(config, certs);
+    service.start();
+    auto st = service.status();
+    INFO(st.dump(2));
+    REQUIRE(st["nginx"]["http_port"] == a);
+    REQUIRE(get(a, "site.localhost") == "200 site");
+
+    // Other ports, but nginx refuses the new config: the old nginx keeps
+    // serving on its ports, and the reason is said, also on later reloads.
+    const fs::path mime = runtimes_dir(data) / "nginx" / "1.24.0" / "conf" / "mime.types";
+    const std::string good_mime = read_small_file(mime, 1 << 20).value_or("");
+    test_util::write_file(mime, "types { this is broken");
+    settings.http_port = b;
+    write_web_settings(app, settings);
+    REQUIRE(save_app_config(app_config_file(data), app, error));
+    for (int i = 0; i < 2; ++i) {
+        st = service.reload();
+        CHECK(st["nginx"]["running"] == true);
+        CHECK(st["nginx"]["http_port"] == a);
+        CHECK(st.value("error", std::string()).find("nginx refused the new settings") != std::string::npos);
+        CHECK(st["sites"]["site"]["address"] == "http://site.localhost:" + std::to_string(a));
+        CHECK(get(a, "site.localhost") == "200 site");
+    }
+    CHECK(service.ports_in_use() == WebPorts{a, c, false});
+
+    // Fixed: the next change goes through. B held by another program: the
+    // automatic pair, with B taken; C stays nginx's own.
+    test_util::write_file(mime, good_mime);
+    const int holder = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(b);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    REQUIRE(bind(holder, reinterpret_cast<const sockaddr*>(&addr), sizeof addr) == 0);
+    REQUIRE(listen(holder, 1) == 0);
+    settings.https = false;  // a new text, so it isn't the refused one
+    write_web_settings(app, settings);
+    REQUIRE(save_app_config(app_config_file(data), app, error));
+    st = service.reload();
+    CHECK(st["nginx"]["ports_taken"] == nlohmann::json::array({b}));
+    const auto fallback = st["nginx"]["http_port"].get<Port>();
+    CHECK(fallback != b);
+    CHECK(get(fallback, "site.localhost") == "200 site");
+
+    // B free again: nginx moves to B and C, even though C's https port may
+    // be the fallback's own.
+    close(holder);
+    st = service.reload();
+    CHECK(st["nginx"]["http_port"] == b);
+    CHECK(st["nginx"]["https_port"] == c);
+    CHECK_FALSE(st["nginx"].contains("ports_taken"));
+    CHECK(get(b, "site.localhost") == "200 site");
+    service.stop();
+}
+
+TEST_CASE("Settings > Ports & HTTPS: custom ports taken, a fallback sharing the https port; nginx moves back once free") {
+    // The https port asked for is the fallback's own: nginx holds it, which
+    // mustn't count as taken when it moves.
+    const auto nginx = tool("FLOSERVER_TEST_NGINX", "/usr/sbin/nginx");
+    const auto php = tool("FLOSERVER_TEST_PHP_CGI", "/usr/bin/php-cgi");
+    if (!nginx || !php) {
+        MESSAGE("nginx or php-cgi isn't installed here; skipped");
+        return;
+    }
+    // As custom 8081/8443 with the fallback 8080/8443, one pair further on
+    // (8080-8088 are made "taken"), so other tests' 8080 doesn't matter.
+    constexpr Port kFallbackHttp = 8089;
+    constexpr Port kHttps = 8452;
+    constexpr Port kWanted = 8091;
+    if (!can_listen_on_loopback(kFallbackHttp) || !can_listen_on_loopback(kWanted) || !can_listen_on_loopback(kHttps)) {
+        MESSAGE("8089, 8091 or 8452 is in use here; skipped");
+        return;
+    }
+    const test_util::TempDir tmp;
+    const fs::path data = tmp.path() / "data";
+    install_test_nginx(data, *nginx);
+    const fs::path site = tmp.path() / "site";
+    test_util::write_file(site / "index.html", "site");
+    std::error_code ec;
+    for (const auto& e : fs::recursive_directory_iterator(tmp.path())) {
+        fs::permissions(e.path(), fs::perms::others_read | fs::perms::others_exec, fs::perm_options::add, ec);
+    }
+    fs::permissions(tmp.path(), fs::perms::others_read | fs::perms::others_exec, fs::perm_options::add, ec);
+
+    std::atomic<bool> wanted_taken{true};
+    WebServiceConfig config;
+    config.data_dir = data;
+    config.reload_every = 1h;  // reloads only when the test asks
+    // 80/443 and 8080-8088 are someone else's; the wanted port too, until
+    // the test lets go of it.
+    config.probe = [&](Port p) {
+        if (p == 80 || p == 443 || (p >= 8080 && p < kFallbackHttp) || (p == kWanted && wanted_taken.load())) {
+            return false;
+        }
+        return can_listen_on_loopback(p);
+    };
+    AppConfig app;
+    std::string error;
+    REQUIRE(add_project(app, site, "", error));
+    app.projects.front().on = true;
+    WebSettings settings;
+    settings.ports = PortChoice::Custom;
+    settings.http_port = kWanted;
+    settings.https_port = kHttps;
+    write_web_settings(app, settings);
+    REQUIRE(save_app_config(app_config_file(data), app, error));
+    CertStore certs(data);
+    WebService service(config, certs);
+    service.start();
+    auto st = service.status();
+    INFO(st.dump(2));
+    REQUIRE(st["nginx"]["http_port"] == kFallbackHttp);
+    REQUIRE(st["nginx"]["https_port"] == kHttps);
+    CHECK(st["nginx"]["ports_taken"] == nlohmann::json::array({kWanted}));
+
+    wanted_taken = false;
+    st = service.reload();
+    CHECK(st["nginx"]["http_port"] == kWanted);
+    CHECK(st["nginx"]["https_port"] == kHttps);
+    CHECK_FALSE(st["nginx"].contains("ports_taken"));
+    CHECK(get(kWanted, "site.localhost") == "200 site");
+    service.stop();
 }
 
 #endif

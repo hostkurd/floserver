@@ -71,8 +71,6 @@ enum class Str : std::uint8_t {
     FieldPython,
     ChoiceNone,
     ChoiceNewest,
-    ChoiceAuto,        // PHP: no key, the folder decides
-    ChoiceAutoIs,      // {0}: what's in effect, "None" or "Newest installed"
     NotInstalled,      // {0}: "8.1"
     SavedIn,           // {0}: "floserver.json"
     PhpOffNote,        // under the pickers: PHP off, the folder has .php files
@@ -221,6 +219,54 @@ enum class Str : std::uint8_t {
     // The project panel's tabs.
     PanelTabGeneral,
     PanelFolder,
+    // Settings > Ports & HTTPS (D20).
+    SettingsPorts,
+    PortsHint,
+    PortsWebTitle,
+    PortsAuto,
+    PortsAutoNote,
+    PortsStandard,
+    PortsStandardNote,  // {0}: an address
+    PortsAlternate,
+    PortsAlternateNote,  // {0}: an address
+    PortsCustom,
+    PortsCustomNote,
+    PortsHttpLabel,
+    PortsHttpsLabel,
+    PortsUse,
+    PortsBadNumber,
+    PortsSameNumber,
+    PortsInUse,  // {0}: http port, {1}: https port
+    PortsNotRunning,
+    PortsTakenBy,  // {0}: port, {1}: program
+    PortsTakenByPid,  // {0}: port, {1}: process id
+    PortsTaken,  // {0}: port
+    PortsMovesLater,
+    PortsHttpsTitle,
+    PortsHttpsProjects,
+    PortsHttpsProjectsNote,  // {0}: "https://<name>.localhost"
+    PortsHttpsShared,
+    PortsHttpsSharedNote,  // {0}: "https://localhost/<folder>/", {1}: "<folder>.localhost"
+    PortsNeedsTrust,
+    PortsCaTitle,
+    PortsCaTrusted,
+    PortsCaNotTrusted,
+    PortsCaNone,
+    PortsCaDamaged,  // {0}: the reason (English)
+    PortsCaSafe,
+    PortsTrust,
+    PortsOpenCert,
+    PortsTrustDone,
+    PortsTrustNo,
+    PortsTrustFailed,  // {0}: the reason
+    PortsRemoveDone,
+    PortsRemoveNo,
+    PortsRemoveFailed,  // {0}: the reason
+    PortsChangeFailed,  // {0}: the service's reason
+    PortsReadFailed,  // {0}: the service's reason
+    PortsOpenFailed,  // {0}: the reason
+    PortsChanging,
+    PortsCertUnreadable,  // a reason, after "Not added: "
     Count_,
 };
 

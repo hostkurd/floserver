@@ -31,7 +31,9 @@ using PortProbe = std::function<bool(Port)>;
 struct WebPorts {
     Port http;
     Port https;
-    bool fallback;  // true when 80/443 were taken and 8080/8443 (or later) are used
+    bool fallback;  // true when 80/443 (or the pair asked for) were taken and another pair is used
+
+    bool operator==(const WebPorts&) const = default;
 };
 
 // Q4: 80 and 443 when both are free, else the first free pair from

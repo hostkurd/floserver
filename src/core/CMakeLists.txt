@@ -30,6 +30,7 @@ add_library(floserver_core STATIC
     src/app_runner.cpp
     src/apache_config.cpp
     src/web_service.cpp
+    src/web_settings.cpp
     src/crypto_common.cpp
     src/crypto_windows.cpp
     src/crypto_openssl.cpp

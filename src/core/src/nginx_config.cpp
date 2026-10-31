@@ -2,6 +2,7 @@
 
 #include "floserver/core/project_registry.h"
 #include "floserver/core/request_log.h"
+#include "floserver/core/shared_sites.h"
 
 #include <algorithm>
 #include <set>
@@ -74,7 +75,8 @@ public:
              << "    " << kRequestLogFormat << "\n";
 
         const bool any_tls = std::any_of(spec_.sites.begin(), spec_.sites.end(),
-                                         [](const NginxSite& s) { return s.tls.has_value(); });
+                                         [](const NginxSite& s) { return s.tls.has_value(); }) ||
+                             (spec_.shared && spec_.shared->tls);
         // One upstream per pool: a php-cgi worker on each port, requests
         // spread over them. A worker that sleeps still has its port held by
         // the service, so a connection never fails; max_fails=0 keeps nginx
@@ -210,7 +212,7 @@ private:
             out_ << "    server {\n";
             listen(spec_.ports.http, "");
             out_ << "        server_name " << host << ";\n"
-                 << "        return 301 " << site_address(site.name, spec_.ports, true) << "$request_uri;\n"
+                 << "        return 302 " << site_address(site.name, spec_.ports, true) << "$request_uri;\n"
                  << "    }\n";
         }
         out_ << "    server {\n";
@@ -340,10 +342,27 @@ private:
             }
             request_log = "access_log " + *quoted + " floserver_requests;\n";
         }
+        std::optional<std::string> cert;
+        std::optional<std::string> key;
+        if (shared.tls) {
+            cert = path(shared.tls->certificate);
+            key = path(shared.tls->key);
+            if (!cert || !key) {
+                return false;
+            }
+        }
         const std::string bare = root->substr(1, root->size() - 2);
         const auto server = [&](bool by_folder) {
+            const bool https = !by_folder && shared.tls;
             out_ << "    server {\n";
-            listen(spec_.ports.http, "");
+            if (https) {
+                listen(spec_.ports.https, spec_.http2_directive ? " ssl" : " ssl http2");
+                out_ << (spec_.http2_directive ? "        http2 on;\n" : "")
+                     << "        ssl_certificate " << *cert << ";\n"
+                     << "        ssl_certificate_key " << *key << ";\n";
+            } else {
+                listen(spec_.ports.http, "");
+            }
             if (by_folder) {
                 // Each folder its own root, like a project; a project of the
                 // same name wins (exact names come first).
@@ -407,6 +426,7 @@ private:
                      << "            include " << fastcgi_params_ << ";\n"
                      << "            fastcgi_param SCRIPT_FILENAME " << *list << ";\n"
                      << "            fastcgi_param SCRIPT_NAME /;\n"
+                     << (https ? "            fastcgi_param HTTPS on;\n" : "")
                      << "            fastcgi_pass " << upstream_name(shared.php_ports) << ";\n";
                 if (idle_log) {
                     out_ << "            access_log " << *idle_log << " floserver_idle;\n";
@@ -427,11 +447,19 @@ private:
                      // under localhost/ a missing file is just missing.
                      << "            try_files $uri $uri/ " << (by_folder ? "/index.php$is_args$args" : "=404") << ";\n"
                      << "        }\n";
-                write_php_location(shared.php_ports, false, idle_log, request_log);
+                write_php_location(shared.php_ports, https, idle_log, request_log);
             }
             out_ << "    }\n";
         };
         out_ << "\n    # Shared sites\n";
+        if (shared.tls) {
+            // Only localhost moves to https; <folder>.localhost stays http.
+            out_ << "    server {\n";
+            listen(spec_.ports.http, "");
+            out_ << "        server_name localhost;\n"
+                 << "        return 302 " << shared_address(spec_.ports, true) << "$request_uri;\n"
+                 << "    }\n";
+        }
         server(false);
         server(true);
         if (!shared.reserved.empty()) {

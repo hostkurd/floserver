@@ -83,15 +83,18 @@ inline constexpr std::size_t kMaxSharedFolders = 1000;
 // out. At most kMaxSharedFolders. Empty when the folder can't be read.
 [[nodiscard]] std::vector<SharedFolder> scan_shared_folders(const std::filesystem::path& dir, const AppConfig& app);
 
-// "http://localhost:8080", or "http://localhost" on port 80; shared sites are http only.
-[[nodiscard]] std::string shared_address(const WebPorts& ports);
+// "http://localhost:8080", or "http://localhost" on port 80; with `https`
+// (Settings → Ports & HTTPS) "https://localhost:8443" or "https://localhost".
+[[nodiscard]] std::string shared_address(const WebPorts& ports, bool https = false);
 
 // The page localhost/ shows when the www folder has no index file of its
 // own: a small PHP script, run by the shared sites' PHP pool, that reads the
 // www folder only when the page is opened (nothing reads it in the
 // background) and lists its folders with their addresses, Node.js/Python
 // apps and project names. The project names come from config.json.
+// `http_port`: where <folder>.localhost links go when the page itself is
+// opened over https (Settings → Ports & HTTPS).
 [[nodiscard]] std::string shared_list_script(const std::filesystem::path& dir, const std::filesystem::path& config_json,
-                                             WebServer web);
+                                             WebServer web, Port http_port = 80);
 
 }  // namespace floserver::core

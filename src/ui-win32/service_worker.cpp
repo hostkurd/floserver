@@ -210,6 +210,9 @@ void ServiceWorker::php_set(const nlohmann::json& params) {
 void ServiceWorker::php_custom_ini(const std::string& series, bool final) {
     push({Command::Kind::PhpCustomIni, {}, final, series, std::nullopt, {}, {}});
 }
+void ServiceWorker::web_settings(const std::string& what, const nlohmann::json& params) {
+    push({Command::Kind::WebSettings, {}, false, what, std::nullopt, {}, params});
+}
 void ServiceWorker::project_php(const std::string& project, const nlohmann::json& params) {
     push({Command::Kind::ProjectPhp, project, false, {}, std::nullopt, {}, params});
 }
@@ -256,6 +259,7 @@ Snapshot ServiceWorker::take() {
     latest_.runtimes_refresh = false;
     latest_.settings_error.clear();
     latest_.php.clear();
+    latest_.web_settings.clear();
     latest_.custom_ini.clear();
     latest_.custom_ini_error.clear();
     latest_.custom_ini_final = false;
@@ -394,6 +398,7 @@ void ServiceWorker::run(const std::stop_token& stop) {
         bool refetch_runtimes = false;  // a change Settings shows is done: ask again
         std::optional<Defaults> defaults;
         std::vector<Snapshot::PhpAnswer> php_answers;
+        std::vector<Snapshot::WebSettingsAnswer> web_answers;
         std::string custom_ini;
         std::string custom_ini_error;
         bool custom_ini_final = false;
@@ -725,6 +730,31 @@ void ServiceWorker::run(const std::stop_token& stop) {
                 case Command::Kind::ProjectPhp:
                     php_call(c.project, {}, "projects.php", c.params, true);
                     break;
+                case Command::Kind::WebSettings: {
+                    Snapshot::WebSettingsAnswer answer{c.key, std::nullopt, {}};
+                    if (client && c.key == "reload") {
+                        // The CA was trusted or removed here: sites switch now.
+                        if (const auto reloaded = client->call("web.reload", nlohmann::json::object()); !reloaded) {
+                            client.reset();
+                        }
+                    }
+                    const char* method = c.key == "set" ? "web.settings.set"
+                                         : c.key == "ca" ? "certs.ensure_ca"
+                                                         : "web.settings.get";
+                    if (!client) {
+                        answer.error = lost;
+                    } else if (auto got = client->call(method, c.key == "set" ? c.params : nlohmann::json::object());
+                               !got) {
+                        client.reset();
+                        answer.error = lost;
+                    } else if (!got->ok) {
+                        answer.error = got->error_message;
+                    } else {
+                        answer.reply = std::move(got->result);
+                    }
+                    web_answers.push_back(std::move(answer));
+                    break;
+                }
                 case Command::Kind::PhpCustomIni:
                     custom_ini_final = c.flag;
                     if (!client) {
@@ -932,6 +962,9 @@ void ServiceWorker::run(const std::stop_token& stop) {
         }
         for (auto& answer : php_answers) {
             latest_.php.push_back(std::move(answer));
+        }
+        for (auto& answer : web_answers) {
+            latest_.web_settings.push_back(std::move(answer));
         }
         if (!custom_ini.empty() || !custom_ini_error.empty()) {
             latest_.custom_ini = std::move(custom_ini);

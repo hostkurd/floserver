@@ -26,6 +26,7 @@ add_executable(floserver_tests
     test_shared_sites.cpp
     test_ui_model.cpp
     test_web_service.cpp
+    test_web_settings.cpp
     test_tar.cpp
     test_templates.cpp
     test_version.cpp

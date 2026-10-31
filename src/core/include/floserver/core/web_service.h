@@ -19,6 +19,9 @@
 // HTTPS: sites get certificates when the local CA exists and isn't known to
 // be untrusted (on Windows, after `flo trust`); before that they're served
 // on plain http, so the browser shows no warnings in the meantime.
+// Settings > Ports & HTTPS (web_settings.h, config.json's "web") can turn
+// it off for projects, turn it on for https://localhost/<folder>/, and ask
+// for other ports.
 
 #include "floserver/core/app_runner.h"
 #include "floserver/core/certificates.h"
@@ -82,7 +85,8 @@ public:
     // Brings everything in line with the project list now; the status after.
     nlohmann::json reload();
 
-    //   {"nginx": {"running", "pid", "version", "http_port", "https_port", "tls", "error"?},
+    //   {"nginx": {"running", "pid", "version", "http_port", "https_port", "tls", "https_off"?,
+    //              "ports_taken"? (asked for in Settings, held by another program), "error"?},
     //    "pools": [{"key", "version", "port", "state": "sleeping"|"running"|"failed",
     //   {"key", "version", "ports", "state", "pid"?, "pids"? (every worker), "sites",
     //    "keep_running", "idle_s"?, "error"?}],
@@ -92,6 +96,9 @@ public:
     //              "state"?, "missing"?, "problem"?, "error"?}},
     //    "error"?: "..."}
     [[nodiscard]] nlohmann::json status() const;
+
+    // The ports nginx listens on now; nothing while it isn't running.
+    [[nodiscard]] std::optional<WebPorts> ports_in_use() const;
 
 private:
     struct Site {
@@ -135,8 +142,11 @@ private:
     std::filesystem::path nginx_dir_;
     std::string nginx_version_;
     std::optional<WebPorts> ports_;
+    std::optional<WebPorts> wanted_ports_;  // what Settings asked for when ports_ was chosen; nothing: auto
+    std::vector<Port> ports_taken_;          // of those, held by another program
     std::string config_text_;  // what nginx runs now
     bool tls_ = false;
+    bool https_off_ = false;  // Settings > Ports & HTTPS turned it off for projects
     std::string nginx_error_;
     std::string error_;
     std::chrono::steady_clock::time_point nginx_retry_after_;

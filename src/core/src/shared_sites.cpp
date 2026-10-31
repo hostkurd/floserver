@@ -203,7 +203,10 @@ std::vector<SharedFolder> scan_shared_folders(const fs::path& dir, const AppConf
     return out;
 }
 
-std::string shared_address(const WebPorts& ports) {
+std::string shared_address(const WebPorts& ports, bool https) {
+    if (https) {
+        return ports.https == 443 ? std::string("https://localhost") : "https://localhost:" + std::to_string(ports.https);
+    }
     return ports.http == 80 ? std::string("http://localhost") : "http://localhost:" + std::to_string(ports.http);
 }
 
@@ -253,7 +256,10 @@ if (is_array($c) && isset($c['projects']) && is_array($c['projects'])) {
 }
 $host = isset($_SERVER['HTTP_HOST']) ? (string)$_SERVER['HTTP_HOST'] : 'localhost';
 $port = preg_match('/:(\d{1,5})$/', $host, $m) ? ':' . $m[1] : '';
-$base = 'http://localhost' . $port;
+$https = isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== '' && strtolower((string)$_SERVER['HTTPS']) !== 'off';
+$base = ($https ? 'https' : 'http') . '://localhost' . $port;
+$folder_port = $https ? @HTTPPORT@ : $port; // <folder>.localhost is always http
+
 $folders = [];
 foreach ((@scandir($www) ?: []) as $n) {
     if ($n === '' || $n[0] === '.' || !is_dir("$www/$n")) { continue; }
@@ -297,7 +303,7 @@ p.foot{color:var(--muted);font-size:12px;margin:12px 2px}
 <?php elseif ($label && isset($projects[$n])): ?>
 <span class="note"><?= fs_h($n) ?>.localhost is the project <?= fs_h($n) ?></span>
 <?php elseif ($label): ?>
-<a class="note" href="<?= fs_h('http://' . $n . '.localhost' . $port . '/') ?>"><?= fs_h($n . '.localhost' . $port) ?></a>
+<a class="note" href="<?= fs_h('http://' . $n . '.localhost' . $folder_port . '/') ?>"><?= fs_h($n . '.localhost' . $folder_port) ?></a>
 <?php endif; ?>
 </li>
 <?php endforeach; ?>
@@ -311,13 +317,14 @@ p.foot{color:var(--muted);font-size:12px;margin:12px 2px}
 
 }  // namespace
 
-std::string shared_list_script(const fs::path& dir, const fs::path& config_json, WebServer web) {
+std::string shared_list_script(const fs::path& dir, const fs::path& config_json, WebServer web, Port http_port) {
     const auto text = [](const fs::path& p) {
         const std::u8string u = p.generic_u8string();
         return std::string(u.begin(), u.end());
     };
     // One pass over the template: an inserted value is never searched again.
-    const std::array<std::pair<std::string_view, std::string>, 3> values = {{
+    const std::array<std::pair<std::string_view, std::string>, 4> values = {{
+        {"@HTTPPORT@", php_string(http_port == 80 ? std::string() : ":" + std::to_string(http_port))},
         {"@WWW@", php_string(text(dir))},
         {"@CONFIG@", php_string(text(config_json))},
         {"@WEB@", php_string(web == WebServer::Apache ? "Apache" : "nginx")},

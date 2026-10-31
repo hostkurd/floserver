@@ -8,6 +8,11 @@
 // asks php.get once when it's opened or the version changes, and changes
 // wait for Save (one php.set).
 //
+// Ports & HTTPS is the third: the web ports, HTTPS for projects and for
+// shared sites, and FloServer's certificate authority. It asks
+// web.settings.get once when it's opened (the service checks the ports then,
+// and names who holds one); each change is sent at once (web.settings.set).
+//
 // Nothing runs while it's closed: it's destroyed on close, and while open it
 // adds no timer or poll. Opening asks runtimes.list {"cached": true} once (no
 // network); what's installed then comes from the main window's 2 s
@@ -17,6 +22,7 @@
 #include "canvas.h"
 #include "form_parts.h"
 #include "model/php_page.h"
+#include "model/ports_page.h"
 #include "model/runtimes_page.h"
 #include "model/ui_strings.h"
 #include "service_worker.h"
@@ -71,7 +77,8 @@ public:
     void quit_when_asked() { quit_after_ask_ = true; }
 
 private:
-    enum class Section : std::uint8_t { Runtimes, Php };
+    // In the sidebar's order.
+    enum class Section : std::uint8_t { Runtimes, Php, Ports };
     enum class Part : std::uint8_t {
         None,
         Nav,     // row: the section
@@ -90,6 +97,15 @@ private:
         PhpReset,
         PhpDiscard,
         PhpSave,
+        // Settings > Ports & HTTPS; `row` is the choice's or switch's index.
+        PortsChoice,
+        PortsHttpEdit,
+        PortsHttpsEdit,
+        PortsUse,
+        PortsSwitch,  // row 0: HTTPS for projects, 1: shared sites
+        PortsTrust,
+        PortsRemove,
+        PortsOpenCert,
     };
     enum class Button : std::uint8_t { None, Remove, RemoveDisabled, Download, Cancel };
     struct Hit {
@@ -150,8 +166,38 @@ private:
         RECT discard{};
         RECT save{};
     };
+    struct PortsGeometry {
+        RECT note{};  // Loading…
+        RECT web_card{};
+        RECT web_title{};
+        std::array<RECT, kPortChoices.size()> choices{};  // the whole row
+        std::array<RECT, kPortChoices.size()> choice_labels{};
+        std::array<RECT, kPortChoices.size()> choice_notes{};
+        RECT http_label{};
+        RECT https_label{};
+        RECT http_box{};   // empty unless "Other ports" is picked
+        RECT https_box{};
+        RECT use{};
+        RECT problem{};
+        RECT in_use{};
+        std::vector<std::pair<RECT, std::string>> taken;
+        RECT https_card{};
+        RECT https_title{};
+        std::array<RECT, 2> switch_rows{};
+        std::array<RECT, 2> switches{};
+        std::array<RECT, 2> switch_labels{};
+        std::array<RECT, 2> switch_notes{};
+        RECT needs_trust{};
+        RECT ca_card{};
+        RECT ca_title{};
+        RECT ca_status{};
+        RECT ca_safe{};
+        RECT trust{};   // empty when there's nothing to trust
+        RECT remove{};
+        RECT open{};
+    };
     struct Geometry {
-        std::array<RECT, 2> navs{};  // Runtimes, PHP
+        std::array<RECT, 3> navs{};  // Runtimes, PHP, Ports & HTTPS
         RECT title{};
         RECT hint{};
         RECT check{};
@@ -159,6 +205,7 @@ private:
         RECT note{};  // "Loading…" before the first answer
         std::vector<GroupGeometry> groups;
         PhpGeometry php;
+        PortsGeometry ports;
         int content_h = 0;  // of the main column, unscrolled
     };
 
@@ -199,12 +246,35 @@ private:
     void paint_ring(Canvas& c, const RECT& r) const;
     [[nodiscard]] bool is_focused(const Hit& hit) const;
 
+    // --- Settings > Ports & HTTPS (settings_ports.cpp) ---
+    void load_ports();
+    void on_ports_answers(const Snapshot& snap);
+    void make_port_edits();
+    void fill_port_edits();
+    void place_port_edits();
+    void layout_ports(HDC dc, Geometry& g, int x0, int x1, int y) const;
+    [[nodiscard]] const RECT* ports_rect_of(const Hit& hit) const;
+    void ports_focus_order(std::vector<Hit>& order) const;
+    void on_ports_click(const Hit& hit);
+    [[nodiscard]] std::size_t shown_port_choice() const;
+    [[nodiscard]] bool shown_switch(int index) const;
+    void send_ports(const nlohmann::json& params);
+    void use_custom_ports();
+    void trust_ca();
+    void trust_ca_now();
+    void remove_ca();
+    void open_certificate();
+    void paint_ports_shapes(Canvas& c) const;
+    void paint_ports_text(Canvas& c) const;
+
     // --- Settings > PHP (settings_php.cpp) ---
     // Leaves PHP's unsaved changes as the user says; false: stay (Cancel).
     // `then` is what a Save waits for (done once it's answered without a
     // refusal); `series` goes with AfterSave::Version.
     [[nodiscard]] bool settle_php_changes(AfterSave then, const std::string& series = {});
     void set_php_read_only(bool read_only);
+    // port_edits_[i] has id kPortEditBase + i (edits_ start at 1000).
+    static constexpr int kPortEditBase = 2000;
     void try_close();
     // `series`: the PHP version to show; empty for the newest.
     void open_section(Section section, const std::string& series = {});
@@ -290,6 +360,17 @@ private:
     // The find box, then one per text field; only while the section is shown.
     std::vector<std::unique_ptr<FieldEdit>> edits_;
     std::vector<int> field_edit_;  // field index -> index in edits_, or -1 (a picker)
+    // Settings > Ports & HTTPS: web.settings.get's answer, and what the user
+    // picked while its web.settings.set is on its way.
+    std::optional<PortsSettings> ports_;
+    bool ports_loading_ = false;
+    int ports_waiting_ = 0;                 // changes, CA requests on their way
+    std::optional<std::size_t> pending_choice_;
+    std::array<std::optional<bool>, 2> pending_switch_{};
+    bool custom_open_ = false;              // "Other ports" picked here, not sent yet
+    Str ports_problem_ = Str::Count_;       // what's wrong with the typed ports
+    bool trust_after_ca_ = false;           // Trust asked for a CA first
+    std::vector<std::unique_ptr<FieldEdit>> port_edits_;  // http, https; only while the section is shown
     win::UniqueBrush input_brush_;
     win::UniqueBrush input_set_brush_;
 

@@ -28,6 +28,7 @@
 #include "floserver/core/secret_store.h"
 #include "floserver/core/template_service.h"
 #include "floserver/core/web_service.h"
+#include "floserver/core/web_settings.h"
 
 #include <algorithm>
 #include <atomic>
@@ -173,6 +174,7 @@ struct Service {
     std::unique_ptr<floserver::core::ProjectService> projects;
     std::unique_ptr<floserver::core::CertStore> certs;
     std::unique_ptr<floserver::core::WebService> web;
+    std::unique_ptr<floserver::core::WebSettingsService> web_settings;
     std::unique_ptr<floserver::core::SecretStore> secrets;
     std::unique_ptr<floserver::core::DatabaseService> databases;
     std::unique_ptr<floserver::core::TemplateService> templates;
@@ -517,6 +519,42 @@ struct Service {
         return protocol::make_result(r.id, json::object());
     }
 
+    // Settings > Ports & HTTPS (web_settings.h): web.settings.get, once when
+    // the section opens; web.settings.set {"ports"?, "http_port"?,
+    // "https_port"?, "https"?, "shared_https"?}. Both reply with the
+    // settings, the ports in use, the ports asked for that another program
+    // holds (and which program), and the CA as certs.status says it, with
+    // "viewer": its .crt for Windows' certificate viewer.
+    [[nodiscard]] std::string web_settings_request(const protocol::Request& r) const {
+        if (!web_settings) {
+            return protocol::make_error(r.id, "no_data_folder",
+                                        "FloServer can't find a folder to keep its settings in (LOCALAPPDATA or HOME)");
+        }
+        floserver::core::ServiceRefusal refusal;
+        const auto result = r.method == "web.settings.get"
+                                ? web_settings->get(refusal)
+                                : web_settings->set(r.params.is_object() ? r.params : json::object(), refusal);
+        return result ? protocol::make_result(r.id, *result) : protocol::make_error(r.id, refusal.code, refusal.message);
+    }
+
+    // The CA for Settings > Ports & HTTPS: certs.status's "ca" and its .crt,
+    // {"error"} when it's damaged, or null when there's none yet.
+    [[nodiscard]] json ca_for_settings() const {
+        if (!certs) {
+            return nullptr;
+        }
+        std::string error;
+        const auto ca = certs->load_ca(error);
+        if (!ca) {
+            return error.empty() ? json(nullptr) : json{{"error", error}};
+        }
+        json out = ca_json(*ca);
+        if (const auto viewer = certs->ca_viewer_file(error)) {
+            out["viewer"] = floserver::core::path_to_utf8(*viewer);
+        }
+        return out;
+    }
+
     // web.status, web.reload: what runs, or bring it in line now (after
     // `flo trust`, say).
     [[nodiscard]] std::string web_request(const protocol::Request& r) const {
@@ -687,6 +725,8 @@ struct Service {
                 reply = cert_request(*request);
             } else if (request->method == "web.status" || request->method == "web.reload") {
                 reply = web_request(*request);
+            } else if (request->method == "web.settings.get" || request->method == "web.settings.set") {
+                reply = web_settings_request(*request);
             } else if (request->method == "databases.list" || request->method == "databases.login" ||
                        request->method == "shared.login") {
                 reply = database_request(*request);
@@ -819,6 +859,15 @@ int run() {
         service->certs = std::make_unique<floserver::core::CertStore>(*data);
         service->web = std::make_unique<floserver::core::WebService>(web_config(*data), *service->certs);
         service->web->start();
+        {
+            floserver::core::WebSettingsService::Hooks hooks;
+            const Service* s = service.get();
+            hooks.in_use = [s] { return s->web->ports_in_use(); };
+            hooks.reload = [s] { (void)s->web->reload(); };
+            hooks.ca = [s] { return s->ca_for_settings(); };
+            service->web_settings =
+                std::make_unique<floserver::core::WebSettingsService>(*service->projects, std::move(hooks));
+        }
         service->secrets = std::make_unique<floserver::core::SecretStore>(*data);
         floserver::core::DatabaseServiceConfig db;
         db.data_dir = *data;

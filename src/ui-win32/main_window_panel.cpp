@@ -938,7 +938,10 @@ void MainWindow::show_field_menu(std::size_t index) {
         return;
     }
     const std::size_t picked = command - kFirstChoice;
-    if (picked == shown || selected_ != project || !worker_) {
+    // Without the key in the file the ticked choice is only what's in
+    // effect; picking it writes it.
+    const bool pending = pending_use_.contains(ServiceWorker::use_key(project, field.key));
+    if ((picked == shown && (!field.implicit || pending)) || selected_ != project || !worker_) {
         return;
     }
     const std::string key = ServiceWorker::use_key(project, field.key);

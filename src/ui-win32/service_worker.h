@@ -97,6 +97,15 @@ struct Snapshot {
         bool save = false;                    // the answer to a save
     };
     std::vector<PhpAnswer> php;
+    // Settings > Ports & HTTPS: answers in the order they came. `what` is
+    // what was asked: "get", "reload" (web.reload, then get), "set" or "ca"
+    // (certs.ensure_ca).
+    struct WebSettingsAnswer {
+        std::string what;
+        std::optional<nlohmann::json> reply;
+        std::string error;  // the service's reason, or the connection's
+    };
+    std::vector<WebSettingsAnswer> web_settings;
     std::string custom_ini;        // php.custom_ini's (or php.final_ini's) path, to open in Notepad
     std::string custom_ini_error;
     bool custom_ini_final = false; // it's the final php.ini, to read, not custom.ini
@@ -153,6 +162,11 @@ public:
     void php_set(const nlohmann::json& params);
     // With `final`, php.final_ini: the php.ini the series uses, to look at.
     void php_custom_ini(const std::string& series, bool final = false);
+    // Settings > Ports & HTTPS: web.settings.get ("get"), web.reload then
+    // web.settings.get ("reload", after the CA is trusted or removed),
+    // web.settings.set with `params` ("set"), or certs.ensure_ca ("ca").
+    // Answered in Snapshot::web_settings.
+    void web_settings(const std::string& what, const nlohmann::json& params = nlohmann::json::object());
     // The panel's PHP part: projects.php, answered to the project.
     void project_php(const std::string& project, const nlohmann::json& params);
     // New project: runtimes.list (cached) once, for its defaults.
@@ -210,6 +224,7 @@ private:
             PhpSet,
             PhpCustomIni,
             ProjectPhp,
+            WebSettings,
             LoadDefaults,
             Select,
             Start,

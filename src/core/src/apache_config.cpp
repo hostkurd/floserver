@@ -239,7 +239,7 @@ private:
         };
         out_ << "\n# Shared sites: the www folder\n"
              << "<VirtualHost 127.0.0.1:" << kApachePortPlaceholder << ">\n"
-             << "    ServerName localhost\n"
+             << "    ServerName " << (shared.https ? "https://" : "") << "localhost\n"
              << "    DocumentRoot " << *root << "\n";
         directory("index.php index.html index.htm");
         if (!shared.php_ports.empty()) {
