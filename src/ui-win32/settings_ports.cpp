@@ -629,11 +629,8 @@ void SettingsWindow::paint_ports_shapes(Canvas& c) const {
             paint_button(c, pg.open, hover_ == hit, is_focused(hit), true);
         }
     }
-    if (g.content_h > height_ && height_ > 0) {
-        const int thumb = std::max(px(24), height_ * height_ / g.content_h);
-        const int top = (height_ - thumb) * scroll_ / (g.content_h - height_);
-        c.round_rect({width_ - px(6), top + px(2), width_ - px(2), top + thumb - px(2)}, pxf(2), p.switch_off_border);
-    }
+    // The scroll bar, when the page is taller than the window.
+    scroll_bar_.paint(c, p);
     c.unclip();
 }
 

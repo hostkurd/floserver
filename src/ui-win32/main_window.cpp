@@ -209,10 +209,20 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             }
             break;
         case WM_MOUSEMOVE:
-            on_mouse_move(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+            if (!scroll_bar_mouse(msg, GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam))) {
+                on_mouse_move(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+            }
             return 0;
+        case WM_CAPTURECHANGED:
+        case WM_CANCELMODE:
+            list_bar_.cancel(hwnd_);
+            panel_bar_.cancel(hwnd_);
+            break;
         case WM_MOUSELEAVE:
             tracking_mouse_ = false;
+            if (list_bar_.leave() || panel_bar_.leave()) {
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
             if (hover_.part != Part::None) {
                 hover_ = {};
                 InvalidateRect(hwnd_, nullptr, FALSE);
@@ -234,11 +244,17 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             }
             break;
         case WM_LBUTTONDOWN:
+            if (scroll_bar_mouse(msg, GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam))) {
+                return 0;  // a scroll bar's: the keyboard focus stays where it is
+            }
             SetFocus(hwnd_);
             pressed_ = hit_test(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
             SetCapture(hwnd_);
             return 0;
         case WM_LBUTTONUP: {
+            if (scroll_bar_mouse(msg, GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam))) {
+                return 0;
+            }
             ReleaseCapture();
             const Hit hit = hit_test(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
             if (hit == pressed_) {
@@ -274,6 +290,9 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         case WM_TIMER:
+            if (list_bar_.tick(hwnd_, wparam) || panel_bar_.tick(hwnd_, wparam)) {
+                return 0;
+            }
             if (wparam == kErrorTimer || wparam == kNoticeTimer) {
                 KillTimer(hwnd_, wparam);
                 (wparam == kErrorTimer ? change_error_ : notice_.text).clear();
@@ -794,6 +813,43 @@ void MainWindow::scroll_to(int target) {
     }
 }
 
+void MainWindow::place_scroll_bars() {
+    // The list's bar only while the list is what's shown under the mouse.
+    const bool list_shown = !wizard_open() && !www_open();
+    list_bar_.place(list_shown ? list_rect() : RECT{}, list_height(), scroll_, dpi_);
+    panel_bar_.place(list_shown && panel_open() ? panel_geometry_.content : RECT{}, panel_content_h(), panel_scroll_,
+                     dpi_);
+}
+
+bool MainWindow::scroll_bar_mouse(UINT msg, int x, int y) {
+    place_scroll_bars();
+    // The panel lies over the list when they don't fit side by side.
+    const bool in_panel = panel_open() && contains(panel_geometry_.panel, x, y);
+    switch (msg) {
+        case WM_LBUTTONDOWN:
+            return panel_bar_.press(hwnd_, x, y) || (!in_panel && list_bar_.press(hwnd_, x, y));
+        case WM_LBUTTONUP:
+            return panel_bar_.release(hwnd_) || list_bar_.release(hwnd_);
+        case WM_MOUSEMOVE: {
+            const bool held = list_bar_.active() || panel_bar_.active();
+            bool changed = panel_bar_.move(hwnd_, x, y);
+            if (!panel_bar_.active()) {
+                changed = list_bar_.move(hwnd_, in_panel ? -1 : x, in_panel ? -1 : y) || changed;
+            }
+            if (changed) {
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
+            if (!held && (list_bar_.hot() || panel_bar_.hot()) && hover_.part != Part::None) {
+                hover_ = {};  // the bar's, not the row's under it
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
+            return held || list_bar_.hot() || panel_bar_.hot();
+        }
+        default:
+            return false;
+    }
+}
+
 void MainWindow::ensure_visible(int row) {
     if (row < 0) {
         return;
@@ -849,6 +905,9 @@ bool MainWindow::switch_value(const ProjectRow& row) const {
 }
 
 MainWindow::Hit MainWindow::hit_test(int x, int y) const {
+    if (panel_bar_.over(x, y) || (list_bar_.over(x, y) && !(panel_open() && contains(panel_geometry_.panel, x, y)))) {
+        return {};  // a scroll bar's
+    }
     if (contains(new_project_button(), x, y)) {
         return {Part::NewProject, -1, {}};
     }
@@ -1426,6 +1485,7 @@ void MainWindow::on_paint() {
             const bool list_shown = !wizard_open() && !www_open();
             shared_geometry_ = list_shown ? shared_geometry(mem.get()) : SharedGeometry{};
             www_geometry_ = www_open() && !wizard_open() ? www_geometry(mem.get()) : WwwGeometry{};
+            place_scroll_bars();
             {
                 Canvas canvas(mem.get(), width_, rtl_);
                 canvas.fill({0, 0, width_, height_}, palette(dark_).window);
@@ -1613,15 +1673,8 @@ void MainWindow::paint_list(Canvas& c, HDC /*dc*/, bool text_pass) const {
     }
 
     if (!text_pass) {
-        // A thin scroll indicator when the list is taller than the card.
-        const int view = height_of(list);
-        const int content = list_height();
-        if (content > view && view > 0) {
-            const int thumb = std::max(px(24), view * view / content);
-            const int top = list.top + (view - thumb) * scroll_ / (content - view);
-            c.round_rect({list.right - px(6), top + px(2), list.right - px(2), top + thumb - px(2)}, pxf(2),
-                         p.switch_off_border);
-        }
+        // The scroll bar, when the list is taller than the card.
+        list_bar_.paint(c, p);
         c.unclip();
     } else {
         c.unclip_text();

@@ -1121,15 +1121,8 @@ void MainWindow::paint_panel(Canvas& c, HDC dc, bool text_pass) const {
         if (height_of(g.log_box) > 0) {
             c.round_rect(g.log_box, pxf(6), p.log);
         }
-        // A thin scroll indicator, as in Settings, when the tab is taller than its room.
-        const int content_h = panel_content_h();
-        const int view = height_of(g.content);
-        if (content_h > view && view > 0) {
-            const int thumb = std::max(px(24), view * view / content_h);
-            const int top = g.content.top + (view - thumb) * panel_scroll_ / (content_h - view);
-            c.round_rect({g.content.right - px(6), top + px(2), g.content.right - px(2), top + thumb - px(2)}, pxf(2),
-                         p.switch_off_border);
-        }
+        // The scroll bar, as in Settings, when the tab is taller than its room.
+        panel_bar_.paint(c, p);
         c.unclip();
         return;
     }

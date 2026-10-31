@@ -290,22 +290,43 @@ LRESULT SettingsWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
             return 0;
-        case WM_MOUSEMOVE:
-            on_mouse_move(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+        case WM_MOUSEMOVE: {
+            // While the thumb is dragged (or the track paged) the bar has the mouse.
+            const bool held = scroll_bar_.active();
+            if (scroll_bar_.move(hwnd_, GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam))) {
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
+            if (!held) {
+                on_mouse_move(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+            }
             return 0;
+        }
+        case WM_CAPTURECHANGED:
+        case WM_CANCELMODE:
+            scroll_bar_.cancel(hwnd_);
+            break;
         case WM_MOUSELEAVE:
             tracking_mouse_ = false;
+            if (scroll_bar_.leave()) {
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
             if (hover_.part != Part::None) {
                 hover_ = {};
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
             return 0;
         case WM_LBUTTONDOWN:
+            if (scroll_bar_.press(hwnd_, GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam))) {
+                return 0;  // the bar's: the keyboard focus stays where it is
+            }
             SetFocus(hwnd_);
             pressed_ = hit_test(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
             SetCapture(hwnd_);
             return 0;
         case WM_LBUTTONUP: {
+            if (scroll_bar_.release(hwnd_)) {
+                return 0;
+            }
             ReleaseCapture();
             const Hit hit = hit_test(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
             if (hit == pressed_ && hit.part != Part::None) {
@@ -334,6 +355,9 @@ LRESULT SettingsWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         case WM_TIMER:
+            if (scroll_bar_.tick(hwnd_, wparam)) {
+                return 0;
+            }
             if (wparam == kMessageTimer) {
                 KillTimer(hwnd_, kMessageTimer);
                 message_.clear();
@@ -384,6 +408,7 @@ void SettingsWindow::on_create() {
 
 void SettingsWindow::on_destroy() {
     KillTimer(hwnd_, kMessageTimer);
+    KillTimer(hwnd_, kScrollTimer);
     edits_.clear();
     field_edit_.clear();
     port_edits_.clear();
@@ -735,7 +760,10 @@ void SettingsWindow::relayout() {
     place_php_edits();
     place_port_edits();
     place_db_edits();
+    place_scroll_bar();
 }
+
+void SettingsWindow::place_scroll_bar() { scroll_bar_.place({0, 0, width_, height_}, geometry_.content_h, scroll_, dpi_); }
 
 void SettingsWindow::scroll_to(int target) {
     const int most = std::max(0, geometry_.content_h - height_);
@@ -850,6 +878,9 @@ std::vector<SettingsWindow::Hit> SettingsWindow::focus_order() const {
 }
 
 SettingsWindow::Hit SettingsWindow::hit_test(int x, int y) const {
+    if (scroll_bar_.over(x, y)) {
+        return {};  // the bar's, not what's under it
+    }
     for (const Hit& hit : focus_order()) {
         if (const RECT* r = rect_of(hit); r != nullptr && contains(*r, x, y)) {
             return hit;
@@ -1321,12 +1352,8 @@ void SettingsWindow::paint_shapes(Canvas& c) const {
             }
         }
     }
-    // A thin scroll indicator when the page is taller than the window.
-    if (g.content_h > height_ && height_ > 0) {
-        const int thumb = std::max(px(24), height_ * height_ / g.content_h);
-        const int top = (height_ - thumb) * scroll_ / (g.content_h - height_);
-        c.round_rect({width_ - px(6), top + px(2), width_ - px(2), top + thumb - px(2)}, pxf(2), p.switch_off_border);
-    }
+    // The scroll bar, when the page is taller than the window.
+    scroll_bar_.paint(c, p);
     c.unclip();
 }
 

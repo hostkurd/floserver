@@ -9,6 +9,7 @@
 #include "form_parts.h"
 #include "model/php_page.h"
 #include "model/ui_strings.h"
+#include "scroll_bar.h"
 #include "service_worker.h"
 #include "settings_window.h"
 #include "win_util.h"
@@ -294,6 +295,9 @@ private:
     void layout();  // positions the search box and tooltips
     void update_visible();
     void scroll_to(int target);
+    void place_scroll_bars();
+    // A mouse message for a scroll bar; true when one took it.
+    bool scroll_bar_mouse(UINT msg, int x, int y);
     void ensure_visible(int row);
     [[nodiscard]] int list_height() const;
     [[nodiscard]] Hit hit_test(int x, int y) const;
@@ -560,6 +564,12 @@ private:
     std::optional<WINDOWPLACEMENT> settings_placement_;
 
     int scroll_ = 0;
+    // The list's and the panel's scroll bars (scroll_bar.h), placed from the
+    // last layout before each mouse message and paint.
+    static constexpr UINT_PTR kListScrollTimer = 3;
+    static constexpr UINT_PTR kPanelScrollTimer = 4;
+    ScrollBar list_bar_{kListScrollTimer, [this](int offset) { scroll_to(offset); }};
+    ScrollBar panel_bar_{kPanelScrollTimer, [this](int offset) { panel_scroll_to(offset); }};
     Hit hover_;
     Hit pressed_;
     int focus_ = -1;  // keyboard focus in the list

@@ -30,6 +30,7 @@
 #include "model/ports_page.h"
 #include "model/runtimes_page.h"
 #include "model/ui_strings.h"
+#include "scroll_bar.h"
 #include "service_worker.h"
 #include "win_util.h"
 #include "window_style.h"
@@ -304,6 +305,8 @@ private:
     [[nodiscard]] std::vector<Hit> focus_order() const;
     [[nodiscard]] const RECT* rect_of(const Hit& hit) const;
     void scroll_to(int target);
+    // The bar at the window's end follows the page (after each layout).
+    void place_scroll_bar();
     void ensure_visible(const Hit& hit);
     void show_message(std::string text, bool error);
     void update_tip(const Hit& hit);
@@ -492,6 +495,8 @@ private:
 
     Geometry geometry_;
     int scroll_ = 0;
+    static constexpr UINT_PTR kScrollTimer = 2;  // paging while the button is held on the bar
+    ScrollBar scroll_bar_{kScrollTimer, [this](int offset) { scroll_to(offset); }};
     Hit hover_;
     Hit pressed_;
     int focus_ = -1;  // index into focus_order()
