@@ -510,7 +510,7 @@ std::optional<std::string> set_project_php_settings(std::string_view text,
             return std::nullopt;
         }
         if (state && *state != "on" && *state != "off") {
-            error = "an extension is \"on\", \"off\" or null (the PHP series' setting), not \"" + *state + "\"";
+            error = R"(an extension is "on", "off" or null (the PHP series' setting), not ")" + *state + "\"";
             return std::nullopt;
         }
     }

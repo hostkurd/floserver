@@ -334,7 +334,7 @@ TEST_CASE("the php shim gets the series' settings and the project's own") {
     const TempDir tmp;
     const fs::path data = tmp.path() / "data";
     fake_install(data, "php", "8.5.12");
-    AppConfig app = with_php({{"8.5", {{"ini", {{"memory_limit", "768M"}, {"date.timezone", "UTC"}}}}}});
+    const AppConfig app = with_php({{"8.5", {{"ini", {{"memory_limit", "768M"}, {"date.timezone", "UTC"}}}}}});
     std::string error;
     REQUIRE(save_app_config(app_config_file(data), app, error));
     test_util::write_file(php_custom_ini_file(data, "8.5"), "max_input_vars = 5000\n");

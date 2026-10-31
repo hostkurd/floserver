@@ -1091,8 +1091,11 @@ int php(const std::vector<std::string>& args) {
         std::string off;
         for (const auto& e : r["extensions"]) {
             const std::string name = text_of(e, "name") + (e.value("missing", false) ? " (missing)" : "");
-            std::string& list = e.value("on", false) ? on : off;
-            list += (list.empty() ? "" : " ") + name;
+            if (e.value("on", false)) {
+                on += (on.empty() ? "" : " ") + name;
+            } else {
+                off += (off.empty() ? "" : " ") + name;
+            }
         }
         std::cout << "  extensions on:  " << on << "\n";
         if (r.value("extensions_fixed", false)) {

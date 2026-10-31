@@ -106,8 +106,15 @@ std::optional<std::string> php_series_of(std::string_view version) {
 
 PhpSettings read_php_settings(const AppConfig& app, std::vector<std::string>* problems) {
     PhpSettings out;
-    const auto problem = [problems](std::string text) {
+    // "config.json: php <series> <what>".
+    const auto problem = [problems](std::string_view series, std::string_view what, std::string_view item = {},
+                                    std::string_view rest = {}) {
         if (problems != nullptr) {
+            std::string text = "config.json: php ";
+            if (!series.empty()) {
+                text.append(series).append(" ");
+            }
+            text.append(what).append(item).append(rest);
             problems->push_back(std::move(text));
         }
     };
@@ -118,29 +125,29 @@ PhpSettings read_php_settings(const AppConfig& app, std::vector<std::string>* pr
         return out;
     }
     if (!stored.is_object()) {
-        problem("config.json: php must be an object such as {\"8.5\": {...}}");
+        problem("", R"(must be an object such as {"8.5": {...}})");
         return out;
     }
     for (const auto& [name, entry] : stored.items()) {
         const auto parsed = Version::parse(name);
-        const auto series = php_series_of(name);
-        if (!parsed || !series || parsed->parts().size() != 2) {
-            problem("config.json: php \"" + name + "\" isn't a PHP series such as 8.5");
+        if (!parsed || parsed->parts().size() != 2) {
+            problem(name, "isn't a PHP series such as 8.5");
             continue;
         }
+        const std::string series = parsed->to_string();
         if (!entry.is_object()) {
-            problem("config.json: php " + name + " must be an object");
+            problem(name, "must be an object");
             continue;
         }
         PhpSeriesSettings s;
         if (entry.contains("extensions")) {
             const json ext = entry.at("extensions");
             if (!ext.is_object()) {
-                problem("config.json: php " + name + " extensions must be an object of true/false");
+                problem(name, "extensions must be an object of true/false");
             } else {
                 for (const auto& [e, on] : ext.items()) {
                     if (!is_php_extension_name(e) || !on.is_boolean()) {
-                        problem("config.json: php " + name + " extension \"" + e + "\" is left out");
+                        problem(name, "extension ", e, " is left out");
                         continue;
                     }
                     if (e != "opcache") {
@@ -152,11 +159,11 @@ PhpSettings read_php_settings(const AppConfig& app, std::vector<std::string>* pr
         if (entry.contains("ini")) {
             const json ini = entry.at("ini");
             if (!ini.is_object()) {
-                problem("config.json: php " + name + " ini must be an object of text values");
+                problem(name, "ini must be an object of text values");
             } else {
                 for (const auto& [k, v] : ini.items()) {
                     if (!v.is_string() || php_ini_key_problem(k) || php_ini_value_problem(v.get<std::string>())) {
-                        problem("config.json: php " + name + " ini \"" + k + "\" is left out");
+                        problem(name, "ini ", k, " is left out");
                         continue;
                     }
                     s.ini[k] = v.get<std::string>();
@@ -164,7 +171,7 @@ PhpSettings read_php_settings(const AppConfig& app, std::vector<std::string>* pr
             }
         }
         // "8.05" and "8.5" are the same series; the first one read wins.
-        out.try_emplace(*series, std::move(s));
+        out.try_emplace(series, std::move(s));
     }
     return out;
 }
