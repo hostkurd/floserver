@@ -10,6 +10,7 @@
 #include <nlohmann/json.hpp>
 
 #include <cstddef>
+#include <cstdint>
 #include <map>
 #include <optional>
 #include <string>
@@ -98,6 +99,17 @@ void reset_ini(const PhpSeries& series, PhpChanges& changes, const std::string& 
 // The footer: "Applies when saved: PHP for 3 projects and shared sites
 // restarts (under a second)."
 [[nodiscard]] std::string php_restart_text(const PhpSeries& series, Lang lang);
+
+// Whether an answer belongs to what's shown now: the same receiver
+// (Settings, or the panel's project) and, when the answer names the series
+// it was asked for, the same series. A late answer for a version or project
+// the user has left is dropped, errors as well as values.
+[[nodiscard]] bool php_answer_matches(std::string_view to, std::string_view series, std::string_view shown_to,
+                                      std::string_view shown_series);
+
+// What a "Save" chosen on the way out waits for: it's done only once the
+// save is answered without a refusal.
+enum class AfterSave : std::uint8_t { Stay, Close, Runtimes, Version };
 
 // The php.ini key a refusal from php.set or projects.php is about
 // ("memory_limit: put the value in double quotes when…", "opcache.enable is

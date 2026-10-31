@@ -396,8 +396,9 @@ void ServiceWorker::run(const std::stop_token& stop) {
         std::string custom_ini;
         std::string custom_ini_error;
         // One php.* or projects.php request, answered to `to`.
-        const auto php_call = [&](const std::string& to, const char* method, const nlohmann::json& params, bool save) {
-            Snapshot::PhpAnswer answer{to, std::nullopt, {}, save};
+        const auto php_call = [&](const std::string& to, const std::string& series, const char* method,
+                                  const nlohmann::json& params, bool save) {
+            Snapshot::PhpAnswer answer{to, series, std::nullopt, {}, save};
             if (!client) {
                 answer.error = lost;
             } else if (auto got = client->call(method, params); !got) {
@@ -714,13 +715,13 @@ void ServiceWorker::run(const std::stop_token& stop) {
                     }
                     break;
                 case Command::Kind::PhpGet:
-                    php_call(c.project, "php.get", {{"series", c.key}}, false);
+                    php_call(c.project, c.key, "php.get", {{"series", c.key}}, false);
                     break;
                 case Command::Kind::PhpSet:
-                    php_call(c.project, "php.set", c.params, true);
+                    php_call(c.project, string_field(c.params, "series"), "php.set", c.params, true);
                     break;
                 case Command::Kind::ProjectPhp:
-                    php_call(c.project, "projects.php", c.params, true);
+                    php_call(c.project, {}, "projects.php", c.params, true);
                     break;
                 case Command::Kind::PhpCustomIni:
                     if (!client) {

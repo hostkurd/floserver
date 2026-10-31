@@ -42,6 +42,9 @@ public:
     void set_cue(std::string_view cue);
     void set_cue_color(Rgb color);
     void set_font(HFONT font);
+    // While a save is on its way: what's typed then would be lost. The
+    // parent gets WM_CTLCOLORSTATIC instead of WM_CTLCOLOREDIT meanwhile.
+    void set_read_only(bool read_only);
     // Inside `box` (the parent's client coordinates, which are logical in a
     // mirrored window), `pad` from its sides; hidden when `visible` is false.
     void place(const RECT& box, int pad, int height, bool visible);

@@ -75,6 +75,10 @@ SettingsWindow::SettingsWindow(HINSTANCE instance, Lang lang, ServiceWorker& wor
       closed_message_(closed_message) {}
 
 bool SettingsWindow::close() {
+    if (asking_) {
+        bring_to_front();  // its question is open: answered there first
+        return false;
+    }
     if (hwnd_ != nullptr) {
         try_close();  // the closed message follows, as for the user closing it
     }
@@ -197,6 +201,11 @@ LRESULT SettingsWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
         case WM_DESTROY:
             on_destroy();
             return 0;
+        case WM_CTLCOLORSTATIC:  // a read-only box (a save on its way)
+            if (hit_of_edit(GetDlgCtrlID(win::int_to_ptr<HWND>(lparam))).part == Part::None) {
+                break;
+            }
+            [[fallthrough]];
         case WM_CTLCOLOREDIT: {
             // The PHP section's boxes: a field with the series' own value is tinted.
             const Hit hit = hit_of_edit(GetDlgCtrlID(win::int_to_ptr<HWND>(lparam)));
@@ -438,8 +447,11 @@ void SettingsWindow::on_snapshot(const Snapshot& snap) {
         loading_ = true;
         worker_.list_runtimes(false);
     }
-    on_php_answers(snap);
+    const bool close_now = on_php_answers(snap);
     rebuild();
+    if (close_now) {
+        DestroyWindow(hwnd_);  // the Save chosen on the way out is done
+    }
 }
 
 void SettingsWindow::rebuild() {

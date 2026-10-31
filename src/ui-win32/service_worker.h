@@ -91,6 +91,7 @@ struct Snapshot {
     // order they came. `to` is kPhpSettings, or the project's name for the panel.
     struct PhpAnswer {
         std::string to;
+        std::string series;  // the series asked for (php.get, php.set); empty for projects.php
         std::optional<nlohmann::json> reply;  // php.get's or php.set's; projects.php's (the project)
         std::string error;                    // the service's reason, or the connection's
         bool save = false;                    // the answer to a save

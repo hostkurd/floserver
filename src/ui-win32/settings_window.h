@@ -39,7 +39,9 @@ namespace floserver::ui {
 
 class SettingsWindow {
 public:
-    // `closed_message` is posted to `owner` once the window is gone, so the
+    // `closed_message` is posted to `owner` once the window is gone (wparam 0),
+    // or with wparam 1 when the owner asked to quit while Settings was asking
+    // whether to save (quit_when_asked()): the owner quits then. So the
     // owner can let go of this object outside its window procedure.
     SettingsWindow(HINSTANCE instance, Lang lang, ServiceWorker& worker, HWND owner, UINT closed_message);
     ~SettingsWindow();
@@ -61,6 +63,12 @@ public:
     [[nodiscard]] bool is_open() const { return hwnd_ != nullptr; }
     // Opens the PHP section on `series` ("8.5"), from a project's panel.
     void show_php(const std::string& series);
+    // The Save / Don't save / Cancel question is open: the owner mustn't
+    // destroy this object or ask it to close meanwhile.
+    [[nodiscard]] bool asking() const { return asking_; }
+    // FloServer is quitting while asking(): the owner is told to go on once
+    // the question is answered.
+    void quit_when_asked() { quit_after_ask_ = true; }
 
 private:
     enum class Section : std::uint8_t { Runtimes, Php };
@@ -189,12 +197,16 @@ private:
 
     // --- Settings > PHP (settings_php.cpp) ---
     // Leaves PHP's unsaved changes as the user says; false: stay (Cancel).
-    [[nodiscard]] bool settle_php_changes();
+    // `then` is what a Save waits for (done once it's answered without a
+    // refusal); `series` goes with AfterSave::Version.
+    [[nodiscard]] bool settle_php_changes(AfterSave then, const std::string& series = {});
+    void set_php_read_only(bool read_only);
     void try_close();
     // `series`: the PHP version to show; empty for the newest.
     void open_section(Section section, const std::string& series = {});
     void load_php(const std::string& series);
-    void on_php_answers(const Snapshot& snap);
+    // True when a Save chosen on the way out is done and the window should close.
+    [[nodiscard]] bool on_php_answers(const Snapshot& snap);
     void make_php_edits();
     void fill_php_edits();
     void place_php_edits();
@@ -210,7 +222,8 @@ private:
     void on_php_click(const Hit& hit);
     void php_version_menu();
     void php_field_menu(int index);
-    void save_php();
+    // False when nothing was sent (not connected, a save already on its way).
+    bool save_php();
     void discard_php();
     [[nodiscard]] std::vector<std::pair<std::string, std::string>> php_versions() const;
     void paint_php_shapes(Canvas& c) const;
@@ -260,6 +273,10 @@ private:
     std::optional<PhpSeries> php_;
     bool php_loading_ = false;
     bool php_saving_ = false;
+    bool asking_ = false;
+    bool quit_after_ask_ = false;
+    AfterSave after_save_ = AfterSave::Stay;
+    std::string after_save_series_;
     PhpChanges php_changes_;
     std::string php_query_;
     std::string php_error_key_;  // the php.ini key Save was refused for

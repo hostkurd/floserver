@@ -60,14 +60,33 @@ std::vector<std::pair<std::string, std::string>> SettingsWindow::php_versions() 
     return has_installed_ ? installed_php_series(installed_) : std::vector<std::pair<std::string, std::string>>{};
 }
 
-bool SettingsWindow::settle_php_changes() {
+bool SettingsWindow::settle_php_changes(AfterSave then, const std::string& series) {
     if (!php_ || php_changes_.empty()) {
         return true;
     }
-    switch (ask_to_save(hwnd_, lang_, fill(lang_, Str::PhpAskSave, {php_series_}))) {
+    if (asking_ || php_saving_) {
+        return false;  // asked already, or a save is on its way: its answer comes first
+    }
+    asking_ = true;
+    const SaveChoice choice = ask_to_save(hwnd_, lang_, fill(lang_, Str::PhpAskSave, {php_series_}));
+    asking_ = false;
+    if (quit_after_ask_) {
+        // FloServer quit meanwhile: the owner goes on with it; nothing else here.
+        PostMessageW(owner_, closed_message_, 1, 0);
+        return false;
+    }
+    if (hwnd_ == nullptr) {
+        return false;
+    }
+    switch (choice) {
         case SaveChoice::Save:
-            save_php();
-            return true;
+            // Done only once the save is answered without a refusal; until
+            // then the window stays where it is, so a refusal shows here.
+            if (save_php()) {
+                after_save_ = then;
+                after_save_series_ = series;
+            }
+            return false;
         case SaveChoice::DontSave:
             discard_php();
             return true;
@@ -78,7 +97,7 @@ bool SettingsWindow::settle_php_changes() {
 }
 
 void SettingsWindow::try_close() {
-    if (hwnd_ == nullptr || (section_ == Section::Php && !settle_php_changes())) {
+    if (hwnd_ == nullptr || asking_ || (section_ == Section::Php && !settle_php_changes(AfterSave::Close))) {
         return;
     }
     DestroyWindow(hwnd_);
@@ -89,9 +108,12 @@ void SettingsWindow::show_php(const std::string& series) {
         return;
     }
     bring_to_front();
+    if (asking_) {
+        return;
+    }
     if (section_ != Section::Php) {
         open_section(Section::Php, series);
-    } else if (series != php_series_ && settle_php_changes()) {
+    } else if (series != php_series_ && settle_php_changes(AfterSave::Version, series)) {
         load_php(series);
     }
 }
@@ -101,7 +123,7 @@ void SettingsWindow::open_section(Section section, const std::string& series) {
         return;
     }
     if (section_ == Section::Php) {
-        if (!settle_php_changes()) {
+        if (!settle_php_changes(AfterSave::Runtimes)) {
             return;
         }
         if (GetFocus() != hwnd_) {
@@ -146,19 +168,26 @@ void SettingsWindow::load_php(const std::string& series) {
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
-void SettingsWindow::on_php_answers(const Snapshot& snap) {
+bool SettingsWindow::on_php_answers(const Snapshot& snap) {
+    bool close_now = false;
     for (const Snapshot::PhpAnswer& answer : snap.php) {
         if (answer.to != ServiceWorker::kPhpSettings) {
             continue;
         }
-        if (answer.save) {
+        if (answer.save && php_saving_) {
             php_saving_ = false;
+            set_php_read_only(false);
+        }
+        // A late answer for a version the user has left: dropped, errors too.
+        if (!php_answer_matches(answer.to, answer.series, ServiceWorker::kPhpSettings, php_series_)) {
+            continue;
         }
         if (!answer.error.empty() || !answer.reply) {
             if (!answer.save) {
                 php_loading_ = false;
             }
             if (answer.save) {
+                after_save_ = AfterSave::Stay;  // refused: stay here with the reason shown
                 // A refused value is shown under its field too.
                 std::vector<std::string> keys;
                 for (const PhpIniField& field : settings_php_ini_fields()) {
@@ -173,14 +202,8 @@ void SettingsWindow::on_php_answers(const Snapshot& snap) {
             continue;
         }
         auto series = php_series_from_reply(*answer.reply);
-        if (!series) {
+        if (!series || series->series != php_series_) {
             continue;
-        }
-        if (answer.save) {
-            show_message(std::string(text(lang_, Str::PhpSaved)), false);
-        }
-        if (series->series != php_series_) {
-            continue;  // saved on the way to another version
         }
         php_ = std::move(series);
         php_loading_ = false;
@@ -188,8 +211,21 @@ void SettingsWindow::on_php_answers(const Snapshot& snap) {
             php_changes_ = {};
             php_error_key_.clear();
             php_error_.clear();
+            show_message(std::string(text(lang_, Str::PhpSaved)), false);
         }
         fill_php_edits();
+        if (answer.save) {
+            // What the user was on the way to when they chose Save.
+            const AfterSave then = std::exchange(after_save_, AfterSave::Stay);
+            const std::string target = std::exchange(after_save_series_, {});
+            if (then == AfterSave::Close) {
+                close_now = true;
+            } else if (then == AfterSave::Runtimes) {
+                open_section(Section::Runtimes);
+            } else if (then == AfterSave::Version && !target.empty()) {
+                load_php(target);
+            }
+        }
     }
     if (!snap.custom_ini.empty()) {
         // Notepad, so the user edits it; FloServer reads it within ~5 s of a save.
@@ -211,20 +247,36 @@ void SettingsWindow::on_php_answers(const Snapshot& snap) {
             load_php(versions.front().first);
         }
     }
+    return close_now;
 }
 
-void SettingsWindow::save_php() {
-    if (!php_ || php_changes_.empty() || php_saving_ || !connected_) {
-        return;
+bool SettingsWindow::save_php() {
+    if (!php_ || php_changes_.empty() || php_saving_) {
+        return false;
+    }
+    if (!connected_) {
+        show_message(fill(lang_, Str::PhpSaveFailed, {text(lang_, Str::ConnectionLost)}), true);
+        return false;
     }
     php_saving_ = true;
+    set_php_read_only(true);  // what's typed now would be lost when the answer comes
     message_.clear();
     worker_.php_set(php_set_params(php_series_, php_changes_));
     relayout();
     InvalidateRect(hwnd_, nullptr, FALSE);
+    return true;
+}
+
+void SettingsWindow::set_php_read_only(bool read_only) {
+    for (std::size_t i = 1; i < edits_.size(); ++i) {  // the find box stays usable
+        edits_[i]->set_read_only(read_only);
+    }
 }
 
 void SettingsWindow::discard_php() {
+    if (php_saving_) {
+        return;
+    }
     php_changes_ = {};
     php_error_key_.clear();
     php_error_.clear();
@@ -326,7 +378,7 @@ void SettingsWindow::on_edit_change(int id) {
     if (hit.part == Part::PhpFind) {
         php_query_ = edit->text();
         relayout();
-    } else if (php_) {
+    } else if (php_ && !php_saving_) {
         set_ini_text(*php_, php_changes_, field_at(hit.row).key, edit->text());
         if (field_at(hit.row).key == php_error_key_) {
             php_error_key_.clear();  // being fixed
@@ -697,12 +749,12 @@ void SettingsWindow::on_php_click(const Hit& hit) {
         case Part::PhpField:
             if (FieldEdit* edit = edit_of(hit); edit != nullptr) {
                 SetFocus(edit->hwnd());
-            } else if (hit.part == Part::PhpField) {
+            } else if (hit.part == Part::PhpField && !php_saving_) {
                 php_field_menu(hit.row);
             }
             break;
         case Part::PhpExt:
-            if (php_ && !php_->extensions_fixed && hit.row >= 0 &&
+            if (php_ && !php_saving_ && !php_->extensions_fixed && hit.row >= 0 &&
                 std::cmp_less(hit.row, geometry_.php.ext_names.size())) {
                 const std::string& name = geometry_.php.ext_names[static_cast<std::size_t>(hit.row)];
                 const auto it = std::find_if(php_->extensions.begin(), php_->extensions.end(),
@@ -725,7 +777,7 @@ void SettingsWindow::on_php_click(const Hit& hit) {
             }
             break;
         case Part::PhpReset:
-            if (php_ && hit.row >= 0) {
+            if (php_ && !php_saving_ && hit.row >= 0) {
                 const std::string& key = field_at(hit.row).key;
                 reset_ini(*php_, php_changes_, key);
                 if (FieldEdit* edit = edit_of({Part::PhpField, -1, hit.row}); edit != nullptr) {
@@ -739,7 +791,7 @@ void SettingsWindow::on_php_click(const Hit& hit) {
             discard_php();
             break;
         case Part::PhpSave:
-            save_php();
+            (void)save_php();
             break;
         default:
             break;
@@ -772,7 +824,7 @@ void SettingsWindow::php_version_menu() {
         return;
     }
     const std::string& series = versions[command - kFirstChoice].first;
-    if (series != php_series_ && settle_php_changes()) {
+    if (series != php_series_ && settle_php_changes(AfterSave::Version, series)) {
         load_php(series);
     }
 }

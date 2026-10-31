@@ -75,6 +75,12 @@ void FieldEdit::set_font(HFONT font) {
     }
 }
 
+void FieldEdit::set_read_only(bool read_only) {
+    if (hwnd_ != nullptr) {
+        SendMessageW(hwnd_, EM_SETREADONLY, read_only ? TRUE : FALSE, 0);
+    }
+}
+
 void FieldEdit::place(const RECT& box, int pad, int height, bool visible) {
     if (hwnd_ == nullptr) {
         return;

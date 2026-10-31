@@ -1008,3 +1008,15 @@ TEST_CASE("the php.ini field a refusal is about") {
     CHECK(ini_error_key("memory_limits: no", keys).empty());
     CHECK(ini_error_key("the config can't be saved", keys).empty());
 }
+
+TEST_CASE("a late PHP answer for what the user has left is dropped") {
+    // Settings shows 8.5: an answer (or error) asked for 8.4 isn't its.
+    CHECK(php_answer_matches("_settings", "8.5", "_settings", "8.5"));
+    CHECK_FALSE(php_answer_matches("_settings", "8.4", "_settings", "8.5"));
+    // The panel: another project's answers, or its old series', aren't the open part's.
+    CHECK_FALSE(php_answer_matches("blog", "8.5", "shop", "8.5"));
+    CHECK_FALSE(php_answer_matches("shop", "8.3", "shop", "8.5"));
+    // projects.php names no series: the project is enough.
+    CHECK(php_answer_matches("shop", "", "shop", "8.5"));
+    CHECK_FALSE(php_answer_matches("shop", "", "_settings", "8.5"));
+}

@@ -86,11 +86,30 @@ bool MainWindow::leave_php_part(bool ask) {
     if (!php_open_) {
         return true;
     }
+    if (ask && (php_saving_ || asking_)) {
+        return false;  // a save's answer, or the question, comes first
+    }
     if (ask && php_dirty()) {
-        switch (ask_to_save(hwnd_, lang_, fill(lang_, Str::ProjectPhpAskSave, {selected_}))) {
+        asking_ = true;
+        const SaveChoice choice = ask_to_save(hwnd_, lang_, fill(lang_, Str::ProjectPhpAskSave, {selected_}));
+        asking_ = false;
+        if (quit_after_ask_) {
+            quit_after_ask_ = false;
+            quit();  // asked while the question was open
+            return false;
+        }
+        if (!php_open_) {
+            return true;  // closed meanwhile (the project went)
+        }
+        switch (choice) {
             case SaveChoice::Save:
                 if (!save_project_php()) {
-                    return false;  // "Another setting" can't be read: the user fixes it
+                    return false;  // not sent: "Another setting" can't be read, or not connected
+                }
+                if (php_saving_) {
+                    // Left once it's answered without a refusal; a refusal shows here.
+                    php_leave_after_save_ = true;
+                    return false;
                 }
                 break;
             case SaveChoice::DontSave:
@@ -100,6 +119,7 @@ bool MainWindow::leave_php_part(bool ask) {
         }
     }
     php_open_ = false;
+    php_leave_after_save_ = false;
     for (const auto& edit : php_edits_) {
         if (edit->focused()) {
             SetFocus(hwnd_);  // before its box goes
@@ -117,7 +137,14 @@ bool MainWindow::leave_php_part(bool ask) {
 }
 
 bool MainWindow::save_project_php() {
-    if (!php_open_ || php_saving_ || !worker_ || snap_.link != Link::Connected) {
+    if (!php_open_ || php_saving_ || !worker_) {
+        return false;
+    }
+    if (snap_.link != Link::Connected) {
+        php_message_ = fill(lang_, Str::PhpSaveFailed, {text(lang_, Str::ConnectionLost)});
+        php_message_error_ = true;
+        layout();
+        InvalidateRect(hwnd_, nullptr, FALSE);
         return false;
     }
     ProjectPhp after = php_after_;
@@ -140,6 +167,7 @@ bool MainWindow::save_project_php() {
         return true;
     }
     php_saving_ = true;
+    set_project_php_read_only(true);  // what's typed now would be lost when the answer comes
     php_message_.clear();
     worker_->project_php(selected_, params);
     layout();
@@ -147,12 +175,19 @@ bool MainWindow::save_project_php() {
     return true;
 }
 
+void MainWindow::set_project_php_read_only(bool read_only) {
+    for (const auto& edit : php_edits_) {
+        edit->set_read_only(read_only);
+    }
+}
+
 void MainWindow::on_project_php_answers() {
     for (const Snapshot::PhpAnswer& answer : snap_.php) {
         if (answer.to == ServiceWorker::kPhpSettings) {
             continue;
         }
-        const bool ours = php_open_ && answer.to == selected_;
+        // A late answer for a project or version the user has left is dropped, errors too.
+        const bool ours = php_open_ && php_answer_matches(answer.to, answer.series, selected_, php_series_);
         if (!ours) {
             // Saved on the way out of the part: only a failure is worth saying.
             if (answer.save && !answer.error.empty()) {
@@ -162,11 +197,13 @@ void MainWindow::on_project_php_answers() {
         }
         if (answer.save) {
             php_saving_ = false;
+            set_project_php_read_only(false);
         } else {
             php_loading_ = false;
         }
         if (!answer.error.empty() || !answer.reply) {
             if (answer.save) {
+                php_leave_after_save_ = false;  // refused: stay with the reason shown
                 std::vector<std::string> keys = php_keys_;
                 if (const auto line = parse_ini_line(php_another_)) {
                     keys.push_back(line->first);
@@ -193,6 +230,10 @@ void MainWindow::on_project_php_answers() {
             php_message_ = std::string(text(lang_, Str::PhpSaved));
             php_message_error_ = false;
             make_project_php_edits();
+            if (std::exchange(php_leave_after_save_, false)) {
+                (void)leave_php_part(false);
+                return;  // the rest of the answers aren't this part's any more
+            }
         } else if (auto info = php_series_from_reply(*answer.reply); info && info->series == php_series_) {
             php_info_ = std::move(info);
             make_project_php_edits();  // the placeholders
@@ -315,7 +356,7 @@ void MainWindow::on_php_edit_change(int id) {
             continue;
         }
         FieldEdit* edit = php_edit_of(f);
-        if (edit == nullptr || edit->setting()) {
+        if (edit == nullptr || edit->setting() || php_saving_) {
             return;
         }
         if (php_keys_[f].empty()) {
@@ -534,24 +575,32 @@ void MainWindow::on_php_panel_click(const Hit& hit) {
             open_settings_php(php_series_);
             break;
         case Part::PanelPhpChange:
-            php_change_menu();
+            if (!php_saving_) {
+                php_change_menu();
+            }
             break;
         case Part::PanelPhpField:
             if (hit.row >= 0) {
                 if (FieldEdit* edit = php_edit_of(static_cast<std::size_t>(hit.row)); edit != nullptr) {
                     SetFocus(edit->hwnd());
-                } else {
+                } else if (!php_saving_) {
                     php_display_menu(static_cast<std::size_t>(hit.row));
                 }
             }
             break;
         case Part::PanelPhpReset:
+            if (php_saving_) {
+                break;
+            }
             php_after_ = {};
             php_another_.clear();
             php_error_key_.clear();
             make_project_php_edits();
             break;
         case Part::PanelPhpDiscard:
+            if (php_saving_) {
+                break;
+            }
             php_after_ = php_before_;
             php_another_.clear();
             php_error_key_.clear();

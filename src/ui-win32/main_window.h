@@ -332,6 +332,7 @@ private:
     void php_change_menu();
     void php_display_menu(std::size_t index);
     bool save_project_php();
+    void set_project_php_read_only(bool read_only);
     void on_project_php_answers();
     void sync_project_php();
     void make_project_php_edits();
@@ -487,6 +488,9 @@ private:
     std::vector<std::unique_ptr<FieldEdit>> php_edits_;
     std::vector<int> php_field_edit_;    // field -> index in php_edits_, or -1 (a picker)
     mutable PhpPanelGeometry php_geometry_;
+    bool php_leave_after_save_ = false;  // "Save" chosen on the way out: leave once it's answered
+    bool asking_ = false;                // the panel's save question is open
+    bool quit_after_ask_ = false;        // Quit came meanwhile
     win::UniqueBrush input_set_brush_;
 
     // Settings (D20): only while it's open; where it was, for next time.

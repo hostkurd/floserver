@@ -157,6 +157,7 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
             return 0;
+        case WM_CTLCOLORSTATIC:  // a read-only PHP box (a save on its way)
         case WM_CTLCOLOREDIT:
             if (const int id = GetDlgCtrlID(win::int_to_ptr<HWND>(lparam)); id >= kPhpEditBase && php_open_) {
                 // The panel's PHP boxes: tinted where the project has its own value.
@@ -286,6 +287,10 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             }
             return 0;
         case kSettingsClosedMessage:
+            if (wparam == 1) {
+                quit();  // asked while Settings' save question was open; it's answered now
+                return 0;
+            }
             // The Settings window is gone: nothing of it stays but where it was.
             if (settings_ && !settings_->is_open()) {
                 settings_placement_ = settings_->placement();
@@ -440,6 +445,17 @@ void MainWindow::on_snapshot() {
 
 void MainWindow::quit() {
     if (quitting_ || !worker_) {
+        return;
+    }
+    // A save question is open (Settings' or the panel's): its code is still
+    // running under the dialog, so nothing it uses may go now. Quit follows
+    // once it's answered.
+    if (settings_ && settings_->asking()) {
+        settings_->quit_when_asked();
+        return;
+    }
+    if (asking_) {
+        quit_after_ask_ = true;
         return;
     }
     quitting_ = true;

@@ -290,6 +290,11 @@ std::string php_restart_text(const PhpSeries& series, Lang lang) {
     return fill_pattern(text(lang, Str::PhpApplies), false, {who});
 }
 
+bool php_answer_matches(std::string_view to, std::string_view series, std::string_view shown_to,
+                        std::string_view shown_series) {
+    return to == shown_to && (series.empty() || series == shown_series);
+}
+
 std::string ini_error_key(std::string_view message, const std::vector<std::string>& keys) {
     std::string best;
     for (const std::string& key : keys) {
