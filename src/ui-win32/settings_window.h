@@ -85,6 +85,7 @@ private:
         PhpExt,
         PhpMore,      // "show all" / "show fewer"
         PhpEditIni,
+        PhpFinalIni,
         PhpField,     // an edit box, or a picker
         PhpReset,
         PhpDiscard,
@@ -136,6 +137,7 @@ private:
         RECT ini_title{};
         RECT ini_hint{};
         RECT edit_ini{};
+        RECT final_ini{};
         std::vector<RECT> labels;   // one per settings_php_ini_fields()
         std::vector<RECT> boxes;
         std::vector<RECT> resets;   // empty when the field isn't marked

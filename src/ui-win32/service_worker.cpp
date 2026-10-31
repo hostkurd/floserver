@@ -207,8 +207,8 @@ void ServiceWorker::php_get(const std::string& series, const std::string& to) {
 void ServiceWorker::php_set(const nlohmann::json& params) {
     push({Command::Kind::PhpSet, kPhpSettings, false, {}, std::nullopt, {}, params});
 }
-void ServiceWorker::php_custom_ini(const std::string& series) {
-    push({Command::Kind::PhpCustomIni, {}, false, series, std::nullopt, {}, {}});
+void ServiceWorker::php_custom_ini(const std::string& series, bool final) {
+    push({Command::Kind::PhpCustomIni, {}, final, series, std::nullopt, {}, {}});
 }
 void ServiceWorker::project_php(const std::string& project, const nlohmann::json& params) {
     push({Command::Kind::ProjectPhp, project, false, {}, std::nullopt, {}, params});
@@ -258,6 +258,7 @@ Snapshot ServiceWorker::take() {
     latest_.php.clear();
     latest_.custom_ini.clear();
     latest_.custom_ini_error.clear();
+    latest_.custom_ini_final = false;
     latest_.quit_done = false;
     latest_.quit_error.clear();
     return out;
@@ -395,6 +396,7 @@ void ServiceWorker::run(const std::stop_token& stop) {
         std::vector<Snapshot::PhpAnswer> php_answers;
         std::string custom_ini;
         std::string custom_ini_error;
+        bool custom_ini_final = false;
         // One php.* or projects.php request, answered to `to`.
         const auto php_call = [&](const std::string& to, const std::string& series, const char* method,
                                   const nlohmann::json& params, bool save) {
@@ -724,9 +726,11 @@ void ServiceWorker::run(const std::stop_token& stop) {
                     php_call(c.project, {}, "projects.php", c.params, true);
                     break;
                 case Command::Kind::PhpCustomIni:
+                    custom_ini_final = c.flag;
                     if (!client) {
                         custom_ini_error = lost;
-                    } else if (reply = client->call("php.custom_ini", {{"series", c.key}}); !reply) {
+                    } else if (reply = client->call(c.flag ? "php.final_ini" : "php.custom_ini", {{"series", c.key}});
+                               !reply) {
                         client.reset();
                         custom_ini_error = lost;
                     } else if (!reply->ok) {
@@ -932,6 +936,7 @@ void ServiceWorker::run(const std::stop_token& stop) {
         if (!custom_ini.empty() || !custom_ini_error.empty()) {
             latest_.custom_ini = std::move(custom_ini);
             latest_.custom_ini_error = std::move(custom_ini_error);
+            latest_.custom_ini_final = custom_ini_final;
         }
         if (defaults) {
             latest_.defaults = std::move(*defaults);

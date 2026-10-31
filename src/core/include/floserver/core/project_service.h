@@ -102,6 +102,12 @@ public:
     // it isn't there.
     [[nodiscard]] std::optional<std::filesystem::path> php_custom_ini(const std::string& series,
                                                                       ServiceRefusal& refusal) const;
+    // The php.ini the series' newest install uses for shared sites and for
+    // projects without changes of their own, written to
+    // <data>/php/<series>/final-php.ini (read-only) for the user to look at.
+    // Written fresh on each call; nothing reads it back.
+    [[nodiscard]] std::optional<std::filesystem::path> php_final_ini(const std::string& series,
+                                                                     ServiceRefusal& refusal) const;
     // A project's own PHP changes, in its floserver.json: `extensions`
     // {"bcmath": "on"|"off"|null}, `ini` {"memory_limit": "1024M"|null}; null
     // goes back to the series' setting. The reply is that project.

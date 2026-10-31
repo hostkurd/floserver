@@ -460,6 +460,29 @@ TEST_CASE("the service's PHP requests: per series and per project") {
     CHECK(read_php_custom_ini(data.path(), "8.5") == "; edited\n");
     CHECK((*service.php_get("8.5", refusal))["custom_ini_exists"] == true);
 
+    // The final php.ini, to look at: the series' values, then custom.ini.
+    REQUIRE(service.php_set("8.5", json(), {{"memory_limit", "768M"}}, refusal));
+    test_util::write_file(*custom, "display_errors = Off\n");
+    auto final_ini = service.php_final_ini("8.5", refusal);
+    REQUIRE_MESSAGE(final_ini, refusal.message);
+    CHECK(final_ini->filename() == "final-php.ini");
+    std::string text = test_util::read_file(*final_ini);
+    CHECK(text.starts_with("; What PHP 8.5.12 uses"));
+    const auto series_at = text.find("memory_limit = 768M");
+    const auto custom_at = text.find("display_errors = Off");
+    REQUIRE(series_at != std::string::npos);
+    REQUIRE(custom_at != std::string::npos);
+    CHECK(series_at < custom_at);
+    // Written fresh each time, though it's left read-only.
+    REQUIRE(service.php_set("8.5", json(), {{"memory_limit", "640M"}}, refusal));
+    final_ini = service.php_final_ini("8.5", refusal);
+    REQUIRE_MESSAGE(final_ini, refusal.message);
+    CHECK(test_util::read_file(*final_ini).find("memory_limit = 640M") != std::string::npos);
+    CHECK_FALSE(service.php_final_ini("8.3", refusal));  // not installed
+    CHECK(refusal.code == "not_installed");
+    REQUIRE(service.php_set("8.5", json(), {{"memory_limit", nullptr}}, refusal));
+    test_util::write_file(*custom, "; edited\n");
+
     // A project's own changes, in its floserver.json; the reply says them.
     const auto p = service.project_php("shop", {{"bcmath", "off"}, {"soap", "on"}}, {{"memory_limit", "2G"}}, refusal);
     REQUIRE_MESSAGE(p, refusal.message);

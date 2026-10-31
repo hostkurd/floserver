@@ -97,8 +97,9 @@ struct Snapshot {
         bool save = false;                    // the answer to a save
     };
     std::vector<PhpAnswer> php;
-    std::string custom_ini;        // php.custom_ini's path, to open in Notepad
+    std::string custom_ini;        // php.custom_ini's (or php.final_ini's) path, to open in Notepad
     std::string custom_ini_error;
+    bool custom_ini_final = false; // it's the final php.ini, to read, not custom.ini
     std::string change_error;          // "Couldn't change shop: ..."
     std::string clipboard;             // .env lines to put on the clipboard
     std::string added;                 // a project just added from the window
@@ -150,7 +151,8 @@ public:
     // php.custom_ini, whose path comes back to be opened.
     void php_get(const std::string& series, const std::string& to);
     void php_set(const nlohmann::json& params);
-    void php_custom_ini(const std::string& series);
+    // With `final`, php.final_ini: the php.ini the series uses, to look at.
+    void php_custom_ini(const std::string& series, bool final = false);
     // The panel's PHP part: projects.php, answered to the project.
     void project_php(const std::string& project, const nlohmann::json& params);
     // New project: runtimes.list (cached) once, for its defaults.

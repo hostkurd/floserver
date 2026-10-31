@@ -676,6 +676,53 @@ std::optional<fs::path> ProjectService::php_custom_ini(const std::string& series
     return php_custom_ini_file(data_dir_, *series);
 }
 
+std::optional<fs::path> ProjectService::php_final_ini(const std::string& series_text, ServiceRefusal& refusal) const {
+    const auto series = request_series(series_text, refusal);
+    if (!series) {
+        return std::nullopt;
+    }
+    AppConfig config;
+    {
+        const std::lock_guard lock(mutex_);
+        auto loaded = load(refusal);
+        if (!loaded) {
+            return std::nullopt;
+        }
+        config = std::move(*loaded);
+    }
+    const auto installed = list_installed(runtimes_dir(data_dir_));
+    const InstalledRuntime* php = best_installed(installed, "php", *series);
+    if (php == nullptr) {
+        refusal = {"not_installed", "PHP " + *series + " isn't installed"};
+        return std::nullopt;
+    }
+    const PhpSettings all = read_php_settings(config);
+    const auto found = all.find(*series);
+    const PhpIniSettings settings = effective_php_settings(
+        *series, found != all.end() ? &found->second : nullptr, read_php_custom_ini(data_dir_, *series), nullptr);
+    // Each pool logs to its own file; the real path is in the pool's copy.
+    const PhpIniResult made = make_php_ini(php->dir, settings, fs::path("(each project's own log)"));
+    const std::string text = "; What PHP " + php->version +
+                             " uses for shared sites and for projects without PHP changes of their own.\n"
+                             "; Written by FloServer when you ask to see it: edits here are lost and do nothing.\n"
+                             "; Change values in Settings > PHP, or add your own lines to custom.ini beside this file.\n"
+                             "; A project's own changes (its floserver.json) come after all of this.\n\n" +
+                             made.text;
+    const fs::path file = php_custom_ini_file(data_dir_, *series).parent_path() / "final-php.ini";
+    std::error_code ec;
+    fs::create_directories(file.parent_path(), ec);
+    // Read-only, so Notepad says so on Save; made writable again to replace it.
+    fs::permissions(file, fs::perms::owner_write, fs::perm_options::add, ec);
+    std::string error;
+    if (!write_file_atomically(file, text, error)) {
+        refusal = {"folder_unwritable", error};
+        return std::nullopt;
+    }
+    fs::permissions(file, fs::perms::owner_write | fs::perms::group_write | fs::perms::others_write,
+                    fs::perm_options::remove, ec);
+    return file;
+}
+
 std::optional<json> ProjectService::project_php(const std::string& name, const json& extensions, const json& ini,
                                                 ServiceRefusal& refusal) {
     std::map<std::string, std::optional<std::string>> ext_changes;

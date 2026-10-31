@@ -418,7 +418,8 @@ struct Service {
     }
 
     // The reply to one php.* request: Settings → PHP (D20), per series.
-    //   php.get {series}; php.set {series, extensions?, ini?}; php.custom_ini {series} -> {"path"}
+    //   php.get {series}; php.set {series, extensions?, ini?}; php.custom_ini {series} -> {"path"};
+    //   php.final_ini {series} -> {"path"} (the php.ini it uses, to look at)
     [[nodiscard]] std::string php_request(const protocol::Request& r) const {
         if (!projects) {
             return protocol::make_error(r.id, "no_data_folder",
@@ -426,6 +427,11 @@ struct Service {
         }
         floserver::core::ServiceRefusal refusal;
         const std::string series = string_param(r.params, "series");
+        if (r.method == "php.final_ini") {
+            const auto path = projects->php_final_ini(series, refusal);
+            return path ? protocol::make_result(r.id, {{"path", floserver::core::path_to_utf8(*path)}})
+                        : protocol::make_error(r.id, refusal.code, refusal.message);
+        }
         if (r.method == "php.custom_ini") {
             // Made here, opened by the window; its text is read on the next reload.
             const auto path = projects->php_custom_ini(series, refusal);
@@ -664,7 +670,7 @@ struct Service {
                        request->method == "shared.get" || request->method == "shared.set") {
                 reply = project_request(*request);
             } else if (request->method == "php.get" || request->method == "php.set" ||
-                       request->method == "php.custom_ini") {
+                       request->method == "php.custom_ini" || request->method == "php.final_ini") {
                 reply = php_request(*request);
             } else if (request->method == "certs.status" || request->method == "certs.ensure_ca" ||
                        request->method == "certs.remove") {

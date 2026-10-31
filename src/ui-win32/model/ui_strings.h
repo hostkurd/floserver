@@ -196,6 +196,8 @@ enum class Str : std::uint8_t {
     PhpSaveFailed,         // {0}: the service's reason
     PhpOpenIniFailed,      // {0}: the reason
     PhpIniOpened,
+    PhpShowFinal,
+    PhpFinalOpened,
     PhpProblems,           // {0}: what the service skipped
     PanelPhpSettings,
     ProjectPhpOpenSettings,  // {0}: "8.5"
