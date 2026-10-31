@@ -1,5 +1,7 @@
 #include "floserver/core/site_plan.h"
 
+#include "floserver/core/apache_settings.h"
+
 #include "floserver/core/nginx_config.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/phpmyadmin.h"
@@ -77,6 +79,17 @@ const InstalledRuntime* best_installed(const std::vector<InstalledRuntime>& inst
         }
     }
     return best;
+}
+
+const InstalledRuntime* chosen_apache(const std::vector<InstalledRuntime>& installed, const AppConfig& config) {
+    if (const auto wanted = read_apache_settings(config).version) {
+        for (const InstalledRuntime& r : installed) {
+            if (r.name == "apache" && r.version == *wanted) {
+                return &r;
+            }
+        }
+    }
+    return best_installed(installed, "apache", "");
 }
 
 ConfigResult read_project_config_file(const Project& project) {
@@ -211,7 +224,7 @@ void plan_shared(WebPlan& plan, const AppConfig& config, const std::vector<Insta
     if (php == nullptr) {
         site.missing.push_back(wanted_php.empty() ? "php" : "php " + wanted_php);
     }
-    const InstalledRuntime* apache_runtime = apache ? best_installed(installed, "apache", "") : nullptr;
+    const InstalledRuntime* apache_runtime = apache ? chosen_apache(installed, config) : nullptr;
     if (apache && apache_runtime == nullptr) {
         site.missing.emplace_back("apache");
     }
@@ -386,7 +399,7 @@ WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
         }
         // Apache with PHP off: Apache alone (for .htaccess), no pool.
         if (apache && off) {
-            const InstalledRuntime* apache_runtime = best_installed(installed, "apache", "");
+            const InstalledRuntime* apache_runtime = chosen_apache(installed, config);
             if (apache_runtime == nullptr) {
                 site.missing.emplace_back("apache");
             }
@@ -424,7 +437,7 @@ WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
         if (pc.python && best_installed(installed, "python", *pc.python) == nullptr) {
             site.missing.push_back("python " + *pc.python);
         }
-        const InstalledRuntime* apache_runtime = apache ? best_installed(installed, "apache", "") : nullptr;
+        const InstalledRuntime* apache_runtime = apache ? chosen_apache(installed, config) : nullptr;
         if (apache && apache_runtime == nullptr) {
             site.missing.emplace_back("apache");
         }
@@ -570,7 +583,7 @@ std::map<std::string, std::vector<std::string>> runtime_users(const AppConfig& c
             }
         }
         if (pc.web == WebServer::Apache) {
-            if (const InstalledRuntime* r = best_installed(installed, "apache", "")) {
+            if (const InstalledRuntime* r = chosen_apache(installed, config)) {
                 use("apache", r->dir, who);
             }
         }

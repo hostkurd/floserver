@@ -3,6 +3,7 @@
 #include "floserver/core/shared_sites.h"
 
 #include "floserver/core/apache_config.h"
+#include "floserver/core/apache_settings.h"
 #include "floserver/core/request_log.h"
 #include "floserver/core/nginx_config.h"
 #include "floserver/core/paths.h"
@@ -57,6 +58,15 @@ std::string tail_of(const fs::path& file) {
     }
     if (text.size() > kMaxLogTail) {
         text = "..." + text.substr(text.size() - kMaxLogTail);
+    }
+    return text;
+}
+
+// Apache's config with a port for `httpd -t`, which doesn't listen on it.
+std::string with_test_port(std::string text) {
+    for (auto at = text.find(kApachePortPlaceholder); at != std::string::npos;
+         at = text.find(kApachePortPlaceholder, at)) {
+        text.replace(at, kApachePortPlaceholder.size(), "65000");
     }
     return text;
 }
@@ -310,6 +320,166 @@ bool WebService::write_phpmyadmin_files_locked(const fs::path& install, std::str
     return true;
 }
 
+std::optional<std::string> WebService::apache_config_locked(const AppConfig& app, const ApacheSpec& spec,
+                                                            const fs::path& apache_dir, const std::string& version,
+                                                            std::string& error) {
+    // Settings > Apache: the modules, then custom.conf (apache_settings.h).
+    const ApacheSettings settings = read_apache_settings(app);
+    const fs::path modules_dir = spec.modules_dir;
+    const ApacheModulePlan modules = plan_apache_modules(
+        settings.modules,
+        [&modules_dir](const std::string& name) {
+            std::error_code ec;
+            return fs::is_regular_file(modules_dir / path_from_utf8("mod_" + name + ".so"), ec);
+        },
+        spec.posix);
+    const std::string custom = read_apache_custom_conf(config_.data_dir);
+    const ApachePart mine{modules.load,
+                          custom.empty() ? std::string() : filter_apache_custom_conf(custom, work_ / "logs").text};
+    const bool own = !settings.modules.empty() || !mine.custom.empty();
+    const auto build = [&](const ApachePart& part) {
+        ApacheSpec s = spec;
+        s.modules = part.modules;
+        s.custom_conf = part.custom;
+        s.custom_conf_path = path_to_utf8(apache_custom_conf_file(config_.data_dir));
+        return make_apache_config(s, error);
+    };
+    auto text = build(mine);
+    apache_version_ = version;
+    apache_modules_ = mine.modules;
+    if (!text || !own || *text == apache_tested_) {
+        // FloServer's own choices alone (nothing of the user's to check), or checked before.
+        apache_problem_.clear();
+        apache_good_ = mine;
+        apache_used_ = mine;
+        apache_used_own_ = own;
+        return text;
+    }
+    if (*text != apache_rejected_) {
+        // Checked before it's used: a config Apache refuses would stop it.
+        // The folders it names must be there for the check: the error
+        // log's, DefaultRuntimeDir and the default host's empty root.
+        std::error_code ec;
+        fs::create_directories(work_ / "logs", ec);
+        fs::create_directories(work_ / "apache" / "run-65000", ec);
+        fs::create_directories(work_ / "apache" / "empty", ec);
+        const auto program = apache_program(apache_dir);
+        const auto problem =
+            program ? apache_config_problem(*program, spec.server_root, work_ / "apache" / "httpd-test.conf",
+                                            with_test_port(*text))
+                    : std::optional<std::string>("httpd is missing from " + path_to_utf8(apache_dir));
+        if (!problem) {
+            apache_tested_ = *text;
+            apache_rejected_.clear();
+            apache_problem_.clear();
+            apache_good_ = mine;
+            apache_used_ = mine;
+            apache_used_own_ = true;
+            return text;
+        }
+        apache_rejected_ = *text;
+        apache_problem_ = *problem;  // what httpd -t said; the old config stays
+    }
+    // The last modules and lines Apache accepted, with today's projects;
+    // FloServer's own choices when it hasn't accepted any yet.
+    const ApachePart fallback =
+        apache_good_.modules.empty()
+            ? ApachePart{plan_apache_modules({}, [&modules_dir](const std::string& name) {
+                             std::error_code ec;
+                             return fs::is_regular_file(modules_dir / path_from_utf8("mod_" + name + ".so"), ec);
+                         }, spec.posix).load,
+                         {}}
+            : apache_good_;
+    apache_modules_ = fallback.modules;
+    apache_used_ = fallback;
+    apache_used_own_ = false;
+    return build(fallback);
+}
+
+void WebService::watch_apache_locked() {
+    const auto it = apps_.find(std::string(kApacheAppName));
+    if (it == apps_.end()) {
+        return;
+    }
+    const AppState state = it->second->state();
+    // Settings > Apache's choices passed `httpd -t` but can still fail as
+    // Apache starts, or (defence in depth) make it listen beyond this
+    // computer: then the choices that last ran are used again.
+    const auto give_up = [&](const std::string& why) {
+        apache_rejected_ = it->second->app().server_config;
+        apache_tested_.clear();
+        apache_problem_ = why;
+        apache_good_ = apache_ran_known_ ? apache_ran_ : ApachePart{};
+    };
+    if (state == AppState::Running) {
+        const json described = it->second->describe();
+        const auto pid = described.contains("pid") && described.at("pid").is_number_unsigned()
+                             ? described.at("pid").get<std::uint32_t>()
+                             : 0U;
+        if (pid != 0 && pid != apache_checked_pid_) {
+            apache_checked_pid_ = pid;
+            if (const auto wide = listening_beyond_loopback(pid); !wide.empty()) {
+                std::string where;
+                for (const std::string& w : wide) {
+                    where += (where.empty() ? "" : ", ") + w;
+                }
+                give_up("Apache listened beyond this computer (" + where + "), so FloServer stopped it");
+                return;
+            }
+        }
+        apache_ran_ = apache_used_;
+        apache_ran_known_ = true;
+        return;
+    }
+    if (state == AppState::Failed && apache_used_own_ && !(apache_ran_known_ && apache_used_ == apache_ran_)) {
+        const json described = it->second->describe();
+        const std::string error = described.contains("error") && described.at("error").is_string()
+                                      ? described.at("error").get<std::string>()
+                                      : std::string("it stopped");
+        give_up("Apache didn't start with these settings, so the last ones that ran are used: " + error);
+    }
+}
+
+std::optional<std::string> WebService::apache_final_config(std::string& error) const {
+    const std::lock_guard lock(mutex_);
+    if (!apache_text_.empty()) {
+        return apache_text_;
+    }
+    // No project uses Apache: what it would run with none.
+    const auto app = load_app_config(app_config_file(config_.data_dir), error);
+    if (!app) {
+        return std::nullopt;
+    }
+    const auto installed = list_installed(runtimes_dir(config_.data_dir));
+    const InstalledRuntime* apache = chosen_apache(installed, *app);
+    if (apache == nullptr) {
+        error = "Apache isn't installed";
+        return std::nullopt;
+    }
+    ApacheSpec as;
+    as.server_root = apache_server_root(apache->dir);
+    as.modules_dir = as.server_root / "modules";
+    as.work_dir = work_;
+#ifndef _WIN32
+    as.posix = true;
+#endif
+    const ApacheSettings settings = read_apache_settings(*app);
+    const fs::path modules_dir = as.modules_dir;
+    as.modules = plan_apache_modules(
+                     settings.modules,
+                     [&modules_dir](const std::string& name) {
+                         std::error_code ec;
+                         return fs::is_regular_file(modules_dir / path_from_utf8("mod_" + name + ".so"), ec);
+                     },
+                     as.posix)
+                     .load;
+    if (const std::string custom = read_apache_custom_conf(config_.data_dir); !custom.empty()) {
+        as.custom_conf = filter_apache_custom_conf(custom, work_ / "logs").text;
+        as.custom_conf_path = path_to_utf8(apache_custom_conf_file(config_.data_dir));
+    }
+    return make_apache_config(as, error);
+}
+
 void WebService::reload_locked() {
     if (stopped_) {
         return;
@@ -367,6 +537,8 @@ void WebService::reload_locked() {
     // The shared Apache (D6), for the projects that ask for it: one more
     // app, under a name no project can have, PHP from the same pools.
     std::string apache_error;
+    watch_apache_locked();
+    apache_text_.clear();
     {
         ApacheSpec as;
         bool keep = false;
@@ -392,11 +564,11 @@ void WebService::reload_locked() {
 #ifndef _WIN32
             as.posix = true;
 #endif
-            auto text = make_apache_config(as, apache_error);
+            if (running_as_root()) {
+                as.extra = "User #65534\nGroup #65534\n";  // Apache won't serve as root (containers)
+            }
+            auto text = apache_config_locked(*app, as, plan.apache_dir, plan.apache_version, apache_error);
             if (text) {
-                if (running_as_root()) {
-                    *text += "User #65534\nGroup #65534\n";  // Apache won't serve as root (containers)
-                }
                 AppSpec spec;
                 spec.name = std::string(kApacheAppName);
                 spec.kind = AppKind::Apache;
@@ -404,6 +576,7 @@ void WebService::reload_locked() {
                 spec.version = plan.apache_version;
                 spec.runtime_dir = plan.apache_dir;
                 spec.keep_running = keep;
+                apache_text_ = *text;
                 spec.server_config = std::move(*text);
                 plan.apps.push_back(std::move(spec));
             }
@@ -1087,7 +1260,18 @@ json WebService::status_locked() const {
     if (!nginx_error_.empty()) {
         nginx["error"] = nginx_error_;
     }
+    // The shared Apache (Settings > Apache): null while no project uses it.
+    json apache = nullptr;
+    if (const auto it = apps_.find(std::string(kApacheAppName)); it != apps_.end() || !apache_text_.empty()) {
+        apache = {{"version", apache_version_},
+                  {"running", it != apps_.end() && it->second->state() == AppState::Running},
+                  {"modules", apache_modules_}};
+        if (!apache_problem_.empty()) {
+            apache["refused"] = apache_problem_;  // httpd -t refused Settings > Apache; the last good config runs
+        }
+    }
     json out = {{"nginx", nginx},
+                {"apache", apache},
                 {"pools", pools},
                 {"apps", apps},
                 {"sites", sites},

@@ -3,8 +3,13 @@
 #include "floserver/core/paths.h"
 #include "floserver/core/project_service.h"
 
+#include <algorithm>
 #include <array>
+#include <filesystem>
+#include <iterator>
 #include <limits>
+#include <set>
+#include <sstream>
 #include <utility>
 
 #ifdef _WIN32
@@ -275,9 +280,99 @@ std::optional<PortOwner> find_port_owner(Port port) {
     return std::nullopt;
 }
 
+std::vector<std::string> listening_beyond_loopback(std::uint32_t pid) {
+    std::vector<std::string> out;
+    const auto read = [&](ULONG family) {
+        DWORD size = 0;
+        std::vector<unsigned char> buf;
+        DWORD result = ERROR_INSUFFICIENT_BUFFER;
+        for (int tries = 0; tries < 4 && result == ERROR_INSUFFICIENT_BUFFER; ++tries) {
+            buf.resize(size == 0 ? 16 * 1024 : size);
+            size = static_cast<DWORD>(buf.size());
+            result = GetExtendedTcpTable(buf.data(), &size, FALSE, family, TCP_TABLE_OWNER_PID_LISTENER, 0);
+        }
+        if (result != NO_ERROR) {
+            return;
+        }
+        if (family == AF_INET) {
+            const auto* table = reinterpret_cast<const MIB_TCPTABLE_OWNER_PID*>(buf.data());
+            for (DWORD i = 0; i < table->dwNumEntries; ++i) {
+                const auto& row = table->table[i];  // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index)
+                const ULONG addr = ntohl(row.dwLocalAddr);
+                if (row.dwOwningPid == pid && (addr >> 24U) != 127U) {
+                    out.push_back(std::to_string(addr >> 24U) + "." + std::to_string((addr >> 16U) & 255U) + "." +
+                                  std::to_string((addr >> 8U) & 255U) + "." + std::to_string(addr & 255U) + ":" +
+                                  std::to_string(ntohs(static_cast<u_short>(row.dwLocalPort))));
+                }
+            }
+        } else {
+            const auto* table = reinterpret_cast<const MIB_TCP6TABLE_OWNER_PID*>(buf.data());
+            constexpr std::array<UCHAR, 16> kLoopback{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+            for (DWORD i = 0; i < table->dwNumEntries; ++i) {
+                const auto& row = table->table[i];  // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index)
+                if (row.dwOwningPid == pid && !std::equal(kLoopback.begin(), kLoopback.end(), std::begin(row.ucLocalAddr))) {
+                    out.push_back("[ipv6]:" + std::to_string(ntohs(static_cast<u_short>(row.dwLocalPort))));
+                }
+            }
+        }
+    };
+    read(AF_INET);
+    read(AF_INET6);
+    return out;
+}
+
 #else
 
 std::optional<PortOwner> find_port_owner(Port /*port*/) { return std::nullopt; }
+
+std::vector<std::string> listening_beyond_loopback(std::uint32_t pid) {
+    namespace fs = std::filesystem;
+    // The process's sockets (their inodes), then those of them listening
+    // (state 0A) in /proc/net/tcp and tcp6 on an address that isn't loopback.
+    std::set<std::string> inodes;
+    const fs::path fds = fs::path("/proc") / std::to_string(pid) / "fd";
+    std::error_code ec;
+    for (fs::directory_iterator it(fds, ec), end; !ec && it != end; it.increment(ec)) {
+        std::error_code link_ec;
+        const std::string target = fs::read_symlink(it->path(), link_ec).string();
+        if (!link_ec && target.starts_with("socket:[") && target.ends_with("]")) {
+            inodes.insert(target.substr(8, target.size() - 9));
+        }
+    }
+    std::vector<std::string> out;
+    if (inodes.empty()) {
+        return out;
+    }
+    for (const char* table : {"/proc/net/tcp", "/proc/net/tcp6"}) {
+        const std::string text = read_small_file(table, std::size_t{8} * 1024 * 1024).value_or(std::string());
+        std::istringstream lines(text);
+        std::string line;
+        std::getline(lines, line);  // the heading
+        while (std::getline(lines, line)) {
+            // sl local_address rem_address st tx:rx tr:when retrnsmt uid timeout inode
+            std::istringstream fields(line);
+            std::string sl;
+            std::string local;
+            std::string remote;
+            std::string st;
+            std::string skip;
+            std::string inode;
+            fields >> sl >> local >> remote >> st >> skip >> skip >> skip >> skip >> skip >> inode;
+            if (st != "0A" || !inodes.contains(inode)) {
+                continue;
+            }
+            const std::string addr = local.substr(0, local.find(':'));
+            // 127.x.x.x is stored little-endian ("0100007F"); ::1 and ::ffff:127.x likewise per word.
+            const bool loopback = (addr.size() == 8 && addr.ends_with("7F")) ||
+                                  addr == "00000000000000000000000001000000" ||
+                                  (addr.size() == 32 && addr.starts_with("0000000000000000FFFF0000") && addr.ends_with("7F"));
+            if (!loopback) {
+                out.push_back(local);
+            }
+        }
+    }
+    return out;
+}
 
 #endif
 

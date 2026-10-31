@@ -4,6 +4,7 @@
 // removal), the project list, the local certificate authority, and running
 // the projects: nginx and the PHP pools that sleep when idle.
 
+#include "floserver/core/apache_settings.h"
 #include "floserver/core/builtin_templates.h"
 #include "floserver/core/build_info.h"
 #include "floserver/core/builtin.h"
@@ -177,6 +178,7 @@ struct Service {
     std::unique_ptr<floserver::core::CertStore> certs;
     std::unique_ptr<floserver::core::WebService> web;
     std::unique_ptr<floserver::core::WebSettingsService> web_settings;
+    std::unique_ptr<floserver::core::ApacheSettingsService> apache_settings;
     std::unique_ptr<floserver::core::SecretStore> secrets;
     std::unique_ptr<floserver::core::DatabaseService> databases;
     std::unique_ptr<floserver::core::TemplateService> templates;
@@ -542,6 +544,28 @@ struct Service {
         const auto result = r.method == "web.settings.get"
                                 ? web_settings->get(refusal)
                                 : web_settings->set(r.params.is_object() ? r.params : json::object(), refusal);
+        return result ? protocol::make_result(r.id, *result) : protocol::make_error(r.id, refusal.code, refusal.message);
+    }
+
+    // Settings > Apache (apache_settings.h): apache.get, once when the
+    // section opens (the install's modules folder is read then);
+    // apache.set {"version"?, "modules"?} with the same reply and
+    // "restarting"; apache.custom_conf / apache.final_conf -> {"path"}.
+    [[nodiscard]] std::string apache_settings_request(const protocol::Request& r) const {
+        if (!apache_settings) {
+            return protocol::make_error(r.id, "no_data_folder",
+                                        "FloServer can't find a folder to keep its settings in (LOCALAPPDATA or HOME)");
+        }
+        floserver::core::ServiceRefusal refusal;
+        if (r.method == "apache.custom_conf" || r.method == "apache.final_conf") {
+            const auto path = r.method == "apache.custom_conf" ? apache_settings->custom_conf(refusal)
+                                                               : apache_settings->final_conf(refusal);
+            return path ? protocol::make_result(r.id, {{"path", floserver::core::path_to_utf8(*path)}})
+                        : protocol::make_error(r.id, refusal.code, refusal.message);
+        }
+        const auto result = r.method == "apache.get"
+                                ? apache_settings->get(refusal)
+                                : apache_settings->set(r.params.is_object() ? r.params : json::object(), refusal);
         return result ? protocol::make_result(r.id, *result) : protocol::make_error(r.id, refusal.code, refusal.message);
     }
 
@@ -916,6 +940,9 @@ struct Service {
                 reply = web_request(*request);
             } else if (request->method == "web.settings.get" || request->method == "web.settings.set") {
                 reply = web_settings_request(*request);
+            } else if (request->method == "apache.get" || request->method == "apache.set" ||
+                       request->method == "apache.custom_conf" || request->method == "apache.final_conf") {
+                reply = apache_settings_request(*request);
             } else if (request->method == "databases.list" || request->method == "databases.login" ||
                        request->method == "shared.login") {
                 reply = database_request(*request);
@@ -1080,6 +1107,19 @@ int run() {
             hooks.ca = [s] { return s->ca_for_settings(); };
             service->web_settings =
                 std::make_unique<floserver::core::WebSettingsService>(*service->projects, std::move(hooks));
+        }
+        {
+            floserver::core::ApacheSettingsService::Hooks hooks;
+            const Service* s = service.get();
+            hooks.reload = [s] { (void)s->web->reload(); };
+            hooks.status = [s] { return s->web->status().value("apache", json()); };
+            hooks.sites = [s] { return s->web->status().value("sites", json::object()); };
+            hooks.final_config = [s](std::string& why) { return s->web->apache_final_config(why); };
+#ifndef _WIN32
+            hooks.posix = true;
+#endif
+            service->apache_settings =
+                std::make_unique<floserver::core::ApacheSettingsService>(*data, *service->projects, std::move(hooks));
         }
         service->templates = std::make_unique<floserver::core::TemplateService>(*data, template_hooks(service));
         service->data = *data;

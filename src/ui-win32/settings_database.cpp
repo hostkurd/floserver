@@ -123,6 +123,9 @@ void SettingsWindow::load_db(const std::string& series) {
 bool SettingsWindow::on_db_answers(const Snapshot& snap) {
     bool close_now = false;
     for (const Snapshot::DbAnswer& answer : snap.db) {
+        if (answer.method.starts_with("apache.")) {
+            continue;  // Settings > Apache's (settings_apache.cpp)
+        }
         const bool save = answer.method == "database.set";
         if (save && db_saving_) {
             db_saving_ = false;
@@ -989,11 +992,8 @@ void SettingsWindow::paint_db_shapes(Canvas& c) const {
             paint_button(c, dg.save, false, is_focused(save), false);
         }
     }
-    if (g.content_h > height_ && height_ > 0) {
-        const int thumb = std::max(px(24), height_ * height_ / g.content_h);
-        const int top = (height_ - thumb) * scroll_ / (g.content_h - height_);
-        c.round_rect({width_ - px(6), top + px(2), width_ - px(2), top + thumb - px(2)}, pxf(2), p.switch_off_border);
-    }
+    // The scroll bar, when the page is taller than the window.
+    scroll_bar_.paint(c, p);
     c.unclip();
 }
 

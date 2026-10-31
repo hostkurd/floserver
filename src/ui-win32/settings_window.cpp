@@ -262,6 +262,9 @@ LRESULT SettingsWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             for (const auto& edit : db_edits_) {
                 edit->set_font(fonts_.button.get());
             }
+            for (const auto& edit : apache_edits_) {
+                edit->set_font(fonts_.button.get());
+            }
             const RECT& r = *win::int_to_ptr<const RECT*>(lparam);
             SetWindowPos(hwnd_, nullptr, r.left, r.top, r.right - r.left, r.bottom - r.top,
                          SWP_NOZORDER | SWP_NOACTIVATE);
@@ -286,26 +289,50 @@ LRESULT SettingsWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
                 for (const auto& edit : db_edits_) {
                     edit->set_font(fonts_.button.get());
                 }
+                for (const auto& edit : apache_edits_) {
+                    edit->set_font(fonts_.button.get());
+                }
                 relayout();
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
             return 0;
-        case WM_MOUSEMOVE:
-            on_mouse_move(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+        case WM_MOUSEMOVE: {
+            // While the thumb is dragged (or the track paged) the bar has the mouse.
+            const bool held = scroll_bar_.active();
+            if (scroll_bar_.move(hwnd_, GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam))) {
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
+            if (!held) {
+                on_mouse_move(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+            }
             return 0;
+        }
+        case WM_CAPTURECHANGED:
+        case WM_CANCELMODE:
+            scroll_bar_.cancel(hwnd_);
+            break;
         case WM_MOUSELEAVE:
             tracking_mouse_ = false;
+            if (scroll_bar_.leave()) {
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
             if (hover_.part != Part::None) {
                 hover_ = {};
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
             return 0;
         case WM_LBUTTONDOWN:
+            if (scroll_bar_.press(hwnd_, GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam))) {
+                return 0;  // the bar's: the keyboard focus stays where it is
+            }
             SetFocus(hwnd_);
             pressed_ = hit_test(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
             SetCapture(hwnd_);
             return 0;
         case WM_LBUTTONUP: {
+            if (scroll_bar_.release(hwnd_)) {
+                return 0;
+            }
             ReleaseCapture();
             const Hit hit = hit_test(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
             if (hit == pressed_ && hit.part != Part::None) {
@@ -334,6 +361,9 @@ LRESULT SettingsWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         case WM_TIMER:
+            if (scroll_bar_.tick(hwnd_, wparam)) {
+                return 0;
+            }
             if (wparam == kMessageTimer) {
                 KillTimer(hwnd_, kMessageTimer);
                 message_.clear();
@@ -384,10 +414,12 @@ void SettingsWindow::on_create() {
 
 void SettingsWindow::on_destroy() {
     KillTimer(hwnd_, kMessageTimer);
+    KillTimer(hwnd_, kScrollTimer);
     edits_.clear();
     field_edit_.clear();
     port_edits_.clear();
     db_edits_.clear();
+    apache_edits_.clear();
     SecureZeroMemory(root_shown_.data(), root_shown_.size());
     root_shown_.clear();
     WINDOWPLACEMENT wp{};
@@ -411,6 +443,10 @@ void SettingsWindow::apply_theme() {
         InvalidateRect(edit->hwnd(), nullptr, TRUE);
     }
     for (const auto& edit : db_edits_) {
+        edit->set_cue_color(palette(dark_).text_subtle);
+        InvalidateRect(edit->hwnd(), nullptr, TRUE);
+    }
+    for (const auto& edit : apache_edits_) {
         edit->set_cue_color(palette(dark_).text_subtle);
         InvalidateRect(edit->hwnd(), nullptr, TRUE);
     }
@@ -497,12 +533,17 @@ void SettingsWindow::on_snapshot(const Snapshot& snap) {
         !db_series_.empty()) {
         load_db(db_series_);
     }
+    // And Apache's.
+    if (!was_connected && connected_ && section_ == Section::Apache && !apache_ && !apache_loading_ && !apache_saving_) {
+        load_apache();
+    }
     // The server's state, from the main window's poll: nothing is asked for it.
     if (!db_series_.empty()) {
         db_server_ = db_server_from_list(databases_, db_series_);
     }
     const bool close_php = on_php_answers(snap);
-    const bool close_now = on_db_answers(snap) || close_php;
+    const bool close_apache = on_apache_answers(snap);
+    const bool close_now = on_db_answers(snap) || close_php || close_apache;
     rebuild();
     if (close_now) {
         DestroyWindow(hwnd_);  // the Save chosen on the way out is done
@@ -540,6 +581,10 @@ SettingsWindow::Geometry SettingsWindow::layout(HDC dc) const {
     const int x0 = main_left();
     const int x1 = std::max(x0 + px(200), width_ - px(24));
     int y = px(4) - scroll_;
+    if (section_ == Section::Apache) {
+        layout_apache(dc, g, x0, x1, y);
+        return g;
+    }
     if (section_ == Section::Php) {
         layout_php(dc, g, x0, x1, y);
         return g;
@@ -735,7 +780,11 @@ void SettingsWindow::relayout() {
     place_php_edits();
     place_port_edits();
     place_db_edits();
+    place_apache_edits();
+    place_scroll_bar();
 }
+
+void SettingsWindow::place_scroll_bar() { scroll_bar_.place({0, 0, width_, height_}, geometry_.content_h, scroll_, dpi_); }
 
 void SettingsWindow::scroll_to(int target) {
     const int most = std::max(0, geometry_.content_h - height_);
@@ -814,13 +863,21 @@ const RECT* SettingsWindow::rect_of(const Hit& hit) const {
         case Part::PortsOpenCert:
             return ports_rect_of(hit);
         default:
+            if (is_apache_part(hit.part)) {
+                return apache_rect_of(hit);
+            }
             return is_db_part(hit.part) ? db_rect_of(hit) : php_rect_of(hit);
     }
     return nullptr;
 }
 
 std::vector<SettingsWindow::Hit> SettingsWindow::focus_order() const {
-    std::vector<Hit> order{{Part::Nav, 0, -1}, {Part::Nav, 1, -1}, {Part::Nav, 2, -1}, {Part::Nav, 3, -1}};
+    std::vector<Hit> order{{Part::Nav, 0, -1}, {Part::Nav, 1, -1}, {Part::Nav, 2, -1}, {Part::Nav, 3, -1},
+                           {Part::Nav, 4, -1}};
+    if (section_ == Section::Apache) {
+        apache_focus_order(order);
+        return order;
+    }
     if (section_ == Section::Php) {
         php_focus_order(order);
         return order;
@@ -850,6 +907,9 @@ std::vector<SettingsWindow::Hit> SettingsWindow::focus_order() const {
 }
 
 SettingsWindow::Hit SettingsWindow::hit_test(int x, int y) const {
+    if (scroll_bar_.over(x, y)) {
+        return {};  // the bar's, not what's under it
+    }
     for (const Hit& hit : focus_order()) {
         if (const RECT* r = rect_of(hit); r != nullptr && contains(*r, x, y)) {
             return hit;
@@ -935,6 +995,7 @@ void SettingsWindow::on_click(const Hit& hit) {
             open_section(hit.group == 1   ? Section::Php
                          : hit.group == 2 ? Section::Ports
                          : hit.group == 3 ? Section::Database
+                         : hit.group == 4 ? Section::Apache
                                           : Section::Runtimes);
             break;
         case Part::None:
@@ -950,7 +1011,9 @@ void SettingsWindow::on_click(const Hit& hit) {
             on_ports_click(hit);
             break;
         default:
-            if (is_db_part(hit.part)) {
+            if (is_apache_part(hit.part)) {
+                on_apache_click(hit);
+            } else if (is_db_part(hit.part)) {
                 on_db_click(hit);
             } else {
                 on_php_click(hit);
@@ -997,6 +1060,12 @@ void SettingsWindow::on_key(WPARAM key) {
             scroll_to(scroll_ - std::max(px(kRowH), height_ - px(kRowH)));
             return;
         case VK_F5:
+            if (section_ == Section::Apache) {
+                if (apache_changes_.empty() && !apache_loading_ && !apache_saving_) {
+                    load_apache();  // the modules folder and custom.conf read again
+                }
+                return;
+            }
             if (section_ == Section::Database) {
                 if (!db_series_.empty() && db_changes_.empty() && !db_loading_ && !db_saving_) {
                     load_db(db_series_);
@@ -1234,6 +1303,11 @@ void SettingsWindow::paint_shapes(Canvas& c) const {
             stroke(10.5F, 7, 10.5F, 4.5F);
             stroke(5.5F, 4.5F, 8, 2);
             stroke(8, 2, 10.5F, 4.5F);
+        } else if (i == 4) {
+            // Apache's: a globe, for the web server.
+            c.circle(static_cast<float>(ix) + pxf(8), static_cast<float>(iy) + pxf(8), pxf(6), p.text, pxf(1.3F));
+            c.round_outline({ix + px(5), iy + px(2), ix + px(11), iy + px(14)}, pxf(3), p.text, pxf(1.3F));
+            stroke(2, 8, 14, 8);
         } else if (i == 1) {
             // PHP's: </>, as in the mockup.
             stroke(5, 5, 2, 8);
@@ -1256,6 +1330,10 @@ void SettingsWindow::paint_shapes(Canvas& c) const {
         if (focused(hit)) {
             paint_ring(c, nav);
         }
+    }
+    if (section_ == Section::Apache) {
+        paint_apache_shapes(c);
+        return;
     }
     if (section_ == Section::Php) {
         paint_php_shapes(c);
@@ -1321,12 +1399,8 @@ void SettingsWindow::paint_shapes(Canvas& c) const {
             }
         }
     }
-    // A thin scroll indicator when the page is taller than the window.
-    if (g.content_h > height_ && height_ > 0) {
-        const int thumb = std::max(px(24), height_ * height_ / g.content_h);
-        const int top = (height_ - thumb) * scroll_ / (g.content_h - height_);
-        c.round_rect({width_ - px(6), top + px(2), width_ - px(2), top + thumb - px(2)}, pxf(2), p.switch_off_border);
-    }
+    // The scroll bar, when the page is taller than the window.
+    scroll_bar_.paint(c, p);
     c.unclip();
 }
 
@@ -1339,9 +1413,14 @@ void SettingsWindow::paint_text(Canvas& c) const {
         const Str label = i == 0   ? Str::SettingsRuntimes
                           : i == 1 ? Str::SettingsPhp
                           : i == 2 ? Str::SettingsPorts
-                                   : Str::SettingsDatabase;
+                          : i == 3 ? Str::SettingsDatabase
+                                   : Str::SettingsApache;
         c.text({nav.left + px(38), nav.top, nav.right - px(8), nav.bottom}, w(text(lang_, label)),
                open ? fonts_.body_bold.get() : fonts_.body.get(), p.text, Align::Start, false);
+    }
+    if (section_ == Section::Apache) {
+        paint_apache_text(c);
+        return;
     }
     if (section_ == Section::Php) {
         paint_php_text(c);

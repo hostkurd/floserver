@@ -87,6 +87,11 @@ using PortOwnerLookup = std::function<std::optional<PortOwner>(Port)>;
 // table. Elsewhere nothing (not looked up).
 [[nodiscard]] std::optional<PortOwner> find_port_owner(Port port);
 
+// The TCP ports process `pid` listens on beyond loopback ("0.0.0.0:80"),
+// from Windows' TCP table or Linux's /proc. Empty when there are none or
+// they can't be read. The shared Apache is checked once it starts.
+[[nodiscard]] std::vector<std::string> listening_beyond_loopback(std::uint32_t pid);
+
 // Settings → Ports & HTTPS, for the daemon's web.settings.get and
 // web.settings.set. Nothing here runs on a timer: each port check and owner
 // lookup is for one request.

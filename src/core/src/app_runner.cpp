@@ -583,13 +583,22 @@ void AppRunner::set_app(const AppSpec& app) {
     const bool other = app.kind != app_.kind || app.dir != app_.dir || app.runtime_dir != app_.runtime_dir ||
                        app.command != app_.command || app.server_config != app_.server_config;
     app_ = app;
+    bool restart = false;
     if (other) {
         error_.clear();
         if (state_ == AppState::Starting) {
             stale_ = true;  // the start under way is thrown away when it ends
         } else if (state_ == AppState::Running || state_ == AppState::Failed) {
+            // The shared Apache serves many projects: a running one comes
+            // back at once with its new config (Settings > Apache), rather
+            // than on the next request.
+            restart = app.kind == AppKind::Apache;  // a failed one too: it gets the config that ran before
             stop_process(lock);
         }
+    }
+    lock.unlock();
+    if (restart) {
+        wake();
     }
 }
 

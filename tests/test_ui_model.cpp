@@ -1,8 +1,10 @@
 // The window's model (src/ui-win32/model): words, rows, addresses, colours.
 
+#include "model/apache_page.h"
 #include "model/php_page.h"
 #include "model/ports_page.h"
 #include "model/runtimes_page.h"
+#include "model/scrollbar.h"
 #include "model/theme.h"
 #include "model/ui_strings.h"
 #include "model/view_model.h"
@@ -11,6 +13,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cstdlib>
 #include <string>
 
 using namespace floserver::ui;
@@ -1341,4 +1344,145 @@ TEST_CASE("the new project wizard's address follows nginx's ports and scheme") {
     const json web = {{"nginx", {{"running", true}, {"http_port", 80}, {"https_port", 443}, {"tls", true}}}};
     footer = footer_text({}, nullptr, &web, Lang::En);
     CHECK(new_project_address("shop", footer) == "https://shop.localhost");
+}
+
+TEST_CASE("Settings > Apache: modules with what they need, locked ones, what Save sends, the footer") {
+    const json reply = json::parse(R"({
+        "version": "2.4.69", "chosen": null, "versions": ["2.4.69", "2.4.66"],
+        "modules": [
+            {"name": "cache", "on": false, "kind": "optional"},
+            {"name": "cache_disk", "on": false, "kind": "optional", "needs": ["cache"]},
+            {"name": "deflate", "on": true, "kind": "default", "needs": ["filter"]},
+            {"name": "filter", "on": true, "kind": "default", "needed_by": ["deflate"]},
+            {"name": "expires", "on": true, "kind": "default"},
+            {"name": "proxy_fcgi", "on": true, "kind": "needed", "why": "fcgi"},
+            {"name": "ssl", "on": false, "kind": "off", "why": "https"},
+            {"name": "zzz", "on": false, "kind": "optional"}],
+        "custom_conf": "C:/data/apache/custom.conf", "custom_conf_exists": false,
+        "used_by": ["wp", "_shared"], "running": true, "refused": "Invalid command 'Bogus'"})");
+    const auto info = apache_info_from_reply(reply);
+    REQUIRE(info);
+    CHECK(info->refused == "Invalid command 'Bogus'");
+    CHECK_FALSE(apache_info_from_reply(json::object()));
+
+    // On first, then the popular ones, the rest, and those that don't apply last.
+    std::vector<std::string> order;
+    for (const ApacheModule& m : ordered_apache_modules(*info)) {
+        order.push_back(m.name);
+    }
+    CHECK(order == std::vector<std::string>{"deflate", "expires", "filter", "proxy_fcgi", "cache", "cache_disk", "zzz", "ssl"});
+
+    ApacheChanges changes;
+    CHECK(apache_modules_on(*info, changes) == 4);
+    // filter is on only for deflate: locked, with a note saying so.
+    const ApacheModule& filter = info->modules[3];
+    CHECK(apache_module_locked(*info, changes, filter));
+    CHECK(apache_module_note(*info, changes, filter, Lang::En) == "for deflate");
+    CHECK(apache_module_locked(*info, changes, info->modules[5]));  // FloServer's own
+    CHECK(apache_module_note(*info, changes, info->modules[5], Lang::En) == "FloServer's");
+    CHECK(apache_module_note(*info, changes, info->modules[6], Lang::En) == "nginx does HTTPS");
+    toggle_apache_module(*info, changes, "ssl");
+    toggle_apache_module(*info, changes, "filter");
+    CHECK(changes.empty());
+
+    // cache_disk on: cache comes with it, locked; off again: nothing changed.
+    toggle_apache_module(*info, changes, "cache_disk");
+    CHECK(apache_module_on(*info, changes, "cache"));
+    CHECK(apache_needed_by(*info, changes, "cache") == std::vector<std::string>{"cache_disk"});
+    CHECK(apache_module_locked(*info, changes, info->modules[0]));
+    CHECK(apache_modules_on(*info, changes) == 6);
+    // deflate off: filter goes with it, and can then be ticked by itself.
+    toggle_apache_module(*info, changes, "deflate");
+    CHECK_FALSE(apache_module_on(*info, changes, "filter"));
+    CHECK_FALSE(apache_module_locked(*info, changes, filter));
+    CHECK(apache_set_params(changes) == json{{"modules", {{"cache_disk", true}, {"deflate", false}}}});
+    toggle_apache_module(*info, changes, "cache_disk");
+    toggle_apache_module(*info, changes, "deflate");
+    CHECK(changes.empty());
+
+    // The version: the newest unless one is picked.
+    CHECK(apache_choice_label(*info, apache_shown_choice(*info, changes), Lang::En) == "Newest installed (2.4.69)");
+    changes.version = std::optional<std::string>("2.4.66");
+    CHECK(apache_choice_label(*info, apache_shown_choice(*info, changes), Lang::En) == "Apache 2.4.66");
+    CHECK(apache_set_params(changes) == json{{"version", "2.4.66"}});
+    changes.version = std::optional<std::string>();
+    CHECK(apache_set_params(changes) == json{{"version", nullptr}});
+
+    CHECK(apache_restart_text(*info, Lang::En) == "Applies when saved: Apache restarts (about a second) for wp and shared sites.");
+    ApacheInfo asleep = *info;
+    asleep.running = false;
+    CHECK(apache_restart_text(asleep, Lang::En).find("isn't running now") != std::string::npos);
+    asleep.used_by.clear();
+    CHECK(apache_restart_text(asleep, Lang::En) == "Applies when saved. No project uses Apache right now.");
+    CHECK_FALSE(apache_restart_text(*info, Lang::Ar).empty());
+    CHECK(text(Lang::Ku, Str::ApacheShowFinal).find("httpd.conf") != std::string_view::npos);
+}
+
+TEST_CASE("scroll bars: the thumb's size and place for an offset, and back") {
+    // A 400 px view of 1600 px of content, on a 400 px track from y = 100.
+    const ScrollMetrics m{100, 500, 400, 1600, 24};
+    CHECK(m.scrolls());
+    CHECK(m.most() == 1200);
+    CHECK(m.thumb_length() == 100);  // a quarter of the track: a quarter of the content is seen
+    CHECK(m.thumb_top(0) == 100);
+    CHECK(m.thumb_top(1200) == 400);  // at the bottom: 500 - 100
+    CHECK(m.thumb_top(600) == 250);
+    CHECK(m.thumb_top(-50) == 100);   // clamped
+    CHECK(m.thumb_top(5000) == 400);
+    // Back: every offset the thumb can show comes back as itself (within a pixel's worth).
+    for (int offset = 0; offset <= m.most(); offset += 37) {
+        CHECK(std::abs(m.offset_for_thumb(m.thumb_top(offset)) - offset) <= 4);
+    }
+    CHECK(m.offset_for_thumb(100) == 0);
+    CHECK(m.offset_for_thumb(400) == 1200);
+    CHECK(m.offset_for_thumb(0) == 0);        // dragged far above the bar
+    CHECK(m.offset_for_thumb(9000) == 1200);  // far below it
+
+    // A long page: the thumb doesn't get shorter than min_thumb.
+    const ScrollMetrics tall{0, 300, 300, 300000, 24};
+    CHECK(tall.thumb_length() == 24);
+    CHECK(tall.thumb_top(tall.most()) == 276);
+    CHECK(tall.offset_for_thumb(276) == tall.most());
+    CHECK(tall.offset_for_thumb(138) == tall.most() / 2);
+
+    // Nothing to scroll: no bar; an empty track never divides by zero.
+    CHECK_FALSE((ScrollMetrics{0, 300, 300, 300, 24}).scrolls());
+    CHECK_FALSE((ScrollMetrics{0, 300, 300, 200, 24}).scrolls());
+    CHECK_FALSE((ScrollMetrics{0, 0, 0, 500, 24}).scrolls());
+    CHECK((ScrollMetrics{0, 0, 0, 500, 24}).offset_for_thumb(10) == 0);
+    CHECK((ScrollMetrics{0, 10, 10, 50000, 24}).thumb_length() == 10);  // never longer than the track
+}
+
+TEST_CASE("scroll bars: a click on the track pages toward it; a drag keeps the grab point under the mouse") {
+    const ScrollMetrics m{100, 500, 400, 1600, 24};
+    // At offset 600 the thumb is 250..350.
+    CHECK(scroll_zone(m, 600, 120) == ScrollZone::Before);
+    CHECK(scroll_zone(m, 600, 250) == ScrollZone::Thumb);
+    CHECK(scroll_zone(m, 600, 349) == ScrollZone::Thumb);
+    CHECK(scroll_zone(m, 600, 350) == ScrollZone::After);
+    CHECK(scroll_zone(m, 600, 99) == ScrollZone::None);
+    CHECK(scroll_zone(m, 600, 500) == ScrollZone::None);
+    CHECK(scroll_page_toward(m, 600, 120, 380) == 220);
+    CHECK(scroll_page_toward(m, 600, 480, 380) == 980);
+    CHECK(scroll_page_toward(m, 980, 480, 380) == 1200);  // not past the end
+    CHECK(scroll_page_toward(m, 220, 120, 380) == 0);
+    CHECK(scroll_page_toward(m, 600, 300, 380) == 600);   // on the thumb: nothing
+    // Held on the track: pages until the thumb is under the mouse, then stops.
+    int offset = 0;
+    int pages = 0;
+    while (scroll_zone(m, offset, 330) == ScrollZone::After && pages < 20) {
+        offset = scroll_page_toward(m, offset, 330, 380);
+        ++pages;
+    }
+    CHECK(scroll_zone(m, offset, 330) == ScrollZone::Thumb);
+    CHECK(pages == 2);
+
+    // Grabbed 30 px below the thumb's top (offset 600: top 250): moving the
+    // mouse 60 px down moves the thumb 60 px, which is 240 px of content.
+    const ScrollDrag drag = ScrollDrag::start(m, 600, 280);
+    CHECK(drag.grab == 30);
+    CHECK(drag.offset_at(m, 280) == 600);
+    CHECK(drag.offset_at(m, 340) == 840);
+    CHECK(drag.offset_at(m, -2000) == 0);    // the mouse far off the bar: the end, not beyond
+    CHECK(drag.offset_at(m, 5000) == 1200);
 }
