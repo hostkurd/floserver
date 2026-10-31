@@ -91,6 +91,38 @@ TEST_CASE("a runtime installs, with the VC++ DLLs next to its programs, and is l
     CHECK(listed[0].dir == r.dir);
 }
 
+TEST_CASE("phpMyAdmin unpacks without its top folder, for any platform, and gets no DLLs") {
+    const TempDir tmp;
+    const auto root = tmp.path() / "runtimes";
+    const auto vc = tmp.path() / "vcruntime";
+    write_file(vc / "vcruntime140.dll", "vc");
+    const auto archive = tmp.path() / "pma.zip";
+    write_file(archive, make_zip({{"phpMyAdmin-5.2.3-all-languages/index.php", "<?php // pma"},
+                                  {"phpMyAdmin-5.2.3-all-languages/config.sample.inc.php", "<?php"},
+                                  {"phpMyAdmin-5.2.3-all-languages/libraries/vendor_config.php", "<?php"},
+                                  {"phpMyAdmin-5.2.3-all-languages/js/dist/app.js", "js"}}));
+    RuntimeFile e = entry("phpmyadmin", "5.2.3");
+    e.platform = "any";
+    e.license = "GPL-2.0-or-later";
+    const auto r = install_runtime(e, archive, root, vc);
+    INFO(r.message);
+    REQUIRE(r.ok);
+    CHECK(r.dir == root / "phpmyadmin" / "5.2.3");
+    CHECK(read_file(r.dir / "index.php") == "<?php // pma");
+    CHECK(fs::is_regular_file(r.dir / "libraries" / "vendor_config.php"));
+    CHECK(fs::is_regular_file(r.dir / "js" / "dist" / "app.js"));
+    CHECK_FALSE(fs::exists(r.dir / "phpMyAdmin-5.2.3-all-languages"));
+    CHECK_FALSE(fs::exists(r.dir / "vcruntime140.dll"));  // no programs in it
+    CHECK(is_installed(root, e));
+    const auto listed = list_installed(root);
+    REQUIRE(listed.size() == 1);
+    CHECK(listed[0].name == "phpmyadmin");
+    CHECK(listed[0].platform == "any");
+    std::string error;
+    CHECK(remove_runtime(root, "phpmyadmin", "5.2.3", error));
+    CHECK(list_installed(root).empty());
+}
+
 TEST_CASE("Apache's DLLs go into Apache24/bin; a plain file is copied as is") {
     const TempDir tmp;
     const auto root = tmp.path() / "runtimes";

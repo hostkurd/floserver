@@ -6,6 +6,7 @@
 #include "floserver/core/request_log.h"
 #include "floserver/core/nginx_config.h"
 #include "floserver/core/paths.h"
+#include "floserver/core/phpmyadmin.h"
 #include "floserver/core/process.h"
 #include "floserver/core/project_registry.h"
 #include "floserver/core/runtime_store.h"
@@ -283,6 +284,30 @@ void WebService::stop_nginx_locked() {
     fs::remove(work_ / "nginx.pid", ec);
     config_text_.clear();
     ports_.reset();
+}
+
+bool WebService::write_phpmyadmin_files_locked(const fs::path& install, std::string& error) {
+    const PhpMyAdminPaths paths = phpmyadmin_paths(config_.data_dir);
+    const auto script = phpmyadmin_signon_script(paths);
+    const auto stub = phpmyadmin_config_stub(paths.config);
+    if (!script || !stub) {
+        error = "phpMyAdmin's folder path can't be written into PHP: " + path_to_utf8(paths.dir);
+        return false;
+    }
+    const fs::path stub_file = install / "config.inc.php";
+    std::string key = path_to_utf8(install);
+    key.append("\n").append(*script).append(*stub);
+    std::error_code ec;
+    // The install's stub goes when phpMyAdmin is updated or reinstalled.
+    if (key == phpmyadmin_files_ && fs::is_regular_file(stub_file, ec)) {
+        return true;
+    }
+    if (!ensure_phpmyadmin_dirs(paths, error) || !write_file_atomically(paths.signon_script, *script, error) ||
+        !write_file_atomically(stub_file, *stub, error)) {
+        return false;
+    }
+    phpmyadmin_files_ = std::move(key);
+    return true;
 }
 
 void WebService::reload_locked() {
@@ -622,7 +647,61 @@ void WebService::reload_locked() {
         sites[std::string(kSharedSiteName)] = site;
     }
 
-    if (serve.empty() && !shared_spec) {
+    // phpMyAdmin, when it's installed: phpmyadmin.localhost.
+    std::optional<NginxPhpMyAdmin> pma_spec;
+    if (plan.phpmyadmin) {
+        const PlannedSite& p = *plan.phpmyadmin;
+        Site site;
+        site.version = plan.phpmyadmin_version;
+        if (p.state == SiteState::Problem) {
+            site.state_override = "problem";
+            site.problem = p.problem;
+            site.name_taken = find_project(*app, kPhpMyAdminHostName) != nullptr;
+        } else if (p.state == SiteState::NeedsDownload) {
+            site.state_override = "needs_download";
+            site.missing = p.missing;
+        } else if (nginx == nullptr) {
+            site.state_override = "needs_download";
+            site.missing = {"nginx"};
+        } else {
+            const PhpPool& pool = plan.pools.at(*p.pool);
+            std::string why;
+            if (const auto e = pool_errors.find(pool.key); e != pool_errors.end()) {
+                why = e->second;
+            } else if (!write_phpmyadmin_files_locked(p.doc_root, why) && why.empty()) {
+                why = "phpMyAdmin's files can't be written";
+            }
+            if (!why.empty()) {
+                site.state_override = "problem";
+                site.problem = why;
+            } else {
+                NginxPhpMyAdmin ns;
+                ns.dir = p.doc_root;
+                ns.signon_script = phpmyadmin_paths(config_.data_dir).signon_script;
+                ns.php_ports = pool.ports;
+                ns.php_access_log = pools.at(pool.key)->access_log();
+                if (tls_) {
+                    std::string cert_error;
+                    if (const auto cert = certs_.ensure_site(std::string(kPhpMyAdminHostName), cert_error)) {
+                        ns.tls = NginxTls{cert->certificate, cert->key};
+                    } else {
+                        error_ = "no certificate for phpMyAdmin: " + cert_error;
+                    }
+                }
+                site.pool_key = pool.key;
+                site.address = ns.tls ? "https" : "http";
+                pma_spec = std::move(ns);
+                if (config_.phpmyadmin_config) {
+                    config_.phpmyadmin_config();
+                }
+            }
+        }
+        sites[std::string(kPhpMyAdminSiteName)] = site;
+    } else {
+        phpmyadmin_files_.clear();  // installed again later: written again
+    }
+
+    if (serve.empty() && !shared_spec && !pma_spec) {
         stop_nginx_locked();  // nothing to serve: free the ports and the memory
         pools_ = std::move(pools);
         replace_apps_locked(std::move(apps));
@@ -679,6 +758,10 @@ void WebService::reload_locked() {
     for (auto& [name, site] : sites) {
         if (name == kSharedSiteName) {
             site.address = site.address.empty() ? std::string() : shared_address(use, site.address == "https");
+        } else if (name == kPhpMyAdminSiteName) {
+            site.address = site.address.empty()
+                               ? std::string()
+                               : site_address(std::string(kPhpMyAdminHostName), use, site.address == "https");
         } else if (!site.address.empty()) {
             site.address = site_address(name, use, site.address == "https");
         }
@@ -723,6 +806,7 @@ void WebService::reload_locked() {
         }
     }
     spec.shared = std::move(shared_spec);
+    spec.phpmyadmin = std::move(pma_spec);
     // The id comes from the config itself, so the same config has the same
     // id and an unchanged one still compares equal.
     auto text = make_nginx_config(spec, error);
@@ -936,6 +1020,7 @@ json WebService::status_locked() const {
     }
     json sites = json::object();
     json shared = nullptr;
+    json phpmyadmin = nullptr;
     for (const auto& [name, s] : sites_) {
         json j = json::object();
         if (!s.address.empty()) {
@@ -971,6 +1056,12 @@ json WebService::status_locked() const {
         }
         if (name == kSharedSiteName) {
             shared = std::move(j);
+        } else if (name == kPhpMyAdminSiteName) {
+            j["version"] = s.version;
+            if (s.name_taken) {
+                j["name_taken"] = true;
+            }
+            phpmyadmin = std::move(j);
         } else {
             sites[name] = std::move(j);
         }
@@ -998,6 +1089,8 @@ json WebService::status_locked() const {
                 {"sites", sites},
                 // Shared sites (D19): null when they're off.
                 {"shared", shared},
+                // phpMyAdmin: null when it isn't installed.
+                {"phpmyadmin", phpmyadmin},
                 // How long a project waits for a request before it sleeps (the window says it).
                 {"idle_after_s", config_.idle_after.count()}};
     if (!error_.empty()) {

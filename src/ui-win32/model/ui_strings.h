@@ -27,6 +27,9 @@ enum class Lang : std::uint8_t { En, Ar, Ku };
 
 [[nodiscard]] bool is_rtl(Lang lang);
 
+// "en", "ar" or "ku": what the window tells the service it shows.
+[[nodiscard]] std::string_view lang_code(Lang lang);
+
 enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every section it outgrows 256
     Projects,
     SearchProjects,
@@ -325,6 +328,16 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     DbOpenIniFailed,         // {0}: the reason
     DbIniOpened,
     DbFinalOpened,
+    // phpMyAdmin (an optional tool).
+    SettingsTools,
+    PmaOpen,
+    PmaOpenProject,
+    PmaNotInstalled,
+    PmaOpening,
+    PmaOpenFailed,           // {0}: the service's reason
+    PmaAddress,              // {0}: "https://phpmyadmin.localhost"
+    PmaNameTaken,
+    PmaNeedsPhp,
     Count_,
 };
 

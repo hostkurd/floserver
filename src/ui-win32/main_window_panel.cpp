@@ -433,6 +433,15 @@ MainWindow::PanelGeometry MainWindow::panel_geometry(HDC dc) const {
         g.db_title = {x0 + px(12), y + px(9), g.copy_env.left - px(12), y + px(28)};
         g.db_detail = {x0 + px(12), y + px(28), g.copy_env.left - px(12), y + px(46)};
         y = g.db_box.bottom + px(kPanelGap);
+        // Open in phpMyAdmin: the project's own login, its database only.
+        const int pw = std::max(Canvas::measure(dc, w(text(lang_, Str::PmaOpenProject)), fonts_.caption.get(), rtl_),
+                                Canvas::measure(dc, w(text(lang_, Str::PmaOpening)), fonts_.caption.get(), rtl_)) +
+                       px(24);
+        g.pma = {x0, y, std::min(x1, x0 + pw), y + px(28)};
+        if (!phpmyadmin_installed(snap_.installed)) {
+            g.pma_hint = {std::min(x1, static_cast<int>(g.pma.right) + px(12)), y, x1, y + px(28)};
+        }
+        y = g.pma.bottom + px(kPanelGap);
     } else if (tab == PanelTab::Log) {
         // The log fills the tab: the newest lines that fit, nothing to scroll.
         g.log_box = {x0, y, x1, std::max(y, static_cast<int>(g.content.bottom) - px(10))};
@@ -494,6 +503,8 @@ RECT MainWindow::panel_rect_of(const Hit& hit) const {
             return {};
         case Part::PanelCopyEnv:
             return g.db_box;
+        case Part::PanelPhpMyAdmin:
+            return g.pma;
         case Part::PanelKeep:
             return {g.keep_title.left, g.keep_title.top, g.keep_switch.right, g.keep_detail.bottom};
         case Part::PanelPhpSettings:
@@ -566,6 +577,9 @@ MainWindow::Hit MainWindow::panel_hit_test(int x, int y) const {
     if (contains(g.copy_env, x, y)) {
         return hit(Part::PanelCopyEnv, -1);
     }
+    if (contains(g.pma, x, y)) {
+        return hit(Part::PanelPhpMyAdmin, -1);
+    }
     if (contains(g.keep_switch, x, y)) {
         return hit(Part::PanelKeep, -1);
     }
@@ -596,6 +610,9 @@ std::vector<MainWindow::Hit> MainWindow::panel_focus_order() const {
     }
     if (g.copy_env.right > g.copy_env.left) {
         order.push_back({Part::PanelCopyEnv, -1, g.project});
+    }
+    if (g.pma.right > g.pma.left) {
+        order.push_back({Part::PanelPhpMyAdmin, -1, g.project});
     }
     if (g.keep_switch.right > g.keep_switch.left) {
         order.push_back({Part::PanelKeep, -1, g.project});
@@ -641,6 +658,16 @@ void MainWindow::on_panel_click(const Hit& hit) {
             if (worker_ && snap_.link == Link::Connected) {
                 change_error_.clear();
                 worker_->copy_env(selected_);
+            }
+            break;
+        case Part::PanelPhpMyAdmin:
+            // One request; on_snapshot() opens the link it answers with.
+            if (worker_ && snap_.link == Link::Connected && !pma_busy_ && phpmyadmin_installed(snap_.installed)) {
+                change_error_.clear();
+                pma_busy_ = true;
+                worker_->database_call("phpmyadmin.login",
+                                       {{"project", selected_}, {"lang", std::string(lang_code(lang_))}}, "panel");
+                InvalidateRect(hwnd_, nullptr, FALSE);
             }
             break;
         case Part::PanelKeep:
@@ -1079,6 +1106,10 @@ void MainWindow::paint_panel(Canvas& c, HDC dc, bool text_pass) const {
             c.round_rect(g.db_box, pxf(6), p.panel_box);
             paint_button(c, g.copy_env, hovered(Part::PanelCopyEnv, -1), focused(Part::PanelCopyEnv, -1));
         }
+        if (g.pma.right > g.pma.left) {
+            paint_button(c, g.pma, hovered(Part::PanelPhpMyAdmin, -1) && phpmyadmin_installed(snap_.installed),
+                         focused(Part::PanelPhpMyAdmin, -1));
+        }
         if (g.keep_switch.right > g.keep_switch.left) {
             paint_switch(c, g.keep_switch, keep_value(*row), hovered(Part::PanelKeep, -1));
             if (focused(Part::PanelKeep, -1)) {
@@ -1160,6 +1191,15 @@ void MainWindow::paint_panel(Canvas& c, HDC dc, bool text_pass) const {
         c.text(g.db_detail, w(fill(lang_, Str::DatabaseDetail, {host, name})), fonts_.caption.get(), p.text_subtle,
                Align::Start, false);
         c.text(g.copy_env, w(text(lang_, Str::CopyEnv)), fonts_.caption.get(), p.text, Align::Center, false);
+    }
+    if (g.pma.right > g.pma.left) {
+        const bool can = phpmyadmin_installed(snap_.installed) && !pma_busy_ && snap_.link == Link::Connected;
+        c.text(g.pma, w(text(lang_, pma_busy_ ? Str::PmaOpening : Str::PmaOpenProject)), fonts_.caption.get(),
+               can ? p.text : p.button_disabled_text, Align::Center, false);
+        if (g.pma_hint.right > g.pma_hint.left) {
+            c.text(g.pma_hint, w(text(lang_, Str::PmaNotInstalled)), fonts_.caption.get(), p.text_subtle, Align::Start,
+                   false);
+        }
     }
 
     if (g.keep_switch.right > g.keep_switch.left) {

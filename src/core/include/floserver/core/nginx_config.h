@@ -60,6 +60,19 @@ struct NginxShared {
     std::vector<std::string> reserved;
 };
 
+// phpMyAdmin (phpmyadmin.h) at phpmyadmin.localhost: its files from its
+// install, PHP to its pool, /floserver-signon.php from FloServer's own
+// script outside the install. Its setup, examples, libraries and other
+// folders that aren't web pages are never served. With `tls` the http port
+// redirects to https, as for a project.
+struct NginxPhpMyAdmin {
+    std::filesystem::path dir;             // the install
+    std::filesystem::path signon_script;   // <data>/phpmyadmin/floserver-signon.php
+    std::vector<Port> php_ports;           // its pool
+    std::filesystem::path php_access_log;  // the pool's idle log
+    std::optional<NginxTls> tls;
+};
+
 struct NginxSpec {
     std::filesystem::path nginx_dir;  // the installed nginx (its conf/mime.types, conf/fastcgi_params)
     std::filesystem::path work_dir;   // our folder: logs/, temp/, the pid file
@@ -75,6 +88,7 @@ struct NginxSpec {
     std::string config_id;
     std::vector<NginxSite> sites;
     std::optional<NginxShared> shared;
+    std::optional<NginxPhpMyAdmin> phpmyadmin;
 };
 
 // The config text, or nothing (with `error`) when a name or path can't be

@@ -57,6 +57,10 @@ struct WebServiceConfig {
     std::size_t php_workers = kPhpWorkers;  // php-cgi processes per pool, one port each
     std::chrono::seconds reload_every{5};
     PortProbe probe;  // empty: can_listen_on_loopback
+    // phpMyAdmin (phpmyadmin.h): writes its config.inc.php when what it
+    // says changed. Called on each reload while phpMyAdmin is served, after
+    // the service has written the signon script and the install's stub.
+    std::function<void()> phpmyadmin_config;
 };
 
 [[nodiscard]] std::filesystem::path web_dir(const std::filesystem::path& data);
@@ -94,6 +98,9 @@ public:
     //             "log", "error"?}},
     //    "sites": {"<name>": {"address", "pool"? | "app"?, "run": "sleeping"|"starting"|"running"|"failed",
     //              "state"?, "missing"?, "problem"?, "error"?}},
+    //    "shared": the same for shared sites, or null,
+    //    "phpmyadmin": the same for phpMyAdmin with its "version" (and "name_taken": true when a
+    //                  project has its address), or null when it isn't installed,
     //    "error"?: "..."}
     [[nodiscard]] nlohmann::json status() const;
 
@@ -111,6 +118,8 @@ private:
         std::string state_override;      // "needs_download" / "problem" set here
         std::vector<std::string> missing;
         std::string problem;
+        std::string version;             // phpMyAdmin's
+        bool name_taken = false;         // phpMyAdmin: a project has its address
     };
 
     void reload_locked();
@@ -156,6 +165,11 @@ private:
     std::string rejected_error_;
     bool stopped_ = false;
     std::string shared_script_text_;  // the list page's script as last written (D19)
+    // phpMyAdmin's signon script and the install's stub as last written:
+    // the install folder, then both texts.
+    std::string phpmyadmin_files_;
+    // Writes them when they changed; false (with `error`) when they can't be.
+    [[nodiscard]] bool write_phpmyadmin_files_locked(const std::filesystem::path& install, std::string& error);
 
     std::atomic<bool> stopping_{false};
     std::thread thread_;

@@ -684,6 +684,9 @@ std::string runtime_label(std::string_view name) {
     if (name == "apache") {
         return "Apache";
     }
+    if (name == "phpmyadmin") {
+        return "phpMyAdmin";
+    }
     return std::string(name);
 }
 
@@ -910,8 +913,10 @@ bool is_project_name(std::string_view name) {
 }
 
 std::string free_project_name(const std::string& base, const std::vector<ProjectRow>& rows) {
+    // "phpmyadmin" is kept for phpMyAdmin (phpmyadmin.localhost).
     const auto taken = [&rows](const std::string& n) {
-        return std::any_of(rows.begin(), rows.end(), [&](const ProjectRow& r) { return r.name == n; });
+        return n == "phpmyadmin" ||
+               std::any_of(rows.begin(), rows.end(), [&](const ProjectRow& r) { return r.name == n; });
     };
     if (!taken(base)) {
         return base;

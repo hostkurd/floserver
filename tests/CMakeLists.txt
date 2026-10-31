@@ -21,6 +21,7 @@ add_executable(floserver_tests
     test_service.cpp
     test_sha256.cpp
     test_php_settings.cpp
+    test_phpmyadmin.cpp
     test_shim.cpp
     test_integration.cpp
     test_site_plan.cpp

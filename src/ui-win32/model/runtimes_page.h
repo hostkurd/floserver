@@ -70,6 +70,15 @@ struct RuntimesPage {
 [[nodiscard]] RuntimesPage runtimes_page(const nlohmann::json& reply, const Installed* installed,
                                          const nlohmann::json& databases, Lang lang);
 
+// The Tools card's line for phpMyAdmin from runtimes.list's "phpmyadmin"
+// (web.status's): "Opens at https://phpmyadmin.localhost", or why it isn't
+// served. Empty when there's nothing to say.
+[[nodiscard]] std::string phpmyadmin_line(const nlohmann::json& served, Lang lang);
+
+// Whether phpMyAdmin is installed (the window's poll): "Open phpMyAdmin"
+// buttons are disabled with a hint until it is.
+[[nodiscard]] bool phpmyadmin_installed(const Installed& installed);
+
 // After "Check for updates" fails the answer has no list: the versions on
 // offer stay those of `before`, the rest (installed, defaults) is `fresh`'s.
 [[nodiscard]] nlohmann::json merge_runtimes_reply(const nlohmann::json& before, const nlohmann::json& fresh);

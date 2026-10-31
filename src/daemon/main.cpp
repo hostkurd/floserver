@@ -13,6 +13,7 @@
 #include "floserver/core/integration.h"
 #include "floserver/core/ipc.h"
 #include "floserver/core/paths.h"
+#include "floserver/core/phpmyadmin.h"
 #include "floserver/core/process.h"
 #include "floserver/core/project_service.h"
 #include "floserver/core/protocol.h"
@@ -179,6 +180,7 @@ struct Service {
     std::unique_ptr<floserver::core::SecretStore> secrets;
     std::unique_ptr<floserver::core::DatabaseService> databases;
     std::unique_ptr<floserver::core::TemplateService> templates;
+    std::unique_ptr<floserver::core::PhpMyAdminConfigWriter> phpmyadmin;
     std::optional<std::filesystem::path> data;
 
     // integration.json for FloCMS Studio (D14): rewritten when what it says
@@ -254,6 +256,11 @@ struct Service {
                 }
                 if (const auto defaults = projects->defaults(ignored)) {
                     out["defaults"] = *defaults;
+                }
+                // Tools: how phpMyAdmin is served (its address, or why not).
+                if (web) {
+                    const json status = web->status();
+                    out["phpmyadmin"] = status.contains("phpmyadmin") ? status.at("phpmyadmin") : json();
                 }
             }
             return protocol::make_result(r.id, out);
@@ -556,6 +563,119 @@ struct Service {
         return out;
     }
 
+    // The MariaDB servers phpMyAdmin offers: those the service runs or holds now.
+    [[nodiscard]] std::vector<floserver::core::PhpMyAdminServer> phpmyadmin_servers() const {
+        std::vector<floserver::core::PhpMyAdminServer> out;
+        if (!databases) {
+            return out;
+        }
+        const json status = databases->status();
+        if (!status.contains("servers") || !status.at("servers").is_array()) {
+            return out;
+        }
+        for (const json& s : status.at("servers")) {
+            if (s.is_object() && s.contains("series") && s.at("series").is_string() && s.contains("port") &&
+                s.at("port").is_number_unsigned() && s.at("port").get<std::uint64_t>() < 65536) {
+                out.push_back({s.at("series").get<std::string>(),
+                               static_cast<floserver::core::Port>(s.at("port").get<std::uint64_t>())});
+            }
+        }
+        return out;
+    }
+
+    // phpmyadmin.login {"series": "11.4"} (as root) or {"project": "shop"}
+    // (the project's own user, its database only), "lang"?: the window's
+    // language -> {"url"}: a one-click login link that works once, for 60 s.
+    // The login waits in a private file; nothing secret is in the link.
+    [[nodiscard]] std::string phpmyadmin_request(const protocol::Request& r) const {
+        namespace core = floserver::core;
+        if (!web || !databases || !phpmyadmin || !data) {
+            return protocol::make_error(r.id, "no_data_folder",
+                                        "FloServer can't find a folder to keep its settings in (LOCALAPPDATA or HOME)");
+        }
+        const json status = web->status();
+        const json pma = status.contains("phpmyadmin") ? status.at("phpmyadmin") : json();
+        if (!pma.is_object()) {
+            return protocol::make_error(r.id, "not_installed",
+                                        "phpMyAdmin isn't installed; download it in Settings → Runtimes");
+        }
+        const std::string address =
+            pma.contains("address") && pma.at("address").is_string() ? pma.at("address").get<std::string>() : "";
+        if (address.empty()) {
+            std::string why = pma.contains("problem") && pma.at("problem").is_string()
+                                  ? pma.at("problem").get<std::string>()
+                                  : std::string("it isn't being served yet");
+            if (pma.contains("missing") && pma.at("missing").is_array() && !pma.at("missing").empty()) {
+                why = "it needs " + pma.at("missing").front().get<std::string>() + " first";
+            }
+            return protocol::make_error(r.id, "not_served", "phpMyAdmin can't be opened: " + why);
+        }
+        const std::string lang = string_param(r.params, "lang");
+        if (!lang.empty()) {
+            phpmyadmin->set_lang(lang);
+        }
+        const std::vector<core::PhpMyAdminServer> running = phpmyadmin_servers();
+        core::ServiceRefusal refusal;
+        core::SignonLogin login;
+        const std::string project = string_param(r.params, "project");
+        if (!project.empty()) {
+            auto own = databases->project_login(project, refusal);
+            if (!own) {
+                return protocol::make_error(r.id, refusal.code, refusal.message);
+            }
+            const auto found = std::find_if(running.begin(), running.end(),
+                                             [&own](const core::PhpMyAdminServer& s) { return s.port == own->port; });
+            if (found == running.end()) {
+                return protocol::make_error(r.id, "no_server", "the project's MariaDB server isn't running");
+            }
+            login.series = found->series;
+            login.user = std::move(own->user);
+            login.password = std::move(own->password);
+            login.port = own->port;
+            login.only_db = std::move(own->database);
+        } else {
+            const std::string text = string_param(r.params, "series");
+            const auto series = core::mariadb_request_series(text);
+            if (!series) {
+                return protocol::make_error(r.id, "bad_params", "name a MariaDB series such as 11.4, or a project");
+            }
+            const auto found = std::find_if(running.begin(), running.end(),
+                                             [&series](const core::PhpMyAdminServer& s) { return s.series == *series; });
+            if (found == running.end()) {
+                return protocol::make_error(r.id, "no_server",
+                                            "MariaDB " + *series +
+                                                " has no server now: no project uses it. Turn on Keep running in "
+                                                "Settings → Database to open it in phpMyAdmin");
+            }
+            auto password = databases->root_password(*series, refusal);
+            if (!password) {
+                return protocol::make_error(r.id, refusal.code, refusal.message);
+            }
+            login.series = *series;
+            login.user = "root";
+            login.password = std::move(*password);
+            login.port = found->port;
+        }
+        std::string error;
+        std::vector<core::PhpMyAdminServer> listed;
+        if (!phpmyadmin->update(error, &listed)) {
+            return protocol::make_error(r.id, "phpmyadmin_failed", error);
+        }
+        const auto index = std::find_if(listed.begin(), listed.end(), [&login](const core::PhpMyAdminServer& s) {
+            return s.series == login.series && s.port == login.port;
+        });
+        if (index == listed.end()) {
+            return protocol::make_error(r.id, "no_server", "MariaDB " + login.series + " isn't running");
+        }
+        login.server = static_cast<std::size_t>(index - listed.begin()) + 1;
+        const auto token = core::create_signon_token(core::phpmyadmin_paths(*data).tokens, login,
+                                                      std::chrono::system_clock::now(), error);
+        if (!token) {
+            return protocol::make_error(r.id, "phpmyadmin_failed", error);
+        }
+        return protocol::make_result(r.id, {{"url", core::signon_url(address, *token, lang)}});
+    }
+
     // web.status, web.reload: what runs, or bring it in line now (after
     // `flo trust`, say).
     [[nodiscard]] std::string web_request(const protocol::Request& r) const {
@@ -804,6 +924,8 @@ struct Service {
                        request->method == "database.final_ini" || request->method == "database.root" ||
                        request->method == "database.root_set") {
                 reply = database_settings_request(*request);
+            } else if (request->method == "phpmyadmin.login") {
+                reply = phpmyadmin_request(*request);
             } else if (request->method == "templates.list" || request->method == "projects.create" ||
                        request->method == "create.get" || request->method == "create.cancel") {
                 reply = template_request(*request);
@@ -931,7 +1053,24 @@ int run() {
     if (const auto data = floserver::core::data_dir()) {
         service->projects = std::make_unique<floserver::core::ProjectService>(*data);
         service->certs = std::make_unique<floserver::core::CertStore>(*data);
-        service->web = std::make_unique<floserver::core::WebService>(web_config(*data), *service->certs);
+        service->secrets = std::make_unique<floserver::core::SecretStore>(*data);
+        floserver::core::DatabaseServiceConfig db;
+        db.data_dir = *data;
+        db.idle_after = web_config(*data).idle_after;
+        service->databases = std::make_unique<floserver::core::DatabaseService>(db, *service->secrets);
+        service->databases->start();
+        {
+            // phpMyAdmin's config.inc.php, kept in line by the web service's reloads.
+            const Service* s = service.get();
+            service->phpmyadmin = std::make_unique<floserver::core::PhpMyAdminConfigWriter>(
+                *data, *service->secrets, [s] { return s->phpmyadmin_servers(); });
+            auto config = web_config(*data);
+            config.phpmyadmin_config = [s] {
+                std::string ignored;  // tried again on the next reload
+                (void)s->phpmyadmin->update(ignored);
+            };
+            service->web = std::make_unique<floserver::core::WebService>(std::move(config), *service->certs);
+        }
         service->web->start();
         {
             floserver::core::WebSettingsService::Hooks hooks;
@@ -942,12 +1081,6 @@ int run() {
             service->web_settings =
                 std::make_unique<floserver::core::WebSettingsService>(*service->projects, std::move(hooks));
         }
-        service->secrets = std::make_unique<floserver::core::SecretStore>(*data);
-        floserver::core::DatabaseServiceConfig db;
-        db.data_dir = *data;
-        db.idle_after = web_config(*data).idle_after;
-        service->databases = std::make_unique<floserver::core::DatabaseService>(db, *service->secrets);
-        service->databases->start();
         service->templates = std::make_unique<floserver::core::TemplateService>(*data, template_hooks(service));
         service->data = *data;
         service->refresh_integration();

@@ -1,6 +1,6 @@
 # The runtime manifest (D5)
 
-FloServer downloads PHP, MariaDB, Node.js, Composer, nginx and Apache from a
+FloServer downloads PHP, MariaDB, Node.js, Composer, nginx, Apache and phpMyAdmin from a
 list on our server. The list is signed, so a hacked mirror or a hijacked
 connection can't send users a different file.
 
@@ -68,6 +68,12 @@ renamed into place, so a folder without a marker is never taken for an
 install. Other variants than PHP's usual NTS get their own folder
 (`8.5.12-ts`).
 
+Files that are the same everywhere (Composer, phpMyAdmin) are listed with
+`"platform": "any"`. An entry whose name a FloServer doesn't know still
+passes its checks: the list is never refused for it. Such an app offers it
+only where its window knows the name (the Settings window shows known kinds
+only); `flo runtimes` lists it and `flo install <name>` installs it.
+
 ## Publishing a new list
 
 The list is built from what the CDN actually serves, after each file has been
@@ -91,7 +97,7 @@ steps 2 to 6 below in one window:
      10 minutes of the CDN's;
    - checks the files: those in the live list must still be served at their
      size; new ones are downloaded from the CDN and compared with the official
-     checksum list (PHP, MariaDB, Node.js, Composer, Python) or the original
+     checksum list (PHP, MariaDB, Node.js, Composer, Python, phpMyAdmin's .sha256) or the original
      download (nginx, WordPress). Apache is compared by hand: select it,
      compare the SHA-256 shown with apachelounge.com, tick the box and press
      Publish again;
