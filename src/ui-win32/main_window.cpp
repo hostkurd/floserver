@@ -65,10 +65,16 @@ bool MainWindow::create(int show) {
                         this) == nullptr) {
         return false;
     }
-    // The window may have opened on a monitor with another scale.
-    if (std::cmp_not_equal(dpi_, system_dpi)) {
-        SetWindowPos(hwnd_, nullptr, 0, 0, px(open_w), px(open_h), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-    }
+    // Centred on the screen it opened on (Windows would put it near the
+    // top-left corner), at that screen's scale.
+    MONITORINFO mi{};
+    mi.cbSize = sizeof mi;
+    GetMonitorInfoW(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTOPRIMARY), &mi);
+    const RECT area = mi.rcWork;
+    const int ww = std::min(px(open_w), width_of(area));
+    const int wh = std::min(px(open_h), height_of(area));
+    SetWindowPos(hwnd_, nullptr, static_cast<int>(area.left) + (width_of(area) - ww) / 2,
+                 static_cast<int>(area.top) + (height_of(area) - wh) / 2, ww, wh, SWP_NOZORDER | SWP_NOACTIVATE);
     ShowWindow(hwnd_, show);
     UpdateWindow(hwnd_);
     return true;
@@ -108,6 +114,11 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             if (quitting_) {
                 DestroyWindow(hwnd_);
             } else {
+                // Settings belongs to this window; it would otherwise stay
+                // on screen with no taskbar button.
+                if (settings_) {
+                    settings_->close();
+                }
                 ShowWindow(hwnd_, SW_HIDE);
             }
             return 0;
@@ -1355,16 +1366,26 @@ void MainWindow::paint_top_bar(Canvas& c, HDC /*dc*/, bool text_pass) const {
 
         c.round_rect(settings, pxf(4), hover_.part == Part::Settings ? p.row_hover : p.button, p.button_border,
                      border);
-        paint_gear(c, settings, p.text);
+        paint_gear(c, settings, p.text, false);
         return;
     }
     const RECT title{px(kPad), 0, search.left - px(kGap), px(kTopBarH)};
     c.text(title, w(text(lang_, Str::Projects)), fonts_.title.get(), p.text, Align::Start, false);
     c.text(add, w(text(lang_, Str::NewProject)), fonts_.button_bold.get(), p.accent_text, Align::Center, false);
+    paint_gear(c, settings, p.text, true);
 }
 
-void MainWindow::paint_gear(Canvas& c, const RECT& r, Rgb color) const {
-    // Gear, 16 px on a 16 grid.
+void MainWindow::paint_gear(Canvas& c, const RECT& r, Rgb color, bool text_pass) const {
+    if (fonts_.icons) {
+        if (text_pass) {
+            c.text(r, std::wstring_view(&kIconSettings, 1), fonts_.icons.get(), color, Align::Center, true);
+        }
+        return;
+    }
+    if (text_pass) {
+        return;
+    }
+    // No icon font: a gear, 16 px on a 16 grid.
     const float g = pxf(16) / 16.0F;
     const float gx = static_cast<float>(r.left + r.right) / 2.0F - 8 * g;
     const float gy = static_cast<float>(r.top + r.bottom) / 2.0F - 8 * g;

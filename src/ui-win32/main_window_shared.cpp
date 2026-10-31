@@ -348,7 +348,7 @@ void MainWindow::paint_shared_row(Canvas& c, HDC /*dc*/, bool text_pass) const {
         }
         paint_button(c, g.open, hovered(Part::SharedOpen), focused(Part::SharedOpen));
         paint_button(c, g.gear, hovered(Part::SharedGear), focused(Part::SharedGear));
-        paint_gear(c, g.gear, p.text);
+        paint_gear(c, g.gear, p.text, false);
         c.unclip();
         return;
     }
@@ -370,6 +370,7 @@ void MainWindow::paint_shared_row(Canvas& c, HDC /*dc*/, bool text_pass) const {
                g.end == SharedGeometry::End::Address);
     }
     c.text(g.open, w(text(lang_, Str::SharedOpenFolder)), fonts_.button.get(), p.text, Align::Center, false);
+    paint_gear(c, g.gear, p.text, true);
     c.unclip_text();
 }
 

@@ -104,6 +104,19 @@ void make_ui_fonts(UiFonts& fonts, UINT dpi, Lang lang) {
     fonts.small_bold = make(12, true);
     fonts.button = make(13, false);
     fonts.button_bold = make(13, true);
+    fonts.icons.reset();
+    for (const wchar_t* icon_face : {L"Segoe Fluent Icons", L"Segoe MDL2 Assets"}) {
+        if (font_exists(icon_face)) {
+            LOGFONTW icon{};
+            icon.lfHeight = -MulDiv(16, static_cast<int>(dpi), 96);
+            icon.lfWeight = FW_NORMAL;
+            icon.lfCharSet = DEFAULT_CHARSET;
+            icon.lfQuality = CLEARTYPE_QUALITY;
+            set_face(icon, icon_face);
+            fonts.icons = win::UniqueFont(CreateFontIndirectW(&icon));
+            break;
+        }
+    }
     // The Log box: Cascadia Mono (Windows 11) or Consolas, 11.5 px.
     LOGFONTW lf{};
     lf.lfHeight = -MulDiv(23, static_cast<int>(dpi), 192);

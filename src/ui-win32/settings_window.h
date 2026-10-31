@@ -43,6 +43,8 @@ public:
     // Opens where it was last time (`placement`), else at the mockup's size.
     [[nodiscard]] bool create(const std::optional<WINDOWPLACEMENT>& placement);
     void bring_to_front();
+    // Closes it as the user would (FloServer's window is being hidden).
+    void close();
     // The worker's latest snapshot, as the main window took it.
     void on_snapshot(const Snapshot& snap);
     // Where it was when it closed, for the next time it opens.
@@ -67,7 +69,7 @@ private:
         std::string line;
         bool line_code = false;
         RECT bar{};   // a download's progress; empty when there's none
-        double fraction = 0;
+        double fraction = -1;  // below 0: no bar (most rows; a download of unknown size)
         RECT button{};
         Button button_kind = Button::None;
     };
