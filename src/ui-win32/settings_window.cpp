@@ -209,9 +209,12 @@ LRESULT SettingsWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
         case WM_CTLCOLOREDIT: {
             // The PHP section's boxes: a field with the series' own value is tinted.
             const Hit hit = hit_of_edit(GetDlgCtrlID(win::int_to_ptr<HWND>(lparam)));
-            const bool marked = hit.part == Part::PhpField && php_ &&
-                                ini_marked(*php_, php_changes_,
-                                           settings_php_ini_fields()[static_cast<std::size_t>(hit.row)].key);
+            const bool marked = (hit.part == Part::PhpField && php_ &&
+                                 ini_marked(*php_, php_changes_,
+                                            settings_php_ini_fields()[static_cast<std::size_t>(hit.row)].key)) ||
+                                (hit.part == Part::DbField && db_ &&
+                                 db_ini_marked(*db_, db_changes_,
+                                               settings_db_ini_fields()[static_cast<std::size_t>(hit.row)].key));
             const Palette& p = palette(dark_);
             auto* dc = win::int_to_ptr<HDC>(wparam);
             SetTextColor(dc, colorref(p.text));
@@ -256,6 +259,9 @@ LRESULT SettingsWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             for (const auto& edit : port_edits_) {
                 edit->set_font(fonts_.button.get());
             }
+            for (const auto& edit : db_edits_) {
+                edit->set_font(fonts_.button.get());
+            }
             const RECT& r = *win::int_to_ptr<const RECT*>(lparam);
             SetWindowPos(hwnd_, nullptr, r.left, r.top, r.right - r.left, r.bottom - r.top,
                          SWP_NOZORDER | SWP_NOACTIVATE);
@@ -275,6 +281,9 @@ LRESULT SettingsWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
                     edit->set_font(fonts_.button.get());
                 }
                 for (const auto& edit : port_edits_) {
+                    edit->set_font(fonts_.button.get());
+                }
+                for (const auto& edit : db_edits_) {
                     edit->set_font(fonts_.button.get());
                 }
                 relayout();
@@ -378,6 +387,9 @@ void SettingsWindow::on_destroy() {
     edits_.clear();
     field_edit_.clear();
     port_edits_.clear();
+    db_edits_.clear();
+    SecureZeroMemory(root_shown_.data(), root_shown_.size());
+    root_shown_.clear();
     WINDOWPLACEMENT wp{};
     wp.length = sizeof wp;
     if (GetWindowPlacement(hwnd_, &wp) != FALSE) {
@@ -396,6 +408,10 @@ void SettingsWindow::apply_theme() {
         InvalidateRect(edit->hwnd(), nullptr, TRUE);
     }
     for (const auto& edit : port_edits_) {
+        InvalidateRect(edit->hwnd(), nullptr, TRUE);
+    }
+    for (const auto& edit : db_edits_) {
+        edit->set_cue_color(palette(dark_).text_subtle);
         InvalidateRect(edit->hwnd(), nullptr, TRUE);
     }
     InvalidateRect(hwnd_, nullptr, FALSE);
@@ -476,7 +492,17 @@ void SettingsWindow::on_snapshot(const Snapshot& snap) {
         load_ports();
     }
     on_ports_answers(snap);
-    const bool close_now = on_php_answers(snap);
+    // And Database's.
+    if (!was_connected && connected_ && section_ == Section::Database && !db_ && !db_loading_ && !db_saving_ &&
+        !db_series_.empty()) {
+        load_db(db_series_);
+    }
+    // The server's state, from the main window's poll: nothing is asked for it.
+    if (!db_series_.empty()) {
+        db_server_ = db_server_from_list(databases_, db_series_);
+    }
+    const bool close_php = on_php_answers(snap);
+    const bool close_now = on_db_answers(snap) || close_php;
     rebuild();
     if (close_now) {
         DestroyWindow(hwnd_);  // the Save chosen on the way out is done
@@ -516,6 +542,10 @@ SettingsWindow::Geometry SettingsWindow::layout(HDC dc) const {
     int y = px(4) - scroll_;
     if (section_ == Section::Php) {
         layout_php(dc, g, x0, x1, y);
+        return g;
+    }
+    if (section_ == Section::Database) {
+        layout_db(dc, g, x0, x1, y);
         return g;
     }
     if (section_ == Section::Ports) {
@@ -704,6 +734,7 @@ void SettingsWindow::relayout() {
     update_tip(hover_);
     place_php_edits();
     place_port_edits();
+    place_db_edits();
 }
 
 void SettingsWindow::scroll_to(int target) {
@@ -721,9 +752,11 @@ void SettingsWindow::ensure_visible(const Hit& hit) {
     if (r == nullptr || hit.part == Part::Nav) {
         return;
     }
-    if (hit.part == Part::PhpField || hit.part == Part::PhpReset) {
+    if (hit.part == Part::PhpField || hit.part == Part::PhpReset || hit.part == Part::DbField ||
+        hit.part == Part::DbReset) {
         // The label too.
-        const RECT& label = geometry_.php.labels[static_cast<std::size_t>(hit.row)];
+        const auto& labels = is_db_part(hit.part) ? geometry_.db.labels : geometry_.php.labels;
+        const RECT& label = labels[static_cast<std::size_t>(hit.row)];
         RECT want = *r;
         want.top = std::min(want.top, label.top);
         if (want.top < px(8)) {
@@ -781,15 +814,19 @@ const RECT* SettingsWindow::rect_of(const Hit& hit) const {
         case Part::PortsOpenCert:
             return ports_rect_of(hit);
         default:
-            return php_rect_of(hit);
+            return is_db_part(hit.part) ? db_rect_of(hit) : php_rect_of(hit);
     }
     return nullptr;
 }
 
 std::vector<SettingsWindow::Hit> SettingsWindow::focus_order() const {
-    std::vector<Hit> order{{Part::Nav, 0, -1}, {Part::Nav, 1, -1}, {Part::Nav, 2, -1}};
+    std::vector<Hit> order{{Part::Nav, 0, -1}, {Part::Nav, 1, -1}, {Part::Nav, 2, -1}, {Part::Nav, 3, -1}};
     if (section_ == Section::Php) {
         php_focus_order(order);
+        return order;
+    }
+    if (section_ == Section::Database) {
+        db_focus_order(order);
         return order;
     }
     if (section_ == Section::Ports) {
@@ -897,6 +934,7 @@ void SettingsWindow::on_click(const Hit& hit) {
         case Part::Nav:
             open_section(hit.group == 1   ? Section::Php
                          : hit.group == 2 ? Section::Ports
+                         : hit.group == 3 ? Section::Database
                                           : Section::Runtimes);
             break;
         case Part::None:
@@ -912,7 +950,11 @@ void SettingsWindow::on_click(const Hit& hit) {
             on_ports_click(hit);
             break;
         default:
-            on_php_click(hit);
+            if (is_db_part(hit.part)) {
+                on_db_click(hit);
+            } else {
+                on_php_click(hit);
+            }
             break;
     }
     InvalidateRect(hwnd_, nullptr, FALSE);
@@ -955,6 +997,12 @@ void SettingsWindow::on_key(WPARAM key) {
             scroll_to(scroll_ - std::max(px(kRowH), height_ - px(kRowH)));
             return;
         case VK_F5:
+            if (section_ == Section::Database) {
+                if (!db_series_.empty() && db_changes_.empty() && !db_loading_ && !db_saving_) {
+                    load_db(db_series_);
+                }
+                return;
+            }
             if (section_ == Section::Ports) {
                 if (!ports_loading_ && ports_waiting_ == 0) {
                     load_ports();  // the ports checked again
@@ -1186,13 +1234,24 @@ void SettingsWindow::paint_shapes(Canvas& c) const {
             stroke(10.5F, 7, 10.5F, 4.5F);
             stroke(5.5F, 4.5F, 8, 2);
             stroke(8, 2, 10.5F, 4.5F);
-        } else {
+        } else if (i == 1) {
             // PHP's: </>, as in the mockup.
             stroke(5, 5, 2, 8);
             stroke(2, 8, 5, 11);
             stroke(11, 5, 14, 8);
             stroke(14, 8, 11, 11);
             stroke(9.5F, 3, 6.5F, 13);
+        } else {
+            // Database's: a cylinder, its top and two bands seen from the side.
+            c.round_outline({ix + px(3), iy + px(1), ix + px(13), iy + px(5)}, pxf(2), p.text, pxf(1.3F));
+            stroke(3, 3, 3, 13);
+            stroke(13, 3, 13, 13);
+            stroke(3, 8, 5, 9.5F);
+            stroke(5, 9.5F, 11, 9.5F);
+            stroke(11, 9.5F, 13, 8);
+            stroke(3, 13, 5, 14.5F);
+            stroke(5, 14.5F, 11, 14.5F);
+            stroke(11, 14.5F, 13, 13);
         }
         if (focused(hit)) {
             paint_ring(c, nav);
@@ -1200,6 +1259,10 @@ void SettingsWindow::paint_shapes(Canvas& c) const {
     }
     if (section_ == Section::Php) {
         paint_php_shapes(c);
+        return;
+    }
+    if (section_ == Section::Database) {
+        paint_db_shapes(c);
         return;
     }
     if (section_ == Section::Ports) {
@@ -1273,12 +1336,19 @@ void SettingsWindow::paint_text(Canvas& c) const {
     for (std::size_t i = 0; i < g.navs.size(); ++i) {
         const RECT& nav = g.navs[i];
         const bool open = static_cast<std::size_t>(section_) == i;
-        const Str label = i == 0 ? Str::SettingsRuntimes : i == 1 ? Str::SettingsPhp : Str::SettingsPorts;
+        const Str label = i == 0   ? Str::SettingsRuntimes
+                          : i == 1 ? Str::SettingsPhp
+                          : i == 2 ? Str::SettingsPorts
+                                   : Str::SettingsDatabase;
         c.text({nav.left + px(38), nav.top, nav.right - px(8), nav.bottom}, w(text(lang_, label)),
                open ? fonts_.body_bold.get() : fonts_.body.get(), p.text, Align::Start, false);
     }
     if (section_ == Section::Php) {
         paint_php_text(c);
+        return;
+    }
+    if (section_ == Section::Database) {
+        paint_db_text(c);
         return;
     }
     if (section_ == Section::Ports) {

@@ -2,6 +2,9 @@
 
 #include "floserver/core/shared_sites.h"
 
+#include "floserver/core/database_service.h"  // kFirstInternalDatabasePort
+#include "floserver/core/mariadb.h"
+#include "floserver/core/mariadb_settings.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/php_pool.h"
 #include "floserver/core/php_settings.h"
@@ -770,6 +773,248 @@ std::optional<fs::path> ProjectService::php_final_ini(const std::string& series_
     fs::permissions(file, fs::perms::owner_write | fs::perms::group_write | fs::perms::others_write,
                     fs::perm_options::remove, ec);
     return file;
+}
+
+namespace {
+
+std::optional<std::string> request_database_series(const std::string& series, ServiceRefusal& refusal) {
+    auto out = mariadb_request_series(series);
+    if (!out) {
+        refusal = {"bad_params", "\"" + series + "\" isn't a MariaDB series such as 11.4"};
+    }
+    return out;
+}
+
+// The newest install of a MariaDB series, or nothing.
+const InstalledRuntime* newest_mariadb(const std::vector<InstalledRuntime>& installed, const std::string& series) {
+    const InstalledRuntime* r = best_installed(installed, "mariadb", series);
+    return r != nullptr && mariadb_series(r->version) == series ? r : nullptr;
+}
+
+}  // namespace
+
+std::optional<json> ProjectService::database_get(const std::string& series_text, ServiceRefusal& refusal) const {
+    const auto series = request_database_series(series_text, refusal);
+    if (!series) {
+        return std::nullopt;
+    }
+    AppConfig config;
+    {
+        const std::lock_guard lock(mutex_);
+        auto loaded = load(refusal);
+        if (!loaded) {
+            return std::nullopt;
+        }
+        config = std::move(*loaded);
+    }
+    std::vector<std::string> problems;
+    const MariaDbSettings all = read_mariadb_settings(config, &problems);
+    const auto found = all.find(*series);
+    const MariaDbSeriesSettings settings = found != all.end() ? found->second : MariaDbSeriesSettings{};
+    const auto installed = list_installed(runtimes_dir(data_dir_));
+    const InstalledRuntime* db = newest_mariadb(installed, *series);
+
+    json out = {{"series", *series},
+                {"version", db != nullptr ? json(db->version) : json(nullptr)},
+                {"port", settings.port ? json(*settings.port) : json(nullptr)},
+                {"keep_running", settings.keep_running}};
+    json ini = json::object();
+    for (const auto& [k, v] : mariadb_ini_defaults()) {
+        ini[k] = v;
+    }
+    for (const auto& [k, v] : settings.ini) {
+        ini[k] = v;
+    }
+    out["ini"] = std::move(ini);
+    out["changed"] = settings.ini;
+
+    const fs::path custom = mariadb_custom_ini_file(data_dir_, *series);
+    std::error_code ec;
+    out["custom_ini"] = path_to_utf8(custom);
+    out["custom_ini_exists"] = fs::is_regular_file(custom, ec);
+    const FilteredCustomIni filtered = filter_mariadb_custom_ini(read_mariadb_custom_ini(data_dir_, *series));
+    if (!filtered.problems.empty()) {
+        out["custom_problems"] = filtered.problems;
+    }
+    out["custom_keys"] = filtered.keys;
+
+    // Who's on this series: the users of every install of it, and the
+    // projects among them set to keep running.
+    std::set<std::string> users;
+    const auto by_runtime = floserver::core::runtime_users(config, read_project_config_file, installed, std::nullopt);
+    for (const InstalledRuntime& r : installed) {
+        if (r.name == "mariadb" && mariadb_series(r.version) == *series) {
+            const auto it = by_runtime.find("mariadb/" + path_to_utf8(r.dir.filename()));
+            if (it != by_runtime.end()) {
+                users.insert(it->second.begin(), it->second.end());
+            }
+        }
+    }
+    json kept = json::array();
+    for (const Project& p : config.projects) {
+        if (p.keep_running && users.contains(p.name)) {
+            kept.push_back(p.name);
+        }
+    }
+    out["used_by"] = users;
+    out["kept_by"] = std::move(kept);
+    if (!problems.empty()) {
+        out["problems"] = problems;
+    }
+    // The names MariaDB knows, so the window can warn about one it would refuse.
+    if (db != nullptr) {
+        const MariaDbFiles files = mariadb_files(db->dir, db->version, data_dir_);
+        const std::string dir = "mariadb\n" + path_to_utf8(db->dir);
+        const fs::path cache = custom.parent_path() /
+                               path_from_utf8("known-options-" + path_to_utf8(db->dir.filename()) + ".json");
+        const auto now = std::chrono::steady_clock::now();
+        bool skip = false;
+        {
+            const std::lock_guard lock(known_mutex_);
+            const auto timed_out = known_timed_out_.find(dir);
+            // A list kept on disk is always read; mariadbd is only run again
+            // 10 minutes after a run that took too long, never after one that failed.
+            skip = !fs::is_regular_file(cache, ec) &&
+                   (known_failed_.contains(dir) ||
+                    (timed_out != known_timed_out_.end() && now - timed_out->second < std::chrono::minutes(10)));
+        }
+        if (!skip) {
+            std::string error;
+            bool timed_out = false;
+            if (const auto known = known_mariadb_options(files.server, cache, error, timed_out)) {
+                out["known_options"] = *known;
+            } else {
+                const std::lock_guard lock(known_mutex_);
+                if (timed_out) {
+                    known_timed_out_[dir] = now;
+                } else {
+                    known_failed_.insert(dir);
+                }
+            }
+        }
+    }
+    return out;
+}
+
+std::optional<json> ProjectService::database_set(const std::string& series_text, const json& ini, const json* port,
+                                                 const json* keep_running, bool& changed_ini, ServiceRefusal& refusal) {
+    changed_ini = false;
+    const auto series = request_database_series(series_text, refusal);
+    if (!series) {
+        return std::nullopt;
+    }
+    if (!ini.is_null() && !ini.is_object()) {
+        refusal = {"bad_params", R"(ini is an object such as {"max_connections": "300"})"};
+        return std::nullopt;
+    }
+    if (port != nullptr && !port->is_null() &&
+        (!port->is_number_integer() || port->get<std::int64_t>() < 1024 || port->get<std::int64_t>() > 65535)) {
+        refusal = {"bad_params", "port: a number from 1024 to 65535"};
+        return std::nullopt;
+    }
+    if (keep_running != nullptr && !keep_running->is_boolean()) {
+        refusal = {"bad_params", "keep_running is true or false"};
+        return std::nullopt;
+    }
+    {
+        const std::lock_guard lock(mutex_);
+        auto config = load(refusal);
+        if (!config) {
+            return std::nullopt;
+        }
+        const MariaDbSettings all = read_mariadb_settings(*config);
+        const auto found = all.find(*series);
+        MariaDbSeriesSettings settings = found != all.end() ? found->second : MariaDbSeriesSettings{};
+        const auto before = settings.ini;
+        if (ini.is_object()) {
+            for (const auto& [key, value] : ini.items()) {
+                if (const auto problem = mariadb_option_problem(key)) {
+                    refusal = {"bad_params", *problem};
+                    return std::nullopt;
+                }
+                const std::string name = canonical_mariadb_option(key);
+                if (value.is_null()) {
+                    settings.ini.erase(name);
+                    continue;
+                }
+                if (!value.is_string()) {
+                    refusal = {"bad_params", key + " is text, or null for the default"};
+                    return std::nullopt;
+                }
+                const std::string text = value.get<std::string>();
+                if (const auto problem = mariadb_value_problem(text)) {
+                    refusal = {"bad_params", key + ": " + *problem};
+                    return std::nullopt;
+                }
+                if (text.empty()) {
+                    settings.ini.erase(name);
+                } else {
+                    settings.ini[name] = text;
+                }
+            }
+        }
+        if (port != nullptr) {
+            std::optional<std::uint16_t> wanted;
+            if (!port->is_null()) {
+                wanted = static_cast<std::uint16_t>(port->get<std::int64_t>());
+            }
+            if (wanted && wanted != settings.port) {
+                // Not another series' (chosen, or kept in its folder), and not FloServer's internal ones.
+                if (*wanted >= kFirstInternalDatabasePort && *wanted < kFirstInternalDatabasePort + 100) {
+                    refusal = {"bad_params", "port " + std::to_string(*wanted) + " is one FloServer uses inside (33100-33199)"};
+                    return std::nullopt;
+                }
+                for (const auto& [other, s] : all) {
+                    if (other != *series && s.port == wanted) {
+                        refusal = {"port_taken", "port " + std::to_string(*wanted) + " is MariaDB " + other + "'s"};
+                        return std::nullopt;
+                    }
+                }
+                const fs::path data = data_dir_ / "data";
+                std::error_code ec;
+                for (fs::directory_iterator it(data, ec), end; !ec && it != end; it.increment(ec)) {
+                    const std::string name = path_to_utf8(it->path().filename());
+                    if (!name.starts_with("mariadb-") || name == "mariadb-" + *series || all.contains(name.substr(8))) {
+                        continue;
+                    }
+                    const auto saved = read_small_file(it->path() / "port", 32);
+                    if (saved && saved->substr(0, saved->find_first_of("\r\n")) == std::to_string(*wanted)) {
+                        refusal = {"port_taken", "port " + std::to_string(*wanted) + " is MariaDB " + name.substr(8) + "'s"};
+                        return std::nullopt;
+                    }
+                }
+                const auto own = read_small_file(data / path_from_utf8("mariadb-" + *series) / "port", 32);
+                const bool current = own && own->substr(0, own->find_first_of("\r\n")) == std::to_string(*wanted);
+                if (!current && !can_listen_on_loopback(*wanted)) {
+                    refusal = {"port_taken", "port " + std::to_string(*wanted) + " is in use by another program"};
+                    return std::nullopt;
+                }
+            }
+            settings.port = wanted;
+        }
+        if (keep_running != nullptr) {
+            settings.keep_running = keep_running->get<bool>();
+        }
+        changed_ini = settings.ini != before;
+        write_mariadb_series(*config, *series, settings);
+        if (!save(*config, refusal)) {
+            return std::nullopt;
+        }
+    }
+    return database_get(*series, refusal);
+}
+
+std::optional<fs::path> ProjectService::database_custom_ini(const std::string& series_text, ServiceRefusal& refusal) const {
+    const auto series = request_database_series(series_text, refusal);
+    if (!series) {
+        return std::nullopt;
+    }
+    std::string error;
+    if (!ensure_mariadb_custom_ini(data_dir_, *series, error)) {
+        refusal = {"folder_unwritable", error};
+        return std::nullopt;
+    }
+    return mariadb_custom_ini_file(data_dir_, *series);
 }
 
 std::optional<json> ProjectService::project_php(const std::string& name, const json& extensions, const json& ini,

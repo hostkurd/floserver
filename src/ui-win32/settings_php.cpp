@@ -22,7 +22,8 @@ using nlohmann::json;
 
 namespace {
 
-constexpr int kEditBase = 1000;  // edits_[i] has id kEditBase + i
+constexpr int kEditBase = 1000;    // edits_[i] has id kEditBase + i
+constexpr int kDbEditBase = 3000;  // db_edits_[i] has id kDbEditBase + i (settings_database.cpp)
 constexpr UINT kFirstChoice = 100;
 constexpr int kGap = 12;
 constexpr int kCardPad = 16;
@@ -99,7 +100,8 @@ bool SettingsWindow::settle_php_changes(AfterSave then, const std::string& serie
 }
 
 void SettingsWindow::try_close() {
-    if (hwnd_ == nullptr || asking_ || (section_ == Section::Php && !settle_php_changes(AfterSave::Close))) {
+    if (hwnd_ == nullptr || asking_ || (section_ == Section::Php && !settle_php_changes(AfterSave::Close)) ||
+        (section_ == Section::Database && !settle_db_changes(AfterSave::Close))) {
         return;
     }
     DestroyWindow(hwnd_);
@@ -124,6 +126,8 @@ void SettingsWindow::open_section(Section section, const std::string& series) {
     if (section == section_) {
         return;
     }
+    // A Save chosen on the way comes back here (AfterSave::Runtimes: to `section`).
+    after_save_section_ = section;
     if (section_ == Section::Php) {
         if (!settle_php_changes(section == Section::Ports ? AfterSave::Ports : AfterSave::Runtimes)) {
             return;
@@ -133,6 +137,18 @@ void SettingsWindow::open_section(Section section, const std::string& series) {
         }
         edits_.clear();
         field_edit_.clear();
+    }
+    if (section_ == Section::Database) {
+        if (!settle_db_changes(AfterSave::Runtimes)) {
+            return;
+        }
+        if (GetFocus() != hwnd_) {
+            SetFocus(hwnd_);
+        }
+        db_edits_.clear();
+        SecureZeroMemory(root_shown_.data(), root_shown_.size());
+        root_shown_.clear();
+        password_error_.clear();
     }
     if (section_ == Section::Ports) {
         if (GetFocus() != hwnd_) {
@@ -159,6 +175,17 @@ void SettingsWindow::open_section(Section section, const std::string& series) {
         // Each time the section opens: one php.get, nothing else.
         if (!pick.empty()) {
             load_php(pick);
+        }
+    }
+    if (section == Section::Database) {
+        make_db_edits();
+        const auto versions = db_versions();
+        const bool still =
+            std::any_of(versions.begin(), versions.end(), [&](const auto& v) { return v.first == db_series_; });
+        const std::string pick = still ? db_series_ : (versions.empty() ? std::string() : versions.front().first);
+        // Each time the section opens: one database.get, nothing else.
+        if (!pick.empty()) {
+            load_db(pick);
         }
     }
     if (section == Section::Ports) {
@@ -235,7 +262,7 @@ bool SettingsWindow::on_php_answers(const Snapshot& snap) {
             if (then == AfterSave::Close) {
                 close_now = true;
             } else if (then == AfterSave::Runtimes) {
-                open_section(Section::Runtimes);
+                open_section(after_save_section_);
             } else if (then == AfterSave::Ports) {
                 open_section(Section::Ports);
             } else if (then == AfterSave::Version && !target.empty()) {
@@ -360,6 +387,21 @@ void SettingsWindow::place_php_edits() {
 }
 
 SettingsWindow::Hit SettingsWindow::hit_of_edit(int id) const {
+    if (id >= kDbEditBase) {
+        // The port, the my.ini fields, then the new root password.
+        const int index = id - kDbEditBase;
+        const int fields = static_cast<int>(settings_db_ini_fields().size());
+        if (std::cmp_greater_equal(index, db_edits_.size())) {
+            return {};
+        }
+        if (index == 0) {
+            return {Part::DbPort, -1, -1};
+        }
+        if (index <= fields) {
+            return {Part::DbField, -1, index - 1};
+        }
+        return {Part::DbNewPassword, -1, -1};
+    }
     if (id >= kPortEditBase && std::cmp_less(id - kPortEditBase, port_edits_.size())) {
         return {id == kPortEditBase ? Part::PortsHttpEdit : Part::PortsHttpsEdit, -1, -1};
     }
@@ -379,6 +421,18 @@ SettingsWindow::Hit SettingsWindow::hit_of_edit(int id) const {
 }
 
 FieldEdit* SettingsWindow::edit_of(const Hit& hit) const {
+    const auto db_edit = [this](std::size_t index) -> FieldEdit* {
+        return index < db_edits_.size() ? db_edits_[index].get() : nullptr;
+    };
+    if (hit.part == Part::DbPort) {
+        return db_edit(0);
+    }
+    if (hit.part == Part::DbField && hit.row >= 0 && std::cmp_less(hit.row, settings_db_ini_fields().size())) {
+        return db_edit(static_cast<std::size_t>(hit.row) + 1);
+    }
+    if (hit.part == Part::DbNewPassword) {
+        return db_edit(settings_db_ini_fields().size() + 1);
+    }
     if ((hit.part == Part::PortsHttpEdit || hit.part == Part::PortsHttpsEdit) && port_edits_.size() == 2) {
         return port_edits_[hit.part == Part::PortsHttpEdit ? 0 : 1].get();
     }
@@ -396,6 +450,11 @@ void SettingsWindow::on_edit_change(int id) {
     const Hit hit = hit_of_edit(id);
     FieldEdit* edit = edit_of(hit);
     if (edit == nullptr || edit->setting()) {
+        return;
+    }
+    if (is_db_part(hit.part)) {
+        on_db_edit_change(hit, *edit);
+        InvalidateRect(hwnd_, nullptr, FALSE);
         return;
     }
     if (hit.part == Part::PortsHttpEdit || hit.part == Part::PortsHttpsEdit) {
@@ -440,7 +499,9 @@ bool SettingsWindow::on_edit_key(int id, WPARAM key) {
         return true;
     }
     if (key == VK_RETURN) {
-        if (id >= kPortEditBase) {
+        if (hit_of_edit(id).part == Part::DbNewPassword) {
+            set_root_password();  // after this message: its box stays
+        } else if (id >= kPortEditBase && id < kDbEditBase) {
             use_custom_ports();  // Enter in a port box: Use these ports
         }
         return true;  // the value is kept as it's typed; Save sends it

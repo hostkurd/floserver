@@ -25,6 +25,7 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -76,12 +77,41 @@ public:
     // sites must be on and have a database.
     [[nodiscard]] std::optional<DatabaseLogin> shared_login(ServiceRefusal& refusal);
 
+    // Settings → Database for one series ("11.4"):
+    //   {"server": that server as status() lists it, or null when it has none
+    //              (nothing uses the series and it isn't kept running),
+    //    "databases": ["blog", "_shared"]: the projects (and shared sites)
+    //                 whose own database has been made on it}
+    [[nodiscard]] nlohmann::json series_status(const std::string& series) const;
+    // "start", "stop" or "restart" the series' server, on a thread of its
+    // own (the reply doesn't wait). Stopping is a clean shutdown; a stopped
+    // server starts again when a project connects. False (with `refusal`)
+    // when the series has no server.
+    bool server_action(const std::string& series, const std::string& action, ServiceRefusal& refusal);
+    // After its my.ini settings changed: restarts the series' server in the
+    // background when it runs (a sleeping one reads them when it wakes).
+    // True when a restart was started.
+    bool restart_if_running(const std::string& series);
+    // root's password, from the secure store.
+    [[nodiscard]] std::optional<std::string> root_password(const std::string& series, ServiceRefusal& refusal) const;
+    // A new password for root (root_password_problem() says which are
+    // refused): set with ALTER USER on the running server (started if it
+    // sleeps), then kept in the secure store.
+    bool set_root_password(const std::string& series, const std::string& password, ServiceRefusal& refusal);
+    // The my.ini the series' server uses, written to
+    // <data>/mariadb/<series>/final-my.ini (read-only) for the user to look at.
+    [[nodiscard]] std::optional<std::filesystem::path> final_ini(const std::string& series,
+                                                                 ServiceRefusal& refusal) const;
+
     class Server;
     struct InternalPorts;
 
 private:
     void supervise();
     void reload_locked();
+    [[nodiscard]] std::shared_ptr<Server> server_of(const std::string& series);
+    // Runs `work` on a thread of its own, joined at stop().
+    void run_later(std::function<void()> work);
     // Shuts `server` down for good on a thread of its own.
     void retire_later(std::shared_ptr<Server> server);
     void stop_later(std::shared_ptr<Server> server, bool retire);

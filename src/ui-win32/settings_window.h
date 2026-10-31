@@ -13,6 +13,10 @@
 // web.settings.get once when it's opened (the service checks the ports then,
 // and names who holds one); each change is sent at once (web.settings.set).
 //
+// Database (MariaDB) is the fourth, built as PHP is: database.get once,
+// database.set on Save; the server's state comes from the main window's
+// databases.list snapshot.
+//
 // Nothing runs while it's closed: it's destroyed on close, and while open it
 // adds no timer or poll. Opening asks runtimes.list {"cached": true} once (no
 // network); what's installed then comes from the main window's 2 s
@@ -21,6 +25,7 @@
 
 #include "canvas.h"
 #include "form_parts.h"
+#include "model/database_page.h"
 #include "model/php_page.h"
 #include "model/ports_page.h"
 #include "model/runtimes_page.h"
@@ -78,7 +83,7 @@ public:
 
 private:
     // In the sidebar's order.
-    enum class Section : std::uint8_t { Runtimes, Php, Ports };
+    enum class Section : std::uint8_t { Runtimes, Php, Ports, Database };
     enum class Part : std::uint8_t {
         None,
         Nav,     // row: the section
@@ -106,6 +111,24 @@ private:
         PortsTrust,
         PortsRemove,
         PortsOpenCert,
+        // Settings > Database; `row` is the field's index.
+        DbVersion,
+        DbRuntimes,   // "Go to Runtimes" when no MariaDB is installed
+        DbStart,
+        DbStop,
+        DbRestart,
+        DbPort,       // an edit
+        DbKeep,       // the Keep running checkbox
+        DbFinalIni,
+        DbEditIni,
+        DbField,      // an edit
+        DbReset,
+        DbRootShow,
+        DbRootCopy,
+        DbNewPassword,  // an edit
+        DbSetPassword,
+        DbDiscard,
+        DbSave,
     };
     enum class Button : std::uint8_t { None, Remove, RemoveDisabled, Download, Cancel };
     struct Hit {
@@ -196,8 +219,55 @@ private:
         RECT remove{};
         RECT open{};
     };
+    struct DbGeometry {
+        RECT version_label{};
+        RECT version{};
+        RECT note{};       // Loading…, or no MariaDB installed
+        RECT runtimes{};   // Go to Runtimes
+        RECT problems{};
+        RECT server_card{};
+        RECT server_title{};
+        RECT state{};      // the server's state, in a line
+        RECT start{};
+        RECT stop{};
+        RECT restart{};
+        RECT port_label{};
+        RECT port{};
+        RECT port_note{};  // the port can't be used, or .env files keep the old one
+        RECT keep{};       // the checkbox and its label
+        RECT keep_note{};
+        RECT used_by{};
+        RECT ini_card{};
+        RECT ini_title{};
+        RECT ini_hint{};
+        RECT final_ini{};
+        RECT edit_ini{};
+        std::vector<RECT> labels;  // one per settings_db_ini_fields()
+        std::vector<RECT> boxes;
+        std::vector<RECT> resets;
+        int error_field = -1;
+        RECT field_error{};
+        RECT custom_problems{};
+        std::vector<std::pair<RECT, std::string>> warnings;  // names in custom.ini MariaDB doesn't know
+        RECT custom_note{};
+        RECT root_card{};
+        RECT root_title{};
+        RECT root_label{};
+        RECT root_value{};
+        RECT root_show{};
+        RECT root_copy{};
+        RECT new_label{};
+        RECT new_password{};
+        RECT set_password{};
+        RECT password_error{};
+        RECT root_note{};
+        RECT databases{};
+        RECT footer_text{};
+        RECT discard{};
+        RECT save{};
+    };
     struct Geometry {
-        std::array<RECT, 3> navs{};  // Runtimes, PHP, Ports & HTTPS
+        std::array<RECT, 4> navs{};  // Runtimes, PHP, Ports & HTTPS, Database
         RECT title{};
         RECT hint{};
         RECT check{};
@@ -206,6 +276,7 @@ private:
         std::vector<GroupGeometry> groups;
         PhpGeometry php;
         PortsGeometry ports;
+        DbGeometry db;
         int content_h = 0;  // of the main column, unscrolled
     };
 
@@ -303,6 +374,29 @@ private:
     void paint_php_shapes(Canvas& c) const;
     void paint_php_text(Canvas& c) const;
 
+    // --- Settings > Database (settings_database.cpp) ---
+    [[nodiscard]] bool settle_db_changes(AfterSave then, const std::string& series = {});
+    [[nodiscard]] std::vector<std::pair<std::string, std::string>> db_versions() const;
+    void load_db(const std::string& series);
+    // True when a Save chosen on the way out is done and the window should close.
+    [[nodiscard]] bool on_db_answers(const Snapshot& snap);
+    void make_db_edits();
+    void fill_db_edits();
+    void place_db_edits();
+    void set_db_read_only(bool read_only);
+    void on_db_edit_change(const Hit& hit, FieldEdit& edit);
+    void layout_db(HDC dc, Geometry& g, int x0, int x1, int y) const;
+    [[nodiscard]] const RECT* db_rect_of(const Hit& hit) const;
+    void db_focus_order(std::vector<Hit>& order) const;
+    void on_db_click(const Hit& hit);
+    void db_version_menu();
+    bool save_db();
+    void discard_db();
+    void set_root_password();
+    void paint_db_shapes(Canvas& c) const;
+    void paint_db_text(Canvas& c) const;
+    [[nodiscard]] static bool is_db_part(Part part) { return part >= Part::DbVersion; }
+
     HINSTANCE instance_;
     Lang lang_;
     bool rtl_;
@@ -371,6 +465,24 @@ private:
     Str ports_problem_ = Str::Count_;       // what's wrong with the typed ports
     bool trust_after_ca_ = false;           // Trust asked for a CA first
     std::vector<std::unique_ptr<FieldEdit>> port_edits_;  // http, https; only while the section is shown
+    // Where a Save chosen on the way to another section goes once it's done.
+    Section after_save_section_ = Section::Runtimes;
+
+    // Settings > Database: the series shown, its database.get answer, the
+    // server's state from the 2 s snapshot, and the changes not saved yet.
+    std::string db_series_;
+    std::optional<DbSeries> db_;
+    DbServer db_server_;
+    bool db_loading_ = false;
+    bool db_saving_ = false;
+    DbChanges db_changes_;
+    std::string db_error_key_;  // the my.ini key Save was refused for
+    std::string db_error_;
+    std::string root_shown_;    // root's password, after Show; wiped when hidden or left
+    bool root_busy_ = false;    // a root password request is on its way
+    std::string password_error_;
+    // The port, the my.ini fields, then the new root password; only while the section is shown.
+    std::vector<std::unique_ptr<FieldEdit>> db_edits_;
     win::UniqueBrush input_brush_;
     win::UniqueBrush input_set_brush_;
 

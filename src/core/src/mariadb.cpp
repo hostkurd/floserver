@@ -1,5 +1,6 @@
 #include "floserver/core/mariadb.h"
 
+#include "floserver/core/mariadb_settings.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/version.h"
 
@@ -14,6 +15,8 @@ namespace floserver::core {
 namespace fs = std::filesystem;
 
 namespace {
+
+constexpr std::size_t kMaxConfigLine = 1100;  // a 64-byte name, '=', a 1000-byte value
 
 #ifdef _WIN32
 constexpr const char* kExe = ".exe";
@@ -96,7 +99,8 @@ MariaDbFiles mariadb_files(const fs::path& install_dir, const std::string& versi
     return f;
 }
 
-std::string mariadb_config(const MariaDbFiles& files, Port port, bool as_root, bool with_init_file) {
+std::string mariadb_config(const MariaDbFiles& files, Port port, bool as_root, bool with_init_file,
+                           const MariaDbExtras* extras) {
 #ifdef _WIN32
     const char* nl = "\r\n";
 #else
@@ -104,6 +108,36 @@ std::string mariadb_config(const MariaDbFiles& files, Port port, bool as_root, b
 #endif
     std::ostringstream c;
     c << "# Written by FloServer for its MariaDB " << files.series << ". It is rewritten at every start." << nl
+      << "[mysqld]" << nl;
+    // A development server: small memory, no name lookups (slow on some
+    // networks), utf8mb4 everywhere. Settings > Database may change these.
+    for (const auto& [key, value] : mariadb_ini_defaults()) {
+        c << key << "=" << value << nl;
+    }
+    c << "skip-name-resolve" << nl;
+    if (extras != nullptr && !extras->ini.empty()) {
+        c << nl << "# Settings > Database (config.json)" << nl;
+        for (const auto& [key, value] : extras->ini) {
+            c << key << "=" << value << nl;
+        }
+    }
+    if (extras != nullptr && !extras->custom_ini.empty()) {
+        c << nl << "# Your own lines (custom.ini)" << nl;
+        const std::string& text = extras->custom_ini;
+        std::size_t pos = 0;
+        while (pos < text.size()) {
+            const auto end = text.find('\n', pos);
+            const std::string line = text.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+            pos = end == std::string::npos ? text.size() : end + 1;
+            // MariaDB reads 4 KB at a time: a longer line's end would be a line of its own.
+            if (line.size() <= kMaxConfigLine) {
+                c << line << nl;
+            }
+        }
+    }
+    // FloServer's own lines come last, in a group of their own, so nothing
+    // above (a [group] in custom.ini included) changes them.
+    c << nl << "# Set by FloServer: where MariaDB keeps its files, and 127.0.0.1 only on FloServer's port." << nl
       << "[mysqld]" << nl
 #ifndef _WIN32
       // On Windows mariadbd finds its own folder; a full path there would
@@ -130,12 +164,27 @@ std::string mariadb_config(const MariaDbFiles& files, Port port, bool as_root, b
     if (as_root) {
         c << "user=root" << nl;
     }
-    // A development server: small memory, no name lookups (slow on some
-    // networks), utf8mb4 everywhere.
-    c << "character-set-server=utf8mb4" << nl << "collation-server=utf8mb4_unicode_ci" << nl
-      << "innodb_buffer_pool_size=64M" << nl << "skip-name-resolve" << nl << nl
-      << "[client]" << nl << "port=" << port << nl;
+    // Never without passwords, and reached only through FloServer's port.
+    c << "skip-grant-tables=0" << nl << "skip-networking=0" << nl;
+#ifdef _WIN32
+    c << "named-pipe=0" << nl << "shared-memory=0" << nl;
+#endif
+    c << nl << "[client]" << nl << "port=" << port << nl;
     return c.str();
+}
+
+std::vector<std::string> mariadb_command_line_guards(const MariaDbFiles& files, Port port) {
+    // Options on the command line win over every option file.
+    std::vector<std::string> args = {"--port=" + std::to_string(port), "--bind-address=127.0.0.1",
+                                     "--skip-grant-tables=0", "--skip-networking=0"};
+#ifdef _WIN32
+    args.emplace_back("--named-pipe=0");
+    args.emplace_back("--shared-memory=0");
+#endif
+    if (!files.socket.empty()) {
+        args.push_back("--socket=" + path_to_utf8(files.socket.filename()));
+    }
+    return args;
 }
 
 bool mariadb_initialized(const MariaDbFiles& files) {

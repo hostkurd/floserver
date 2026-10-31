@@ -216,6 +216,9 @@ void ServiceWorker::web_settings(const std::string& what, const nlohmann::json& 
 void ServiceWorker::project_php(const std::string& project, const nlohmann::json& params) {
     push({Command::Kind::ProjectPhp, project, false, {}, std::nullopt, {}, params});
 }
+void ServiceWorker::database_call(const std::string& method, const nlohmann::json& params, const std::string& purpose) {
+    push({Command::Kind::DatabaseCall, purpose, false, method, std::nullopt, {}, params});
+}
 void ServiceWorker::load_defaults() {
     {
         const std::lock_guard lock(mutex_);
@@ -237,8 +240,12 @@ Snapshot ServiceWorker::take() {
     std::string clipboard = std::move(latest_.clipboard);
     wipe(latest_.clipboard);
     latest_.clipboard.clear();
+    // Settings > Database's answers may hold root's password: moved too.
+    std::vector<Snapshot::DbAnswer> db = std::move(latest_.db);
+    latest_.db.clear();
     Snapshot out = latest_;
     out.clipboard = std::move(clipboard);
+    out.db = std::move(db);
     {
         const std::lock_guard refresh_lock(refresh_->mutex);
         // A cached answer waiting in this snapshot goes first; the check's follows.
@@ -399,6 +406,7 @@ void ServiceWorker::run(const std::stop_token& stop) {
         std::optional<Defaults> defaults;
         std::vector<Snapshot::PhpAnswer> php_answers;
         std::vector<Snapshot::WebSettingsAnswer> web_answers;
+        std::vector<Snapshot::DbAnswer> db_answers;
         std::string custom_ini;
         std::string custom_ini_error;
         bool custom_ini_final = false;
@@ -772,6 +780,21 @@ void ServiceWorker::run(const std::stop_token& stop) {
                         }
                     }
                     break;
+                case Command::Kind::DatabaseCall: {
+                    Snapshot::DbAnswer answer{c.key, string_field(c.params, "series"), c.project, std::nullopt, {}};
+                    if (!client) {
+                        answer.error = lost;
+                    } else if (auto got = client->call(c.key, c.params); !got) {
+                        client.reset();
+                        answer.error = lost;
+                    } else if (!got->ok) {
+                        answer.error = got->error_message;
+                    } else {
+                        answer.reply = std::move(got->result);
+                    }
+                    db_answers.push_back(std::move(answer));
+                    break;
+                }
                 case Command::Kind::LoadDefaults: {
                     // The wizard waits for nothing: without an answer it keeps today's picks.
                     std::optional<core::protocol::Reply> got;
@@ -965,6 +988,9 @@ void ServiceWorker::run(const std::stop_token& stop) {
         }
         for (auto& answer : web_answers) {
             latest_.web_settings.push_back(std::move(answer));
+        }
+        for (auto& answer : db_answers) {
+            latest_.db.push_back(std::move(answer));
         }
         if (!custom_ini.empty() || !custom_ini_error.empty()) {
             latest_.custom_ini = std::move(custom_ini);

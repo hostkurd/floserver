@@ -9,6 +9,8 @@
 #ifndef _WIN32
 
 #include "floserver/core/database_service.h"
+#include "floserver/core/mariadb_settings.h"
+#include "floserver/core/project_service.h"
 #include "floserver/core/shared_sites.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/process.h"
@@ -330,6 +332,156 @@ TEST_CASE("a project's database runs on the real MariaDB, sleeps when idle and w
         CHECK(::kill(static_cast<pid_t>(pid), 0) != 0);
         CHECK(db.status()["servers"].empty());
     }
+}
+
+TEST_CASE("Settings > Database on the real MariaDB: my.ini values, custom.ini's filter, a restart, root's new password") {
+    std::error_code ec;
+    if (!fs::is_regular_file("/usr/sbin/mariadbd", ec) || !fs::is_regular_file("/usr/bin/mariadb-install-db", ec)) {
+        REQUIRE_MESSAGE(!get_env("CI"), "MariaDB is missing from this CI machine");
+        MESSAGE("MariaDB isn't installed here; skipped");
+        return;
+    }
+    const test_util::TempDir tmp;
+    const fs::path data = tmp.path() / "data";
+    fake_runtime(data, "php", "8.3.6", "nts");
+    fake_runtime(data, "mariadb", "10.11.14", "");
+    const fs::path m = runtimes_dir(data) / "mariadb" / "10.11.14";
+    fs::create_directories(m / "bin");
+    fs::create_directories(m / "sbin");
+    for (const char* t : {"mariadb", "mariadb-admin", "mariadb-install-db", "my_print_defaults", "resolveip"}) {
+        fs::create_symlink(fs::path("/usr/bin") / t, m / "bin" / t, ec);
+    }
+    fs::create_symlink("/usr/sbin/mariadbd", m / "sbin" / "mariadbd");
+    fs::create_directory_symlink("/usr/share", m / "share");
+    const fs::path blog = tmp.path() / "blog";
+    test_util::write_file(blog / "floserver.json", R"({"php": "8.3", "database": "mariadb-10.11"})");
+    AppConfig app;
+    std::string error;
+    REQUIRE(add_project(app, blog, "", error));
+    app.projects.front().on = true;
+    app.other["mariadb"] = {{"10.11", {{"ini", {{"max_connections", "77"}}}}}};
+    REQUIRE(save_app_config(app_config_file(data), app, error));
+    // Lines that would let anyone in, or open it to the network, are left out.
+    // So are long lines, whose ends MariaDB would read as lines of their own (it reads 4 KB at a time).
+    const fs::path evil = tmp.path() / "evil";
+    test_util::write_file(evil / "x.cnf", "[mysqld]\nskip-grant-tables\n");
+    test_util::write_file(mariadb_custom_ini_file(data, "10.11"),
+                          "skip-grant-tables\nloose-bind-address=0.0.0.0\nwait_timeout=123\n"
+                          "#" + std::string(4093, 'a') + "skip-grant-tables\n" +
+                          "#" + std::string(4093, 'b') + "plugin-load-add=evil.so\n" +
+                          "#" + std::string(4093, 'c') + "!includedir " + evil.string() + "\n" +
+                          "max_allowed_packet=" + std::string(5000, '1') + "\n" +
+                          // FloServer's own SQL must not depend on it (a \ in root's password).
+                          "sql_mode=NO_BACKSLASH_ESCAPES\n");
+
+    const SecretStore secrets(data);
+    DatabaseServiceConfig cfg;
+    cfg.data_dir = data;
+    cfg.idle_after = 600s;
+    cfg.reload_every = 1s;
+    cfg.probe = [](Port p) { return p != 3306 && can_listen_on_loopback(p); };
+    DatabaseService db(cfg, secrets);
+    db.start();
+    ServiceRefusal refusal;
+    const auto login = db.project_login("blog", refusal);
+    REQUIRE_MESSAGE(login, refusal.message);
+    const Port port = login->port;
+    const auto root = secrets.read("mariadb-10.11/root");
+    REQUIRE(root);
+    CHECK(query(port, "root", *root, "SELECT @@max_connections") == "77");
+    CHECK(query(port, "root", *root, "SELECT @@wait_timeout") == "123");
+    CHECK(query(port, "root", *root, "SELECT @@bind_address") == "127.0.0.1");
+    CHECK(query(port, "root", "wrong", "SELECT 1").starts_with("ERROR"));
+    CHECK(query(port, "root", *root, "SELECT @@sql_mode") == "NO_BACKSLASH_ESCAPES");
+    CHECK(query(port, "root", *root, "SELECT @@skip_grant_tables, @@skip_networking") == "0\t0");
+    CHECK(query(port, "root", *root, "SELECT COUNT(*) FROM information_schema.plugins WHERE PLUGIN_LIBRARY LIKE 'evil%'") ==
+          "0");
+    {
+        // What MariaDB itself reads from the file.
+        const std::string cmd = "/usr/sbin/mariadbd --defaults-file='" +
+                                (data / "data" / "mariadb-10.11" / "my.cnf").string() + "' --print-defaults 2>&1";
+        FILE* pipe = popen(cmd.c_str(), "r");  // NOLINT(cert-env33-c): a test, fixed text
+        REQUIRE(pipe != nullptr);
+        std::string printed;
+        char buf[4096];  // NOLINT(modernize-avoid-c-arrays)
+        while (fgets(buf, sizeof buf, pipe) != nullptr) {
+            printed += buf;
+        }
+        pclose(pipe);
+        CHECK(printed.find("--skip-grant-tables=0") != std::string::npos);
+        CHECK(printed.find("--skip-grant-tables ") == std::string::npos);
+        CHECK(printed.find("--skip-grant-tables\n") == std::string::npos);
+        CHECK(printed.find("plugin") == std::string::npos);
+        CHECK(printed.find("0.0.0.0") == std::string::npos);
+        CHECK(printed.find("--wait_timeout=123") != std::string::npos);
+    }
+    CHECK(query(port, "blog", login->password, "USE blog; CREATE TABLE kept (x INT); INSERT INTO kept VALUES (7)").empty());
+
+    auto st = db.series_status("10.11");
+    CHECK(st["databases"] == nlohmann::json{"blog"});
+    REQUIRE(st["server"].is_object());
+    CHECK(st["server"]["state"] == "running");
+    const auto pid = st["server"]["pid"].get<std::uint32_t>();
+
+    // A new value through the project service (as database.set does): only this server restarts.
+    ProjectService projects(data);
+    bool changed = false;
+    REQUIRE(projects.database_set("10.11", {{"max-connections", "88"}}, nullptr, nullptr, changed, refusal));
+    CHECK(changed);
+    CHECK(db.restart_if_running("10.11"));
+    CHECK(eventually([&] { return query(port, "root", *root, "SELECT @@max_connections") == "88"; }, 60s));
+    st = db.series_status("10.11");
+    CHECK(st["server"]["pid"].get<std::uint32_t>() != pid);
+    CHECK(::kill(static_cast<pid_t>(pid), 0) != 0);
+    CHECK(query(port, "blog", login->password, "SELECT x FROM blog.kept") == "7");  // a clean restart keeps the data
+
+    const auto final_ini = db.final_ini("10.11", refusal);
+    REQUIRE(final_ini);
+    const std::string text = read_small_file(*final_ini, 65536).value_or("");
+    CHECK(text.find("max_connections=88") != std::string::npos);
+    CHECK(text.find("\nskip-grant-tables\n") == std::string::npos);  // only FloServer's =0
+    CHECK(text.find("# FloServer left out line 1\n") != std::string::npos);
+
+    // root's new password: the old one stops working.
+    CHECK_FALSE(db.set_root_password("10.11", "short", refusal));
+    CHECK(refusal.code == "bad_params");
+    const std::string pw = "New-Root\\pass9";  // a \ while sql_mode is NO_BACKSLASH_ESCAPES
+    REQUIRE_MESSAGE(db.set_root_password("10.11", pw, refusal), refusal.message);
+    CHECK(query(port, "root", *root, "SELECT 1").starts_with("ERROR"));
+    CHECK(query(port, "root", pw, "SELECT 1") == "1");
+    CHECK(db.root_password("10.11", refusal) == std::optional<std::string>(pw));
+    CHECK_FALSE(secrets.read("mariadb-10.11/root-new"));
+    // The next clean shutdown logs in with it: a stop leaves no process behind.
+    const auto pid2 = db.series_status("10.11")["server"]["pid"].get<std::uint32_t>();
+    REQUIRE(db.server_action("10.11", "stop", refusal));
+    CHECK(eventually([&] { return db.series_status("10.11")["server"]["state"] == "sleeping"; }, 60s));
+    CHECK(::kill(static_cast<pid_t>(pid2), 0) != 0);
+    CHECK_FALSE(db.server_action("10.11", "jump", refusal));
+    CHECK_FALSE(db.server_action("11.4", "start", refusal));
+    CHECK(refusal.code == "database_off");
+    // A connection wakes it with the new password, and the data is there.
+    CHECK(query(port, "root", pw, "SELECT x FROM blog.kept") == "7");
+    CHECK(secrets.read("mariadb-10.11/root") == std::optional<std::string>(pw));  // not replaced at the start
+
+    // A change MariaDB took but that wasn't kept as root's: the next start uses root-new and keeps it.
+    REQUIRE(db.server_action("10.11", "stop", refusal));
+    CHECK(eventually([&] { return db.series_status("10.11")["server"]["state"] == "sleeping"; }, 60s));
+    REQUIRE(secrets.save("mariadb-10.11/root", "Lost-pass1", error));
+    REQUIRE(secrets.save("mariadb-10.11/root-new", pw, error));
+    CHECK(query(port, "root", pw, "SELECT 1") == "1");
+    CHECK(secrets.read("mariadb-10.11/root") == std::optional<std::string>(pw));
+    CHECK_FALSE(secrets.read("mariadb-10.11/root-new"));
+
+    // A port chosen in Settings: the server moves there.
+    const auto other = pick_port_from(3400, {port}, cfg.probe);
+    REQUIRE(other);
+    const nlohmann::json chosen = *other;
+    REQUIRE_MESSAGE(projects.database_set("10.11", nullptr, &chosen, nullptr, changed, refusal), refusal.message);
+    CHECK_FALSE(changed);
+    (void)db.reload();
+    CHECK(eventually([&] { return query(*other, "root", pw, "SELECT 1") == "1"; }, 60s));
+    CHECK(server_status(db)["port"] == *other);
+    db.stop();
 }
 
 #endif

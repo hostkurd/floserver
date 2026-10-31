@@ -22,6 +22,7 @@
 #include "floserver/core/runtime_store.h"
 #include "floserver/core/trust_store.h"
 #include "floserver/core/database_service.h"
+#include "floserver/core/mariadb_settings.h"
 #include "floserver/core/mariadb.h"
 #include "floserver/core/project_config.h"
 #include "floserver/core/site_plan.h"
@@ -626,6 +627,74 @@ struct Service {
         return protocol::make_result(r.id, result);
     }
 
+    // Settings → Database (MariaDB), per series ("11.4"):
+    //   database.get {series}: ProjectService::database_get() with "server"
+    //     and "databases" from DatabaseService::series_status();
+    //   database.set {series, ini?, port?, keep_running?}: the same reply, and
+    //     "restarting": true when the server restarts for the new my.ini;
+    //   database.server {series, action: start|stop|restart} -> series_status();
+    //   database.custom_ini / database.final_ini {series} -> {"path"};
+    //   database.root {series} -> {"password"}; database.root_set {series, password} -> {}.
+    [[nodiscard]] std::string database_settings_request(const protocol::Request& r) const {
+        namespace core = floserver::core;
+        if (!projects || !databases) {
+            return protocol::make_error(r.id, "no_data_folder",
+                                        "FloServer can't find a folder to keep its settings in (LOCALAPPDATA or HOME)");
+        }
+        core::ServiceRefusal refusal;
+        const std::string text = string_param(r.params, "series");
+        const auto series = core::mariadb_request_series(text);
+        if (!series) {
+            return protocol::make_error(r.id, "bad_params", "\"" + text + "\" isn't a MariaDB series such as 11.4");
+        }
+        const auto with_status = [&](json reply) {
+            json status = databases->series_status(*series);
+            reply["server"] = status["server"];
+            reply["databases"] = status["databases"];
+            return reply;
+        };
+        if (r.method == "database.custom_ini" || r.method == "database.final_ini") {
+            const auto path = r.method == "database.custom_ini" ? projects->database_custom_ini(*series, refusal)
+                                                                : databases->final_ini(*series, refusal);
+            return path ? protocol::make_result(r.id, {{"path", core::path_to_utf8(*path)}})
+                        : protocol::make_error(r.id, refusal.code, refusal.message);
+        }
+        if (r.method == "database.root") {
+            const auto password = databases->root_password(*series, refusal);
+            return password ? protocol::make_result(r.id, {{"password", *password}})
+                            : protocol::make_error(r.id, refusal.code, refusal.message);
+        }
+        if (r.method == "database.root_set") {
+            return databases->set_root_password(*series, string_param(r.params, "password"), refusal)
+                       ? protocol::make_result(r.id, json::object())
+                       : protocol::make_error(r.id, refusal.code, refusal.message);
+        }
+        if (r.method == "database.server") {
+            return databases->server_action(*series, string_param(r.params, "action"), refusal)
+                       ? protocol::make_result(r.id, databases->series_status(*series))
+                       : protocol::make_error(r.id, refusal.code, refusal.message);
+        }
+        if (r.method == "database.get") {
+            const auto result = projects->database_get(*series, refusal);
+            return result ? protocol::make_result(r.id, with_status(*result))
+                          : protocol::make_error(r.id, refusal.code, refusal.message);
+        }
+        // database.set
+        const json none;
+        const json params = r.params.is_object() ? r.params : json::object();
+        const json port = params.contains("port") ? params.at("port") : json();
+        const json keep = params.contains("keep_running") ? params.at("keep_running") : json();
+        bool changed_ini = false;
+        auto result = projects->database_set(*series, params.value("ini", none), params.contains("port") ? &port : nullptr,
+                                             params.contains("keep_running") ? &keep : nullptr, changed_ini, refusal);
+        if (!result) {
+            return protocol::make_error(r.id, refusal.code, refusal.message);
+        }
+        (void)databases->reload();  // a new port or "keep running" now
+        (*result)["restarting"] = changed_ini && databases->restart_if_running(*series);
+        return protocol::make_result(r.id, with_status(*result));
+    }
+
     // templates.list; projects.create {"template", "name", "parent", "versions"?};
     // create.get / create.cancel {"id"} (D9).
     [[nodiscard]] std::string template_request(const protocol::Request& r) const {
@@ -730,6 +799,11 @@ struct Service {
             } else if (request->method == "databases.list" || request->method == "databases.login" ||
                        request->method == "shared.login") {
                 reply = database_request(*request);
+            } else if (request->method == "database.get" || request->method == "database.set" ||
+                       request->method == "database.server" || request->method == "database.custom_ini" ||
+                       request->method == "database.final_ini" || request->method == "database.root" ||
+                       request->method == "database.root_set") {
+                reply = database_settings_request(*request);
             } else if (request->method == "templates.list" || request->method == "projects.create" ||
                        request->method == "create.get" || request->method == "create.cancel") {
                 reply = template_request(*request);
