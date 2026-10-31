@@ -48,6 +48,9 @@ public:
     // Inside `box` (the parent's client coordinates, which are logical in a
     // mirrored window), `pad` from its sides; hidden when `visible` is false.
     void place(const RECT& box, int pad, int height, bool visible);
+    // The same inside a scrolling part from `clip_top` to `clip_bottom`
+    // (client coordinates): cut at its edges, hidden when wholly outside.
+    void place(const RECT& box, int pad, int height, bool visible, int clip_top, int clip_bottom);
 
 private:
     static LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, UINT_PTR id, DWORD_PTR self);
@@ -60,6 +63,7 @@ private:
     std::wstring cue_;
     Rgb cue_color_ = 0x5F5F5F;
     bool setting_ = false;
+    bool clipped_ = false;  // a window region cuts it at a scrolling part's edge
 };
 
 enum class SaveChoice : std::uint8_t { Save, DontSave, Cancel };

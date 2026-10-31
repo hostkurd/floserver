@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 
 namespace floserver::core {
@@ -89,9 +90,13 @@ public:
     //    "extensions": [{"name", "on", "base", "missing"?}],
     //    "ini": {every value the series gives: FloServer's defaults and its own},
     //    "changed": {the series' own values}, "custom_ini": "<data>/php/8.5/custom.ini",
-    //    "custom_ini_exists": bool, "used_by": ["blog", "_shared"], "problems"?: ["..."]}
+    //    "custom_ini_exists": bool, "used_by": ["blog", "_shared"], "problems"?: ["..."],
+    //    "known_ini"?: [every php.ini name the install knows, sorted]}
     // Reads the install's ext folder and every project's floserver.json:
-    // for a request, never a timer.
+    // for a request, never a timer. "known_ini" is asked of the install's
+    // php CLI the first time (known_php_ini_names), then read from
+    // <data>/php/<series>/known-ini-<version>.json; it's left out when PHP
+    // can't tell (and not asked again of that install while the service runs).
     [[nodiscard]] std::optional<nlohmann::json> php_get(const std::string& series, ServiceRefusal& refusal) const;
     // Changes the series' settings: `extensions` {"bcmath": true|false|null},
     // `ini` {"memory_limit": "1G"|null}; null goes back to the default. Either
@@ -126,6 +131,8 @@ private:
 
     std::filesystem::path data_dir_;
     mutable std::mutex mutex_;  // one change at a time: load, change, save
+    mutable std::mutex known_mutex_;
+    mutable std::set<std::string> known_failed_;  // installs whose php couldn't list its settings
 };
 
 }  // namespace floserver::core

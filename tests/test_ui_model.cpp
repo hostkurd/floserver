@@ -1024,3 +1024,75 @@ TEST_CASE("a late PHP answer for what the user has left is dropped") {
     CHECK(php_answer_matches("shop", "", "shop", "8.5"));
     CHECK_FALSE(php_answer_matches("shop", "", "_settings", "8.5"));
 }
+
+TEST_CASE("Settings > PHP offline: the versions come from what's on this computer") {
+    // Offline there's no list of versions ("list": null), but runtimes.list
+    // still says what's installed: Settings > PHP has its versions before
+    // the poll has answered, and the list being missing changes nothing.
+    const json offline = {{"list", nullptr},
+                          {"list_error", "couldn't reach cdn.floserver.org"},
+                          {"installed", json::array({{{"name", "php"}, {"version", "8.4.27"}, {"folder", "8.4.27"}},
+                                                     {{"name", "php"}, {"version", "8.5.12"}, {"folder", "8.5.12"}},
+                                                     {{"name", "nginx"}, {"version", "1.30.6"}, {"folder", "1.30.6"}}})}};
+    auto versions = settings_php_versions(false, Installed{}, offline);
+    REQUIRE(versions.size() == 2);
+    CHECK(versions[0] == std::pair<std::string, std::string>{"8.5", "8.5.12"});
+    CHECK(versions[1].first == "8.4");
+    // The poll's answer wins once it's there (a version removed since).
+    versions = settings_php_versions(true, Installed{{"php", {"8.4.27"}}}, offline);
+    REQUIRE(versions.size() == 1);
+    CHECK(versions[0].first == "8.4");
+    CHECK(settings_php_versions(false, Installed{}, json()).empty());
+    // The Runtimes page keeps the installed rows, Remove and the default picker offline.
+    const auto page = runtimes_page(offline, nullptr, json(), Lang::En);
+    REQUIRE_FALSE(page.groups.empty());
+    CHECK_FALSE(page.has_list);
+    CHECK(page.groups[0].rows.size() == 2);
+    CHECK(page.groups[0].rows[0].action == RowAction::Remove);
+    REQUIRE(page.groups[0].picker);
+    CHECK(page.groups[0].picker->choices.size() == 3);  // Newest, 8.5, 8.4
+}
+
+TEST_CASE("php.ini names PHP doesn't know: a warning, with a close one when there is") {
+    const std::vector<std::string> known = {"date.timezone", "disable_classes", "disable_functions", "display_errors",
+                                            "memory_limit", "xdebug.mode"};
+    CHECK_FALSE(unknown_ini_name(known, "memory_limit"));
+    CHECK_FALSE(unknown_ini_name(known, "xdebug.mode"));
+    CHECK_FALSE(unknown_ini_name({}, "khalat"));  // PHP couldn't tell: no warnings
+    CHECK(unknown_ini_name(known, "disable_function") == "disable_functions");
+    CHECK(unknown_ini_name(known, "Memory_Limit") == "memory_limit");   // names are case-sensitive in PHP
+    CHECK(unknown_ini_name(known, "memroy_limit") == "memory_limit");   // two letters swapped: one edit
+    CHECK(unknown_ini_name(known, "khalat") == "");
+    CHECK(unknown_ini_name(known, "dsplay_erors") == "display_errors");
+    CHECK(unknown_ini_name(known, "abc") == "");  // too short to guess
+    CHECK(unknown_ini_text("8.5", "disable_function", "disable_functions", Lang::En) ==
+          "PHP 8.5 has no setting named disable_function. Did you mean disable_functions?");
+    CHECK(unknown_ini_text("8.5", "khalat", "", Lang::En) ==
+          "PHP 8.5 has no setting named khalat, so it would be ignored.");
+    CHECK(unknown_ini_text("8.5", "khalat", "", Lang::Ar).find(isolate_ltr("khalat")) != std::string::npos);
+
+    auto reply = php_reply();
+    reply["known_ini"] = json::array({"memory_limit", "date.timezone"});
+    CHECK(php_series_from_reply(reply)->known_ini == std::vector<std::string>{"date.timezone", "memory_limit"});
+    CHECK(php_series_from_reply(php_reply())->known_ini.empty());
+}
+
+TEST_CASE("the panel's tabs: which a project has, the one shown, and their padding") {
+    ProjectRow php_site;
+    php_site.name = "shop";
+    php_site.wants.database = "mariadb-11.4";
+    CHECK(panel_tabs(php_site) == std::vector<PanelTab>{PanelTab::General, PanelTab::Php, PanelTab::Database, PanelTab::Log});
+    ProjectRow node_app;
+    node_app.name = "api";
+    node_app.wants.node = "24";
+    const auto tabs = panel_tabs(node_app);
+    CHECK(tabs == std::vector<PanelTab>{PanelTab::General, PanelTab::Log});
+    // The choice is kept across projects; a project without that tab shows General.
+    CHECK(shown_panel_tab(tabs, PanelTab::Php) == PanelTab::General);
+    CHECK(shown_panel_tab(tabs, PanelTab::Log) == PanelTab::Log);
+    // Padding shrinks before labels are cut.
+    CHECK(tab_padding({60, 30, 70, 30}, 328, 14, 4) == 14);
+    CHECK(tab_padding({90, 30, 110, 50}, 328, 14, 4) == 6);
+    CHECK(tab_padding({120, 40, 140, 60}, 328, 14, 4) == 4);
+    CHECK(tab_padding({}, 328, 14, 4) == 14);
+}

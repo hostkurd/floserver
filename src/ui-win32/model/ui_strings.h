@@ -213,6 +213,11 @@ enum class Str : std::uint8_t {
     ProjectPhpAskSave,       // {0}: the project
     ProjectPhpNoSeries,
     ProjectPhpBadLine,
+    PhpUnknownIni,           // {0}: "8.5", {1}: the name
+    PhpUnknownIniMaybe,      // {0}: "8.5", {1}: the name, {2}: the known name it's closest to
+    // The project panel's tabs.
+    PanelTabGeneral,
+    PanelFolder,
     Count_,
 };
 

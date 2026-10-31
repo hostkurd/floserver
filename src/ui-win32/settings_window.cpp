@@ -455,6 +455,12 @@ void SettingsWindow::on_snapshot(const Snapshot& snap) {
         loading_ = true;
         worker_.list_runtimes(false);
     }
+    // And PHP's, when its php.get went while the service wasn't there (it's
+    // left with nothing to show otherwise): once, on coming back.
+    if (!was_connected && connected_ && section_ == Section::Php && !php_ && !php_loading_ && !php_saving_ &&
+        !php_series_.empty()) {
+        load_php(php_series_);
+    }
     const bool close_now = on_php_answers(snap);
     rebuild();
     if (close_now) {

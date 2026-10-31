@@ -38,8 +38,26 @@ constexpr int kButtonH = 32;
 constexpr int kButtonGap = 8;
 constexpr int kLogLineH = 17;
 constexpr UINT kFirstChoice = 100;
+// The tab bar: Windows 11's underline tabs (the accent line under the shown one).
+constexpr int kTabH = 36;
+constexpr int kTabPadMost = 14;
+constexpr int kTabPadLeast = 4;
 
 std::wstring w(std::string_view s) { return win::widen(s); }
+
+std::string_view tab_label(Lang lang, PanelTab tab) {
+    switch (tab) {
+        case PanelTab::Php:
+            return text(lang, Str::FieldPhp);
+        case PanelTab::Database:
+            return text(lang, Str::FieldDatabase);
+        case PanelTab::Log:
+            return text(lang, Str::Log);
+        case PanelTab::General:
+            break;
+    }
+    return text(lang, Str::PanelTabGeneral);
+}
 
 Str action_label(int action) {
     switch (action) {
@@ -126,10 +144,12 @@ RECT MainWindow::panel_rect() const {
 }
 
 void MainWindow::select(const std::string& project) {
-    if (project == selected_ || !leave_php_part(true)) {
+    if (project == selected_ || !leave_php_part(true, {PanelAct::Kind::Project, PanelTab::General, project})) {
         return;
     }
+    forget_php_info();
     selected_ = project;
+    panel_scroll_ = 0;
     // When the panel takes the list's place, the keys go to it: the hidden
     // list must never be switched by Space.
     panel_focus_ = panel_beside_list() ? -1 : 0;
@@ -137,27 +157,94 @@ void MainWindow::select(const std::string& project) {
         worker_->select(project);
     }
     update_fields();
+    if (shown_tab() == PanelTab::Php) {
+        open_php_part();  // the remembered tab: its php.get is asked now it's shown
+    }
     layout();
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 void MainWindow::close_panel() {
-    if (selected_.empty() || !leave_php_part(true)) {
+    if (selected_.empty() || !leave_php_part(true, {PanelAct::Kind::Close, PanelTab::General, {}})) {
         return;
     }
     // Keyboard focus goes back to the project it came from.
     if (const int row = visible_index(selected_); row >= 0) {
         focus_ = row;
     }
+    forget_php_info();
     selected_.clear();
     fields_.clear();
     panel_focus_ = -1;
+    panel_scroll_ = 0;
     if (worker_) {
         worker_->select({});
     }
     scroll_to(scroll_);
     layout();
     InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+PanelTab MainWindow::shown_tab() const {
+    const ProjectRow* row = selected_row();
+    return row != nullptr ? shown_panel_tab(panel_tabs(*row), panel_tab_) : PanelTab::General;
+}
+
+void MainWindow::select_tab(PanelTab tab) {
+    const ProjectRow* row = selected_row();
+    if (row == nullptr) {
+        return;
+    }
+    const std::vector<PanelTab> tabs = panel_tabs(*row);
+    if (std::find(tabs.begin(), tabs.end(), tab) == tabs.end() || tab == shown_tab()) {
+        panel_tab_ = shown_panel_tab(tabs, tab);
+        return;
+    }
+    if (!leave_php_part(true, {PanelAct::Kind::Tab, tab, {}})) {
+        return;
+    }
+    panel_tab_ = tab;
+    panel_scroll_ = 0;
+    if (panel_focus_ >= 0) {
+        panel_focus_ = 0;  // the keys stay on the tab bar
+    }
+    if (tab == PanelTab::Php) {
+        open_php_part();
+    }
+    layout();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void MainWindow::step_panel_tab(int by) {
+    const ProjectRow* row = selected_row();
+    if (row == nullptr) {
+        return;
+    }
+    const std::vector<PanelTab> tabs = panel_tabs(*row);
+    const auto it = std::find(tabs.begin(), tabs.end(), shown_tab());
+    const int count = static_cast<int>(tabs.size());
+    const int at = it == tabs.end() ? 0 : static_cast<int>(it - tabs.begin());
+    select_tab(tabs[static_cast<std::size_t>(((at + by) % count + count) % count)]);
+    panel_focus_ = 0;  // the tab bar
+    show_focus_ = true;
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+// What a Save chosen on the way out of the PHP tab was for, once it's saved.
+void MainWindow::run_panel_act(const PanelAct& act) {
+    switch (act.kind) {
+        case PanelAct::Kind::Tab:
+            select_tab(act.tab);
+            break;
+        case PanelAct::Kind::Project:
+            select(act.project);
+            break;
+        case PanelAct::Kind::Close:
+            close_panel();
+            break;
+        case PanelAct::Kind::None:
+            break;
+    }
 }
 
 void MainWindow::update_fields() {
@@ -184,9 +271,6 @@ std::size_t MainWindow::field_value(const VersionField& field) const {
 }
 
 std::string MainWindow::panel_button_text(PanelAction action) const {
-    if (action == PanelAction::Php) {
-        return std::string(text(lang_, Str::PanelPhpSettings));
-    }
     if (action == PanelAction::Download) {
         const ProjectRow* row = selected_row();
         return row != nullptr ? download_button_text(downloads_for(*row, snap_.installed), lang_) : std::string();
@@ -208,6 +292,7 @@ MainWindow::PanelGeometry MainWindow::panel_geometry(HDC dc) const {
     const int x1 = g.panel.right - px(kPanelPad);
     int y = g.panel.top + px(kPanelPad);
 
+    // The header: the name, the address (or the folder) and Close.
     g.close = {x1 - px(28), y - px(2), x1, y + px(26)};
     g.title = {x0, y, g.close.left - px(8), y + px(24)};
     y += px(24);
@@ -216,59 +301,89 @@ MainWindow::PanelGeometry MainWindow::panel_geometry(HDC dc) const {
         const int aw = Canvas::measure(dc, w(row->address), fonts_.button.get(), false);
         g.address = {x0, g.line2.top, std::min(static_cast<int>(g.line2.right), x0 + aw), g.line2.bottom};
     }
-    y = g.line2.bottom + px(kPanelGap);
+    y = g.line2.bottom + px(10);
 
-    // The buttons, wrapping to a new line when they don't fit.
+    // The tabs, under the header: their labels, with the padding shrunk
+    // before a label is cut when they don't all fit (Arabic, Kurdish).
+    const std::vector<PanelTab> tabs = panel_tabs(*row);
+    std::vector<int> widths;
+    widths.reserve(tabs.size());
+    for (const PanelTab tab : tabs) {
+        widths.push_back(Canvas::measure(dc, w(tab_label(lang_, tab)), fonts_.button_bold.get(), rtl_) + px(2));
+    }
+    const int pad = tab_padding(widths, x1 - x0, px(kTabPadMost), px(kTabPadLeast));
+    g.tab_bar = {x0, y, x1, y + px(kTabH)};
     int x = x0;
-    const auto add_button = [&](PanelAction action) {
-        const int bw =
-            Canvas::measure(dc, w(panel_button_text(action)), fonts_.button.get(), rtl_) +
-            px(24);
-        if (x > x0 && x + bw > x1) {
-            x = x0;
-            y += px(kButtonH) + px(kButtonGap);
+    for (std::size_t i = 0; i < tabs.size(); ++i) {
+        const int tw = std::min(widths[i] + 2 * pad, x1 - x);
+        g.tabs.emplace_back(RECT{x, y, x + tw, y + px(kTabH)}, tabs[i]);
+        x += tw;
+    }
+    y = g.tab_bar.bottom;
+    g.content = {g.panel.left + std::max(1, px(1)), y + std::max(1, px(1)), g.panel.right - std::max(1, px(1)),
+                 std::max(y + std::max(1, px(1)), static_cast<int>(g.panel.bottom) - px(6))};
+
+    // The shown tab's content, from its top less what's scrolled.
+    const PanelTab tab = shown_tab();
+    const int top = g.content.top + px(kPanelGap);
+    y = top - panel_scroll_;
+    if (tab == PanelTab::General) {
+        // The buttons, wrapping to a new line when they don't fit.
+        x = x0;
+        const auto add_button = [&](PanelAction action) {
+            const int bw = Canvas::measure(dc, w(panel_button_text(action)), fonts_.button.get(), rtl_) + px(24);
+            if (x > x0 && x + bw > x1) {
+                x = x0;
+                y += px(kButtonH) + px(kButtonGap);
+            }
+            g.buttons.emplace_back(RECT{x, y, std::min(x1, x + bw), y + px(kButtonH)}, action);
+            x += bw + px(kButtonGap);
+        };
+        // The row's Download button again, where the keyboard reaches it.
+        std::string ignored;
+        if (row_end(*row, ignored) == RowGeometry::End::Download) {
+            add_button(PanelAction::Download);
         }
-        g.buttons.emplace_back(RECT{x, y, std::min(x1, x + bw), y + px(kButtonH)}, action);
-        x += bw + px(kButtonGap);
-    };
-    // The row's Download button again, where the keyboard reaches it.
-    std::string ignored;
-    if (row_end(*row, ignored) == RowGeometry::End::Download) {
-        add_button(PanelAction::Download);
-    }
-    if (is_openable_address(row->address)) {
-        add_button(PanelAction::Browser);
-    }
-    add_button(PanelAction::Folder);
-    add_button(PanelAction::Terminal);
-    if (snap_.panel.project == row->name && snap_.panel.studio) {
-        add_button(PanelAction::Studio);
-    }
-    // The project's own PHP extensions and php.ini values (D20).
-    if (project_uses_php(*row)) {
-        add_button(PanelAction::Php);
-    }
-    y += px(kButtonH) + px(kPanelGap);
+        if (is_openable_address(row->address)) {
+            add_button(PanelAction::Browser);
+        }
+        add_button(PanelAction::Folder);
+        add_button(PanelAction::Terminal);
+        if (snap_.panel.project == row->name && snap_.panel.studio) {
+            add_button(PanelAction::Studio);
+        }
+        y += px(kButtonH) + px(kPanelGap);
 
-    g.versions = {x0, y, x1, y + px(18)};
-    y += px(18) + px(4);
-    const int col_w = (x1 - x0 - px(kFieldGap)) / 2;
-    const int cell_h = px(kFieldLabelH) + px(4) + px(kFieldH);
-    for (std::size_t i = 0; i < fields_.size(); ++i) {
-        const int col = static_cast<int>(i % 2);
-        const int line = static_cast<int>(i / 2);
-        const int cx = x0 + col * (col_w + px(kFieldGap));
-        const int cy = y + line * (cell_h + px(kFieldGap));
-        g.fields.emplace_back(RECT{cx, cy, cx + col_w, cy + px(kFieldLabelH)},
-                              RECT{cx, cy + px(kFieldLabelH) + px(4), cx + col_w, cy + cell_h});
-    }
-    const int lines = static_cast<int>((fields_.size() + 1) / 2);
-    y += lines * cell_h + std::max(0, lines - 1) * px(kFieldGap);
-    g.saved_in = {x0, y + px(6), x1, y + px(6) + px(16)};
-    y = g.saved_in.bottom + px(kPanelGap);
+        // The project folder (the header shows the address when there's one).
+        g.folder_label = {x0, y, x1, y + px(18)};
+        y += px(18) + px(2);
+        g.folder = {x0, y, x1, y + px(18)};
+        y = g.folder.bottom + px(kPanelGap);
 
-    const std::string database = !row->database.empty() ? row->database : row->wants.database;
-    if (!database.empty()) {
+        g.versions = {x0, y, x1, y + px(18)};
+        y += px(18) + px(4);
+        const int col_w = (x1 - x0 - px(kFieldGap)) / 2;
+        const int cell_h = px(kFieldLabelH) + px(4) + px(kFieldH);
+        for (std::size_t i = 0; i < fields_.size(); ++i) {
+            const int col = static_cast<int>(i % 2);
+            const int line = static_cast<int>(i / 2);
+            const int cx = x0 + col * (col_w + px(kFieldGap));
+            const int cy = y + line * (cell_h + px(kFieldGap));
+            g.fields.emplace_back(RECT{cx, cy, cx + col_w, cy + px(kFieldLabelH)},
+                                  RECT{cx, cy + px(kFieldLabelH) + px(4), cx + col_w, cy + cell_h});
+        }
+        const int lines = static_cast<int>((fields_.size() + 1) / 2);
+        y += lines * cell_h + std::max(0, lines - 1) * px(kFieldGap);
+        g.saved_in = {x0, y + px(6), x1, y + px(6) + px(16)};
+        y = g.saved_in.bottom + px(kPanelGap);
+
+        const int keep_mid = y + px(18);
+        g.keep_switch = {x1 - px(kSwitchW), keep_mid - px(kSwitchH) / 2, x1,
+                         keep_mid - px(kSwitchH) / 2 + px(kSwitchH)};
+        g.keep_title = {x0, y, g.keep_switch.left - px(12), y + px(18)};
+        g.keep_detail = {x0, y + px(18), g.keep_switch.left - px(12), y + px(36)};
+        y += px(36) + px(kPanelGap);
+    } else if (tab == PanelTab::Database) {
         g.db_box = {x0, y, x1, y + px(56)};
         const int mid = y + px(28);
         const int cw = Canvas::measure(dc, w(text(lang_, Str::CopyEnv)), fonts_.caption.get(), rtl_) + px(24);
@@ -276,18 +391,103 @@ MainWindow::PanelGeometry MainWindow::panel_geometry(HDC dc) const {
         g.db_title = {x0 + px(12), y + px(9), g.copy_env.left - px(12), y + px(28)};
         g.db_detail = {x0 + px(12), y + px(28), g.copy_env.left - px(12), y + px(46)};
         y = g.db_box.bottom + px(kPanelGap);
+    } else if (tab == PanelTab::Log) {
+        // The log fills the tab: the newest lines that fit, nothing to scroll.
+        g.log_box = {x0, y, x1, std::max(y, static_cast<int>(g.content.bottom) - px(10))};
+        g.content_h = height_of(g.content);
+        return g;
     }
-
-    const int keep_mid = y + px(18);
-    g.keep_switch = {x1 - px(kSwitchW), keep_mid - px(kSwitchH) / 2, x1, keep_mid - px(kSwitchH) / 2 + px(kSwitchH)};
-    g.keep_title = {x0, y, g.keep_switch.left - px(12), y + px(18)};
-    g.keep_detail = {x0, y + px(18), g.keep_switch.left - px(12), y + px(36)};
-    y += px(36) + px(kPanelGap);
-
-    g.log_label = {x0, y, x1, y + px(18)};
-    y += px(18) + px(4);
-    g.log_box = {x0, y, x1, std::max(y, static_cast<int>(g.panel.bottom) - px(kPanelPad))};
+    g.content_h = y + panel_scroll_ - static_cast<int>(g.content.top);
     return g;
+}
+
+int MainWindow::panel_content_h() const {
+    return shown_tab() == PanelTab::Php ? php_geometry_.content_h : panel_geometry_.content_h;
+}
+
+void MainWindow::update_panel_geometry(HDC dc) {
+    if (!panel_open()) {
+        panel_geometry_ = {};
+        php_geometry_ = {};
+        return;
+    }
+    for (int pass = 0; pass < 2; ++pass) {
+        panel_geometry_ = panel_geometry(dc);
+        php_geometry_ = php_open_ && shown_tab() == PanelTab::Php ? php_panel_geometry(dc) : PhpPanelGeometry{};
+        // Kept inside the content when it got shorter (a window grown, a box gone).
+        const int most = std::max(0, panel_content_h() - height_of(panel_geometry_.content));
+        if (panel_scroll_ <= most) {
+            break;
+        }
+        panel_scroll_ = most;
+    }
+}
+
+void MainWindow::panel_scroll_to(int target) {
+    const int most = std::max(0, panel_content_h() - height_of(panel_geometry_.content));
+    const int value = std::clamp(target, 0, most);
+    if (value == panel_scroll_) {
+        return;
+    }
+    panel_scroll_ = value;
+    layout();  // the PHP boxes follow
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+RECT MainWindow::panel_rect_of(const Hit& hit) const {
+    const PanelGeometry& g = panel_geometry_;
+    const PhpPanelGeometry& p = php_geometry_;
+    const auto at = [&](const auto& list, int i) -> RECT {
+        return i >= 0 && std::cmp_less(i, list.size()) ? list[static_cast<std::size_t>(i)] : RECT{};
+    };
+    switch (hit.part) {
+        case Part::PanelButton:
+            return hit.row >= 0 && std::cmp_less(hit.row, g.buttons.size()) ? g.buttons[static_cast<std::size_t>(hit.row)].first
+                                                                           : RECT{};
+        case Part::PanelField:
+            if (hit.row >= 0 && std::cmp_less(hit.row, g.fields.size())) {
+                const auto& [label, box] = g.fields[static_cast<std::size_t>(hit.row)];
+                return {box.left, label.top, box.right, box.bottom};
+            }
+            return {};
+        case Part::PanelCopyEnv:
+            return g.db_box;
+        case Part::PanelKeep:
+            return {g.keep_title.left, g.keep_title.top, g.keep_switch.right, g.keep_detail.bottom};
+        case Part::PanelPhpSettings:
+            return p.open_settings;
+        case Part::PanelPhpChange:
+            return p.change;
+        case Part::PanelPhpField: {
+            const RECT box = at(p.boxes, hit.row);
+            const RECT label = at(p.labels, hit.row);
+            return {box.left, std::min(label.top, box.top), box.right, box.bottom};
+        }
+        case Part::PanelPhpReset:
+            return p.reset;
+        case Part::PanelPhpDiscard:
+            return p.discard;
+        case Part::PanelPhpSave:
+            return p.save;
+        default:
+            break;
+    }
+    return {};
+}
+
+void MainWindow::ensure_panel_visible(const Hit& hit) {
+    const RECT r = panel_rect_of(hit);
+    const RECT& content = panel_geometry_.content;
+    if (r.bottom <= r.top || height_of(content) <= 0) {
+        return;  // the header and tabs don't scroll
+    }
+    const int margin = px(8);
+    if (r.top < content.top + margin) {
+        panel_scroll_to(panel_scroll_ - (static_cast<int>(content.top) + margin - static_cast<int>(r.top)));
+    } else if (r.bottom > content.bottom - margin) {
+        panel_scroll_to(panel_scroll_ + std::min(static_cast<int>(r.bottom) - static_cast<int>(content.bottom) + margin,
+                                                 static_cast<int>(r.top) - static_cast<int>(content.top) - margin));
+    }
 }
 
 MainWindow::Hit MainWindow::panel_hit_test(int x, int y) const {
@@ -298,6 +498,18 @@ MainWindow::Hit MainWindow::panel_hit_test(int x, int y) const {
     }
     if (contains(g.address, x, y)) {
         return hit(Part::PanelAddress, -1);
+    }
+    for (std::size_t i = 0; i < g.tabs.size(); ++i) {
+        if (contains(g.tabs[i].first, x, y)) {
+            return hit(Part::PanelTab, static_cast<int>(i));
+        }
+    }
+    // What's scrolled out of the content can't be clicked.
+    if (!contains(g.content, x, y)) {
+        return {};
+    }
+    if (shown_tab() == PanelTab::Php) {
+        return php_open_ ? php_panel_hit_test(x, y) : Hit{};
     }
     for (std::size_t i = 0; i < g.buttons.size(); ++i) {
         if (contains(g.buttons[i].first, x, y)) {
@@ -318,12 +530,21 @@ MainWindow::Hit MainWindow::panel_hit_test(int x, int y) const {
     return {};
 }
 
-// What Tab visits in the panel, in reading order.
+// What Tab visits in the panel, in reading order: the tab bar (one stop; the
+// arrows move between its tabs), the shown tab's controls, then Close.
 std::vector<MainWindow::Hit> MainWindow::panel_focus_order() const {
     std::vector<Hit> order;
     const PanelGeometry& g = panel_geometry_;
     if (g.project.empty()) {
         return order;
+    }
+    for (std::size_t i = 0; i < g.tabs.size(); ++i) {
+        if (g.tabs[i].second == shown_tab()) {
+            order.push_back({Part::PanelTab, static_cast<int>(i), g.project});
+        }
+    }
+    if (shown_tab() == PanelTab::Php) {
+        add_php_focus_order(order);
     }
     for (std::size_t i = 0; i < g.buttons.size(); ++i) {
         order.push_back({Part::PanelButton, static_cast<int>(i), g.project});
@@ -334,7 +555,9 @@ std::vector<MainWindow::Hit> MainWindow::panel_focus_order() const {
     if (g.copy_env.right > g.copy_env.left) {
         order.push_back({Part::PanelCopyEnv, -1, g.project});
     }
-    order.push_back({Part::PanelKeep, -1, g.project});
+    if (g.keep_switch.right > g.keep_switch.left) {
+        order.push_back({Part::PanelKeep, -1, g.project});
+    }
     order.push_back({Part::PanelClose, -1, g.project});
     return order;
 }
@@ -345,6 +568,10 @@ void MainWindow::on_panel_click(const Hit& hit) {
     if (hit.project != selected_ || selected_row() == nullptr) {
         return;  // the panel changed under the click
     }
+    if (is_php_part(hit.part)) {
+        on_php_panel_click(hit);
+        return;
+    }
     const PanelGeometry& g = panel_geometry_;
     switch (hit.part) {
         case Part::PanelClose:
@@ -352,6 +579,11 @@ void MainWindow::on_panel_click(const Hit& hit) {
             break;
         case Part::PanelAddress:
             run_panel_action(PanelAction::Browser);
+            break;
+        case Part::PanelTab:
+            if (hit.row >= 0 && std::cmp_less(hit.row, g.tabs.size())) {
+                select_tab(g.tabs[static_cast<std::size_t>(hit.row)].second);
+            }
             break;
         case Part::PanelButton:
             if (hit.row >= 0 && std::cmp_less(hit.row, g.buttons.size())) {
@@ -378,13 +610,18 @@ void MainWindow::on_panel_click(const Hit& hit) {
 }
 
 void MainWindow::on_panel_key(WPARAM key) {
-    if (php_open_) {
-        on_php_panel_key(key);
-        return;
-    }
-    // The panel was just opened and not painted yet: lay it out first.
-    if (panel_geometry_.project != selected_) {
+    // The panel was just opened or changed tab and not painted yet: lay it out first.
+    if (panel_geometry_.project != selected_ || (shown_tab() == PanelTab::Php && php_geometry_.project != selected_)) {
         UpdateWindow(hwnd_);
+    }
+    const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+    const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+    const ProjectRow* row = selected_row();
+    const auto step_tab = [this](int by) { step_panel_tab(by); };
+    // Ctrl+Tab and Ctrl+Shift+Tab: the next or previous tab, from anywhere in the panel.
+    if (key == VK_TAB && ctrl) {
+        step_tab(shift ? -1 : 1);
+        return;
     }
     const std::vector<Hit> order = panel_focus_order();
     const int count = static_cast<int>(order.size());
@@ -393,7 +630,7 @@ void MainWindow::on_panel_key(WPARAM key) {
         return;
     }
     panel_focus_ = std::clamp(panel_focus_, 0, count - 1);
-    const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+    const Hit& current = order[static_cast<std::size_t>(panel_focus_)];
     switch (key) {
         case VK_TAB:
             if (shift && panel_focus_ == 0) {
@@ -408,11 +645,48 @@ void MainWindow::on_panel_key(WPARAM key) {
                 return;
             } else {
                 panel_focus_ += shift ? -1 : 1;
+                const Hit& next = order[static_cast<std::size_t>(panel_focus_)];
+                ensure_panel_visible(next);
+                // A box takes the keys itself.
+                if (next.part == Part::PanelPhpField && next.row >= 0) {
+                    if (FieldEdit* edit = php_edit_of(static_cast<std::size_t>(next.row));
+                        edit != nullptr && IsWindowVisible(edit->hwnd()) != FALSE) {
+                        SetFocus(edit->hwnd());
+                        SendMessageW(edit->hwnd(), EM_SETSEL, 0, -1);
+                    }
+                }
             }
             break;
+        case VK_LEFT:
+        case VK_RIGHT:
+            // On the tab bar the arrows move between tabs, the way they look
+            // (the window is mirrored in right-to-left languages).
+            if (current.part == Part::PanelTab) {
+                const bool forward = (key == VK_RIGHT) != rtl_;
+                step_tab(forward ? 1 : -1);
+            }
+            return;
+        case VK_HOME:
+        case VK_END:
+            if (current.part == Part::PanelTab && row != nullptr) {
+                const std::vector<PanelTab> tabs = panel_tabs(*row);
+                select_tab(key == VK_HOME ? tabs.front() : tabs.back());
+                panel_focus_ = 0;
+                show_focus_ = true;
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            } else {
+                panel_scroll_to(key == VK_HOME ? 0 : panel_content_h());
+            }
+            return;
+        case VK_NEXT:
+        case VK_PRIOR: {
+            const int page = std::max(px(40), height_of(panel_geometry_.content) - px(40));
+            panel_scroll_to(panel_scroll_ + (key == VK_NEXT ? page : -page));
+            return;
+        }
         case VK_RETURN:
         case VK_SPACE:
-            on_panel_click(order[static_cast<std::size_t>(panel_focus_)]);
+            on_panel_click(current);
             return;
         case VK_ESCAPE:
             close_panel();
@@ -454,9 +728,6 @@ void MainWindow::run_panel_action(PanelAction action) {
             break;
         case PanelAction::Download:
             start_downloads_for(row->name);
-            break;
-        case PanelAction::Php:
-            open_php_part();
             break;
     }
 }
@@ -694,6 +965,7 @@ void MainWindow::paint_panel(Canvas& c, HDC dc, bool text_pass) const {
                order[static_cast<std::size_t>(panel_focus_)].row == index;
     };
     const auto hovered = [&](Part part, int index) { return hover_.part == part && hover_.row == index; };
+    const PanelTab shown = shown_tab();
 
     if (!text_pass) {
         c.round_rect(g.panel, pxf(8), p.card, p.card_border, border);
@@ -711,6 +983,34 @@ void MainWindow::paint_panel(Canvas& c, HDC dc, bool text_pass) const {
         c.line(cx - k, cy - k, cx + k, cy + k, p.text, pxf(1.3F));
         c.line(cx - k, cy + k, cx + k, cy - k, p.text, pxf(1.3F));
 
+        // The tabs: a hover fill, and the shown one's accent line under its
+        // label (Windows 11's tabs); a line under them all.
+        c.fill({g.panel.left + std::max(1, px(1)), g.tab_bar.bottom, g.panel.right - std::max(1, px(1)),
+                g.tab_bar.bottom + std::max(1, px(1))},
+               p.divider);
+        for (std::size_t i = 0; i < g.tabs.size(); ++i) {
+            const auto& [r, tab] = g.tabs[i];
+            const int index = static_cast<int>(i);
+            RECT inner = r;
+            InflateRect(&inner, 0, -px(4));
+            if (tab != shown && hovered(Part::PanelTab, index)) {
+                c.round_rect(inner, pxf(4), p.row_hover);
+            }
+            if (tab == shown) {
+                const int line_w = std::max(px(16), width_of(r) - 2 * px(10));
+                const int lx = (r.left + r.right - line_w) / 2;
+                c.round_rect({lx, r.bottom - px(3), lx + line_w, r.bottom}, pxf(1.5F), p.accent);
+            }
+            if (focused(Part::PanelTab, index)) {
+                c.round_outline(inner, pxf(4), p.focus, pxf(2));
+            }
+        }
+
+        // The content scrolls under the tabs.
+        c.clip(g.content);
+        if (shown == PanelTab::Php) {
+            paint_php_panel(c, false);
+        }
         for (std::size_t i = 0; i < g.buttons.size(); ++i) {
             const int index = static_cast<int>(i);
             paint_button(c, g.buttons[i].first, hovered(Part::PanelButton, index), focused(Part::PanelButton, index));
@@ -734,14 +1034,25 @@ void MainWindow::paint_panel(Canvas& c, HDC dc, bool text_pass) const {
             c.round_rect(g.db_box, pxf(6), p.panel_box);
             paint_button(c, g.copy_env, hovered(Part::PanelCopyEnv, -1), focused(Part::PanelCopyEnv, -1));
         }
-        paint_switch(c, g.keep_switch, keep_value(*row), hovered(Part::PanelKeep, -1));
-        if (focused(Part::PanelKeep, -1)) {
-            RECT ring = g.keep_switch;
-            InflateRect(&ring, px(3), px(3));
-            c.round_outline(ring, static_cast<float>(height_of(ring)) / 2.0F, p.focus, pxf(2));
+        if (g.keep_switch.right > g.keep_switch.left) {
+            paint_switch(c, g.keep_switch, keep_value(*row), hovered(Part::PanelKeep, -1));
+            if (focused(Part::PanelKeep, -1)) {
+                RECT ring = g.keep_switch;
+                InflateRect(&ring, px(3), px(3));
+                c.round_outline(ring, static_cast<float>(height_of(ring)) / 2.0F, p.focus, pxf(2));
+            }
         }
         if (height_of(g.log_box) > 0) {
             c.round_rect(g.log_box, pxf(6), p.log);
+        }
+        // A thin scroll indicator, as in Settings, when the tab is taller than its room.
+        const int content_h = panel_content_h();
+        const int view = height_of(g.content);
+        if (content_h > view && view > 0) {
+            const int thumb = std::max(px(24), view * view / content_h);
+            const int top = g.content.top + (view - thumb) * panel_scroll_ / (content_h - view);
+            c.round_rect({g.content.right - px(6), top + px(2), g.content.right - px(2), top + thumb - px(2)}, pxf(2),
+                         p.switch_off_border);
         }
         c.unclip();
         return;
@@ -754,25 +1065,42 @@ void MainWindow::paint_panel(Canvas& c, HDC dc, bool text_pass) const {
     } else {
         c.text(g.line2, w(row->path), fonts_.button.get(), p.text_subtle, Align::Start, true);
     }
-    for (const auto& [rect, action] : g.buttons) {
-        c.text(rect, w(panel_button_text(action)), fonts_.button.get(), p.text, Align::Center,
-               false);
+    for (const auto& [r, tab] : g.tabs) {
+        RECT label = r;
+        label.bottom -= px(2);
+        c.text(label, w(tab_label(lang_, tab)), tab == shown ? fonts_.button_bold.get() : fonts_.button.get(),
+               tab == shown ? p.text : p.text_subtle, Align::Center, false);
     }
 
-    c.text(g.versions, w(text(lang_, Str::Versions)), fonts_.button_bold.get(), p.text, Align::Start, false);
+    c.clip_text(g.content);
+    if (shown == PanelTab::Php) {
+        paint_php_panel(c, true);
+    }
+    for (const auto& [rect, action] : g.buttons) {
+        c.text(rect, w(panel_button_text(action)), fonts_.button.get(), p.text, Align::Center, false);
+    }
+    if (g.folder.right > g.folder.left) {
+        c.text(g.folder_label, w(text(lang_, Str::PanelFolder)), fonts_.button_bold.get(), p.text, Align::Start, false);
+        c.text(g.folder, w(row->path), fonts_.caption.get(), p.text_subtle, Align::Start, true);
+    }
+    if (g.versions.right > g.versions.left) {
+        c.text(g.versions, w(text(lang_, Str::Versions)), fonts_.button_bold.get(), p.text, Align::Start, false);
+    }
     for (std::size_t i = 0; i < g.fields.size() && i < fields_.size(); ++i) {
         const VersionField& field = fields_[i];
         c.text(g.fields[i].first, w(field.label), fonts_.caption.get(), p.text_subtle, Align::Start, false);
         RECT inner = g.fields[i].second;
         inner.left += px(8);
         inner.right -= px(26);
-        const std::size_t shown = field_value(field);
-        if (shown < field.choices.size()) {
-            c.text(inner, w(field.choices[shown].label), fonts_.button.get(), p.text, Align::Start, false);
+        const std::size_t value = field_value(field);
+        if (value < field.choices.size()) {
+            c.text(inner, w(field.choices[value].label), fonts_.button.get(), p.text, Align::Start, false);
         }
     }
-    c.text(g.saved_in, w(fill(lang_, Str::SavedIn, {core::kProjectConfigFileName})), fonts_.caption.get(),
-           p.text_subtle, Align::Start, false);
+    if (g.saved_in.right > g.saved_in.left) {
+        c.text(g.saved_in, w(fill(lang_, Str::SavedIn, {core::kProjectConfigFileName})), fonts_.caption.get(),
+               p.text_subtle, Align::Start, false);
+    }
 
     if (g.db_box.right > g.db_box.left) {
         const std::string database = !row->database.empty() ? row->database : row->wants.database;
@@ -786,15 +1114,16 @@ void MainWindow::paint_panel(Canvas& c, HDC dc, bool text_pass) const {
         c.text(g.copy_env, w(text(lang_, Str::CopyEnv)), fonts_.caption.get(), p.text, Align::Center, false);
     }
 
-    const bool keep = keep_value(*row);
-    c.text(g.keep_title, w(text(lang_, Str::KeepRunning)), fonts_.button_bold.get(), p.text, Align::Start, false);
-    c.text(g.keep_detail,
-           w(keep ? std::string(text(lang_, Str::KeepRunningOn))
-                  : fill(lang_, Str::KeepRunningOff,
-                         {std::to_string(snap_.footer.idle_minutes != 0 ? snap_.footer.idle_minutes : 10)})),
-           fonts_.caption.get(), p.text_subtle, Align::Start, false);
+    if (g.keep_switch.right > g.keep_switch.left) {
+        const bool keep = keep_value(*row);
+        c.text(g.keep_title, w(text(lang_, Str::KeepRunning)), fonts_.button_bold.get(), p.text, Align::Start, false);
+        c.text(g.keep_detail,
+               w(keep ? std::string(text(lang_, Str::KeepRunningOn))
+                      : fill(lang_, Str::KeepRunningOff,
+                             {std::to_string(snap_.footer.idle_minutes != 0 ? snap_.footer.idle_minutes : 10)})),
+               fonts_.caption.get(), p.text_subtle, Align::Start, false);
+    }
 
-    c.text(g.log_label, w(text(lang_, Str::Log)), fonts_.button_bold.get(), p.text, Align::Start, false);
     if (height_of(g.log_box) > px(kLogLineH)) {
         RECT inner = g.log_box;
         InflateRect(&inner, -px(10), -px(8));
@@ -809,7 +1138,8 @@ void MainWindow::paint_panel(Canvas& c, HDC dc, bool text_pass) const {
         } else {
             // The newest at the bottom; as many as fit.
             const int fit = std::max(1, height_of(inner) / px(kLogLineH));
-            const std::size_t first = lines.size() > static_cast<std::size_t>(fit) ? lines.size() - static_cast<std::size_t>(fit) : 0;
+            const std::size_t first =
+                lines.size() > static_cast<std::size_t>(fit) ? lines.size() - static_cast<std::size_t>(fit) : 0;
             c.clip_text(inner);
             int ly = inner.top;
             for (std::size_t i = first; i < lines.size(); ++i) {

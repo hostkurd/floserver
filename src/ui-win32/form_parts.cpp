@@ -5,6 +5,7 @@
 
 #include <commctrl.h>
 
+#include <algorithm>
 #include <array>
 #include <utility>
 
@@ -93,6 +94,29 @@ void FieldEdit::place(const RECT& box, int pad, int height, bool visible) {
     const int top = static_cast<int>(box.top) + (static_cast<int>(box.bottom - box.top) - height) / 2;
     SetWindowPos(hwnd_, nullptr, static_cast<int>(box.left) + pad, top, w, height,
                  SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+}
+
+void FieldEdit::place(const RECT& box, int pad, int height, bool visible, int clip_top, int clip_bottom) {
+    if (hwnd_ == nullptr) {
+        return;
+    }
+    const int top = static_cast<int>(box.top) + (static_cast<int>(box.bottom - box.top) - height) / 2;
+    const int from = std::max(0, clip_top - top);
+    const int to = std::min(height, clip_bottom - top);
+    if (!visible || to <= from) {
+        place(box, pad, height, false);
+        return;
+    }
+    place(box, pad, height, true);
+    const bool cut = from > 0 || to < height;
+    if (cut) {
+        // Only rows are cut, so the region is the same in a mirrored window.
+        const int w = static_cast<int>(box.right - box.left) - 2 * pad;
+        SetWindowRgn(hwnd_, CreateRectRgn(0, from, w, to), TRUE);  // the window owns the region
+    } else if (clipped_) {
+        SetWindowRgn(hwnd_, nullptr, TRUE);
+    }
+    clipped_ = cut;
 }
 
 void FieldEdit::paint_cue() const {

@@ -140,11 +140,14 @@ std::optional<RuntimeService::CachedList> RuntimeService::get_list(bool refresh,
             // Not being able to store the sequence only weakens rollback
             // protection on this computer; the list itself is good, so use it.
             (void)store_last_sequence(state, fetched.key_id, fetched.manifest->sequence, store_error);
-            // Kept for offline use (the templates). The pair is checked
-            // again when read back, so a half-written pair is just ignored.
-            if (!fetched.manifest->templates.empty()) {
-                // Under offline_mutex_, so an offline read never sees half a
-                // pair; a later fallback reads this newest pair.
+            // Kept for offline use: Settings' list (D20) and the templates.
+            // Every good list, with templates or not: one kept only when it
+            // had templates left Settings with no list offline, so each
+            // opening without the internet tried to fetch one. The pair is
+            // checked again when read back, so a half-written pair is just
+            // ignored. Under offline_mutex_, so an offline read never sees
+            // half a pair; a later fallback reads this newest pair.
+            {
                 const std::lock_guard offline_lock(offline_mutex_);
                 std::string keep_error;
                 (void)(write_file_atomically(kept_manifest_file(config_.data_dir), fetched.manifest_bytes, keep_error) &&

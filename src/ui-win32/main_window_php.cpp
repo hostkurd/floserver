@@ -1,8 +1,9 @@
-// The project panel's PHP part (D20): this project's own extension changes
+// The project panel's PHP tab (D20): this project's own extension changes
 // (chips, and "Change…" for a checklist), its php.ini values over the
-// series' (shown grey as placeholders), Reset to defaults, Discard and Save
-// (one projects.php). It takes the panel's place while it's open; php.get
-// is asked only when it's opened, for the placeholders and the list.
+// series' (shown grey as placeholders), a warning under a name PHP doesn't
+// know, Reset to defaults, Discard and Save (one projects.php). php.get is
+// asked when the tab is first shown for a project, for the placeholders,
+// the list and the names PHP knows; never while the panel or tab is closed.
 
 #include "main_window.h"
 
@@ -61,28 +62,55 @@ void MainWindow::open_php_part() {
     }
     php_open_ = true;
     php_series_ = project_php_series(*row, snap_.installed).value_or(std::string());
-    php_info_.reset();
     php_before_ = project_php_of(*row);
     php_after_ = php_before_;
     php_another_.clear();
     php_message_.clear();
     php_error_key_.clear();
     php_saving_ = false;
-    php_loading_ = !php_series_.empty() && worker_ && snap_.link == Link::Connected;
-    if (php_loading_) {
-        worker_->php_get(php_series_, row->name);  // the one request opening makes
+    // Asked once per project while it's selected: shown again, the tab
+    // uses the answer it has (or the one on its way).
+    if (php_info_project_ != row->name || php_info_series_ != php_series_) {
+        forget_php_info();
+        php_info_project_ = row->name;
+        php_info_series_ = php_series_;
+        ask_php_info();
     }
     make_project_php_edits();
-    panel_focus_ = 0;
     layout();
     InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void MainWindow::forget_php_info() {
+    php_info_.reset();
+    php_info_project_.clear();
+    php_info_series_.clear();
+    php_info_wanted_ = false;
+    php_loading_ = false;
+}
+
+// The one request the tab makes; when the service isn't there it's asked
+// once it is (on_snapshot), never on a timer.
+void MainWindow::ask_php_info() {
+    php_info_wanted_ = false;
+    if (php_info_series_.empty() || php_info_project_.empty() || !worker_) {
+        return;
+    }
+    if (snap_.link != Link::Connected) {
+        php_info_wanted_ = true;
+        return;
+    }
+    php_loading_ = true;
+    worker_->php_get(php_info_series_, php_info_project_);
 }
 
 bool MainWindow::php_dirty() const {
     return php_open_ && (php_after_ != php_before_ || !trimmed(php_another_).empty());
 }
 
-bool MainWindow::leave_php_part(bool ask) {
+bool MainWindow::leave_php_part(bool ask) { return leave_php_part(ask, PanelAct{}); }
+
+bool MainWindow::leave_php_part(bool ask, const PanelAct& then) {
     if (!php_open_) {
         return true;
     }
@@ -107,8 +135,9 @@ bool MainWindow::leave_php_part(bool ask) {
                     return false;  // not sent: "Another setting" can't be read, or not connected
                 }
                 if (php_saving_) {
-                    // Left once it's answered without a refusal; a refusal shows here.
+                    // Done once it's answered without a refusal; a refusal shows here.
                     php_leave_after_save_ = true;
+                    php_then_ = then;
                     return false;
                 }
                 break;
@@ -120,6 +149,7 @@ bool MainWindow::leave_php_part(bool ask) {
     }
     php_open_ = false;
     php_leave_after_save_ = false;
+    php_then_ = {};
     for (const auto& edit : php_edits_) {
         if (edit->focused()) {
             SetFocus(hwnd_);  // before its box goes
@@ -128,7 +158,6 @@ bool MainWindow::leave_php_part(bool ask) {
     php_edits_.clear();
     php_field_edit_.clear();
     php_keys_.clear();
-    php_info_.reset();
     php_geometry_ = {};
     panel_focus_ = panel_beside_list() ? -1 : 0;
     layout();
@@ -186,57 +215,72 @@ void MainWindow::on_project_php_answers() {
         if (answer.to == ServiceWorker::kPhpSettings) {
             continue;
         }
-        // A late answer for a project or version the user has left is dropped, errors too.
+        if (!answer.save) {
+            // php.get: kept for the project it was asked for, the tab shown or not.
+            if (php_info_project_.empty() ||
+                !php_answer_matches(answer.to, answer.series, php_info_project_, php_info_series_)) {
+                continue;  // a late answer for a project the user has left
+            }
+            php_loading_ = false;
+            if (!answer.error.empty() || !answer.reply) {
+                const std::string series = php_info_series_;
+                php_info_project_.clear();  // asked again when the tab is shown again
+                if (php_open_) {
+                    php_message_ = fill(lang_, Str::PhpReadFailed, {series, answer.error});
+                    php_message_error_ = true;
+                }
+                continue;
+            }
+            if (auto info = php_series_from_reply(*answer.reply); info && info->series == php_info_series_) {
+                php_info_ = std::move(info);
+                if (php_open_) {
+                    make_project_php_edits();  // the placeholders and warnings
+                }
+            }
+            continue;
+        }
+        // A save's answer for a project the user has left is dropped, errors too.
         const bool ours = php_open_ && php_answer_matches(answer.to, answer.series, selected_, php_series_);
         if (!ours) {
-            // Saved on the way out of the part: only a failure is worth saying.
-            if (answer.save && !answer.error.empty()) {
+            if (!answer.error.empty()) {
                 show_notice(fill(lang_, Str::ChangeFailed, {answer.to, answer.error}), true);
             }
             continue;
         }
-        if (answer.save) {
-            php_saving_ = false;
-            set_project_php_read_only(false);
-        } else {
-            php_loading_ = false;
-        }
+        php_saving_ = false;
+        set_project_php_read_only(false);
         if (!answer.error.empty() || !answer.reply) {
-            if (answer.save) {
-                php_leave_after_save_ = false;  // refused: stay with the reason shown
-                std::vector<std::string> keys = php_keys_;
-                if (const auto line = parse_ini_line(php_another_)) {
-                    keys.push_back(line->first);
-                }
-                php_error_key_ = ini_error_key(answer.error, keys);
-                if (!php_error_key_.empty() && std::find(php_keys_.begin(), php_keys_.end(), php_error_key_) == php_keys_.end()) {
-                    php_error_key_ = " ";  // it was "Another setting": its box gets the mark
-                }
+            php_leave_after_save_ = false;  // refused: stay with the reason shown
+            php_then_ = {};
+            std::vector<std::string> keys = php_keys_;
+            if (const auto line = parse_ini_line(php_another_)) {
+                keys.push_back(line->first);
             }
-            php_message_ = answer.save ? fill(lang_, Str::PhpSaveFailed, {answer.error})
-                                       : fill(lang_, Str::PhpReadFailed, {php_series_, answer.error});
+            php_error_key_ = ini_error_key(answer.error, keys);
+            if (!php_error_key_.empty() &&
+                std::find(php_keys_.begin(), php_keys_.end(), php_error_key_) == php_keys_.end()) {
+                php_error_key_ = " ";  // it was "Another setting": its box gets the mark
+            }
+            php_message_ = fill(lang_, Str::PhpSaveFailed, {answer.error});
             php_message_error_ = true;
             continue;
         }
-        if (answer.save) {
-            // The project as the service now describes it.
-            const auto rows = rows_from_list(json{{"projects", json::array({*answer.reply})}}, lang_);
-            if (!rows.empty()) {
-                php_before_ = project_php_of(rows.front());
-            }
-            php_after_ = php_before_;
-            php_another_.clear();
-            php_error_key_.clear();
-            php_message_ = std::string(text(lang_, Str::PhpSaved));
-            php_message_error_ = false;
-            make_project_php_edits();
-            if (std::exchange(php_leave_after_save_, false)) {
-                (void)leave_php_part(false);
-                return;  // the rest of the answers aren't this part's any more
-            }
-        } else if (auto info = php_series_from_reply(*answer.reply); info && info->series == php_series_) {
-            php_info_ = std::move(info);
-            make_project_php_edits();  // the placeholders
+        // The project as the service now describes it.
+        const auto rows = rows_from_list(json{{"projects", json::array({*answer.reply})}}, lang_);
+        if (!rows.empty()) {
+            php_before_ = project_php_of(rows.front());
+        }
+        php_after_ = php_before_;
+        php_another_.clear();
+        php_error_key_.clear();
+        php_message_ = std::string(text(lang_, Str::PhpSaved));
+        php_message_error_ = false;
+        make_project_php_edits();
+        if (std::exchange(php_leave_after_save_, false)) {
+            const PanelAct then = std::exchange(php_then_, {});
+            (void)leave_php_part(false);
+            run_panel_act(then);  // what the Save was chosen on the way to
+            return;               // the rest of the answers aren't this tab's any more
         }
     }
 }
@@ -333,19 +377,24 @@ FieldEdit* MainWindow::php_edit_of(std::size_t field) const {
     return php_edits_[static_cast<std::size_t>(php_field_edit_[field])].get();
 }
 
-void MainWindow::place_project_php_edits(HDC dc) {
-    const bool shown = php_open_ && panel_open() && !wizard_open() && !www_open();
+// The boxes follow the content's scroll: one partly scrolled out is cut at
+// the content's edge, one wholly out is hidden (they're real windows, drawn
+// over the panel otherwise).
+void MainWindow::place_project_php_edits() {
+    const bool shown = php_open_ && panel_open() && !wizard_open() && !www_open() && shown_tab() == PanelTab::Php;
     if (shown) {
-        php_geometry_ = php_panel_geometry(dc);
+        HDC dc = GetDC(hwnd_);
+        update_panel_geometry(dc);
+        ReleaseDC(hwnd_, dc);
     }
+    const RECT& content = panel_geometry_.content;
     for (std::size_t f = 0; f < php_keys_.size(); ++f) {
         FieldEdit* edit = php_edit_of(f);
         if (edit == nullptr) {
             continue;
         }
         const RECT box = shown && f < php_geometry_.boxes.size() ? php_geometry_.boxes[f] : RECT{};
-        // Hidden when the panel is too short for it.
-        edit->place(box, px(8), px(20), shown && !is_empty(box) && box.bottom <= php_geometry_.panel.bottom);
+        edit->place(box, px(8), px(20), shown && !is_empty(box), content.top, content.bottom);
     }
 }
 
@@ -375,12 +424,13 @@ void MainWindow::on_php_edit_change(int id) {
 
 void MainWindow::on_php_edit_focus(int id) {
     const int index = id - kPhpEditBase;
-    const std::vector<Hit> order = php_panel_focus_order();
+    const std::vector<Hit> order = panel_focus_order();
     for (std::size_t i = 0; i < order.size(); ++i) {
         if (order[i].part == Part::PanelPhpField && order[i].row >= 0 &&
             std::cmp_less(order[i].row, php_field_edit_.size()) &&
             php_field_edit_[static_cast<std::size_t>(order[i].row)] == index) {
             panel_focus_ = static_cast<int>(i);
+            ensure_panel_visible(order[i]);  // a box scrolled half out comes into view
         }
     }
     InvalidateRect(hwnd_, nullptr, FALSE);
@@ -388,15 +438,21 @@ void MainWindow::on_php_edit_focus(int id) {
 
 bool MainWindow::on_php_edit_key(int id, WPARAM key) {
     if (key == VK_ESCAPE) {
-        PostMessageW(hwnd_, kPhpBackMessage, 0, 0);  // after this message: the box goes
+        // Back to the tab bar (after this message); Escape there closes the panel.
+        PostMessageW(hwnd_, kPhpBackMessage, 0, 0);
         return true;
     }
     if (key == VK_RETURN) {
         return true;  // kept as typed; Save sends it
     }
+    if ((GetKeyState(VK_CONTROL) & 0x8000) != 0) {
+        // Ctrl+Tab: another tab, after this message (the box goes with this one).
+        PostMessageW(hwnd_, kStepTabMessage, (GetKeyState(VK_SHIFT) & 0x8000) != 0 ? 0 : 1, 0);
+        return true;
+    }
     on_php_edit_focus(id);
     SetFocus(hwnd_);
-    on_php_panel_key(VK_TAB);
+    on_panel_key(VK_TAB);
     return true;
 }
 
@@ -424,24 +480,24 @@ MainWindow::PhpPanelGeometry MainWindow::php_panel_geometry(HDC dc) const {
         return g;
     }
     g.project = row->name;
-    g.panel = panel_rect();
+    g.panel = panel_geometry_.panel;
+    g.content = panel_geometry_.content;
     const int x0 = g.panel.left + px(kPanelPad);
     const int x1 = g.panel.right - px(kPanelPad);
     const int width = x1 - x0;
-    int y = g.panel.top + px(kPanelPad);
+    const int top = g.content.top + px(kPanelGap);
+    int y = top - panel_scroll_;
     const auto measure = [&](std::string_view s, HFONT font, bool code = false) {
         return Canvas::measure(dc, w(s), font, rtl_ && !code);
     };
 
-    g.close = {x1 - px(28), y - px(2), x1, y + px(26)};
-    g.title = {x0, y, g.close.left - px(8), y + px(24)};
-    y += px(24);
-    g.line2 = {x0, y, g.close.left - px(8), y + px(20)};
-    y = g.line2.bottom + px(kPanelGap);
+    // The PHP it uses, and its settings in Settings.
+    g.line2 = {x0, y, x1, y + px(20)};
+    y = g.line2.bottom + px(8);
     if (!php_series_.empty()) {
         const int bw = measure(fill(lang_, Str::ProjectPhpOpenSettings, {php_series_}), fonts_.button.get()) + px(24);
         g.open_settings = {x0, y, std::min(x1, x0 + bw), y + px(kButtonH)};
-        y += px(kButtonH) + px(kPanelGap);
+        y += px(kButtonH) + px(kSection);
     }
 
     // A section's title with its hint after it, or under it when it doesn't fit.
@@ -488,16 +544,48 @@ MainWindow::PhpPanelGeometry MainWindow::php_panel_geometry(HDC dc) const {
     const int cols = width >= px(520) ? 3 : 2;
     const int col_w = (width - (cols - 1) * px(kGap)) / cols;
     const int cell_h = px(kLabelH) + px(4) + px(kBoxH);
-    for (std::size_t i = 0; i < php_keys_.size(); ++i) {
-        const int col = static_cast<int>(i) % cols;
-        const int line = static_cast<int>(i) / cols;
-        const int left = x0 + col * (col_w + px(kGap));
-        const int top = y + line * (cell_h + px(kGap));
-        g.labels.push_back({left, top, left + col_w, top + px(kLabelH)});
-        g.boxes.push_back({left, top + px(kLabelH) + px(4), left + col_w, top + cell_h});
+    // A name PHP doesn't know gets a line under its row of fields (the whole
+    // width: the words are longer than a field), one per such field.
+    std::vector<std::string> notes(php_keys_.size());
+    if (php_info_) {
+        for (std::size_t i = 0; i < php_keys_.size(); ++i) {
+            std::string key = php_keys_[i];
+            if (key.empty()) {
+                if (const auto line = parse_ini_line(php_another_)) {
+                    key = line->first;
+                }
+            }
+            if (const auto suggestion = unknown_ini_name(php_info_->known_ini, key)) {
+                notes[i] = unknown_ini_text(php_series_, key, *suggestion, lang_);
+            }
+        }
     }
+    g.warned.assign(php_keys_.size(), -1);
     const int lines = (static_cast<int>(php_keys_.size()) + cols - 1) / cols;
-    y += lines * cell_h + std::max(0, lines - 1) * px(kGap) + px(kSection);
+    for (int line = 0; line < lines; ++line) {
+        for (int col = 0; col < cols; ++col) {
+            const auto i = static_cast<std::size_t>(line * cols + col);
+            if (i >= php_keys_.size()) {
+                break;
+            }
+            const int left = x0 + col * (col_w + px(kGap));
+            g.labels.push_back({left, y, left + col_w, y + px(kLabelH)});
+            g.boxes.push_back({left, y + px(kLabelH) + px(4), left + col_w, y + cell_h});
+        }
+        y += cell_h;
+        for (int col = 0; col < cols; ++col) {
+            const auto i = static_cast<std::size_t>(line * cols + col);
+            if (i >= php_keys_.size() || notes[i].empty()) {
+                continue;
+            }
+            const int nh = text_height(dc, w(notes[i]), fonts_.caption.get(), width, rtl_);
+            g.warned[i] = static_cast<int>(g.warnings.size());
+            g.warnings.emplace_back(RECT{x0, y + px(4), x1, y + px(4) + nh}, notes[i]);
+            y += px(4) + nh;
+        }
+        y += px(kGap);
+    }
+    y += px(kSection) - px(kGap);
 
     const std::string info = fill(lang_, Str::ProjectPhpSavedIn, {floserver::core::kProjectConfigFileName});
     const int ih = text_height(dc, w(info), fonts_.caption.get(), width - px(24), rtl_);
@@ -509,26 +597,29 @@ MainWindow::PhpPanelGeometry MainWindow::php_panel_geometry(HDC dc) const {
         y = g.message.bottom + px(kGap);
     }
 
-    // The buttons at the panel's bottom when there's room.
-    const int top = std::max(y, static_cast<int>(g.panel.bottom) - px(kPanelPad) - px(kButtonH));
+    // The buttons at the content's bottom when there's room, else after the rest.
+    const int bottom_top = static_cast<int>(g.content.bottom) - px(kPanelPad) - px(kButtonH);
+    const int buttons_top = panel_scroll_ == 0 ? std::max(y, bottom_top) : y;
     const int rw = measure(text(lang_, Str::ProjectPhpReset), fonts_.button.get()) + px(24);
     const int sw = std::max(measure(text(lang_, Str::PhpSave), fonts_.button.get()),
                             measure(text(lang_, Str::PhpSaving), fonts_.button.get())) +
                    px(24);
     const int dw = measure(text(lang_, Str::PhpDiscard), fonts_.button.get()) + px(24);
-    g.save = {x1 - sw, top, x1, top + px(kButtonH)};
-    g.discard = {static_cast<int>(g.save.left) - px(8) - dw, top, static_cast<int>(g.save.left) - px(8),
-                 top + px(kButtonH)};
-    g.reset = {x0, top, std::min(x0 + rw, static_cast<int>(g.discard.left) - px(8)), top + px(kButtonH)};
+    g.save = {x1 - sw, buttons_top, x1, buttons_top + px(kButtonH)};
+    g.discard = {static_cast<int>(g.save.left) - px(8) - dw, buttons_top, static_cast<int>(g.save.left) - px(8),
+                 buttons_top + px(kButtonH)};
+    g.reset = {x0, buttons_top, std::min(x0 + rw, static_cast<int>(g.discard.left) - px(8)), buttons_top + px(kButtonH)};
+    // The height without the buttons pushed down: it only scrolls when it doesn't fit.
+    g.content_h = y + px(kButtonH) + px(kPanelPad) + panel_scroll_ - static_cast<int>(g.content.top);
     return g;
 }
 
 MainWindow::Hit MainWindow::php_panel_hit_test(int x, int y) const {
     const PhpPanelGeometry& g = php_geometry_;
     const auto hit = [&](Part part, int index) { return Hit{part, index, g.project}; };
-    for (const auto& [part, r] : {std::pair{Part::PanelPhpBack, g.close}, std::pair{Part::PanelPhpSettings, g.open_settings},
-                                  std::pair{Part::PanelPhpChange, g.change}, std::pair{Part::PanelPhpReset, g.reset},
-                                  std::pair{Part::PanelPhpDiscard, g.discard}, std::pair{Part::PanelPhpSave, g.save}}) {
+    for (const auto& [part, r] : {std::pair{Part::PanelPhpSettings, g.open_settings}, std::pair{Part::PanelPhpChange, g.change},
+                                  std::pair{Part::PanelPhpReset, g.reset}, std::pair{Part::PanelPhpDiscard, g.discard},
+                                  std::pair{Part::PanelPhpSave, g.save}}) {
         if (contains(r, x, y)) {
             return hit(part, -1);
         }
@@ -541,11 +632,10 @@ MainWindow::Hit MainWindow::php_panel_hit_test(int x, int y) const {
     return {};
 }
 
-std::vector<MainWindow::Hit> MainWindow::php_panel_focus_order() const {
-    std::vector<Hit> order;
+void MainWindow::add_php_focus_order(std::vector<Hit>& order) const {
     const PhpPanelGeometry& g = php_geometry_;
     if (g.project.empty()) {
-        return order;
+        return;
     }
     if (!is_empty(g.open_settings)) {
         order.push_back({Part::PanelPhpSettings, -1, g.project});
@@ -557,8 +647,6 @@ std::vector<MainWindow::Hit> MainWindow::php_panel_focus_order() const {
     order.push_back({Part::PanelPhpReset, -1, g.project});
     order.push_back({Part::PanelPhpDiscard, -1, g.project});
     order.push_back({Part::PanelPhpSave, -1, g.project});
-    order.push_back({Part::PanelPhpBack, -1, g.project});
-    return order;
 }
 
 // --- input -------------------------------------------------------------------------------
@@ -568,9 +656,6 @@ void MainWindow::on_php_panel_click(const Hit& hit) {
         return;
     }
     switch (hit.part) {
-        case Part::PanelPhpBack:
-            (void)leave_php_part(true);
-            break;
         case Part::PanelPhpSettings:
             open_settings_php(php_series_);
             break;
@@ -613,44 +698,6 @@ void MainWindow::on_php_panel_click(const Hit& hit) {
         default:
             break;
     }
-    InvalidateRect(hwnd_, nullptr, FALSE);
-}
-
-void MainWindow::on_php_panel_key(WPARAM key) {
-    if (php_geometry_.project != selected_) {
-        UpdateWindow(hwnd_);  // just opened: laid out first
-    }
-    const std::vector<Hit> order = php_panel_focus_order();
-    const int count = static_cast<int>(order.size());
-    if (count == 0) {
-        return;
-    }
-    panel_focus_ = std::clamp(panel_focus_, 0, count - 1);
-    switch (key) {
-        case VK_TAB: {
-            const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-            panel_focus_ = (panel_focus_ + (shift ? count - 1 : 1)) % count;
-            const Hit& next = order[static_cast<std::size_t>(panel_focus_)];
-            if (next.part == Part::PanelPhpField && next.row >= 0) {
-                if (FieldEdit* edit = php_edit_of(static_cast<std::size_t>(next.row));
-                    edit != nullptr && IsWindowVisible(edit->hwnd()) != FALSE) {
-                    SetFocus(edit->hwnd());
-                    SendMessageW(edit->hwnd(), EM_SETSEL, 0, -1);
-                }
-            }
-            break;
-        }
-        case VK_RETURN:
-        case VK_SPACE:
-            on_php_panel_click(order[static_cast<std::size_t>(panel_focus_)]);
-            return;
-        case VK_ESCAPE:
-            (void)leave_php_part(true);
-            return;
-        default:
-            return;
-    }
-    show_focus_ = true;
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
@@ -754,7 +801,7 @@ void MainWindow::paint_php_panel(Canvas& c, bool text_pass) const {
     const Palette& p = palette(dark_);
     const float border = std::max(1.0F, pxf(1.0F));
     const bool keys = GetFocus() == hwnd_ && show_focus_;
-    const std::vector<Hit> order = php_panel_focus_order();
+    const std::vector<Hit> order = panel_focus_order();
     const auto focused = [&](Part part, int index) {
         return keys && panel_focus_ >= 0 && std::cmp_less(panel_focus_, order.size()) &&
                order[static_cast<std::size_t>(panel_focus_)].part == part &&
@@ -772,20 +819,8 @@ void MainWindow::paint_php_panel(Canvas& c, bool text_pass) const {
     const bool can_change = php_info_ && !php_info_->extensions_fixed;
     const std::vector<std::pair<std::string, bool>> chips = php_chips();
 
+    // Drawn by paint_panel inside the content, which it has clipped to.
     if (!text_pass) {
-        c.round_rect(g.panel, pxf(8), p.card, p.card_border, border);
-        c.clip(g.panel);
-        if (hovered(Part::PanelPhpBack, -1) || focused(Part::PanelPhpBack, -1)) {
-            c.round_rect(g.close, pxf(4), p.row_hover);
-        }
-        if (focused(Part::PanelPhpBack, -1)) {
-            c.round_outline(g.close, pxf(4), p.focus, pxf(2));
-        }
-        const float cx = static_cast<float>(g.close.left + g.close.right) / 2.0F;
-        const float cy = static_cast<float>(g.close.top + g.close.bottom) / 2.0F;
-        const float k = pxf(5);
-        c.line(cx - k, cy - k, cx + k, cy + k, p.text, pxf(1.3F));
-        c.line(cx - k, cy + k, cx + k, cy - k, p.text, pxf(1.3F));
         if (!is_empty(g.open_settings)) {
             paint_button(c, g.open_settings, hovered(Part::PanelPhpSettings, -1), focused(Part::PanelPhpSettings, -1));
         }
@@ -812,10 +847,12 @@ void MainWindow::paint_php_panel(Canvas& c, bool text_pass) const {
             const std::string& key = php_keys_[i];
             const bool marked = !key.empty() && php_after_.ini.contains(key);
             const bool refused = !php_error_key_.empty() && (php_error_key_ == key || (key.empty() && php_error_key_ == " "));
+            const bool unknown = i < g.warned.size() && g.warned[i] >= 0;
             const FieldEdit* edit = php_edit_of(i);
+            const Rgb outline = refused ? p.banner_error.text : unknown ? p.asleep.text : marked ? p.accent : p.input_border;
             c.round_rect(g.boxes[i], pxf(4),
                          marked ? p.input_set : (edit == nullptr && hovered(Part::PanelPhpField, index) ? p.row_hover : p.input),
-                         refused ? p.banner_error.text : (marked ? p.accent : p.input_border), refused ? pxf(2) : border);
+                         outline, refused || unknown ? pxf(2) : border);
             if (edit != nullptr && edit->focused()) {
                 c.round_outline(g.boxes[i], pxf(4), p.accent, pxf(2));
             } else if (focused(Part::PanelPhpField, index)) {
@@ -845,12 +882,9 @@ void MainWindow::paint_php_panel(Canvas& c, bool text_pass) const {
                 ring(g.save, pxf(6));
             }
         }
-        c.unclip();
         return;
     }
 
-    c.clip_text(g.panel);
-    c.text(g.title, w(row->name), fonts_.panel_title.get(), p.text, Align::Start, true);
     std::string line2(text(lang_, Str::PanelPhpSettings));
     if (php_info_ && !php_info_->version.empty()) {
         line2 += " · " + (rtl_ ? isolate_ltr("PHP " + php_info_->version) : "PHP " + php_info_->version);
@@ -925,7 +959,9 @@ void MainWindow::paint_php_panel(Canvas& c, bool text_pass) const {
            Align::Center, false);
     c.text(g.save, w(text(lang_, php_saving_ ? Str::PhpSaving : Str::PhpSave)), fonts_.button.get(),
            can_save ? p.accent_text : p.button_disabled_text, Align::Center, false);
-    c.unclip_text();
+    for (const auto& [r, words] : g.warnings) {
+        c.paragraph(r, w(words), fonts_.caption.get(), p.asleep.text);
+    }
 }
 
 }  // namespace floserver::ui

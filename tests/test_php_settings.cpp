@@ -498,3 +498,57 @@ TEST_CASE("the service's PHP requests: per series and per project") {
     CHECK_FALSE(service.project_php("nope", json(), json(), refusal));
     CHECK(refusal.code == "unknown_project");
 }
+
+TEST_CASE("php.get lists the php.ini names the install knows, asked of its php once") {
+    const TempDir data;
+    fake_install(data.path(), "php", "8.5.12");  // its php program is empty: it can't run
+    const ProjectService service(data.path());
+    ServiceRefusal refusal;
+    auto got = service.php_get("8.5", refusal);
+    REQUIRE(got);
+    CHECK_FALSE(got->contains("known_ini"));  // no list, so the window warns about nothing
+
+#ifndef _WIN32
+    const fs::path php = "/usr/bin/php";
+    std::error_code ec;
+    if (!fs::exists(php, ec)) {
+        MESSAGE("php isn't installed here; the run skipped");
+        return;
+    }
+    fake_install(data.path(), "php", "8.3.6");
+    const fs::path program = runtimes_dir(data.path()) / "php" / "8.3.6" / "bin" / "php";
+    fs::remove(program);
+    fs::create_symlink(fs::canonical(php), program);
+    got = service.php_get("8.3", refusal);
+    REQUIRE(got);
+    REQUIRE(got->contains("known_ini"));
+    const auto names = (*got)["known_ini"].get<std::vector<std::string>>();
+    CHECK(std::is_sorted(names.begin(), names.end()));
+    CHECK(std::find(names.begin(), names.end(), "memory_limit") != names.end());
+    CHECK(std::find(names.begin(), names.end(), "disable_functions") != names.end());
+    CHECK(std::find(names.begin(), names.end(), "disable_function") == names.end());
+    const fs::path cache = data.path() / "php" / "8.3" / "known-ini-8.3.6.json";
+    CHECK(fs::is_regular_file(cache));
+    // Nothing else is left behind.
+    CHECK_FALSE(fs::exists(data.path() / "php" / "8.3" / "known-ini-8.3.6.ini"));
+    CHECK_FALSE(fs::exists(data.path() / "php" / "8.3" / "known-ini-8.3.6.out"));
+
+    // Read from the cache after that: php isn't run again.
+    fs::remove(program);
+    test_util::write_file(program, "");
+    got = service.php_get("8.3", refusal);
+    REQUIRE(got);
+    CHECK((*got)["known_ini"].get<std::vector<std::string>>() == names);
+
+    // A new install of the series asks its own php; the old list goes.
+    std::string error;
+    fs::remove(program);
+    fs::create_symlink(fs::canonical(php), program);
+    fs::rename(cache, data.path() / "php" / "8.3" / "known-ini-8.3.1.json");
+    const auto again = known_php_ini_names(runtimes_dir(data.path()) / "php" / "8.3.6", cache, error);
+    REQUIRE_MESSAGE(again, error);
+    CHECK(*again == names);
+    CHECK(fs::is_regular_file(cache));
+    CHECK_FALSE(fs::exists(data.path() / "php" / "8.3" / "known-ini-8.3.1.json"));
+#endif
+}

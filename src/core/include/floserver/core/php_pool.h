@@ -51,6 +51,19 @@ struct PhpIniResult {
 [[nodiscard]] PhpIniResult make_php_ini(const std::filesystem::path& php_dir, const PhpIniSettings& settings,
                                         const std::filesystem::path& error_log);
 
+// The php CLI program in a PHP install (php.exe; bin/php or php elsewhere).
+[[nodiscard]] std::optional<std::filesystem::path> php_cli_program(const std::filesystem::path& php_dir);
+
+// The php.ini setting names a PHP install knows (ini_get_all()), so the
+// window can warn about one PHP would silently ignore. Asked of the
+// install's php CLI once, with a php.ini like a pool's and every extension
+// it has turned on (so xdebug.* and opcache.* are known too), then read
+// from `cache_file` (JSON, an array of names). Nothing (with `error`) when
+// the CLI can't run: the caller then shows no warnings.
+[[nodiscard]] std::optional<std::vector<std::string>> known_php_ini_names(const std::filesystem::path& php_dir,
+                                                                        const std::filesystem::path& cache_file,
+                                                                        std::string& error);
+
 enum class PoolState : std::uint8_t { Sleeping, Running, Failed };
 
 class PhpPoolRunner {

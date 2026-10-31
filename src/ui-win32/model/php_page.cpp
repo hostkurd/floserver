@@ -100,6 +100,8 @@ std::optional<PhpSeries> php_series_from_reply(const json& reply) {
     out.custom_ini_exists = flag_of(reply, "custom_ini_exists");
     out.used_by = list_of(reply, "used_by");
     out.problems = list_of(reply, "problems");
+    out.known_ini = list_of(reply, "known_ini");
+    std::sort(out.known_ini.begin(), out.known_ini.end());
     return out;
 }
 
@@ -122,6 +124,81 @@ std::vector<std::pair<std::string, std::string>> installed_php_series(const Inst
         }
     }
     return out;
+}
+
+std::vector<std::pair<std::string, std::string>> settings_php_versions(bool has_installed, const Installed& installed,
+                                                                      const json& runtimes_reply) {
+    if (has_installed) {
+        return installed_php_series(installed);
+    }
+    Installed from_reply;
+    if (runtimes_reply.is_object() && runtimes_reply.contains("installed") && runtimes_reply["installed"].is_array()) {
+        for (const json& r : runtimes_reply["installed"]) {
+            const std::string name = text_of(r, "name");
+            const std::string version = text_of(r, "version");
+            if (!name.empty() && !version.empty()) {
+                from_reply[name].push_back(version);
+            }
+        }
+    }
+    return installed_php_series(from_reply);
+}
+
+namespace {
+
+// Edits (insert, delete, change, swap two neighbours) from `a` to `b`,
+// ignoring case; anything over `limit` is reported as limit + 1.
+std::size_t edit_distance(std::string_view a, std::string_view b, std::size_t limit) {
+    const std::size_t n = a.size();
+    const std::size_t m = b.size();
+    if ((n > m ? n - m : m - n) > limit) {
+        return limit + 1;
+    }
+    std::vector<std::vector<std::size_t>> d(n + 1, std::vector<std::size_t>(m + 1, 0));
+    for (std::size_t i = 0; i <= n; ++i) {
+        d[i][0] = i;
+    }
+    for (std::size_t j = 0; j <= m; ++j) {
+        d[0][j] = j;
+    }
+    for (std::size_t i = 1; i <= n; ++i) {
+        for (std::size_t j = 1; j <= m; ++j) {
+            const std::size_t cost = lower(a[i - 1]) == lower(b[j - 1]) ? 0 : 1;
+            d[i][j] = std::min({d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost});
+            if (i > 1 && j > 1 && lower(a[i - 1]) == lower(b[j - 2]) && lower(a[i - 2]) == lower(b[j - 1])) {
+                d[i][j] = std::min(d[i][j], d[i - 2][j - 2] + 1);
+            }
+        }
+    }
+    return std::min(d[n][m], limit + 1);
+}
+
+}  // namespace
+
+std::optional<std::string> unknown_ini_name(const std::vector<std::string>& known, std::string_view key) {
+    constexpr std::size_t kMostEdits = 2;
+    if (known.empty() || key.empty() || std::binary_search(known.begin(), known.end(), key) ||
+        std::find(known.begin(), known.end(), key) != known.end()) {
+        return std::nullopt;
+    }
+    std::string best;
+    std::size_t best_distance = kMostEdits + 1;
+    // Two edits turn any short name into many others: only a longer one gets a guess.
+    if (key.size() >= 4) {
+        for (const std::string& name : known) {
+            const std::size_t d = edit_distance(key, name, kMostEdits);
+            if (d < best_distance || (d == best_distance && d <= kMostEdits && name < best)) {
+                best = name;
+                best_distance = d;
+            }
+        }
+    }
+    return best_distance <= kMostEdits ? best : std::string();
+}
+
+std::string unknown_ini_text(std::string_view series, std::string_view key, const std::string& suggestion, Lang lang) {
+    return suggestion.empty() ? fill(lang, Str::PhpUnknownIni, {series, key})
+                              : fill(lang, Str::PhpUnknownIniMaybe, {series, key, suggestion});
 }
 
 const std::vector<PhpIniField>& settings_php_ini_fields() {
@@ -304,6 +381,37 @@ std::string ini_error_key(std::string_view message, const std::vector<std::strin
         }
     }
     return best;
+}
+
+// --- the project panel's tabs -------------------------------------------------------
+
+std::vector<PanelTab> panel_tabs(const ProjectRow& row) {
+    std::vector<PanelTab> out{PanelTab::General};
+    if (project_uses_php(row)) {
+        out.push_back(PanelTab::Php);
+    }
+    if (!row.database.empty() || !row.wants.database.empty()) {
+        out.push_back(PanelTab::Database);
+    }
+    out.push_back(PanelTab::Log);
+    return out;
+}
+
+PanelTab shown_panel_tab(const std::vector<PanelTab>& tabs, PanelTab chosen) {
+    return std::find(tabs.begin(), tabs.end(), chosen) != tabs.end() ? chosen : PanelTab::General;
+}
+
+int tab_padding(const std::vector<int>& label_widths, int width, int most, int least) {
+    if (label_widths.empty()) {
+        return most;
+    }
+    int text = 0;
+    for (const int w : label_widths) {
+        text += w;
+    }
+    const int sides = 2 * static_cast<int>(label_widths.size());
+    const int fits = (width - text) / sides;
+    return std::clamp(fits, least, most);
 }
 
 // --- the project panel's PHP part -------------------------------------------------
