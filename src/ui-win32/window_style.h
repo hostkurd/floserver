@@ -27,7 +27,13 @@ struct UiFonts {
     win::UniqueFont small_bold;
     win::UniqueFont button;
     win::UniqueFont button_bold;
+    // Windows' own icon font (Segoe Fluent Icons on 11, Segoe MDL2 Assets on
+    // 10), 16 px; null when neither is there and icons are drawn by hand.
+    win::UniqueFont icons;
 };
+
+// Glyphs in that font.
+inline constexpr wchar_t kIconSettings = L'\uE713';
 
 // Segoe UI Variable Text where it can draw the language, at `dpi`.
 void make_ui_fonts(UiFonts& fonts, UINT dpi, Lang lang);

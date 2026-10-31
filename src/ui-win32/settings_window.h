@@ -67,7 +67,7 @@ private:
         std::string line;
         bool line_code = false;
         RECT bar{};   // a download's progress; empty when there's none
-        double fraction = 0;
+        double fraction = -1;  // below 0: no bar (most rows; a download of unknown size)
         RECT button{};
         Button button_kind = Button::None;
     };

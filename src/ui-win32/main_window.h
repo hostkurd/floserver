@@ -276,7 +276,9 @@ private:
     void paint_panel(Canvas& c, HDC dc, bool text_pass) const;
     void paint_switch(Canvas& c, const RECT& r, bool on, bool hover) const;
     void paint_button(Canvas& c, const RECT& r, bool hover, bool focused) const;
-    void paint_gear(Canvas& c, const RECT& r, Rgb color) const;  // 16 px, centred in `r`
+    // 16 px, centred in `r`: Windows' Settings glyph in the text pass, or
+    // drawn by hand in the shapes pass when the icon font isn't there.
+    void paint_gear(Canvas& c, const RECT& r, Rgb color, bool text_pass) const;
 
     // --- New project (main_window_wizard.cpp) ---
     [[nodiscard]] bool wizard_open() const;

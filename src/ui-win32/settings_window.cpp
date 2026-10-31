@@ -33,6 +33,10 @@ constexpr int kSmallOpenW = 860;
 constexpr int kSmallOpenH = 600;
 constexpr int kMinW = 560;
 constexpr int kMinH = 400;
+// No wider or taller than this, and no Maximize: a page of settings
+// stretched across a big screen is hard to read.
+constexpr int kMaxW = 1200;
+constexpr int kMaxH = 1000;
 constexpr int kSidebarW = 220;
 constexpr int kNarrowSidebarW = 168;  // below kWideFromW
 constexpr int kWideFromW = 760;
@@ -99,7 +103,8 @@ bool SettingsWindow::create(const std::optional<WINDOWPLACEMENT>& placement) {
     const int open_h = roomy ? kOpenH : kSmallOpenH;
     const std::wstring title = w(text(lang_, Str::SettingsTitle));
     // No owner: its own taskbar button, and it stays when the main window hides.
-    if (CreateWindowExW(rtl_ ? WS_EX_LAYOUTRTL : 0, kClassName, title.c_str(), WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+    if (CreateWindowExW(rtl_ ? WS_EX_LAYOUTRTL : 0, kClassName, title.c_str(),
+                        (WS_OVERLAPPEDWINDOW & ~static_cast<DWORD>(WS_MAXIMIZEBOX)) | WS_CLIPCHILDREN,
                         CW_USEDEFAULT, CW_USEDEFAULT, MulDiv(open_w, system_dpi, 96), MulDiv(open_h, system_dpi, 96),
                         nullptr, nullptr, instance_, this) == nullptr) {
         return false;
@@ -109,12 +114,28 @@ bool SettingsWindow::create(const std::optional<WINDOWPLACEMENT>& placement) {
         WINDOWPLACEMENT wp = *placement;
         wp.length = sizeof wp;
         wp.flags = 0;
-        wp.showCmd = wp.showCmd == SW_SHOWMAXIMIZED ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL;
+        wp.showCmd = SW_SHOWNORMAL;
         SetWindowPlacement(hwnd_, &wp);
     } else {
-        if (std::cmp_not_equal(dpi_, system_dpi)) {
-            SetWindowPos(hwnd_, nullptr, 0, 0, px(open_w), px(open_h), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        // Centred over FloServer's window (Windows would put it at the
+        // screen's corner), kept inside that screen's work area.
+        RECT anchor{};
+        const HMONITOR monitor = MonitorFromWindow(owner_ != nullptr ? owner_ : hwnd_, MONITOR_DEFAULTTOPRIMARY);
+        MONITORINFO mi{};
+        mi.cbSize = sizeof mi;
+        GetMonitorInfoW(monitor, &mi);
+        const RECT area = mi.rcWork;
+        if (owner_ == nullptr || IsWindowVisible(owner_) == FALSE || IsIconic(owner_) != FALSE ||
+            GetWindowRect(owner_, &anchor) == FALSE) {
+            anchor = area;
         }
+        const int ww = std::min(px(open_w), width_of(area));
+        const int wh = std::min(px(open_h), height_of(area));
+        int x = static_cast<int>(anchor.left) + (width_of(anchor) - ww) / 2;
+        int y = static_cast<int>(anchor.top) + (height_of(anchor) - wh) / 2;
+        x = std::clamp(x, static_cast<int>(area.left), static_cast<int>(area.right) - ww);
+        y = std::clamp(y, static_cast<int>(area.top), static_cast<int>(area.bottom) - wh);
+        SetWindowPos(hwnd_, nullptr, x, y, ww, wh, SWP_NOZORDER | SWP_NOACTIVATE);
         ShowWindow(hwnd_, SW_SHOWNORMAL);
     }
     UpdateWindow(hwnd_);
@@ -180,6 +201,7 @@ LRESULT SettingsWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
         case WM_GETMINMAXINFO: {
             auto* info = win::int_to_ptr<MINMAXINFO*>(lparam);
             info->ptMinTrackSize = {px(kMinW), px(kMinH)};
+            info->ptMaxTrackSize = {px(kMaxW), px(kMaxH)};
             return 0;
         }
         case WM_DPICHANGED: {
