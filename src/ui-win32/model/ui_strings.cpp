@@ -24,7 +24,8 @@ struct Entry {
 
 // Arabic and Kurdish need a native read before release (see the step 5a report).
 // Words the mockups already use: يعمل / نائم / متوقف.
-constexpr std::array kTable{
+// The size spelled out: deducing it from 280+ entries passes clang's nesting limit.
+constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
     Entry{Str::Projects, "Projects", "المشاريع", "پڕۆژەکان"},
     Entry{Str::SearchProjects, "Search projects", "ابحث في المشاريع", "گەڕان لە پڕۆژەکان"},
     Entry{Str::NewProject, "+ New project", "+ مشروع جديد", "+ پڕۆژەی نوێ"},
@@ -557,7 +558,7 @@ constexpr std::array kTable{
     Entry{Str::DbFinalOpened, "Opened in Notepad to read: the my.ini this MariaDB uses.",
           "فُتح في المفكرة للقراءة: ملف " FLO_LRI "my.ini" FLO_PDI " الذي يستخدمه " FLO_LRI "MariaDB" FLO_PDI " هذا.",
           "لە " FLO_LRI "Notepad" FLO_PDI " بۆ خوێندنەوە کرایەوە: ئەو " FLO_LRI "my.ini" FLO_PDI "ـەی ئەم " FLO_LRI "MariaDB" FLO_PDI "ـە بەکاری دەهێنێت."},
-};
+}};
 
 #undef FLO_LRI
 #undef FLO_PDI
