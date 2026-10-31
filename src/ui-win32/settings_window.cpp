@@ -428,6 +428,14 @@ void SettingsWindow::on_snapshot(const Snapshot& snap) {
         reply_ = merge_runtimes_reply(reply_, fresh);
         has_reply_ = true;
         loading_ = false;
+        // First use: no list has ever been fetched on this PC, so there's
+        // nothing to show. Fetch it once by itself, as "Check for updates"
+        // would; once a list is kept, opening Settings stays offline.
+        const bool no_list = fresh.is_object() && fresh.contains("list") && fresh["list"].is_null();
+        if (!snap.runtimes_refresh && no_list && !auto_checked_) {
+            auto_checked_ = true;
+            check_for_updates();
+        }
     } else if (!snap.runtimes_error.empty()) {
         if (snap.runtimes_refresh) {
             checking_ = false;
@@ -566,9 +574,9 @@ SettingsWindow::Geometry SettingsWindow::layout(HDC dc) const {
                 if (!row.note.empty()) {
                     rg.line = row.note;
                     rg.line_code = true;
-                } else if (wide && row.installed) {
+                } else if (row.installed) {
                     rg.line = row.usage;
-                } else if (wide && row.size > 0) {
+                } else if (row.size > 0) {
                     rg.line = size_text(row.size);
                     rg.line_code = true;
                 }
@@ -616,7 +624,8 @@ SettingsWindow::Geometry SettingsWindow::layout(HDC dc) const {
         return px(kHeadH) + static_cast<int>(group.rows.size()) * px(kRowH);
     };
 
-    // PHP and MariaDB take the full width; the rest share a row of cards.
+    // PHP, MariaDB and Web servers take the full width; Node.js and Python
+    // share a row of cards.
     std::vector<std::size_t> grid;
     for (std::size_t i = 0; i < page_.groups.size(); ++i) {
         const RuntimeGroup& group = page_.groups[i];
@@ -713,8 +722,10 @@ void SettingsWindow::ensure_visible(const Hit& hit) {
 const RECT* SettingsWindow::rect_of(const Hit& hit) const {
     switch (hit.part) {
         case Part::Nav:
-            if (hit.row >= 0 && std::cmp_less(hit.row, geometry_.navs.size())) {
-                return &geometry_.navs[static_cast<std::size_t>(hit.row)];
+            // A sidebar entry's index is in `group` (as focus_order() and
+            // the drawing name it).
+            if (hit.group >= 0 && std::cmp_less(hit.group, geometry_.navs.size())) {
+                return &geometry_.navs[static_cast<std::size_t>(hit.group)];
             }
             return nullptr;
         case Part::Check:
@@ -845,7 +856,7 @@ void SettingsWindow::on_click(const Hit& hit) {
             run_button(hit);
             break;
         case Part::Nav:
-            open_section(hit.row == 1 ? Section::Php : Section::Runtimes);
+            open_section(hit.group == 1 ? Section::Php : Section::Runtimes);
             break;
         case Part::None:
             break;

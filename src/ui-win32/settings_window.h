@@ -253,6 +253,7 @@ private:
     nlohmann::json reply_;           // runtimes.list's full answer (merged after a failed check)
     bool loading_ = true;            // the first answer hasn't come
     bool checking_ = false;          // "Check for updates" is on its way
+    bool auto_checked_ = false;      // the first-use fetch was made (once per opening)
     Installed installed_;
     bool has_installed_ = false;
     nlohmann::json databases_;

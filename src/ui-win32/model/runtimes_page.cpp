@@ -51,7 +51,7 @@ struct Spec {
     bool wide;
     bool picker;
 };
-// The groups in the mockup's order; Web servers (nginx and Apache) come last.
+// The groups in order; Web servers (nginx and Apache) go in after the wide ones.
 constexpr std::array kGroups{Spec{"php", true, true}, Spec{"mariadb", true, true}, Spec{"node", false, false},
                              Spec{"python", false, false}};
 
@@ -300,11 +300,16 @@ RuntimesPage runtimes_page(const json& reply, const Installed* installed, const 
     }
     for (RuntimeRow& row : take_rows("apache")) {
         row.label = "Apache " + row.label;
-        row.note = ".htaccess";
         web.rows.push_back(std::move(row));
     }
+    // Full width after PHP and MariaDB (the user's layout, 31 Oct), so its
+    // rows have room for sizes and who uses them; Node.js and Python share
+    // the row of cards below.
     if (!web.rows.empty()) {
-        page.groups.push_back(std::move(web));
+        web.wide = true;
+        const auto first_narrow = std::find_if(page.groups.begin(), page.groups.end(),
+                                               [](const RuntimeGroup& g) { return !g.wide; });
+        page.groups.insert(first_narrow, std::move(web));
     }
     return page;
 }
