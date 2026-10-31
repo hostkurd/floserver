@@ -43,6 +43,8 @@ public:
     // Opens where it was last time (`placement`), else at the mockup's size.
     [[nodiscard]] bool create(const std::optional<WINDOWPLACEMENT>& placement);
     void bring_to_front();
+    // Closes it as the user would (FloServer's window is being hidden).
+    void close();
     // The worker's latest snapshot, as the main window took it.
     void on_snapshot(const Snapshot& snap);
     // Where it was when it closed, for the next time it opens.

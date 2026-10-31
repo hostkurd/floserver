@@ -114,6 +114,11 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             if (quitting_) {
                 DestroyWindow(hwnd_);
             } else {
+                // Settings belongs to this window; it would otherwise stay
+                // on screen with no taskbar button.
+                if (settings_) {
+                    settings_->close();
+                }
                 ShowWindow(hwnd_, SW_HIDE);
             }
             return 0;

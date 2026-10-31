@@ -74,6 +74,12 @@ SettingsWindow::SettingsWindow(HINSTANCE instance, Lang lang, ServiceWorker& wor
     : instance_(instance), lang_(lang), rtl_(is_rtl(lang)), worker_(worker), owner_(owner),
       closed_message_(closed_message) {}
 
+void SettingsWindow::close() {
+    if (hwnd_ != nullptr) {
+        DestroyWindow(hwnd_);  // the closed message follows, as for the user closing it
+    }
+}
+
 SettingsWindow::~SettingsWindow() {
     if (hwnd_ != nullptr) {
         DestroyWindow(hwnd_);
@@ -102,11 +108,13 @@ bool SettingsWindow::create(const std::optional<WINDOWPLACEMENT>& placement) {
     const int open_w = roomy ? kOpenW : kSmallOpenW;
     const int open_h = roomy ? kOpenH : kSmallOpenH;
     const std::wstring title = w(text(lang_, Str::SettingsTitle));
-    // No owner: its own taskbar button, and it stays when the main window hides.
+    // Owned by FloServer's window (not modal): always in front of it,
+    // minimised and restored with it, no taskbar button of its own, and the
+    // main window stays usable while it's open.
     if (CreateWindowExW(rtl_ ? WS_EX_LAYOUTRTL : 0, kClassName, title.c_str(),
                         (WS_OVERLAPPEDWINDOW & ~static_cast<DWORD>(WS_MAXIMIZEBOX)) | WS_CLIPCHILDREN,
                         CW_USEDEFAULT, CW_USEDEFAULT, MulDiv(open_w, system_dpi, 96), MulDiv(open_h, system_dpi, 96),
-                        nullptr, nullptr, instance_, this) == nullptr) {
+                        owner_, nullptr, instance_, this) == nullptr) {
         return false;
     }
     if (placement) {
