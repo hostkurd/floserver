@@ -466,7 +466,7 @@ TEST_CASE("the service's PHP requests: per series and per project") {
     auto final_ini = service.php_final_ini("8.5", refusal);
     REQUIRE_MESSAGE(final_ini, refusal.message);
     CHECK(final_ini->filename() == "final-php.ini");
-    std::string text = test_util::read_file(*final_ini);
+    const std::string text = test_util::read_file(*final_ini);
     CHECK(text.starts_with("; What PHP 8.5.12 uses"));
     const auto series_at = text.find("memory_limit = 768M");
     const auto custom_at = text.find("display_errors = Off");
