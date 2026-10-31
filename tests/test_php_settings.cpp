@@ -112,6 +112,20 @@ TEST_CASE("php.ini: FloServer's defaults, the series, its custom.ini, the projec
 TEST_CASE("ini keys and values are checked") {
     CHECK_FALSE(php_ini_key_problem("memory_limit"));
     CHECK_FALSE(php_ini_key_problem("opcache.jit_buffer_size"));
+    CHECK(php_ini_key_problem("opcache.enable"));
+    CHECK(php_ini_key_problem("opcache.validate_timestamps"));
+    // Values PHP can't parse would drop every line after them.
+    CHECK_FALSE(php_ini_value_problem("512M"));
+    CHECK_FALSE(php_ini_value_problem("E_ALL & ~E_DEPRECATED"));
+    CHECK_FALSE(php_ini_value_problem(R"(C:\tmp\uploads)"));
+    CHECK_FALSE(php_ini_value_problem(R"("/usr/sbin/sendmail -t -i -f a=b")"));
+    CHECK(php_ini_value_problem("/usr/sbin/sendmail -t -i -f a=b"));
+    CHECK(php_ini_value_problem(R"("abc)"));
+    CHECK(php_ini_value_problem(R"("a"b")"));
+    CHECK(php_ini_value_problem(R"("C:\tmp\")"));
+    CHECK(php_ini_value_problem("${HOME}"));
+    CHECK(php_ini_value_problem(R"("${HOME}")"));
+    CHECK(php_ini_value_problem("on ; comment"));
     CHECK_FALSE(php_ini_key_problem("xdebug.mode"));
     CHECK(php_ini_key_problem("extension"));
     CHECK(php_ini_key_problem("Zend_Extension"));
@@ -167,6 +181,14 @@ TEST_CASE("config.json's php: read leniently, written keeping what this version 
 
     write_php_series(app, "8.4", PhpSeriesSettings{});
     CHECK_FALSE(app.other["php"].contains("8.4"));
+
+    // "08.5" written by hand is the same series: it would hide "8.5" from
+    // the reader (it sorts first), so writing "8.5" removes it.
+    AppConfig odd;
+    odd.other["php"] = {{"08.5", {{"ini", {{"memory_limit", "1G"}}}}}};
+    write_php_series(odd, "8.5", changed);
+    CHECK_FALSE(odd.other["php"].contains("08.5"));
+    CHECK(read_php_settings(odd).at("8.5") == changed);
     AppConfig empty;
     write_php_series(empty, "8.5", changed);
     write_php_series(empty, "8.5", PhpSeriesSettings{});

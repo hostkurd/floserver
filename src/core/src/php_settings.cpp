@@ -81,6 +81,11 @@ std::optional<std::string> php_ini_key_problem(std::string_view key) {
     if (k == "extension_dir" || k == "error_log") {
         return std::string(key) + " is set by FloServer and can't be changed";
     }
+    // What keeps opcache on and seeing edited files at once; its other
+    // settings (the JIT, memory) can be changed.
+    if (k == "opcache.enable" || k == "opcache.validate_timestamps" || k == "opcache.revalidate_freq") {
+        return std::string(key) + " is set by FloServer (opcache always on, edits seen at once) and can't be changed";
+    }
     return std::nullopt;
 }
 
@@ -92,6 +97,23 @@ std::optional<std::string> php_ini_value_problem(std::string_view value) {
     if (std::any_of(value.begin(), value.end(),
                     [](char c) { return static_cast<unsigned char>(c) < 0x20 || c == 0x7f; })) {
         return "the value must be one line, with no control characters";
+    }
+    // php.ini stops reading at a line it can't parse, so one bad value would
+    // silently drop every setting after it (custom.ini, the project's). Only
+    // what PHP reads as a plain value is let through: no $ (PHP expands
+    // ${...}), and = ; " ' { } [ ] only inside one pair of double quotes.
+    if (value.find('$') != std::string_view::npos) {
+        return "the value can't contain $";
+    }
+    if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
+        const std::string_view inner = value.substr(1, value.size() - 2);
+        if (inner.find('"') != std::string_view::npos || inner.ends_with('\\')) {
+            return R"(a value in double quotes can't contain another " or end with \)";
+        }
+        return std::nullopt;
+    }
+    if (value.find_first_of(R"(=;"'{}[]`)") != std::string_view::npos) {
+        return R"(put the value in double quotes when it contains = ; " ' { } [ ] or `)";
     }
     return std::nullopt;
 }
@@ -183,6 +205,17 @@ void write_php_series(AppConfig& app, const std::string& series, const PhpSeries
     json& all = app.other["php"];
     if (!all.is_object()) {
         all = json::object();  // unusable before: replaced
+    }
+    // Other spellings of the same series ("08.5" for "8.5"), written by
+    // hand, would hide this one from the reader: they go.
+    std::vector<std::string> same;
+    for (const auto& [key, value] : all.items()) {
+        if (key != series && php_series_of(key) == series) {
+            same.push_back(key);
+        }
+    }
+    for (const std::string& key : same) {
+        all.erase(key);
     }
     json& entry = all[series];
     if (!entry.is_object()) {
