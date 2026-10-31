@@ -92,7 +92,7 @@ TEST_CASE("config.inc.php: the secret, one server per series, signon with a logi
     REQUIRE_MESSAGE(text, error);
     CHECK(text->starts_with("<?php\n"));
     CHECK(text->find("$cfg['blowfish_secret'] = hex2bin('" + kSecret + "');") != std::string::npos);
-    const std::string data = path_to_utf8(kBase / "data");
+    const std::string data = path_to_utf8((kBase / "data").generic_string());  // PHP gets forward slashes
     CHECK(text->find("$cfg['TempDir'] = '" + data + "/phpmyadmin/tmp';") != std::string::npos);
     CHECK(text->find("$cfg['SessionSavePath'] = '" + data + "/phpmyadmin/sessions';") != std::string::npos);
     CHECK(text->find("$cfg['DefaultLang'] = 'ckb';") != std::string::npos);
