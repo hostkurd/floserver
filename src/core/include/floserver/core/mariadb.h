@@ -67,6 +67,13 @@ struct MariaDbExtras;  // mariadb_settings.h
 [[nodiscard]] std::string mariadb_config(const MariaDbFiles& files, Port port, bool as_root, bool with_init_file,
                                          const MariaDbExtras* extras = nullptr);
 
+// What mariadbd gets on its command line after --defaults-file, so no
+// option file can change it: the port, 127.0.0.1 only, passwords needed,
+// TCP on (named pipe and shared memory off on Windows), the socket. The data
+// folder stays in my.ini only (an argument would be read in the ANSI code
+// page on Windows).
+[[nodiscard]] std::vector<std::string> mariadb_command_line_guards(const MariaDbFiles& files, Port port);
+
 // install-db finished: the system database exists, and the marker written
 // only after install-db succeeded. A half-set-up folder isn't.
 [[nodiscard]] bool mariadb_initialized(const MariaDbFiles& files);

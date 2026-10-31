@@ -16,6 +16,8 @@ namespace fs = std::filesystem;
 
 namespace {
 
+constexpr std::size_t kMaxConfigLine = 1100;  // a 64-byte name, '=', a 1000-byte value
+
 #ifdef _WIN32
 constexpr const char* kExe = ".exe";
 #else
@@ -120,13 +122,17 @@ std::string mariadb_config(const MariaDbFiles& files, Port port, bool as_root, b
         }
     }
     if (extras != nullptr && !extras->custom_ini.empty()) {
-        c << nl << "# Your own lines (" << extras->custom_ini_path << ")" << nl;
+        c << nl << "# Your own lines (custom.ini)" << nl;
         const std::string& text = extras->custom_ini;
         std::size_t pos = 0;
         while (pos < text.size()) {
             const auto end = text.find('\n', pos);
-            c << text.substr(pos, end == std::string::npos ? std::string::npos : end - pos) << nl;
+            const std::string line = text.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
             pos = end == std::string::npos ? text.size() : end + 1;
+            // MariaDB reads 4 KB at a time: a longer line's end would be a line of its own.
+            if (line.size() <= kMaxConfigLine) {
+                c << line << nl;
+            }
         }
     }
     // FloServer's own lines come last, in a group of their own, so nothing
@@ -158,8 +164,27 @@ std::string mariadb_config(const MariaDbFiles& files, Port port, bool as_root, b
     if (as_root) {
         c << "user=root" << nl;
     }
+    // Never without passwords, and reached only through FloServer's port.
+    c << "skip-grant-tables=0" << nl << "skip-networking=0" << nl;
+#ifdef _WIN32
+    c << "named-pipe=0" << nl << "shared-memory=0" << nl;
+#endif
     c << nl << "[client]" << nl << "port=" << port << nl;
     return c.str();
+}
+
+std::vector<std::string> mariadb_command_line_guards(const MariaDbFiles& files, Port port) {
+    // Options on the command line win over every option file.
+    std::vector<std::string> args = {"--port=" + std::to_string(port), "--bind-address=127.0.0.1",
+                                     "--skip-grant-tables=0", "--skip-networking=0"};
+#ifdef _WIN32
+    args.emplace_back("--named-pipe=0");
+    args.emplace_back("--shared-memory=0");
+#endif
+    if (!files.socket.empty()) {
+        args.push_back("--socket=" + path_to_utf8(files.socket.filename()));
+    }
+    return args;
 }
 
 bool mariadb_initialized(const MariaDbFiles& files) {

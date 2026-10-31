@@ -20,6 +20,7 @@ namespace {
 
 constexpr std::size_t kMaxOptionLength = 64;
 constexpr std::size_t kMaxValueLength = 1000;
+constexpr std::size_t kMaxLineLength = 1000;  // a custom.ini line, before trimming
 constexpr std::size_t kMaxCustomIniBytes = std::size_t{256} * 1024;
 constexpr std::size_t kMaxHelpBytes = std::size_t{4} * 1024 * 1024;
 constexpr std::size_t kMaxKnownBytes = std::size_t{512} * 1024;
@@ -98,7 +99,8 @@ std::optional<std::string> mariadb_option_problem(std::string_view name) {
     const std::string shown = trimmed(name);
     if (shown.empty() || shown.size() > kMaxOptionLength || !std::all_of(shown.begin(), shown.end(), is_option_char) ||
         shown.front() == '-' || shown.front() == '_') {
-        return "\"" + shown + "\" isn't a my.ini option name (letters, digits, _ and -)";
+        const std::string cut = shown.size() > kMaxOptionLength ? shown.substr(0, kMaxOptionLength) + "..." : shown;
+        return "\"" + cut + "\" isn't a my.ini option name (letters, digits, _ and -)";
     }
     std::string full = canonical_mariadb_option(shown);
     while (full.starts_with("loose_")) {
@@ -346,19 +348,20 @@ FilteredCustomIni filter_mariadb_custom_ini(std::string_view text) {
         const std::string_view raw = text.substr(pos, end == std::string_view::npos ? std::string_view::npos : end - pos);
         pos = end == std::string_view::npos ? text.size() : end + 1;
         ++number;
-        const std::string line = trimmed(raw);
+        // Nothing the user wrote goes into my.ini unchecked, and no line of
+        // it is long: MariaDB reads option files in 4 KB pieces, so the end
+        // of a long line (a comment's too) would be read as a line of its own.
         const auto leave_out = [&](const std::string& why) {
             out.problems.push_back("line " + std::to_string(number) + ": " + why);
-            out.text += "# FloServer left out line " + std::to_string(number) + ": " + why + "\n";
+            out.text += "# FloServer left out line " + std::to_string(number) + "\n";
         };
-        if (line.empty() || line.front() == '#' || line.front() == ';') {
-            // Comments as they are, minus control characters.
-            if (std::any_of(line.begin(), line.end(), [](char c) { return static_cast<unsigned char>(c) < 0x20; })) {
-                out.text += "\n";
-            } else {
-                out.text += line + "\n";
-            }
+        if (raw.size() > kMaxLineLength) {
+            leave_out("the line is longer than 1000 characters");
             continue;
+        }
+        const std::string line = trimmed(raw);
+        if (line.empty() || line.front() == '#' || line.front() == ';') {
+            continue;  // comments stay in custom.ini only
         }
         if (line.front() == '!') {
             leave_out("!include can't be used: every line must be here, where FloServer can check it");

@@ -12,6 +12,8 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
+
 using namespace floserver::core;
 namespace fs = std::filesystem;
 using nlohmann::json;
@@ -98,15 +100,53 @@ TEST_CASE("custom.ini: lines that would change FloServer's own are left out with
     CHECK(f.text.find("sql-mode=ANSI\n") != std::string::npos);
     CHECK(f.text.find("slow_query_log\n") != std::string::npos);
     CHECK(f.text.find("[client]\n") != std::string::npos);
-    CHECK(f.text.find("# mine\n") == 0);
+    CHECK(f.text.find("mine") == std::string::npos);  // comments stay in custom.ini
     // Left out: as comments only.
     for (const char* gone : {"\nskip-grant-tables", "\n!include", "\nport=1", "\n[mysqld\n", "\nloose-bind-address"}) {
         CHECK_MESSAGE(f.text.find(gone) == std::string::npos, gone);
     }
     REQUIRE(f.problems.size() == 5);
     CHECK(f.problems[0].starts_with("line 3: "));
-    CHECK(f.text.find("# FloServer left out line 3:") != std::string::npos);
+    CHECK(f.text.find("# FloServer left out line 3\n") != std::string::npos);
     CHECK(f.keys == std::vector<std::string>{"max_connections", "slow_query_log", "sql_mode"});
+}
+
+TEST_CASE("custom.ini: no long line reaches my.ini (MariaDB reads 4 KB at a time)") {
+    // The end of a 4 KB line would be read as a line of its own.
+    const std::string text = "#" + std::string(4093, 'a') + "skip-grant-tables\n" +
+                             "max_connections=" + std::string(5000, '9') + "\n" +
+                             "#" + std::string(4093, 'b') + "!includedir /tmp/evil\n" +
+                             ";" + std::string(4093, 'c') + "plugin-load-add=evil.so\n" +
+                             std::string(2000, 'k') + "=1\n" +
+                             "wait_timeout=30\n";
+    const FilteredCustomIni f = filter_mariadb_custom_ini(text);
+    CHECK(f.text.find("skip-grant") == std::string::npos);
+    CHECK(f.text.find("include") == std::string::npos);
+    CHECK(f.text.find("plugin") == std::string::npos);
+    CHECK(f.text.find("999") == std::string::npos);
+    CHECK(f.text.find("wait_timeout=30\n") != std::string::npos);
+    CHECK(f.problems.size() == 5);
+    for (const std::string& p : f.problems) {
+        CHECK(p.size() < 200);
+    }
+    MariaDbExtras extras;
+    extras.ini = {{"sql_mode", std::string(1000, 'x')}};
+    extras.custom_ini = f.text + std::string(3000, 'z') + "\n";  // even unfiltered, a long line is dropped
+    const std::string c = mariadb_config(mariadb_files("/opt/mariadb", "11.4.5", "/data"), 33100, false, false, &extras);
+    std::size_t start = 0;
+    while (start < c.size()) {
+        const auto end = c.find('\n', start);
+        CHECK((end == std::string::npos ? c.size() : end) - start <= 1100);
+        start = end == std::string::npos ? c.size() : end + 1;
+    }
+    CHECK(c.find("zzz") == std::string::npos);
+    // FloServer's own last: never without passwords, never off the network.
+    CHECK(c.rfind("skip-grant-tables=0") > c.rfind("wait_timeout=30"));
+    CHECK(c.find("skip-networking=0") != std::string::npos);
+    const auto guards = mariadb_command_line_guards(mariadb_files("/opt/mariadb", "11.4.5", "/data"), 33100);
+    CHECK(std::find(guards.begin(), guards.end(), "--bind-address=127.0.0.1") != guards.end());
+    CHECK(std::find(guards.begin(), guards.end(), "--skip-grant-tables=0") != guards.end());
+    CHECK(std::find(guards.begin(), guards.end(), "--port=33100") != guards.end());
 }
 
 TEST_CASE("the my.ini: defaults, Settings' values, custom.ini, then FloServer's own lines last") {

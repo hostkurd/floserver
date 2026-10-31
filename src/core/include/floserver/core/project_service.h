@@ -15,8 +15,10 @@
 
 #include <nlohmann/json.hpp>
 
+#include <chrono>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -172,6 +174,9 @@ private:
     mutable std::mutex mutex_;  // one change at a time: load, change, save
     mutable std::mutex known_mutex_;
     mutable std::set<std::string> known_failed_;  // installs whose php (or mariadbd) couldn't list its settings
+    // MariaDB installs whose option list took too long, and when: not asked
+    // again for a while, so a slow PC doesn't wait on every database.get.
+    mutable std::map<std::string, std::chrono::steady_clock::time_point> known_timed_out_;
 };
 
 }  // namespace floserver::core

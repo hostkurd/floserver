@@ -865,21 +865,31 @@ std::optional<json> ProjectService::database_get(const std::string& series_text,
     if (db != nullptr) {
         const MariaDbFiles files = mariadb_files(db->dir, db->version, data_dir_);
         const std::string dir = "mariadb\n" + path_to_utf8(db->dir);
-        bool failed_before = false;
+        const fs::path cache = custom.parent_path() /
+                               path_from_utf8("known-options-" + path_to_utf8(db->dir.filename()) + ".json");
+        const auto now = std::chrono::steady_clock::now();
+        bool skip = false;
         {
             const std::lock_guard lock(known_mutex_);
-            failed_before = known_failed_.contains(dir);
+            const auto timed_out = known_timed_out_.find(dir);
+            // A list kept on disk is always read; mariadbd is only run again
+            // 10 minutes after a run that took too long, never after one that failed.
+            skip = !fs::is_regular_file(cache, ec) &&
+                   (known_failed_.contains(dir) ||
+                    (timed_out != known_timed_out_.end() && now - timed_out->second < std::chrono::minutes(10)));
         }
-        if (!failed_before) {
-            const fs::path cache = custom.parent_path() /
-                                   path_from_utf8("known-options-" + path_to_utf8(db->dir.filename()) + ".json");
+        if (!skip) {
             std::string error;
             bool timed_out = false;
             if (const auto known = known_mariadb_options(files.server, cache, error, timed_out)) {
                 out["known_options"] = *known;
-            } else if (!timed_out) {
+            } else {
                 const std::lock_guard lock(known_mutex_);
-                known_failed_.insert(dir);
+                if (timed_out) {
+                    known_timed_out_[dir] = now;
+                } else {
+                    known_failed_.insert(dir);
+                }
             }
         }
     }

@@ -30,6 +30,8 @@ using Clock = std::chrono::steady_clock;
 namespace {
 
 constexpr int kMaxConnections = 256;
+// First in every SQL FloServer runs as root.
+constexpr std::string_view kPlainSqlMode = "SET SESSION sql_mode='';\n";
 constexpr auto kFailedRetry = 30s;
 
 bool running_as_root() {
@@ -336,7 +338,9 @@ public:
             return false;
         }
         const fs::path file = files_.folder / ("query-" + random_suffix() + ".sql");
-        if (!write_private_file_atomically(file, sql, error)) {
+        // FloServer's quoting (sql_string) whatever sql_mode my.ini sets
+        // (NO_BACKSLASH_ESCAPES would read a password's \ differently).
+        if (!write_private_file_atomically(file, std::string(kPlainSqlMode) + sql, error)) {
             return false;
         }
         const bool ok = run_tool(files_.client, {"--batch"}, *root, file, 60s, error);
@@ -533,7 +537,8 @@ private:
         });
         if (first) {
             fs::create_directories(files_.data_dir, ec);
-            if (!write_private_file_atomically(files_.init_file, root_password_sql(*root), error)) {
+            if (!write_private_file_atomically(files_.init_file, std::string(kPlainSqlMode) + root_password_sql(*root),
+                                               error)) {
                 return nullptr;
             }
         }
@@ -546,6 +551,10 @@ private:
         ChildOptions o;
         o.program = files_.server;
         o.args = {"--defaults-file=" + path_to_utf8(files_.config.filename())};  // relative: the folder is its cwd
+        // After it, so they win over anything in the file.
+        for (std::string& a : mariadb_command_line_guards(files_, internal_)) {
+            o.args.push_back(std::move(a));
+        }
         o.working_dir = files_.folder;
         o.output_log = files_.folder / "mariadbd.out";
         auto process = ChildProcess::start(o, error);
@@ -574,6 +583,18 @@ private:
                     }
                     // Not first: a wrong password won't put itself right.
                     if (!first && login_error.find("1045") != std::string::npos) {
+                        // A password change that was set in MariaDB but not
+                        // kept as root's: that one, kept now.
+                        if (const auto pending = secrets_.read(root_name() + "-new")) {
+                            std::string ignored;
+                            if (run_tool(files_.client, {"--batch", "--connect-timeout=10"}, *pending, probe, 30s,
+                                         ignored) &&
+                                secrets_.save(root_name(), *pending, ignored)) {
+                                (void)secrets_.remove(root_name() + "-new");
+                                ready = true;
+                                break;
+                            }
+                        }
                         wrong_root = true;
                         break;
                     }

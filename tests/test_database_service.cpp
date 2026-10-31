@@ -362,8 +362,17 @@ TEST_CASE("Settings > Database on the real MariaDB: my.ini values, custom.ini's 
     app.other["mariadb"] = {{"10.11", {{"ini", {{"max_connections", "77"}}}}}};
     REQUIRE(save_app_config(app_config_file(data), app, error));
     // Lines that would let anyone in, or open it to the network, are left out.
+    // So are long lines, whose ends MariaDB would read as lines of their own (it reads 4 KB at a time).
+    const fs::path evil = tmp.path() / "evil";
+    test_util::write_file(evil / "x.cnf", "[mysqld]\nskip-grant-tables\n");
     test_util::write_file(mariadb_custom_ini_file(data, "10.11"),
-                          "skip-grant-tables\nloose-bind-address=0.0.0.0\nwait_timeout=123\n");
+                          "skip-grant-tables\nloose-bind-address=0.0.0.0\nwait_timeout=123\n"
+                          "#" + std::string(4093, 'a') + "skip-grant-tables\n" +
+                          "#" + std::string(4093, 'b') + "plugin-load-add=evil.so\n" +
+                          "#" + std::string(4093, 'c') + "!includedir " + evil.string() + "\n" +
+                          "max_allowed_packet=" + std::string(5000, '1') + "\n" +
+                          // FloServer's own SQL must not depend on it (a \ in root's password).
+                          "sql_mode=NO_BACKSLASH_ESCAPES\n");
 
     const SecretStore secrets(data);
     DatabaseServiceConfig cfg;
@@ -383,6 +392,29 @@ TEST_CASE("Settings > Database on the real MariaDB: my.ini values, custom.ini's 
     CHECK(query(port, "root", *root, "SELECT @@wait_timeout") == "123");
     CHECK(query(port, "root", *root, "SELECT @@bind_address") == "127.0.0.1");
     CHECK(query(port, "root", "wrong", "SELECT 1").starts_with("ERROR"));
+    CHECK(query(port, "root", *root, "SELECT @@sql_mode") == "NO_BACKSLASH_ESCAPES");
+    CHECK(query(port, "root", *root, "SELECT @@skip_grant_tables, @@skip_networking") == "0\t0");
+    CHECK(query(port, "root", *root, "SELECT COUNT(*) FROM information_schema.plugins WHERE PLUGIN_LIBRARY LIKE 'evil%'") ==
+          "0");
+    {
+        // What MariaDB itself reads from the file.
+        const std::string cmd = "/usr/sbin/mariadbd --defaults-file='" +
+                                (data / "data" / "mariadb-10.11" / "my.cnf").string() + "' --print-defaults 2>&1";
+        FILE* pipe = popen(cmd.c_str(), "r");  // NOLINT(cert-env33-c): a test, fixed text
+        REQUIRE(pipe != nullptr);
+        std::string printed;
+        char buf[4096];  // NOLINT(modernize-avoid-c-arrays)
+        while (fgets(buf, sizeof buf, pipe) != nullptr) {
+            printed += buf;
+        }
+        pclose(pipe);
+        CHECK(printed.find("--skip-grant-tables=0") != std::string::npos);
+        CHECK(printed.find("--skip-grant-tables ") == std::string::npos);
+        CHECK(printed.find("--skip-grant-tables\n") == std::string::npos);
+        CHECK(printed.find("plugin") == std::string::npos);
+        CHECK(printed.find("0.0.0.0") == std::string::npos);
+        CHECK(printed.find("--wait_timeout=123") != std::string::npos);
+    }
     CHECK(query(port, "blog", login->password, "USE blog; CREATE TABLE kept (x INT); INSERT INTO kept VALUES (7)").empty());
 
     auto st = db.series_status("10.11");
@@ -407,16 +439,17 @@ TEST_CASE("Settings > Database on the real MariaDB: my.ini values, custom.ini's 
     REQUIRE(final_ini);
     const std::string text = read_small_file(*final_ini, 65536).value_or("");
     CHECK(text.find("max_connections=88") != std::string::npos);
-    CHECK(text.find("\nskip-grant-tables") == std::string::npos);
-    CHECK(text.find("# FloServer left out line 1:") != std::string::npos);
+    CHECK(text.find("\nskip-grant-tables\n") == std::string::npos);  // only FloServer's =0
+    CHECK(text.find("# FloServer left out line 1\n") != std::string::npos);
 
     // root's new password: the old one stops working.
     CHECK_FALSE(db.set_root_password("10.11", "short", refusal));
     CHECK(refusal.code == "bad_params");
-    REQUIRE_MESSAGE(db.set_root_password("10.11", "New-Root_pass9", refusal), refusal.message);
+    const std::string pw = "New-Root\\pass9";  // a \ while sql_mode is NO_BACKSLASH_ESCAPES
+    REQUIRE_MESSAGE(db.set_root_password("10.11", pw, refusal), refusal.message);
     CHECK(query(port, "root", *root, "SELECT 1").starts_with("ERROR"));
-    CHECK(query(port, "root", "New-Root_pass9", "SELECT 1") == "1");
-    CHECK(db.root_password("10.11", refusal) == std::optional<std::string>("New-Root_pass9"));
+    CHECK(query(port, "root", pw, "SELECT 1") == "1");
+    CHECK(db.root_password("10.11", refusal) == std::optional<std::string>(pw));
     CHECK_FALSE(secrets.read("mariadb-10.11/root-new"));
     // The next clean shutdown logs in with it: a stop leaves no process behind.
     const auto pid2 = db.series_status("10.11")["server"]["pid"].get<std::uint32_t>();
@@ -427,7 +460,17 @@ TEST_CASE("Settings > Database on the real MariaDB: my.ini values, custom.ini's 
     CHECK_FALSE(db.server_action("11.4", "start", refusal));
     CHECK(refusal.code == "database_off");
     // A connection wakes it with the new password, and the data is there.
-    CHECK(query(port, "root", "New-Root_pass9", "SELECT x FROM blog.kept") == "7");
+    CHECK(query(port, "root", pw, "SELECT x FROM blog.kept") == "7");
+    CHECK(secrets.read("mariadb-10.11/root") == std::optional<std::string>(pw));  // not replaced at the start
+
+    // A change MariaDB took but that wasn't kept as root's: the next start uses root-new and keeps it.
+    REQUIRE(db.server_action("10.11", "stop", refusal));
+    CHECK(eventually([&] { return db.series_status("10.11")["server"]["state"] == "sleeping"; }, 60s));
+    REQUIRE(secrets.save("mariadb-10.11/root", "Lost-pass1", error));
+    REQUIRE(secrets.save("mariadb-10.11/root-new", pw, error));
+    CHECK(query(port, "root", pw, "SELECT 1") == "1");
+    CHECK(secrets.read("mariadb-10.11/root") == std::optional<std::string>(pw));
+    CHECK_FALSE(secrets.read("mariadb-10.11/root-new"));
 
     // A port chosen in Settings: the server moves there.
     const auto other = pick_port_from(3400, {port}, cfg.probe);
@@ -436,7 +479,7 @@ TEST_CASE("Settings > Database on the real MariaDB: my.ini values, custom.ini's 
     REQUIRE_MESSAGE(projects.database_set("10.11", nullptr, &chosen, nullptr, changed, refusal), refusal.message);
     CHECK_FALSE(changed);
     (void)db.reload();
-    CHECK(eventually([&] { return query(*other, "root", "New-Root_pass9", "SELECT 1") == "1"; }, 60s));
+    CHECK(eventually([&] { return query(*other, "root", pw, "SELECT 1") == "1"; }, 60s));
     CHECK(server_status(db)["port"] == *other);
     db.stop();
 }
