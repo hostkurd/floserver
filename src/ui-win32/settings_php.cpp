@@ -235,7 +235,8 @@ bool SettingsWindow::on_php_answers(const Snapshot& snap) {
         if (opened <= 32) {
             show_message(fill(lang_, Str::PhpOpenIniFailed, {snap.custom_ini}), true);
         } else {
-            show_message(std::string(text(lang_, Str::PhpIniOpened)), false);
+            show_message(std::string(text(lang_, snap.custom_ini_final ? Str::PhpFinalOpened : Str::PhpIniOpened)),
+                         false);
         }
     } else if (!snap.custom_ini_error.empty()) {
         show_message(fill(lang_, Str::PhpOpenIniFailed, {snap.custom_ini_error}), true);
@@ -607,9 +608,13 @@ void SettingsWindow::layout_php(HDC dc, Geometry& g, int x0, int x1, int y) cons
     // php.ini.
     top = y + px(14);
     pg.ini_card = {x0, y, x1, y};
+    // The two buttons at the card's end: your own lines, then what PHP ends up with.
     const int edit_w = measure(text(lang_, Str::PhpEditFull), fonts_.button.get()) + px(24);
     pg.edit_ini = {std::max(cx0, cx1 - edit_w), top, cx1, top + px(kControlH)};
-    const int ini_end = static_cast<int>(pg.edit_ini.left) - px(kGap);
+    const int final_w = measure(text(lang_, Str::PhpShowFinal), fonts_.button.get()) + px(24);
+    pg.final_ini = {std::max(cx0, static_cast<int>(pg.edit_ini.left) - px(8) - final_w), top,
+                    static_cast<int>(pg.edit_ini.left) - px(8), top + px(kControlH)};
+    const int ini_end = static_cast<int>(pg.final_ini.left) - px(kGap);
     const int ini_w = Canvas::measure(dc, L"php.ini", fonts_.body_bold.get(), false);
     pg.ini_title = {cx0, top, std::min(ini_end, cx0 + ini_w), top + px(kControlH)};
     pg.ini_hint = {std::min(ini_end, static_cast<int>(pg.ini_title.right) + px(8)), top, ini_end, top + px(kControlH)};
@@ -649,11 +654,10 @@ void SettingsWindow::layout_php(HDC dc, Geometry& g, int x0, int x1, int y) cons
     }
     const int flines = (static_cast<int>(fields.size()) + fcols - 1) / fcols;
     yy += flines * cell_h + (flines - 1) * px(kGap) + (error_line >= 0 ? error_h : 0);
-    if (php_->custom_ini_exists) {
-        yy += px(10);
-        pg.custom_note = {cx0, yy, cx1, yy + px(kNoteH)};
-        yy += px(kNoteH);
-    }
+    // Always said: where your own lines go and that they win over the fields.
+    yy += px(10);
+    pg.custom_note = {cx0, yy, cx1, yy + px(kNoteH)};
+    yy += px(kNoteH);
     pg.ini_card.bottom = yy + px(14);
     y = static_cast<int>(pg.ini_card.bottom) + px(kGap);
 
@@ -693,6 +697,8 @@ const RECT* SettingsWindow::php_rect_of(const Hit& hit) const {
             return &g.more;
         case Part::PhpEditIni:
             return &g.edit_ini;
+        case Part::PhpFinalIni:
+            return &g.final_ini;
         case Part::PhpField:
             return in(g.boxes);
         case Part::PhpReset:
@@ -726,6 +732,7 @@ void SettingsWindow::php_focus_order(std::vector<Hit>& order) const {
         }
     }
     add(Part::PhpMore, g.more);
+    add(Part::PhpFinalIni, g.final_ini);
     add(Part::PhpEditIni, g.edit_ini);
     for (std::size_t i = 0; i < g.boxes.size(); ++i) {
         add(Part::PhpField, g.boxes[i], static_cast<int>(i));
@@ -770,9 +777,10 @@ void SettingsWindow::on_php_click(const Hit& hit) {
             relayout();
             break;
         case Part::PhpEditIni:
+        case Part::PhpFinalIni:
             if (connected_ && !php_series_.empty()) {
                 message_.clear();
-                worker_.php_custom_ini(php_series_);
+                worker_.php_custom_ini(php_series_, hit.part == Part::PhpFinalIni);
                 relayout();
             }
             break;
@@ -945,6 +953,8 @@ void SettingsWindow::paint_php_shapes(Canvas& c) const {
         c.round_rect(pg.ini_card, pxf(8), p.card, p.card_border, border);
         const Hit edit_ini{Part::PhpEditIni, -1, -1};
         paint_button(c, pg.edit_ini, hover_ == edit_ini, is_focused(edit_ini), connected_);
+        const Hit final_ini{Part::PhpFinalIni, -1, -1};
+        paint_button(c, pg.final_ini, hover_ == final_ini, is_focused(final_ini), connected_);
         const auto& fields = settings_php_ini_fields();
         for (std::size_t i = 0; i < pg.boxes.size() && i < fields.size(); ++i) {
             const Hit hit{Part::PhpField, -1, static_cast<int>(i)};
@@ -1077,6 +1087,8 @@ void SettingsWindow::paint_php_text(Canvas& c) const {
     c.text(pg.ini_hint, w(text(lang_, Str::PhpIniHint)), fonts_.caption.get(), p.text_subtle, Align::Start, false);
     c.text(pg.edit_ini, w(text(lang_, Str::PhpEditFull)), fonts_.button.get(), connected_ ? p.text : p.button_disabled_text,
            Align::Center, false);
+    c.text(pg.final_ini, w(text(lang_, Str::PhpShowFinal)), fonts_.button.get(),
+           connected_ ? p.text : p.button_disabled_text, Align::Center, false);
     const auto& fields = settings_php_ini_fields();
     for (std::size_t i = 0; i < pg.boxes.size() && i < fields.size(); ++i) {
         c.text(pg.labels[i], w(fields[i].key), fonts_.caption.get(), p.text_subtle, Align::Start, true);
