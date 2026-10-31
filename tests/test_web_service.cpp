@@ -9,10 +9,12 @@
 #ifndef _WIN32
 
 #include "floserver/core/paths.h"
+#include "floserver/core/phpmyadmin.h"
 #include "floserver/core/process.h"
 #include "floserver/core/project_registry.h"
 #include "floserver/core/project_service.h"
 #include "floserver/core/request_log.h"
+#include "floserver/core/secret_store.h"
 #include "floserver/core/shared_sites.h"
 #include "floserver/core/web_service.h"
 #include "floserver/core/web_settings.h"
@@ -56,7 +58,7 @@ void fake_runtime(const fs::path& data, const std::string& name, const std::stri
 }
 
 // GET over plain http; the whole reply, headers and all, or "" when it couldn't connect.
-std::string get_raw(Port port, const std::string& host, const std::string& path = "/") {
+std::string get_raw(Port port, const std::string& host, const std::string& path = "/", const std::string& headers = "") {
     const int s = socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
@@ -68,7 +70,7 @@ std::string get_raw(Port port, const std::string& host, const std::string& path 
         close(s);
         return "";
     }
-    const std::string req = "GET " + path + " HTTP/1.0\r\nHost: " + host + "\r\n\r\n";  // no chunked replies
+    const std::string req = "GET " + path + " HTTP/1.0\r\nHost: " + host + "\r\n" + headers + "\r\n";  // no chunked replies
     (void)send(s, req.data(), req.size(), 0);
     std::string resp;
     char buf[4096];  // NOLINT(modernize-avoid-c-arrays)
@@ -973,7 +975,9 @@ TEST_CASE("Settings > Ports & HTTPS with real nginx: a refused config keeps the 
         st = service.reload();
         CHECK(st["nginx"]["running"] == true);
         CHECK(st["nginx"]["http_port"] == a);
-        CHECK(st.value("error", std::string()).find("nginx refused the new settings") != std::string::npos);
+        // contains()/at(): GCC -O3 sees a null dereference inside value().
+        CHECK((st.contains("error") ? st.at("error").get<std::string>() : std::string())
+                  .find("nginx refused the new settings") != std::string::npos);
         CHECK(st["sites"]["site"]["address"] == "http://site.localhost:" + std::to_string(a));
         CHECK(get(a, "site.localhost") == "200 site");
     }
@@ -1076,6 +1080,223 @@ TEST_CASE("Settings > Ports & HTTPS: custom ports taken, a fallback sharing the 
     CHECK_FALSE(st["nginx"].contains("ports_taken"));
     CHECK(get(kWanted, "site.localhost") == "200 site");
     service.stop();
+}
+
+namespace {
+
+// A header's value in a raw reply ("Location"), or "".
+std::string header_of(const std::string& reply, const std::string& name) {
+    const std::string key = "\r\n" + name + ": ";
+    const auto at = reply.find(key);
+    if (at == std::string::npos) {
+        return "";
+    }
+    const auto start = at + key.size();
+    return reply.substr(start, reply.find("\r\n", start) - start);
+}
+
+}  // namespace
+
+TEST_CASE("phpMyAdmin with real nginx and php-cgi: the one-click login through FloServer's signon script") {
+    const auto nginx = tool("FLOSERVER_TEST_NGINX", "/usr/sbin/nginx");
+    const auto php = tool("FLOSERVER_TEST_PHP_CGI", "/usr/bin/php-cgi");
+    if (!nginx || !php) {
+        MESSAGE("nginx or php-cgi isn't installed here; skipped");
+        return;
+    }
+    const test_util::TempDir tmp;
+    const fs::path data = tmp.path() / "data";
+    install_test_nginx(data, *nginx);
+    fake_runtime(data, "php", "8.3.6", "nts");
+    fs::create_symlink(*php, runtimes_dir(data) / "php" / "8.3.6" / "php-cgi");
+    // A fake phpMyAdmin: its page reads config.inc.php (through the stub
+    // FloServer writes) and prints the signon session it would sign in with.
+    fake_runtime(data, "phpmyadmin", "5.2.3", "");
+    const fs::path pma = runtimes_dir(data) / "phpmyadmin" / "5.2.3";
+    test_util::write_file(pma / "index.php", R"PHP(<?php
+require __DIR__ . '/config.inc.php';
+$name = null;
+foreach ($_COOKIE as $k => $v) {
+    if (strncmp((string) $k, 'FloServerSignon_', 16) === 0) {
+        $name = (string) $k;
+    }
+}
+$server = $cfg['Servers'][1];
+if ($name === null) {
+    echo 'form ', $server['auth_type'], ' ', $cfg['DefaultLang'], ' ', $server['verbose'], ' ', $server['port'];
+    exit;
+}
+session_save_path($cfg['SessionSavePath']);
+session_name($name);
+session_id($_COOKIE[$name]);
+session_start();
+$s = $_SESSION;
+echo $server['auth_type'], ' ', $s['PMA_single_signon_user'] ?? '-', ' ', $s['PMA_single_signon_password'] ?? '-', ' ',
+    $s['PMA_single_signon_host'] ?? '-', ' ', $s['PMA_single_signon_port'] ?? '-', ' ',
+    $s['PMA_single_signon_cfgupdate']['only_db'] ?? '-';
+)PHP");
+    test_util::write_file(pma / "setup" / "index.php", "<?php echo 'setup';");
+    test_util::write_file(pma / "examples" / "signon.php", "<?php echo 'example';");
+    std::error_code ec;
+    fs::permissions(tmp.path(), fs::perms::others_read | fs::perms::others_exec, fs::perm_options::add, ec);
+
+    const AppConfig app;
+    std::string error;
+    REQUIRE(save_app_config(app_config_file(data), app, error));
+    const SecretStore secrets(data);
+    PhpMyAdminConfigWriter writer(data, secrets, [] { return std::vector<PhpMyAdminServer>{{"11.4", 3307}}; });
+
+    const auto ports = pick_web_ports([](Port p) { return p > 1024 && can_listen_on_loopback(p); });
+    REQUIRE(ports);
+    CertStore certs(data);
+    WebServiceConfig config;
+    config.data_dir = data;
+    config.fixed_ports = WebPorts{static_cast<Port>(ports->http + 23000), static_cast<Port>(ports->https + 23000), true};
+    config.reload_every = 1s;
+    config.phpmyadmin_config = [&writer] {
+        std::string ignored;
+        (void)writer.update(ignored);
+    };
+    WebService web(config, certs);
+    web.start();
+    const Port http = config.fixed_ports->http;
+    const std::string host = "phpmyadmin.localhost";
+    REQUIRE(eventually([&] {
+        const nlohmann::json s = web.status().at("phpmyadmin");
+        return s.is_object() && s.contains("address") &&
+               s.at("address").get<std::string>() == "http://phpmyadmin.localhost:" + std::to_string(http);
+    }));
+    CHECK(web.status().at("phpmyadmin").at("version").get<std::string>() == "5.2.3");
+    CHECK(fs::is_regular_file(pma / "config.inc.php"));
+
+    // Opened directly: phpMyAdmin's own login form, with FloServer's settings.
+    CHECK(eventually([&] { return get(http, host, "/index.php") == "200 form cookie en MariaDB 11.4 3307"; }));
+    // Never served: the setup script, the examples, the config, hidden files.
+    CHECK(get(http, host, "/setup/index.php").starts_with("404 "));
+    CHECK(get(http, host, "/examples/signon.php").starts_with("404 "));
+    CHECK(get(http, host, "/config.inc.php").starts_with("404 "));
+    CHECK(get(http, host, "/.floserver-runtime.json").starts_with("404 "));
+
+    const PhpMyAdminPaths paths = phpmyadmin_paths(data);
+    const auto login = [&](std::optional<std::string> only_db) {
+        SignonLogin l;
+        l.server = 1;
+        l.series = "11.4";
+        l.user = only_db ? *only_db : "root";
+        l.password = only_db ? "shop-pass" : "root-pass";
+        l.port = 3307;
+        l.only_db = std::move(only_db);
+        std::string e;
+        auto token = create_signon_token(paths.tokens, l, std::chrono::system_clock::now(), e);
+        REQUIRE_MESSAGE(token, e);
+        return *token;
+    };
+
+    // A token signs in once: a session cookie, then phpMyAdmin.
+    const std::string token = login(std::nullopt);
+    const std::string reply = get_raw(http, host, "/floserver-signon.php?token=" + token + "&lang=ar");
+    CHECK(reply.starts_with("HTTP/1.1 303"));
+    CHECK(header_of(reply, "Location") == "./index.php?route=/&server=1&lang=ar");
+    CHECK(header_of(reply, "Cache-Control").starts_with("no-store"));
+    const std::string set_cookie = header_of(reply, "Set-Cookie");
+    CHECK(set_cookie.starts_with("FloServerSignon_11_4="));
+    CHECK(set_cookie.find("HttpOnly") != std::string::npos);
+    CHECK(set_cookie.find("SameSite=Lax") != std::string::npos);
+    CHECK(set_cookie.find("secure") == std::string::npos);  // plain http here
+    const std::string cookie = "Cookie: " + set_cookie.substr(0, set_cookie.find(';')) + "\r\n";
+    CHECK(get(http, host, "/index.php") == "200 form cookie en MariaDB 11.4 3307");
+    const auto signed_in = get_raw(http, host, "/index.php", cookie);
+    CHECK(signed_in.substr(signed_in.find("\r\n\r\n") + 4) == "signon root root-pass 127.0.0.1 3307 -");
+    CHECK(fs::is_empty(paths.tokens));  // claimed and deleted
+
+    // Used, expired, malformed or missing tokens are refused.
+    const auto refused = [&](const std::string& query) {
+        const std::string r = get(http, host, "/floserver-signon.php" + query);
+        return r.starts_with("403 ") && r.find("expired or was already used") != std::string::npos;
+    };
+    CHECK(refused("?token=" + token));
+    const std::string old = login(std::nullopt);
+    {
+        const fs::path file = paths.tokens / (old + ".json");
+        auto doc = nlohmann::json::parse(test_util::read_file(file));
+        doc.at("expires") = doc.at("expires").get<std::int64_t>() - 120;
+        test_util::write_file(file, doc.dump());
+    }
+    CHECK(refused("?token=" + old));
+    CHECK_FALSE(fs::exists(paths.tokens / (old + ".json")));
+    CHECK(refused("?token=" + std::string(64, 'g')));
+    CHECK(refused("?token=..%2F..%2Fconfig"));
+    CHECK(refused("?token[]=x"));
+    CHECK(refused(""));
+    test_util::write_file(paths.tokens / (std::string(64, 'c') + ".json"), R"({"expires": 1})");
+    CHECK(refused("?token=" + std::string(64, 'c')));
+
+    // Two requests with one token at the same time: only one signs in.
+    {
+        const std::string both = login(std::nullopt);
+        std::array<std::string, 2> got;
+        std::thread a([&] { got[0] = get_raw(http, host, "/floserver-signon.php?token=" + both); });
+        std::thread b([&] { got[1] = get_raw(http, host, "/floserver-signon.php?token=" + both); });
+        a.join();
+        b.join();
+        const auto won = std::count_if(got.begin(), got.end(),
+                                       [](const std::string& r) { return r.starts_with("HTTP/1.1 303"); });
+        const auto lost = std::count_if(got.begin(), got.end(),
+                                        [](const std::string& r) { return r.starts_with("HTTP/1.1 403"); });
+        CHECK(won == 1);
+        CHECK(lost == 1);
+    }
+
+    // A token nobody used is removed by the service's own reloads once it expires.
+    {
+        const std::string unused = login(std::nullopt);
+        const fs::path file = paths.tokens / (unused + ".json");
+        fs::last_write_time(file, fs::file_time_type::clock::now() - kSignonTokenLife - 5s);
+        CHECK(eventually([&] { return !fs::exists(file); }, 5s));
+    }
+
+    // A project's login: its own user, its database only, replacing root's.
+    const std::string project = login(std::string("shop"));
+    const std::string second = get_raw(http, host, "/floserver-signon.php?token=" + project + "&lang=xx",
+                                       cookie);
+    CHECK(header_of(second, "Location") == "./index.php?route=/&server=1");  // an unknown language is left out
+    const std::string second_cookie = header_of(second, "Set-Cookie");
+    REQUIRE(second_cookie.starts_with("FloServerSignon_11_4="));
+    const std::string cookie2 = "Cookie: " + second_cookie.substr(0, second_cookie.find(';')) + "\r\n";
+    CHECK(second_cookie.substr(0, second_cookie.find(';')) != set_cookie.substr(0, set_cookie.find(';')));
+    const auto as_project = get_raw(http, host, "/index.php", cookie2);
+    CHECK(as_project.substr(as_project.find("\r\n\r\n") + 4) == "signon shop shop-pass 127.0.0.1 3307 shop");
+    // The old session id was dropped with the new login.
+    const auto stale = get_raw(http, host, "/index.php", cookie);
+    CHECK(stale.substr(stale.find("\r\n\r\n") + 4) == "signon - - - - -");
+
+    // Sign out: the session is gone and phpMyAdmin shows its own form.
+    const std::string out = get_raw(http, host, "/floserver-signon.php?logout=1", cookie2);
+    CHECK(out.starts_with("HTTP/1.1 303"));
+    CHECK(header_of(out, "Location") == "./index.php?route=/");
+    INFO(out);
+    CHECK(out.find("Set-Cookie: FloServerSignon_11_4=deleted") != std::string::npos);
+    const auto after = get_raw(http, host, "/index.php", cookie2);
+    CHECK(after.substr(after.find("\r\n\r\n") + 4) == "signon - - - - -");
+
+    // A project called phpmyadmin keeps the address; phpMyAdmin says why it isn't served.
+    const fs::path other = tmp.path() / "pma-project";
+    test_util::write_file(other / "index.html", "the project");
+    fs::permissions(other, fs::perms::others_read | fs::perms::others_exec, fs::perm_options::add, ec);
+    fs::permissions(other / "index.html", fs::perms::others_read, fs::perm_options::add, ec);
+    {
+        AppConfig with;
+        const Project p{"phpmyadmin", other, true, false, nlohmann::json::object()};
+        with.projects.push_back(p);
+        REQUIRE(save_app_config(app_config_file(data), with, error));
+    }
+    const nlohmann::json status = web.reload();
+    const nlohmann::json& served = status.at("phpmyadmin");
+    CHECK(served.at("state").get<std::string>() == "problem");
+    CHECK(served.at("name_taken").get<bool>());
+    CHECK_FALSE(served.contains("address"));
+    CHECK(eventually([&] { return get(http, host) == "200 the project"; }));
+    web.stop();
 }
 
 #endif

@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace floserver::ui {
@@ -69,6 +70,19 @@ struct RuntimesPage {
 // `databases` is databases.list's answer, for MariaDB's port.
 [[nodiscard]] RuntimesPage runtimes_page(const nlohmann::json& reply, const Installed* installed,
                                          const nlohmann::json& databases, Lang lang);
+
+// The Tools card's line for phpMyAdmin from runtimes.list's "phpmyadmin"
+// (web.status's): "Opens at https://phpmyadmin.localhost", or why it isn't
+// served. Empty when there's nothing to say.
+[[nodiscard]] std::string phpmyadmin_line(const nlohmann::json& served, Lang lang);
+
+// Whether phpMyAdmin is installed (the window's poll): "Open phpMyAdmin"
+// buttons are disabled with a hint until it is.
+[[nodiscard]] bool phpmyadmin_installed(const Installed& installed);
+
+// True for http(s)://phpmyadmin.localhost followed by '/', ':' or nothing:
+// the only links phpmyadmin.login's answer may open.
+[[nodiscard]] bool is_phpmyadmin_url(std::string_view url);
 
 // After "Check for updates" fails the answer has no list: the versions on
 // offer stay those of `before`, the rest (installed, defaults) is `fresh`'s.

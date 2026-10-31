@@ -558,6 +558,27 @@ constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
     Entry{Str::DbFinalOpened, "Opened in Notepad to read: the my.ini this MariaDB uses.",
           "فُتح في المفكرة للقراءة: ملف " FLO_LRI "my.ini" FLO_PDI " الذي يستخدمه " FLO_LRI "MariaDB" FLO_PDI " هذا.",
           "لە " FLO_LRI "Notepad" FLO_PDI " بۆ خوێندنەوە کرایەوە: ئەو " FLO_LRI "my.ini" FLO_PDI "ـەی ئەم " FLO_LRI "MariaDB" FLO_PDI "ـە بەکاری دەهێنێت."},
+    // phpMyAdmin (an optional tool).
+    Entry{Str::SettingsTools, "Tools", "الأدوات", "ئامرازەکان"},
+    Entry{Str::PmaOpen, "Open phpMyAdmin", "فتح " FLO_LRI "phpMyAdmin" FLO_PDI,
+          FLO_LRI "phpMyAdmin" FLO_PDI " بکەرەوە"},
+    Entry{Str::PmaOpenProject, "Open in phpMyAdmin", "فتح في " FLO_LRI "phpMyAdmin" FLO_PDI,
+          "لە " FLO_LRI "phpMyAdmin" FLO_PDI " بیکەرەوە"},
+    Entry{Str::PmaNotInstalled, "Download phpMyAdmin in Settings → Runtimes",
+          "نزّل " FLO_LRI "phpMyAdmin" FLO_PDI " من الإعدادات ← بيئات التشغيل",
+          FLO_LRI "phpMyAdmin" FLO_PDI " لە ڕێکخستنەکان ← ژینگەکانی کارپێکردن دابگرە"},
+    Entry{Str::PmaOpening, "Opening phpMyAdmin…", "جارٍ فتح " FLO_LRI "phpMyAdmin" FLO_PDI "…",
+          FLO_LRI "phpMyAdmin" FLO_PDI " دەکرێتەوە…"},
+    Entry{Str::PmaOpenFailed, "phpMyAdmin couldn't be opened: {0}", "تعذّر فتح " FLO_LRI "phpMyAdmin" FLO_PDI ": {0}",
+          "نەتوانرا " FLO_LRI "phpMyAdmin" FLO_PDI " بکرێتەوە: {0}"},
+    Entry{Str::PmaAddress, "Opens at {0}", "يُفتح على {0}", "لە {0} دەکرێتەوە"},
+    Entry{Str::PmaNameTaken, "The project phpmyadmin has phpmyadmin.localhost, so phpMyAdmin can't use it",
+          "المشروع " FLO_LRI "phpmyadmin" FLO_PDI " يستخدم " FLO_LRI "phpmyadmin.localhost" FLO_PDI
+          "، لذلك لا يستطيع " FLO_LRI "phpMyAdmin" FLO_PDI " استخدامه",
+          "پڕۆژەی " FLO_LRI "phpmyadmin" FLO_PDI " خاوەنی " FLO_LRI "phpmyadmin.localhost" FLO_PDI
+          "ـە، بۆیە " FLO_LRI "phpMyAdmin" FLO_PDI " ناتوانێت بەکاری بهێنێت"},
+    Entry{Str::PmaNeedsPhp, "Needs PHP: download a version above", "يحتاج إلى " FLO_LRI "PHP" FLO_PDI ": نزّل إصدارًا من الأعلى",
+          "پێویستی بە " FLO_LRI "PHP" FLO_PDI " هەیە: وەشانێک لە سەرەوە دابگرە"},
 }};
 
 #undef FLO_LRI
@@ -606,6 +627,18 @@ Lang lang_from_setting(const char* value) {
 }
 
 bool is_rtl(Lang lang) { return lang != Lang::En; }
+
+std::string_view lang_code(Lang lang) {
+    switch (lang) {
+        case Lang::Ar:
+            return "ar";
+        case Lang::Ku:
+            return "ku";
+        case Lang::En:
+            break;
+    }
+    return "en";
+}
 
 std::string_view text(Lang lang, Str key) {
     const auto index = static_cast<std::size_t>(key);

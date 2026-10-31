@@ -1,5 +1,7 @@
 #include "floserver/core/template_service.h"
 
+#include "floserver/core/phpmyadmin.h"
+
 #include "floserver/core/child_process.h"
 #include "floserver/core/encoding.h"
 #include "floserver/core/paths.h"
@@ -200,6 +202,10 @@ TemplateService::~TemplateService() { stop(); }
 std::optional<std::int64_t> TemplateService::create(const CreateRequest& request, ServiceRefusal& refusal) {
     if (const auto problem = project_name_problem(request.name)) {
         refusal = {"bad_name", "the name " + request.name + " can't be used: " + *problem};
+        return std::nullopt;
+    }
+    if (reserved_project_name(request.name)) {
+        refusal = {"bad_name", request.name + ".localhost is kept for phpMyAdmin; choose another name"};
         return std::nullopt;
     }
     std::error_code ec;

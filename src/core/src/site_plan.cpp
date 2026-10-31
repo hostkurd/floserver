@@ -2,6 +2,7 @@
 
 #include "floserver/core/nginx_config.h"
 #include "floserver/core/paths.h"
+#include "floserver/core/phpmyadmin.h"
 #include "floserver/core/shared_sites.h"
 #include "floserver/core/version.h"
 
@@ -151,7 +152,10 @@ private:
 // site joins it.
 std::size_t add_to_pool(WebPlan& plan, const InstalledRuntime& php, PhpIniSettings settings,
                         const std::string& site, bool keep_running) {
-    const std::string key = "php-" + php.version + php_settings_key(settings);
+    std::string key = "php-" + php.version + php_settings_key(settings);
+    if (site == kPhpMyAdminSiteName) {
+        key += "-phpmyadmin";  // always a pool of its own, whatever a project's settings
+    }
     auto it = std::find_if(plan.pools.begin(), plan.pools.end(), [&key](const PhpPool& p) { return p.key == key; });
     if (it == plan.pools.end()) {
         plan.pools.push_back({key, php.version, php.dir, std::move(settings), {}, false, {}});
@@ -229,6 +233,55 @@ void plan_shared(WebPlan& plan, const AppConfig& config, const std::vector<Insta
         plan.apache_version = apache_runtime->version;
     }
     plan.shared = std::move(site);
+}
+
+// phpMyAdmin: its own pool on the newest PHP, so its php.ini can hide what
+// newer PHP versions say about phpMyAdmin's older code.
+void plan_phpmyadmin(WebPlan& plan, const AppConfig& config, const std::vector<InstalledRuntime>& installed,
+                     PhpSettingsSource& php_settings) {
+    const InstalledRuntime* pma = best_installed(installed, std::string(kPhpMyAdminRuntime), "");
+    if (pma == nullptr) {
+        return;  // not installed: not served
+    }
+    PlannedSite site;
+    site.name = std::string(kPhpMyAdminSiteName);
+    site.dir = pma->dir;
+    site.doc_root = pma->dir;
+    plan.phpmyadmin_version = pma->version;
+    if (find_project(config, kPhpMyAdminHostName) != nullptr) {
+        site.state = SiteState::Problem;
+        site.problem = "the project " + std::string(kPhpMyAdminHostName) + " has the address " +
+                       std::string(kPhpMyAdminHostName) + ".localhost, so phpMyAdmin can't use it";
+        plan.phpmyadmin = std::move(site);
+        return;
+    }
+    if (!nginx_quoted_path(site.doc_root)) {
+        site.state = SiteState::Problem;
+        site.problem = "phpMyAdmin's folder path has a $ or \" in it, which nginx can't use";
+        plan.phpmyadmin = std::move(site);
+        return;
+    }
+    const InstalledRuntime* php = best_installed(installed, "php", "");
+    if (php == nullptr) {
+        site.state = SiteState::NeedsDownload;
+        site.missing.emplace_back("php");
+        plan.phpmyadmin = std::move(site);
+        return;
+    }
+    PhpIniSettings settings = php_settings(*php, nullptr);
+    // Errors go to the pool's log, not into phpMyAdmin's pages; from PHP 8.4
+    // on, deprecation notices aren't reported at all (phpMyAdmin 5.2 is made
+    // for PHP up to 8.3 and runs on later ones with such notices).
+    settings.project_ini["display_errors"] = "Off";
+    settings.project_ini["display_startup_errors"] = "Off";
+    const auto version = Version::parse(php->version);
+    const auto first_noisy = Version::parse("8.4");
+    if (version && first_noisy && !(*version < *first_noisy)) {
+        settings.project_ini["error_reporting"] = "E_ALL & ~E_DEPRECATED";
+    }
+    site.pool = add_to_pool(plan, *php, std::move(settings), site.name, false);
+    site.state = SiteState::Ready;
+    plan.phpmyadmin = std::move(site);
 }
 
 }  // namespace
@@ -394,6 +447,7 @@ WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
         plan.sites.push_back(std::move(site));
     }
     plan_shared(plan, config, installed, default_php, php_settings);
+    plan_phpmyadmin(plan, config, installed, php_settings);
     return plan;
 }
 
@@ -477,6 +531,9 @@ std::map<std::string, std::vector<std::string>> runtime_users(const AppConfig& c
     };
     for (const PhpPool& pool : plan.pools) {
         for (const std::string& site : pool.sites) {
+            if (site == kPhpMyAdminSiteName) {
+                continue;  // it moves to the next newest PHP when this one goes
+            }
             use("php", pool.php_dir, site);
         }
     }

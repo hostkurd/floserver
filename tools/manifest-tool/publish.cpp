@@ -202,7 +202,7 @@ LiveResult fetch_live_list(HttpTransport& http, std::string_view cdn,
 }
 
 std::string runtime_title(std::string_view runtime, std::string_view version) {
-    static constexpr std::array<std::pair<std::string_view, std::string_view>, 8> kNames = {{
+    static constexpr std::array<std::pair<std::string_view, std::string_view>, 9> kNames = {{
         {"php", "PHP"},
         {"mariadb", "MariaDB"},
         {"node", "Node.js"},
@@ -211,6 +211,7 @@ std::string runtime_title(std::string_view runtime, std::string_view version) {
         {"apache", "Apache"},
         {"wordpress", "WordPress"},
         {"python", "Python"},
+        {"phpmyadmin", "phpMyAdmin"},
     }};
     std::string name(runtime);
     for (const auto& [id, title] : kNames) {
@@ -329,6 +330,10 @@ OfficialSource official_source(std::string_view path) {
         s.name = "cpython-" + v + "+" + p.file.substr(head.size());
         s.urls = {"https://github.com/astral-sh/python-build-standalone/releases/download/" + date +
                   "/SHA256SUMS"};
+    } else if (p.runtime == "phpmyadmin") {
+        // Each download has its own .sha256 next to it: "<hash>  <file>".
+        s.kind = Kind::Sums;
+        s.urls = {"https://files.phpmyadmin.net/phpMyAdmin/" + v + "/" + p.file + ".sha256"};
     } else if (p.runtime == "apache") {
         // Apache Lounge publishes no checksum list.
         s.kind = Kind::ByHand;

@@ -56,6 +56,7 @@ private:
         PanelButton,
         PanelField,
         PanelCopyEnv,
+        PanelPhpMyAdmin,  // Open in phpMyAdmin (the project's own login)
         PanelKeep,
         // The panel's PHP tab (D20); `row` is the field's index.
         PanelPhpSettings,
@@ -90,7 +91,7 @@ private:
     [[nodiscard]] static constexpr bool is_panel_part(Part part) {
         return part == Part::PanelClose || part == Part::PanelAddress || part == Part::PanelTab ||
                part == Part::PanelButton || part == Part::PanelField || part == Part::PanelCopyEnv ||
-               part == Part::PanelKeep || is_php_part(part);
+               part == Part::PanelPhpMyAdmin || part == Part::PanelKeep || is_php_part(part);
     }
     [[nodiscard]] static constexpr bool is_php_part(Part part) {
         return part == Part::PanelPhpSettings || part == Part::PanelPhpChange || part == Part::PanelPhpField ||
@@ -147,6 +148,8 @@ private:
         RECT db_title{};
         RECT db_detail{};
         RECT copy_env{};  // empty when the project has no database
+        RECT pma{};       // Open in phpMyAdmin
+        RECT pma_hint{};  // Download phpMyAdmin in Settings → Runtimes, when it isn't installed
         RECT keep_title{};
         RECT keep_detail{};
         RECT keep_switch{};
@@ -275,6 +278,7 @@ private:
     void on_create();
     void on_destroy();
     void on_snapshot();
+    void open_phpmyadmin_links(std::vector<Snapshot::DbAnswer>& answers);
     void on_paint();
     void on_mouse_move(int x, int y);
     void on_click(const Hit& hit);
@@ -490,6 +494,7 @@ private:
     std::map<std::string, int> outstanding_;    // commands not yet finished, per ServiceWorker key
     std::map<std::string, bool> installing_;    // Download clicked; the worker hasn't reported yet
     std::string change_error_;
+    bool pma_busy_ = false;  // the panel's phpmyadmin.login is on its way
     Notice notice_;  // a short message in the banner ("copied")
 
     WizardState wizard_;

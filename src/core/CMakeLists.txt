@@ -27,6 +27,7 @@ add_library(floserver_core STATIC
     src/child_process.cpp
     src/php_pool.cpp
     src/php_settings.cpp
+    src/phpmyadmin.cpp
     src/app_runner.cpp
     src/apache_config.cpp
     src/web_service.cpp

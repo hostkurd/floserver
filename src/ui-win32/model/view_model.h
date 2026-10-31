@@ -220,7 +220,8 @@ using Defaults = std::map<std::string, std::string>;
 [[nodiscard]] std::vector<VersionField> template_fields(const TemplateCard& card, const Installed& installed, Lang lang,
                                                         const Defaults& defaults = {});
 
-// A free name for a new project: `base`, else base-2, base-3...
+// A free name for a new project: `base`, else base-2, base-3... ("phpmyadmin"
+// is never free: phpMyAdmin has that address).
 [[nodiscard]] std::string free_project_name(const std::string& base, const std::vector<ProjectRow>& rows);
 
 // The rules for a project name (as the service checks them): a-z 0-9 and

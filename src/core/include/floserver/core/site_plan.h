@@ -111,6 +111,11 @@ struct WebPlan {
     // Shared sites (D19), named kSharedSiteName, when they're on (or their
     // settings can't be read: then a Problem). doc_root is the www folder.
     std::optional<PlannedSite> shared;
+    // phpMyAdmin (phpmyadmin.h), named kPhpMyAdminSiteName, when it's
+    // installed: the newest install, PHP from a pool of its own on the
+    // newest installed PHP. A Problem when a project has its address.
+    std::optional<PlannedSite> phpmyadmin;
+    std::string phpmyadmin_version;
     std::vector<PhpPool> pools;      // in order of first use
     std::vector<AppSpec> apps;       // in list order
     // The newest installed Apache, when a project needs it.

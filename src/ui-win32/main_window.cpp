@@ -379,6 +379,41 @@ void MainWindow::on_destroy() {
     PostQuitMessage(0);
 }
 
+// phpmyadmin.login's answers, from the panel and from Settings → Database:
+// the link is opened in the browser here. A refusal is shown where it was
+// asked (the panel's here; Settings' stays in the list for it).
+void MainWindow::open_phpmyadmin_links(std::vector<Snapshot::DbAnswer>& answers) {
+    for (auto it = answers.begin(); it != answers.end();) {
+        if (it->method != "phpmyadmin.login") {
+            ++it;
+            continue;
+        }
+        const bool panel = it->purpose == "panel";
+        if (panel) {
+            pma_busy_ = false;
+        }
+        std::string url;
+        if (it->error.empty() && it->reply && it->reply->is_object() && it->reply->contains("url") &&
+            it->reply->at("url").is_string()) {
+            url = it->reply->at("url").get<std::string>();
+        }
+        // Only phpMyAdmin's own address is ever opened.
+        const bool ours = is_phpmyadmin_url(url);
+        if (ours) {
+            ShellExecuteW(hwnd_, L"open", w(url).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        }
+        if (panel) {
+            if (!ours) {
+                change_error_ = fill(lang_, Str::PmaOpenFailed, {it->error});
+                SetTimer(hwnd_, kErrorTimer, kErrorShownMs, nullptr);
+            }
+            it = answers.erase(it);
+        } else {
+            ++it;  // Settings clears its busy state and shows a refusal
+        }
+    }
+}
+
 void MainWindow::on_snapshot() {
     if (!worker_) {
         return;
@@ -396,6 +431,7 @@ void MainWindow::on_snapshot() {
     if (!s.added.empty()) {
         pending_added_ = s.added;
     }
+    open_phpmyadmin_links(s.db);
     const bool quit_done = s.quit_done;
     const std::string quit_error = s.quit_error;
     // A project made from a template that hands over to FloCMS Studio (D9, D14).
@@ -927,6 +963,7 @@ void MainWindow::on_click(const Hit& clicked) {
         case Part::PanelButton:
         case Part::PanelField:
         case Part::PanelCopyEnv:
+        case Part::PanelPhpMyAdmin:
         case Part::PanelKeep:
             on_panel_click(hit);
             break;

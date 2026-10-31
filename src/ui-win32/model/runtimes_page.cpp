@@ -114,6 +114,49 @@ bool newest_first(const RuntimeRow& a, const RuntimeRow& b) {
 
 }  // namespace
 
+std::string phpmyadmin_line(const json& served, Lang lang) {
+    if (!served.is_object()) {
+        return {};
+    }
+    if (const std::string address = text_of(served, "address"); !address.empty()) {
+        return fill(lang, Str::PmaAddress, {address});
+    }
+    if (served.contains("name_taken") && served["name_taken"].is_boolean() && served["name_taken"].get<bool>()) {
+        return std::string(text(lang, Str::PmaNameTaken));
+    }
+    for (const json& m : array_of(served, "missing")) {
+        if (m.is_string() && m.get<std::string>().starts_with("php")) {
+            return std::string(text(lang, Str::PmaNeedsPhp));
+        }
+    }
+    return text_of(served, "problem");  // the service's words
+}
+
+bool is_phpmyadmin_url(std::string_view url) {
+    for (const std::string_view prefix : {std::string_view("https://phpmyadmin.localhost"),
+                                          std::string_view("http://phpmyadmin.localhost")}) {
+        if (url.starts_with(prefix)) {
+            std::string_view rest = url.substr(prefix.size());
+            if (rest.starts_with(':')) {
+                // A port, digits only: "localhost:x@evil.example" would name another host.
+                rest.remove_prefix(1);
+                const std::size_t digits = std::min(rest.find_first_not_of("0123456789"), rest.size());
+                if (digits == 0 || digits > 5) {
+                    return false;
+                }
+                rest.remove_prefix(digits);
+            }
+            return rest.empty() || rest.front() == '/';
+        }
+    }
+    return false;
+}
+
+bool phpmyadmin_installed(const Installed& installed) {
+    const auto it = installed.find("phpmyadmin");
+    return it != installed.end() && !it->second.empty();
+}
+
 std::optional<RuntimeJob> runtime_job(const json& job) {
     RuntimeJob out;
     if (!job.is_object() || !job.contains("id") || !job["id"].is_number_integer()) {
@@ -310,6 +353,27 @@ RuntimesPage runtimes_page(const json& reply, const Installed* installed, const 
         const auto first_narrow = std::find_if(page.groups.begin(), page.groups.end(),
                                                [](const RuntimeGroup& g) { return !g.wide; });
         page.groups.insert(first_narrow, std::move(web));
+    }
+
+    // Tools: phpMyAdmin, with how it's served on the newest install's row.
+    RuntimeGroup tools;
+    tools.title = std::string(text(lang, Str::SettingsTools));
+    tools.rows = take_rows("phpmyadmin");
+    const json& served = reply.is_object() && reply.contains("phpmyadmin") ? reply["phpmyadmin"] : json();
+    for (RuntimeRow& row : tools.rows) {
+        row.label = "phpMyAdmin " + row.label;
+    }
+    for (RuntimeRow& row : tools.rows) {
+        if (!row.installed) {
+            continue;
+        }
+        if (served.is_object() && text_of(served, "version") == row.version) {
+            row.usage = phpmyadmin_line(served, lang);
+        }
+        break;  // the newest is the one served
+    }
+    if (!tools.rows.empty()) {
+        page.groups.push_back(std::move(tools));
     }
     return page;
 }

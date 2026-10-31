@@ -1,6 +1,7 @@
 #include "floserver/core/project_registry.h"
 
 #include "floserver/core/paths.h"
+#include "floserver/core/phpmyadmin.h"
 #include "floserver/core/process.h"
 
 #include <algorithm>
@@ -287,7 +288,7 @@ std::optional<Project> add_project(AppConfig& config, const fs::path& dir, std::
     if (chosen.empty()) {
         const std::string base = project_name_from(path_to_utf8(folder.filename()));
         chosen = base;
-        for (int n = 2; find_project(config, chosen) != nullptr; ++n) {
+        for (int n = 2; find_project(config, chosen) != nullptr || reserved_project_name(chosen); ++n) {
             const std::string suffix = "-" + std::to_string(n);
             chosen = base.substr(0, kMaxProjectNameLength - suffix.size());
             while (!chosen.empty() && chosen.back() == '-') {
@@ -300,6 +301,9 @@ std::optional<Project> add_project(AppConfig& config, const fs::path& dir, std::
         return std::nullopt;
     } else if (find_project(config, chosen) != nullptr) {
         error = "there's already a project called " + chosen;
+        return std::nullopt;
+    } else if (reserved_project_name(chosen)) {
+        error = chosen + ".localhost is kept for phpMyAdmin; choose another name";
         return std::nullopt;
     }
 

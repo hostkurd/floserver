@@ -1,6 +1,7 @@
 #include "floserver/core/nginx_config.h"
 
 #include "floserver/core/project_registry.h"
+#include "floserver/core/phpmyadmin.h"
 #include "floserver/core/request_log.h"
 #include "floserver/core/shared_sites.h"
 
@@ -76,7 +77,7 @@ public:
 
         const bool any_tls = std::any_of(spec_.sites.begin(), spec_.sites.end(),
                                          [](const NginxSite& s) { return s.tls.has_value(); }) ||
-                             (spec_.shared && spec_.shared->tls);
+                             (spec_.shared && spec_.shared->tls) || (spec_.phpmyadmin && spec_.phpmyadmin->tls);
         // One upstream per pool: a php-cgi worker on each port, requests
         // spread over them. A worker that sleeps still has its port held by
         // the service, so a connection never fails; max_fails=0 keeps nginx
@@ -87,6 +88,11 @@ public:
             NginxSite s;
             s.php_ports = spec_.shared->php_ports;
             s.app_port = spec_.shared->app_port;
+            with_shared.push_back(std::move(s));
+        }
+        if (spec_.phpmyadmin) {
+            NginxSite s;
+            s.php_ports = spec_.phpmyadmin->php_ports;
             with_shared.push_back(std::move(s));
         }
         for (const NginxSite& site : with_shared) {
@@ -146,6 +152,9 @@ public:
             }
         }
         if (spec_.shared && !write_shared(*spec_.shared)) {
+            return std::nullopt;
+        }
+        if (spec_.phpmyadmin && !write_phpmyadmin(*spec_.phpmyadmin)) {
             return std::nullopt;
         }
         out_ << "}\n";
@@ -315,6 +324,86 @@ private:
             }
         }
         out_ << "        }\n";
+    }
+
+    // phpMyAdmin at phpmyadmin.localhost.
+    bool write_phpmyadmin(const NginxPhpMyAdmin& pma) {
+        const auto root = path(pma.dir);
+        const auto signon = path(pma.signon_script);
+        if (!root || !signon) {
+            return false;
+        }
+        if (pma.php_ports.empty()) {
+            error_ = "phpMyAdmin has no PHP pool";
+            return false;
+        }
+        std::optional<std::string> idle_log;
+        if (!pma.php_access_log.empty()) {
+            idle_log = path(pma.php_access_log);
+            if (!idle_log) {
+                return false;
+            }
+        }
+        std::optional<std::string> cert;
+        std::optional<std::string> key;
+        if (pma.tls) {
+            cert = path(pma.tls->certificate);
+            key = path(pma.tls->key);
+            if (!cert || !key) {
+                return false;
+            }
+        }
+        const std::string name(kPhpMyAdminHostName);
+        out_ << "\n    # phpMyAdmin\n";
+        if (pma.tls) {
+            out_ << "    server {\n";
+            listen(spec_.ports.http, "");
+            out_ << "        server_name " << name << ".localhost;\n"
+                 << "        return 302 " << site_address(name, spec_.ports, true) << "$request_uri;\n"
+                 << "    }\n";
+        }
+        out_ << "    server {\n";
+        if (pma.tls) {
+            listen(spec_.ports.https, spec_.http2_directive ? " ssl" : " ssl http2");
+            out_ << (spec_.http2_directive ? "        http2 on;\n" : "")
+                 << "        ssl_certificate " << *cert << ";\n"
+                 << "        ssl_certificate_key " << *key << ";\n";
+        } else {
+            listen(spec_.ports.http, "");
+        }
+        out_ << "        server_name " << name << ".localhost;\n"
+             << "        root " << *root << ";\n"
+             << "        index index.php;\n"
+             << "        add_header Referrer-Policy no-referrer always;\n";
+        // Hidden files, and what isn't a web page: the setup script, the
+        // examples (another signon), the code, and the config stub.
+        out_ << R"(        location ~* /\.(?!well-known/) {
+            return 404;
+        }
+        location ~* ^/(setup|examples|libraries|templates|vendor|sql|test|tmp|po|locale|scripts)(/|$) {
+            return 404;
+        }
+        location ~* ^/config\. {
+            return 404;
+        }
+)";
+        // FloServer's login, from outside the install.
+        out_ << "        location = /" << kSignonScriptName << " {\n"
+             << "            include " << fastcgi_params_ << ";\n"
+             << "            fastcgi_param SCRIPT_FILENAME " << *signon << ";\n"
+             << "            fastcgi_param SCRIPT_NAME /" << kSignonScriptName << ";\n"
+             << (pma.tls ? "            fastcgi_param HTTPS on;\n" : "")
+             << "            fastcgi_pass " << upstream_name(pma.php_ports) << ";\n";
+        if (idle_log) {
+            out_ << "            access_log " << *idle_log << " floserver_idle;\n";
+        }
+        out_ << "        }\n"
+             << "        location / {\n"
+             << "            try_files $uri $uri/ =404;\n"
+             << "        }\n";
+        write_php_location(pma.php_ports, pma.tls.has_value(), idle_log, std::string());
+        out_ << "    }\n";
+        return true;
     }
 
     // Shared sites (D19): localhost and <folder>.localhost on the http port.

@@ -128,6 +128,9 @@ bool SettingsWindow::on_db_answers(const Snapshot& snap) {
             db_saving_ = false;
             set_db_read_only(false);
         }
+        if (answer.method == "phpmyadmin.login") {
+            pma_busy_ = false;
+        }
         // A late answer for a version the user has left: dropped, errors too.
         if (answer.series != db_series_) {
             continue;
@@ -202,6 +205,11 @@ bool SettingsWindow::on_db_answers(const Snapshot& snap) {
                 root_shown_ = std::move(password);
             }
             wipe(password);
+        } else if (answer.method == "phpmyadmin.login") {
+            // The main window opened the link; only a refusal comes here.
+            if (!answer.error.empty() || !answer.reply) {
+                show_message(fill(lang_, Str::PmaOpenFailed, {answer.error}), true);
+            }
         } else if (answer.method == "database.root_set") {
             root_busy_ = false;
             if (!answer.error.empty() || !answer.reply) {
@@ -587,8 +595,17 @@ void SettingsWindow::layout_db(HDC dc, Geometry& g, int x0, int x1, int y) const
     // Root access.
     top = y + px(14);
     dg.root_card = {x0, y, x1, y};
-    dg.root_title = {cx0, top, cx1, top + px(kControlH)};
+    // Open phpMyAdmin (as root, on this series) beside the title.
+    const int pma_w = std::max(button_w(Str::PmaOpen), button_w(Str::PmaOpening));
+    dg.pma = {std::max(cx0, cx1 - pma_w), top, cx1, top + px(kControlH)};
+    dg.root_title = {cx0, top, std::max(cx0, static_cast<int>(dg.pma.left) - px(kGap)), top + px(kControlH)};
     yy = top + px(kControlH) + px(4);
+    if (!phpmyadmin_installed(installed_)) {
+        const int hh = std::max(px(kNoteH), text_height(dc, w(text(lang_, Str::PmaNotInstalled)), fonts_.caption.get(),
+                                                        avail, rtl_));
+        dg.pma_hint = {cx0, yy, cx1, yy + hh};
+        yy += hh + px(4);
+    }
     const int copy_w = button_w(Str::DbCopy);
     const int show_w = std::max(button_w(Str::DbShow), button_w(Str::DbHide));
     dg.root_copy = {cx1 - copy_w, yy, cx1, yy + px(kControlH)};
@@ -673,6 +690,8 @@ const RECT* SettingsWindow::db_rect_of(const Hit& hit) const {
             return &g.root_show;
         case Part::DbRootCopy:
             return &g.root_copy;
+        case Part::DbPhpMyAdmin:
+            return &g.pma;
         case Part::DbNewPassword:
             return &g.new_password;
         case Part::DbSetPassword:
@@ -710,6 +729,7 @@ void SettingsWindow::db_focus_order(std::vector<Hit>& order) const {
         add(Part::DbField, g.boxes[i], static_cast<int>(i));
         add(Part::DbReset, g.resets[i], static_cast<int>(i));
     }
+    add(Part::DbPhpMyAdmin, g.pma);
     add(Part::DbRootShow, g.root_show);
     add(Part::DbRootCopy, g.root_copy);
     add(Part::DbNewPassword, g.new_password);
@@ -796,6 +816,16 @@ void SettingsWindow::on_db_click(const Hit& hit) {
             if (db_ && connected_ && !root_busy_) {
                 root_busy_ = true;
                 worker_.database_call("database.root", {{"series", db_series_}}, "copy");
+            }
+            break;
+        case Part::DbPhpMyAdmin:
+            // One request; the window opens the link it answers with.
+            if (db_ && connected_ && !pma_busy_ && phpmyadmin_installed(installed_)) {
+                pma_busy_ = true;
+                message_.clear();
+                worker_.database_call("phpmyadmin.login", {{"series", db_series_}, {"lang", std::string(lang_code(lang_))}},
+                                      "settings");
+                relayout();
             }
             break;
         case Part::DbSetPassword:
@@ -939,6 +969,7 @@ void SettingsWindow::paint_db_shapes(Canvas& c) const {
         c.round_rect(dg.root_card, pxf(8), p.card, p.card_border, border);
         button(Part::DbRootShow, dg.root_show, connected_ || !root_shown_.empty());
         button(Part::DbRootCopy, dg.root_copy, connected_ && !root_busy_);
+        button(Part::DbPhpMyAdmin, dg.pma, connected_ && !pma_busy_ && phpmyadmin_installed(installed_));
         {
             const Hit hit{Part::DbNewPassword, -1, -1};
             const FieldEdit* edit = edit_of(hit);
@@ -1085,6 +1116,11 @@ void SettingsWindow::paint_db_text(Canvas& c) const {
     }
     label(dg.root_show, root_shown_.empty() ? Str::DbShow : Str::DbHide, connected_ || !root_shown_.empty());
     label(dg.root_copy, Str::DbCopy, connected_ && !root_busy_);
+    label(dg.pma, pma_busy_ ? Str::PmaOpening : Str::PmaOpen,
+          connected_ && !pma_busy_ && phpmyadmin_installed(installed_));
+    if (!is_empty(dg.pma_hint)) {
+        c.paragraph(dg.pma_hint, w(text(lang_, Str::PmaNotInstalled)), fonts_.caption.get(), p.text_subtle);
+    }
     c.text(dg.new_label, w(text(lang_, Str::DbNewPassword)), fonts_.caption.get(), p.text_subtle, Align::Start, false);
     label(dg.set_password, Str::DbSetPassword, connected_ && !root_busy_);
     if (!is_empty(dg.password_error)) {

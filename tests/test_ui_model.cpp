@@ -802,12 +802,58 @@ TEST_CASE("Settings > Runtimes: downloads") {
     CHECK_FALSE(is_project_name("_settings"));
 }
 
+TEST_CASE("Settings > Runtimes: phpMyAdmin in the Tools card, with how it's served") {
+    json reply = runtimes_reply();
+    reply["installed"].push_back({{"name", "phpmyadmin"}, {"version", "5.2.3"}, {"variant", ""}, {"folder", "5.2.3"},
+                                  {"used_by", json::array()}});
+    reply["available"].push_back({{"name", "phpmyadmin"}, {"version", "5.2.3"}, {"variant", ""}, {"size", 15000000}});
+    reply["available"].push_back({{"name", "phpmyadmin"}, {"version", "5.2.4"}, {"variant", ""}, {"size", 15100000}});
+    reply["phpmyadmin"] = {{"address", "https://phpmyadmin.localhost"}, {"version", "5.2.3"}, {"run", "sleeping"}};
+    const RuntimesPage page = runtimes_page(reply, nullptr, json(), Lang::En);
+    REQUIRE(page.groups.size() == 6);
+    const RuntimeGroup& tools = page.groups.back();
+    CHECK(tools.title == "Tools");
+    CHECK_FALSE(tools.wide);
+    CHECK_FALSE(tools.picker);
+    REQUIRE(tools.rows.size() == 2);
+    CHECK(tools.rows[0].label == "phpMyAdmin 5.2.4");
+    CHECK(tools.rows[0].action == RowAction::Download);
+    CHECK(tools.rows[1].label == "phpMyAdmin 5.2.3");
+    CHECK(tools.rows[1].action == RowAction::Remove);  // nobody holds on to it
+    CHECK(tools.rows[1].usage == "Opens at https://phpmyadmin.localhost");
+
+    CHECK(phpmyadmin_line({{"name_taken", true}, {"problem", "x"}}, Lang::En) ==
+          "The project phpmyadmin has phpmyadmin.localhost, so phpMyAdmin can't use it");
+    CHECK(phpmyadmin_line({{"missing", json::array({"php"})}}, Lang::En) == "Needs PHP: download a version above");
+    CHECK(phpmyadmin_line({{"problem", "nginx says no"}}, Lang::En) == "nginx says no");
+    CHECK(phpmyadmin_line(json(), Lang::En).empty());
+
+    // Not installed: no Tools card until the list offers it; the buttons wait.
+    CHECK(runtimes_page(runtimes_reply(), nullptr, json(), Lang::En).groups.size() == 5);
+    CHECK_FALSE(phpmyadmin_installed({{"php", {"8.5.1"}}}));
+    CHECK(phpmyadmin_installed({{"phpmyadmin", {"5.2.3"}}}));
+    // Only phpMyAdmin's own address is opened.
+    CHECK(is_phpmyadmin_url("https://phpmyadmin.localhost/floserver-signon.php?token=ab"));
+    CHECK(is_phpmyadmin_url("http://phpmyadmin.localhost:8080/floserver-signon.php?token=ab"));
+    CHECK(is_phpmyadmin_url("https://phpmyadmin.localhost"));
+    CHECK_FALSE(is_phpmyadmin_url("https://phpmyadmin.localhost.evil.example/x"));
+    CHECK_FALSE(is_phpmyadmin_url("https://phpmyadmin.localhost:x@evil.example/x"));
+    CHECK_FALSE(is_phpmyadmin_url("https://phpmyadmin.localhost:8443@evil.example/x"));
+    CHECK_FALSE(is_phpmyadmin_url("https://phpmyadmin.localhost:/x"));
+    CHECK_FALSE(is_phpmyadmin_url("file:///C:/x"));
+    CHECK_FALSE(is_phpmyadmin_url(""));
+    CHECK(lang_code(Lang::Ku) == "ku");
+    CHECK(lang_code(Lang::Ar) == "ar");
+    CHECK(lang_code(Lang::En) == "en");
+}
+
 TEST_CASE("new project names") {
     std::vector<ProjectRow> rows(2);
     rows[0].name = "php-app";
     rows[1].name = "php-app-2";
     CHECK(free_project_name("php-app", rows) == "php-app-3");
     CHECK(free_project_name("blog", rows) == "blog");
+    CHECK(free_project_name("phpmyadmin", rows) == "phpmyadmin-2");  // phpMyAdmin's address
     CHECK(is_project_name("my-shop2"));
     CHECK_FALSE(is_project_name("My Shop"));
     CHECK_FALSE(is_project_name("-shop"));
