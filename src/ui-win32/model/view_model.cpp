@@ -310,6 +310,16 @@ std::string human_bytes(std::uint64_t bytes) {
     return std::to_string(tenths / 10) + "." + std::to_string(tenths % 10) + (mb ? " MB" : " KB");
 }
 
+std::string new_project_address(const std::string& name, const FooterText& footer) {
+    if (footer.http_port == 0 || footer.https_port == 0) {
+        return "https://" + name + ".localhost";
+    }
+    const std::uint64_t port = footer.tls ? footer.https_port : footer.http_port;
+    const std::uint64_t usual = footer.tls ? 443 : 80;
+    return (footer.tls ? "https://" : "http://") + name + ".localhost" +
+           (port == usual ? std::string() : ":" + std::to_string(port));
+}
+
 FooterText footer_text(const std::vector<ProjectRow>& rows, const json* status, const json* web, Lang lang) {
     FooterText out;
     std::size_t running = 0;
@@ -329,6 +339,9 @@ FooterText footer_text(const std::vector<ProjectRow>& rows, const json* status, 
             if (http && https) {
                 out.nginx = fill_pattern(text(lang, Str::FooterNginx), false,
                                          {std::to_string(*http), std::to_string(*https)});
+                out.http_port = *http;
+                out.https_port = *https;
+                out.tls = flag_of(n, "tls");
             }
         } else if (std::any_of(rows.begin(), rows.end(), [](const ProjectRow& r) { return r.on; })) {
             // Only worth saying when something should be served.

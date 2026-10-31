@@ -637,51 +637,50 @@ void WebService::reload_locked() {
         keep_both();  // it failed a moment ago; the supervisor tries again
         return;
     }
-    // Other ports asked for in Settings: nginx starts again on them (a
-    // reload can't always move its listening sockets, on Windows above all).
+    // The ports for this config. Other ports asked for in Settings (or the
+    // ones asked for, free again after being taken) mean a new nginx on
+    // them, but only once the new config has passed `nginx -t`: until then
+    // the running nginx keeps serving on its ports.
     const auto wanted = wanted_web_ports(settings);
-    std::optional<WebPorts> released;
-    if (wanted != wanted_ports_) {
-        wanted_ports_ = wanted;
-        if (ports_ && !config_.fixed_ports) {
-            released = ports_;
-            stop_nginx_locked();
-        }
-    } else if (ports_ && !ports_taken_.empty() && wanted && !config_.fixed_ports && config_.probe(wanted->http) &&
-               config_.probe(wanted->https)) {
-        // The ports asked for were taken and are free now (the other program
-        // ended, or a closed connection let go of them): nginx moves there.
-        stop_nginx_locked();
-    }
-    if (!ports_) {
-        if (config_.fixed_ports) {
-            ports_ = config_.fixed_ports;
-            ports_taken_.clear();
-        } else {
-            // The ports nginx has just let go of are free for it (a closed
-            // connection can still hold them for a while, which nginx's own
-            // listening sockets don't mind).
-            const PortProbe probe = [&](Port p) {
-                return (released && (p == released->http || p == released->https)) || config_.probe(p);
-            };
+    std::optional<WebPorts> next = ports_;
+    std::vector<Port> next_taken = ports_taken_;
+    if (config_.fixed_ports) {
+        next = config_.fixed_ports;
+        next_taken.clear();
+    } else if (ports_) {
+        // nginx's own ports count as free: it lets go of them when it moves.
+        const WebPorts current = *ports_;
+        const PortProbe probe = [&](Port p) { return p == current.http || p == current.https || config_.probe(p); };
+        const bool retry = !ports_taken_.empty() && wanted && probe(wanted->http) && probe(wanted->https);
+        if (wanted != wanted_ports_ || retry) {
             ChosenWebPorts chosen = choose_web_ports(settings, probe);
-            ports_ = chosen.ports;
-            ports_taken_ = std::move(chosen.taken);
+            if (chosen.ports) {
+                next = chosen.ports;
+                next_taken = std::move(chosen.taken);
+            }
         }
-        if (!ports_) {
-            error_ = "ports 80/443 and 8080-8099/8443-8462 are all taken by other programs";
-            keep_both();
-            return;
-        }
+    } else {
+        ChosenWebPorts chosen = choose_web_ports(settings, config_.probe);
+        next = chosen.ports;
+        next_taken = std::move(chosen.taken);
     }
+    if (!next) {
+        error_ = "ports 80/443 and 8080-8099/8443-8462 are all taken by other programs";
+        keep_both();
+        return;
+    }
+    const WebPorts use = *next;
+    // A running nginx on other ports is replaced by a new one (a reload
+    // can't always move its listening sockets, on Windows above all).
+    const bool moving = ports_ && *ports_ != use;
     if (!settings_error.empty() && error_.empty()) {
         error_ = "config.json's \"web\" settings can't be used, so the defaults are: " + settings_error;
     }
     for (auto& [name, site] : sites) {
         if (name == kSharedSiteName) {
-            site.address = site.address.empty() ? std::string() : shared_address(*ports_, site.address == "https");
+            site.address = site.address.empty() ? std::string() : shared_address(use, site.address == "https");
         } else if (!site.address.empty()) {
-            site.address = site_address(name, *ports_, site.address == "https");
+            site.address = site_address(name, use, site.address == "https");
         }
     }
     if (shared_spec) {
@@ -689,7 +688,7 @@ void WebService::reload_locked() {
         // reads the www folder only when the page is opened.
         const std::string script = shared_list_script(shared_spec->dir, app_config_file(config_.data_dir),
                                                       plan.shared->apache ? WebServer::Apache : WebServer::Nginx,
-                                                      ports_->http);
+                                                      use.http);
         if (script != shared_script_text_) {
             const fs::path file = shared_list_script_file(work_);
             std::error_code dir_ec;
@@ -704,7 +703,7 @@ void WebService::reload_locked() {
     NginxSpec spec;
     spec.nginx_dir = nginx_dir_;
     spec.work_dir = work_;
-    spec.ports = *ports_;
+    spec.ports = use;
     spec.ipv6 = loopback_ipv6_available();
     const auto v = Version::parse(nginx_version_);
     const auto http2_on = Version::parse("1.25.1");
@@ -764,6 +763,12 @@ void WebService::reload_locked() {
         return;
     }
     rejected_text_.clear();
+    if (moving) {
+        stop_nginx_locked();  // the new config passed: the old nginx lets go of its ports now
+    }
+    ports_ = use;
+    ports_taken_ = std::move(next_taken);
+    wanted_ports_ = wanted;
     fs::rename(work_ / "nginx.next.conf", work_ / "nginx.conf", ec);
     if (ec) {
         error_ = "can't replace nginx.conf: " + error_text(ec);

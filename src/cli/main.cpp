@@ -699,9 +699,20 @@ int trust() {
                                 : "Not added: " + error + "\n");
         return 1;
     }
-    (void)client->call("web.reload");  // projects switch to https now
-    std::cout << "Done. Browsers accept https://<project>.localhost now (restart a browser that was open).\n"
-              << "Firefox: if it still warns, open about:config and set security.enterprise_roots.enabled to true.\n";
+    const auto web = client->call("web.reload");  // projects switch to https now
+    const nlohmann::json nginx =
+        web && web->ok && web->result.contains("nginx") ? web->result.at("nginx") : nlohmann::json::object();
+    if (nginx.value("https_off", false)) {
+        std::cout << "Done. HTTPS for projects is off in Settings > Ports & HTTPS; turn it on there for https addresses.\n";
+    } else {
+        // The https port nginx uses now (Settings > Ports & HTTPS may have chosen another).
+        const auto port = nginx.contains("https_port") && nginx.at("https_port").is_number_unsigned()
+                              ? nginx.at("https_port").get<unsigned>()
+                              : 443U;
+        std::cout << "Done. Browsers accept https://<project>.localhost" << (port == 443U ? "" : ":" + std::to_string(port))
+                  << " now (restart a browser that was open).\n";
+    }
+    std::cout << "Firefox: if it still warns, open about:config and set security.enterprise_roots.enabled to true.\n";
     return 0;
 }
 

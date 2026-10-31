@@ -1280,3 +1280,19 @@ TEST_CASE("Settings > Ports & HTTPS: custom ports as typed, and what a pick send
     CHECK(port_choice_params(3, CustomPorts{8000, 8001}) ==
           json{{"ports", "custom"}, {"http_port", 8000}, {"https_port", 8001}});
 }
+
+TEST_CASE("the new project wizard's address follows nginx's ports and scheme") {
+    FooterText footer;
+    CHECK(new_project_address("shop", footer) == "https://shop.localhost");  // not known yet
+    footer.http_port = 8080;
+    footer.https_port = 8443;
+    footer.tls = true;
+    CHECK(new_project_address("shop", footer) == "https://shop.localhost:8443");
+    footer.tls = false;
+    CHECK(new_project_address("shop", footer) == "http://shop.localhost:8080");
+    footer.http_port = 80;
+    CHECK(new_project_address("shop", footer) == "http://shop.localhost");
+    const json web = {{"nginx", {{"running", true}, {"http_port", 80}, {"https_port", 443}, {"tls", true}}}};
+    footer = footer_text({}, nullptr, &web, Lang::En);
+    CHECK(new_project_address("shop", footer) == "https://shop.localhost");
+}

@@ -266,6 +266,7 @@ enum class Str : std::uint8_t {
     PortsReadFailed,  // {0}: the service's reason
     PortsOpenFailed,  // {0}: the reason
     PortsChanging,
+    PortsCertUnreadable,  // a reason, after "Not added: "
     Count_,
 };
 

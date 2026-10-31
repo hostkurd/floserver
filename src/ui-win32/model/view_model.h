@@ -93,7 +93,15 @@ struct FooterText {
     // web.status's idle time in whole minutes (at least 1), for the panel's
     // Keep running line; 0 when the service didn't say.
     std::uint64_t idle_minutes = 0;
+    // nginx's ports and whether projects get https, while it runs (0: not known).
+    std::uint64_t http_port = 0;
+    std::uint64_t https_port = 0;
+    bool tls = false;
 };
+
+// The address a new project called `name` will have, with the ports and
+// scheme nginx uses now; "https://<name>.localhost" while that isn't known.
+[[nodiscard]] std::string new_project_address(const std::string& name, const FooterText& footer);
 
 [[nodiscard]] FooterText footer_text(const std::vector<ProjectRow>& rows, const nlohmann::json* status,
                                      const nlohmann::json* web, Lang lang);

@@ -14,11 +14,14 @@
 #include "model/theme.h"
 
 #include "floserver/core/encoding.h"
+#include "floserver/core/paths.h"
 #include "floserver/core/trust_store.h"
 
 #include <shellapi.h>
 
 #include <algorithm>
+#include <filesystem>
+#include <system_error>
 #include <string_view>
 #include <utility>
 
@@ -74,10 +77,11 @@ void SettingsWindow::on_ports_answers(const Snapshot& snap) {
             if (!answer.error.empty() || !answer.reply || !ports_ || !apply_ca_reply(*ports_, *answer.reply)) {
                 trust_after_ca_ = false;
                 show_message(fill_pattern(text(lang_, Str::PortsTrustFailed), false,
-                                          {service_words(answer.error.empty() ? "no certificate authority" : answer.error)}),
+                                          {answer.error.empty() ? std::string(text(lang_, Str::PortsCertUnreadable))
+                                                                : service_words(answer.error)}),
                              true);
-            } else if (std::exchange(trust_after_ca_, false)) {
-                trust_ca_now();
+            } else if (std::exchange(trust_after_ca_, false) && section_ == Section::Ports) {
+                trust_ca_now();  // only while the section that asked is shown
             }
             continue;
         }
@@ -214,7 +218,7 @@ void SettingsWindow::trust_ca_now() {
     }
     const auto der = floserver::core::from_base64(ports_->ca_der);
     if (!der) {
-        show_message(fill(lang_, Str::PortsTrustFailed, {"the certificate can't be read"}), true);
+        show_message(fill_pattern(text(lang_, Str::PortsTrustFailed), false, {text(lang_, Str::PortsCertUnreadable)}), true);
         return;
     }
     bool cancelled = false;
@@ -237,7 +241,7 @@ void SettingsWindow::remove_ca() {
     }
     const auto der = floserver::core::from_base64(ports_->ca_der);
     if (!der) {
-        show_message(fill(lang_, Str::PortsRemoveFailed, {"the certificate can't be read"}), true);
+        show_message(fill_pattern(text(lang_, Str::PortsRemoveFailed), false, {text(lang_, Str::PortsCertUnreadable)}), true);
         return;
     }
     bool cancelled = false;
@@ -257,6 +261,13 @@ void SettingsWindow::remove_ca() {
 
 void SettingsWindow::open_certificate() {
     if (!ports_ || ports_->ca_viewer.empty()) {
+        return;
+    }
+    // Only FloServer's own certificate file: a .crt that's there.
+    const std::filesystem::path file = floserver::core::path_from_utf8(ports_->ca_viewer);
+    std::error_code ec;
+    if (file.extension() != ".crt" || !std::filesystem::is_regular_file(file, ec)) {
+        show_message(fill(lang_, Str::PortsOpenFailed, {ports_->ca_viewer}), true);
         return;
     }
     // A .crt opens in Windows' own certificate viewer.

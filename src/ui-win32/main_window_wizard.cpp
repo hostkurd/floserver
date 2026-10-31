@@ -678,7 +678,7 @@ void MainWindow::paint_wizard(Canvas& c, HDC dc, bool text_pass) const {
         case 1: {
             c.text(g.name_label, w(text(lang_, Str::WizardName)), fonts_.button_bold.get(), p.text, Align::Start, false);
             const std::string name = wizard_name();
-            const std::string hint = is_project_name(name) ? fill(lang_, Str::WizardAddress, {"https://" + name + ".localhost"})
+            const std::string hint = is_project_name(name) ? fill(lang_, Str::WizardAddress, {new_project_address(name, snap_.footer)})
                                                            : std::string(text(lang_, Str::WizardNameRule));
             c.text(g.name_hint, w(hint), fonts_.caption.get(), is_project_name(name) ? p.text_subtle : p.problem.text,
                    Align::Start, false);

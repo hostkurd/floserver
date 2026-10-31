@@ -423,6 +423,7 @@ constexpr std::array kTable{
           "تعذّر فتح الشهادة: {0}",
           "نەتوانرا بڕوانامەکە بکرێتەوە: {0}"},
     Entry{Str::PortsChanging, "Changing…", "جارٍ التغيير…", "دەگۆڕدرێت…"},
+    Entry{Str::PortsCertUnreadable, "the certificate can't be read", "تعذّرت قراءة الشهادة", "بڕوانامەکە ناخوێندرێتەوە"},
 };
 
 #undef FLO_LRI
