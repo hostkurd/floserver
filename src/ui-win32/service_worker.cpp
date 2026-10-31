@@ -201,6 +201,18 @@ void ServiceWorker::set_default(const std::string& name, const std::optional<std
 void ServiceWorker::cancel_job(std::int64_t id) {
     push({Command::Kind::CancelJob, {}, false, {}, std::nullopt, {}, nlohmann::json(id)});
 }
+void ServiceWorker::php_get(const std::string& series, const std::string& to) {
+    push({Command::Kind::PhpGet, to, false, series, std::nullopt, {}, {}});
+}
+void ServiceWorker::php_set(const nlohmann::json& params) {
+    push({Command::Kind::PhpSet, kPhpSettings, false, {}, std::nullopt, {}, params});
+}
+void ServiceWorker::php_custom_ini(const std::string& series) {
+    push({Command::Kind::PhpCustomIni, {}, false, series, std::nullopt, {}, {}});
+}
+void ServiceWorker::project_php(const std::string& project, const nlohmann::json& params) {
+    push({Command::Kind::ProjectPhp, project, false, {}, std::nullopt, {}, params});
+}
 void ServiceWorker::load_defaults() {
     {
         const std::lock_guard lock(mutex_);
@@ -243,6 +255,9 @@ Snapshot ServiceWorker::take() {
     latest_.runtimes_error.clear();
     latest_.runtimes_refresh = false;
     latest_.settings_error.clear();
+    latest_.php.clear();
+    latest_.custom_ini.clear();
+    latest_.custom_ini_error.clear();
     latest_.quit_done = false;
     latest_.quit_error.clear();
     return out;
@@ -377,6 +392,24 @@ void ServiceWorker::run(const std::stop_token& stop) {
         std::string runtimes_error;
         bool refetch_runtimes = false;  // a change Settings shows is done: ask again
         std::optional<Defaults> defaults;
+        std::vector<Snapshot::PhpAnswer> php_answers;
+        std::string custom_ini;
+        std::string custom_ini_error;
+        // One php.* or projects.php request, answered to `to`.
+        const auto php_call = [&](const std::string& to, const char* method, const nlohmann::json& params, bool save) {
+            Snapshot::PhpAnswer answer{to, std::nullopt, {}, save};
+            if (!client) {
+                answer.error = lost;
+            } else if (auto got = client->call(method, params); !got) {
+                client.reset();
+                answer.error = lost;
+            } else if (!got->ok) {
+                answer.error = got->error_message;
+            } else {
+                answer.reply = std::move(got->result);
+            }
+            php_answers.push_back(std::move(answer));
+        };
         const auto list_runtimes_now = [&](bool refresh) {
             if (!client) {
                 runtimes_error = lost;
@@ -680,6 +713,30 @@ void ServiceWorker::run(const std::stop_token& stop) {
                         }
                     }
                     break;
+                case Command::Kind::PhpGet:
+                    php_call(c.project, "php.get", {{"series", c.key}}, false);
+                    break;
+                case Command::Kind::PhpSet:
+                    php_call(c.project, "php.set", c.params, true);
+                    break;
+                case Command::Kind::ProjectPhp:
+                    php_call(c.project, "projects.php", c.params, true);
+                    break;
+                case Command::Kind::PhpCustomIni:
+                    if (!client) {
+                        custom_ini_error = lost;
+                    } else if (reply = client->call("php.custom_ini", {{"series", c.key}}); !reply) {
+                        client.reset();
+                        custom_ini_error = lost;
+                    } else if (!reply->ok) {
+                        custom_ini_error = reply->error_message;
+                    } else {
+                        custom_ini = string_field(reply->result, "path");
+                        if (custom_ini.empty()) {
+                            custom_ini_error = "the service's reply had no path";
+                        }
+                    }
+                    break;
                 case Command::Kind::LoadDefaults: {
                     // The wizard waits for nothing: without an answer it keeps today's picks.
                     std::optional<core::protocol::Reply> got;
@@ -867,6 +924,13 @@ void ServiceWorker::run(const std::stop_token& stop) {
         if (runtimes || !runtimes_error.empty()) {
             latest_.runtimes = std::move(runtimes);
             latest_.runtimes_error = runtimes_error;
+        }
+        for (auto& answer : php_answers) {
+            latest_.php.push_back(std::move(answer));
+        }
+        if (!custom_ini.empty() || !custom_ini_error.empty()) {
+            latest_.custom_ini = std::move(custom_ini);
+            latest_.custom_ini_error = std::move(custom_ini_error);
         }
         if (defaults) {
             latest_.defaults = std::move(*defaults);

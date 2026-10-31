@@ -53,6 +53,7 @@ struct Palette {
     Rgb button_disabled;
     Rgb button_disabled_text;
     Rgb bar_track;      // under a download's progress
+    Rgb input_set;      // a php.ini field with its own value (Settings > PHP, the panel)
     StateColors on;
     StateColors asleep;
     StateColors waking;
@@ -62,6 +63,7 @@ struct Palette {
     StateColors banner_info;
     StateColors banner_error;
     StateColors chip_default;  // "Default" in Settings > Runtimes
+    StateColors chip_added;    // "+ bcmath" in the project panel's PHP part
 };
 
 [[nodiscard]] const Palette& palette(bool dark);

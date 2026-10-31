@@ -87,6 +87,17 @@ struct Snapshot {
     bool runtimes_refresh = false;  // the answer to "Check for updates"
     std::string settings_error;     // a change in Settings failed
     std::vector<std::string> settled;  // change keys whose command finished (see ServiceWorker)
+    // Settings > PHP and the project panel's PHP part (D20): answers in the
+    // order they came. `to` is kPhpSettings, or the project's name for the panel.
+    struct PhpAnswer {
+        std::string to;
+        std::optional<nlohmann::json> reply;  // php.get's or php.set's; projects.php's (the project)
+        std::string error;                    // the service's reason, or the connection's
+        bool save = false;                    // the answer to a save
+    };
+    std::vector<PhpAnswer> php;
+    std::string custom_ini;        // php.custom_ini's path, to open in Notepad
+    std::string custom_ini_error;
     std::string change_error;          // "Couldn't change shop: ..."
     std::string clipboard;             // .env lines to put on the clipboard
     std::string added;                 // a project just added from the window
@@ -133,6 +144,14 @@ public:
     // runtimes.default; nothing clears it. settled reports default_key(name).
     void set_default(const std::string& name, const std::optional<std::string>& series);
     void cancel_job(std::int64_t id);
+    // Settings > PHP (D20): php.get for one series ("8.5"), answered to `to`
+    // (kPhpSettings or the panel's project); php.set with only what changed;
+    // php.custom_ini, whose path comes back to be opened.
+    void php_get(const std::string& series, const std::string& to);
+    void php_set(const nlohmann::json& params);
+    void php_custom_ini(const std::string& series);
+    // The panel's PHP part: projects.php, answered to the project.
+    void project_php(const std::string& project, const nlohmann::json& params);
     // New project: runtimes.list (cached) once, for its defaults.
     void load_defaults();
     // Asks for the templates (templates.list).
@@ -148,6 +167,8 @@ public:
 
     // Shared sites' name wherever a project's goes; project names can't have '_'.
     static constexpr const char* kSharedKey = "_shared";
+    // Settings' answers in Snapshot::php; project names can't have '_'.
+    static constexpr const char* kPhpSettings = "_settings";
 
     [[nodiscard]] static std::string on_key(const std::string& project) { return "on\n" + project; }
     [[nodiscard]] static std::string keep_key(const std::string& project) { return "keep\n" + project; }
@@ -182,6 +203,10 @@ private:
             RemoveRuntime,
             SetDefault,
             CancelJob,
+            PhpGet,
+            PhpSet,
+            PhpCustomIni,
+            ProjectPhp,
             LoadDefaults,
             Select,
             Start,
@@ -193,7 +218,7 @@ private:
         std::string key;
         std::optional<std::string> value;
         std::vector<Download> downloads;
-        nlohmann::json params;  // CreateProject: projects.create's parameters; SetShared: the changes
+        nlohmann::json params;  // CreateProject: projects.create's parameters; SetShared: the changes; php.*
     };
 
     // "Check for updates" (runtimes.list {"refresh": true}) can take as long

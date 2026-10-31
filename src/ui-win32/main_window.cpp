@@ -116,8 +116,8 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             } else {
                 // Settings belongs to this window; it would otherwise stay
                 // on screen with no taskbar button.
-                if (settings_) {
-                    settings_->close();
+                if (settings_ && !settings_->close()) {
+                    return 0;  // PHP changes not saved, and the user chose to stay
                 }
                 ShowWindow(hwnd_, SW_HIDE);
             }
@@ -158,6 +158,21 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             }
             return 0;
         case WM_CTLCOLOREDIT:
+            if (const int id = GetDlgCtrlID(win::int_to_ptr<HWND>(lparam)); id >= kPhpEditBase && php_open_) {
+                // The panel's PHP boxes: tinted where the project has its own value.
+                const std::size_t index = static_cast<std::size_t>(id - kPhpEditBase);
+                bool marked = false;
+                for (std::size_t f = 0; f < php_field_edit_.size() && f < php_keys_.size(); ++f) {
+                    if (php_field_edit_[f] == static_cast<int>(index)) {
+                        marked = !php_keys_[f].empty() && php_after_.ini.contains(php_keys_[f]);
+                    }
+                }
+                const Palette& p = palette(dark_);
+                auto* dc = win::int_to_ptr<HDC>(wparam);
+                SetTextColor(dc, colorref(p.text));
+                SetBkColor(dc, colorref(marked ? p.input_set : p.input));
+                return reinterpret_cast<LRESULT>(marked ? input_set_brush_.get() : input_brush_.get());
+            }
             if (win::int_to_ptr<HWND>(lparam) == search_ || win::int_to_ptr<HWND>(lparam) == name_edit_) {
                 const Palette& p = palette(dark_);
                 auto* dc = win::int_to_ptr<HDC>(wparam);
@@ -167,6 +182,14 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             }
             break;
         case WM_COMMAND:
+            if (lparam != 0 && LOWORD(wparam) >= kPhpEditBase && HIWORD(wparam) == EN_CHANGE) {
+                on_php_edit_change(LOWORD(wparam));
+                return 0;
+            }
+            if (lparam != 0 && LOWORD(wparam) >= kPhpEditBase && HIWORD(wparam) == EN_SETFOCUS) {
+                on_php_edit_focus(LOWORD(wparam));
+                return 0;
+            }
             if (name_edit_ != nullptr && win::int_to_ptr<HWND>(lparam) == name_edit_ && HIWORD(wparam) == EN_CHANGE) {
                 InvalidateRect(hwnd_, nullptr, FALSE);  // the address and folder lines follow the name
                 return 0;
@@ -256,6 +279,11 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             return 0;
         case kShowWindowMessage:
             show_window();
+            return 0;
+        case kPhpBackMessage:
+            if (leave_php_part(true)) {
+                SetFocus(hwnd_);
+            }
             return 0;
         case kSettingsClosedMessage:
             // The Settings window is gone: nothing of it stays but where it was.
@@ -361,8 +389,11 @@ void MainWindow::on_snapshot() {
     update_visible();
     // The panel's project may have been removed (flo remove).
     if (!selected_.empty() && shows_rows() && selected_row() == nullptr) {
+        (void)leave_php_part(false);
         close_panel();
     }
+    on_project_php_answers();
+    sync_project_php();
     update_fields();
     // Shared sites: the row goes when the service stops answering shared.get.
     if (!snap_.shared.known) {
@@ -453,6 +484,10 @@ float MainWindow::pxf(float dip) const { return dip * static_cast<float>(dpi_) /
 void MainWindow::apply_theme() {
     apply_title_bar(hwnd_, dark_);
     input_brush_.reset(CreateSolidBrush(colorref(palette(dark_).input)));
+    input_set_brush_.reset(CreateSolidBrush(colorref(palette(dark_).input_set)));
+    for (const auto& edit : php_edits_) {
+        edit->set_cue_color(palette(dark_).text_subtle);
+    }
     if (search_ != nullptr) {
         InvalidateRect(search_, nullptr, TRUE);
     }
@@ -463,6 +498,9 @@ void MainWindow::make_fonts() {
     make_ui_fonts(fonts_, dpi_, lang_);
     if (name_edit_ != nullptr) {
         SendMessageW(name_edit_, WM_SETFONT, reinterpret_cast<WPARAM>(fonts_.body.get()), TRUE);
+    }
+    for (const auto& edit : php_edits_) {
+        edit->set_font(fonts_.button.get());
     }
     if (search_ != nullptr) {
         SendMessageW(search_, WM_SETFONT, reinterpret_cast<WPARAM>(fonts_.button.get()), TRUE);
@@ -636,6 +674,11 @@ void MainWindow::layout() {
         const RECT r = g.name_box;  // child positions use the same mirrored space as ours
         MoveWindow(name_edit_, r.left + px(10), r.top + (height_of(r) - eh) / 2, std::max(0, width_of(r) - px(20)), eh, TRUE);
     }
+    if (!php_edits_.empty()) {
+        HDC dc = GetDC(hwnd_);
+        place_project_php_edits(dc);
+        ReleaseDC(hwnd_, dc);
+    }
     for (const auto& [id, rect] : {std::pair{kTipNewProject, new_project_button()},
                                    std::pair{kTipSettings, settings_button()}}) {
         TOOLINFOW ti{};
@@ -742,7 +785,10 @@ MainWindow::Hit MainWindow::hit_test(int x, int y) const {
     if (www_open()) {
         return contains(www_geometry_.area, x, y) ? www_hit_test(x, y) : Hit{};
     }
-    if (panel_open() && contains(panel_geometry_.panel, x, y)) {
+    if (panel_open() && php_open_ && contains(php_geometry_.panel, x, y)) {
+        return php_panel_hit_test(x, y);
+    }
+    if (panel_open() && !php_open_ && contains(panel_geometry_.panel, x, y)) {
         return panel_hit_test(x, y);
     }
     if (contains(shared_geometry_.row, x, y)) {
@@ -834,6 +880,15 @@ void MainWindow::on_click(const Hit& clicked) {
         case Part::PanelCopyEnv:
         case Part::PanelKeep:
             on_panel_click(hit);
+            break;
+        case Part::PanelPhpBack:
+        case Part::PanelPhpSettings:
+        case Part::PanelPhpChange:
+        case Part::PanelPhpField:
+        case Part::PanelPhpReset:
+        case Part::PanelPhpDiscard:
+        case Part::PanelPhpSave:
+            on_php_panel_click(hit);
             break;
         case Part::Banner:
             if (banner().clickable && worker_) {
@@ -1314,6 +1369,7 @@ void MainWindow::on_paint() {
             const win::Selected selected(mem.get(), bitmap.get());
             geometry_ = row_geometry(mem.get());
             panel_geometry_ = panel_open() ? panel_geometry(mem.get()) : PanelGeometry{};
+            php_geometry_ = panel_open() && php_open_ ? php_panel_geometry(mem.get()) : PhpPanelGeometry{};
             wizard_geometry_ = wizard_open() ? wizard_geometry(mem.get()) : WizardGeometry{};
             const bool list_shown = !wizard_open() && !www_open();
             shared_geometry_ = list_shown ? shared_geometry(mem.get()) : SharedGeometry{};
@@ -1334,7 +1390,11 @@ void MainWindow::on_paint() {
                     } else {
                         paint_list(canvas, mem.get(), text_pass);
                         paint_shared_row(canvas, mem.get(), text_pass);
-                        paint_panel(canvas, mem.get(), text_pass);
+                        if (php_open_) {
+                            paint_php_panel(canvas, text_pass);
+                        } else {
+                            paint_panel(canvas, mem.get(), text_pass);
+                        }
                     }
                     paint_footer(canvas, mem.get(), text_pass);
                 }
