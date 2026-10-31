@@ -41,6 +41,7 @@ constexpr Palette kLight{
     .button_disabled = 0xF7F7F7,
     .button_disabled_text = 0x8A8A8A,
     .bar_track = 0xE6E6E6,
+    .input_set = 0xF5F9FD,
     .on = {0xDFF6DD, 0x0E700E, 0xDFF6DD},
     .asleep = {0xFFF4CE, 0x7A4A00, 0xFFF4CE},
     .waking = {0xE8F1FB, 0x0B5394, 0xE8F1FB},
@@ -50,6 +51,7 @@ constexpr Palette kLight{
     .banner_info = {0xE8F1FB, 0x0B5394, 0xE8F1FB},
     .banner_error = {0xFDE7E9, 0xA4262C, 0xFDE7E9},
     .chip_default = {0xDCEBFA, 0x0B4F8A, 0xDCEBFA},
+    .chip_added = {0xF5F9FD, 0x0B4F8A, 0x0F6CBD},
 };
 
 constexpr Palette kDark{
@@ -86,6 +88,7 @@ constexpr Palette kDark{
     .button_disabled = 0x272727,
     .button_disabled_text = 0x7A7A7A,
     .bar_track = 0x3A3A3A,
+    .input_set = 0x1F2B38,
     .on = {0x1E3A1E, 0x6CCB5F, 0x1E3A1E},
     .asleep = {0x433519, 0xFCE100, 0x433519},
     .waking = {0x1C3550, 0x8AC7FF, 0x1C3550},
@@ -95,6 +98,7 @@ constexpr Palette kDark{
     .banner_info = {0x1C3550, 0x8AC7FF, 0x1C3550},
     .banner_error = {0x442726, 0xFF99A4, 0x442726},
     .chip_default = {0x1C3550, 0x8AC7FF, 0x1C3550},
+    .chip_added = {0x1F2B38, 0x8AC7FF, 0x60CDFF},
 };
 
 double channel(std::uint8_t v) {

@@ -74,10 +74,15 @@ SettingsWindow::SettingsWindow(HINSTANCE instance, Lang lang, ServiceWorker& wor
     : instance_(instance), lang_(lang), rtl_(is_rtl(lang)), worker_(worker), owner_(owner),
       closed_message_(closed_message) {}
 
-void SettingsWindow::close() {
-    if (hwnd_ != nullptr) {
-        DestroyWindow(hwnd_);  // the closed message follows, as for the user closing it
+bool SettingsWindow::close() {
+    if (asking_) {
+        bring_to_front();  // its question is open: answered there first
+        return false;
     }
+    if (hwnd_ != nullptr) {
+        try_close();  // the closed message follows, as for the user closing it
+    }
+    return hwnd_ == nullptr;
 }
 
 SettingsWindow::~SettingsWindow() {
@@ -190,9 +195,39 @@ LRESULT SettingsWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
         case WM_CREATE:
             on_create();
             return 0;
+        case WM_CLOSE:
+            try_close();
+            return 0;
         case WM_DESTROY:
             on_destroy();
             return 0;
+        case WM_CTLCOLORSTATIC:  // a read-only box (a save on its way)
+            if (hit_of_edit(GetDlgCtrlID(win::int_to_ptr<HWND>(lparam))).part == Part::None) {
+                break;
+            }
+            [[fallthrough]];
+        case WM_CTLCOLOREDIT: {
+            // The PHP section's boxes: a field with the series' own value is tinted.
+            const Hit hit = hit_of_edit(GetDlgCtrlID(win::int_to_ptr<HWND>(lparam)));
+            const bool marked = hit.part == Part::PhpField && php_ &&
+                                ini_marked(*php_, php_changes_,
+                                           settings_php_ini_fields()[static_cast<std::size_t>(hit.row)].key);
+            const Palette& p = palette(dark_);
+            auto* dc = win::int_to_ptr<HDC>(wparam);
+            SetTextColor(dc, colorref(p.text));
+            SetBkColor(dc, colorref(marked ? p.input_set : p.input));
+            return reinterpret_cast<LRESULT>(marked ? input_set_brush_.get() : input_brush_.get());
+        }
+        case WM_COMMAND:
+            if (lparam != 0 && HIWORD(wparam) == EN_CHANGE) {
+                on_edit_change(LOWORD(wparam));
+                return 0;
+            }
+            if (lparam != 0 && HIWORD(wparam) == EN_SETFOCUS) {
+                on_edit_focus(LOWORD(wparam));
+                return 0;
+            }
+            break;
         case WM_ERASEBKGND:
             return 1;
         case WM_PAINT:
@@ -215,6 +250,9 @@ LRESULT SettingsWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
         case WM_DPICHANGED: {
             dpi_ = LOWORD(wparam);
             make_ui_fonts(fonts_, dpi_, lang_);
+            for (const auto& edit : edits_) {
+                edit->set_font(fonts_.button.get());
+            }
             const RECT& r = *win::int_to_ptr<const RECT*>(lparam);
             SetWindowPos(hwnd_, nullptr, r.left, r.top, r.right - r.left, r.bottom - r.top,
                          SWP_NOZORDER | SWP_NOACTIVATE);
@@ -230,6 +268,9 @@ LRESULT SettingsWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
                 }
             } else if (wparam == SPI_SETNONCLIENTMETRICS) {
                 make_ui_fonts(fonts_, dpi_, lang_);
+                for (const auto& edit : edits_) {
+                    edit->set_font(fonts_.button.get());
+                }
                 relayout();
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
@@ -328,6 +369,8 @@ void SettingsWindow::on_create() {
 
 void SettingsWindow::on_destroy() {
     KillTimer(hwnd_, kMessageTimer);
+    edits_.clear();
+    field_edit_.clear();
     WINDOWPLACEMENT wp{};
     wp.length = sizeof wp;
     if (GetWindowPlacement(hwnd_, &wp) != FALSE) {
@@ -339,6 +382,12 @@ void SettingsWindow::on_destroy() {
 
 void SettingsWindow::apply_theme() {
     apply_title_bar(hwnd_, dark_);
+    input_brush_.reset(CreateSolidBrush(colorref(palette(dark_).input)));
+    input_set_brush_.reset(CreateSolidBrush(colorref(palette(dark_).input_set)));
+    for (const auto& edit : edits_) {
+        edit->set_cue_color(palette(dark_).text_subtle);
+        InvalidateRect(edit->hwnd(), nullptr, TRUE);
+    }
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
@@ -398,7 +447,11 @@ void SettingsWindow::on_snapshot(const Snapshot& snap) {
         loading_ = true;
         worker_.list_runtimes(false);
     }
+    const bool close_now = on_php_answers(snap);
     rebuild();
+    if (close_now) {
+        DestroyWindow(hwnd_);  // the Save chosen on the way out is done
+    }
 }
 
 void SettingsWindow::rebuild() {
@@ -424,11 +477,18 @@ int SettingsWindow::main_left() const {
 SettingsWindow::Geometry SettingsWindow::layout(HDC dc) const {
     Geometry g;
     const int side = main_left() - px(8);
-    g.nav = {px(8), px(8), side - px(8), px(8) + px(kNavH)};
+    for (std::size_t i = 0; i < g.navs.size(); ++i) {
+        const int top = px(8) + static_cast<int>(i) * px(kNavH + 2);
+        g.navs[i] = {px(8), top, side - px(8), top + px(kNavH)};
+    }
 
     const int x0 = main_left();
     const int x1 = std::max(x0 + px(200), width_ - px(24));
     int y = px(4) - scroll_;
+    if (section_ == Section::Php) {
+        layout_php(dc, g, x0, x1, y);
+        return g;
+    }
 
     // The title and what the page does, with Check for updates beside them.
     const int check_w = std::max(Canvas::measure(dc, w(text(lang_, Str::SettingsCheckUpdates)), fonts_.button.get(), rtl_),
@@ -608,6 +668,7 @@ void SettingsWindow::relayout() {
     const int count = static_cast<int>(focus_order().size());
     focus_ = std::min(focus_, count - 1);
     update_tip(hover_);
+    place_php_edits();
 }
 
 void SettingsWindow::scroll_to(int target) {
@@ -625,6 +686,18 @@ void SettingsWindow::ensure_visible(const Hit& hit) {
     if (r == nullptr || hit.part == Part::Nav) {
         return;
     }
+    if (hit.part == Part::PhpField || hit.part == Part::PhpReset) {
+        // The label too.
+        const RECT& label = geometry_.php.labels[static_cast<std::size_t>(hit.row)];
+        RECT want = *r;
+        want.top = std::min(want.top, label.top);
+        if (want.top < px(8)) {
+            scroll_to(scroll_ + static_cast<int>(want.top) - px(8));
+        } else if (want.bottom > height_ - px(8)) {
+            scroll_to(scroll_ + static_cast<int>(want.bottom) - height_ + px(8));
+        }
+        return;
+    }
     // The whole row, so a button isn't shown cut at the edge.
     RECT want = *r;
     if (hit.part == Part::Button) {
@@ -640,7 +713,10 @@ void SettingsWindow::ensure_visible(const Hit& hit) {
 const RECT* SettingsWindow::rect_of(const Hit& hit) const {
     switch (hit.part) {
         case Part::Nav:
-            return &geometry_.nav;
+            if (hit.row >= 0 && std::cmp_less(hit.row, geometry_.navs.size())) {
+                return &geometry_.navs[static_cast<std::size_t>(hit.row)];
+            }
+            return nullptr;
         case Part::Check:
             return &geometry_.check;
         case Part::Picker:
@@ -658,12 +734,19 @@ const RECT* SettingsWindow::rect_of(const Hit& hit) const {
             return nullptr;
         case Part::None:
             break;
+        default:
+            return php_rect_of(hit);
     }
     return nullptr;
 }
 
 std::vector<SettingsWindow::Hit> SettingsWindow::focus_order() const {
-    std::vector<Hit> order{{Part::Nav, -1, -1}, {Part::Check, -1, -1}};
+    std::vector<Hit> order{{Part::Nav, 0, -1}, {Part::Nav, 1, -1}};
+    if (section_ == Section::Php) {
+        php_focus_order(order);
+        return order;
+    }
+    order.push_back({Part::Check, -1, -1});
     for (std::size_t i = 0; i < geometry_.groups.size(); ++i) {
         const GroupGeometry& gg = geometry_.groups[i];
         if (!is_empty(gg.picker)) {
@@ -761,8 +844,13 @@ void SettingsWindow::on_click(const Hit& hit) {
         case Part::Button:
             run_button(hit);
             break;
-        case Part::Nav:  // the only section so far
+        case Part::Nav:
+            open_section(hit.row == 1 ? Section::Php : Section::Runtimes);
+            break;
         case Part::None:
+            break;
+        default:
+            on_php_click(hit);
             break;
     }
     InvalidateRect(hwnd_, nullptr, FALSE);
@@ -790,7 +878,7 @@ void SettingsWindow::on_key(WPARAM key) {
             }
             return;
         case VK_ESCAPE:
-            DestroyWindow(hwnd_);
+            try_close();
             return;
         case VK_HOME:
             scroll_to(0);
@@ -805,6 +893,12 @@ void SettingsWindow::on_key(WPARAM key) {
             scroll_to(scroll_ - std::max(px(kRowH), height_ - px(kRowH)));
             return;
         case VK_F5:
+            if (section_ == Section::Php) {
+                if (!php_series_.empty() && php_changes_.empty() && !php_loading_ && !php_saving_) {
+                    load_php(php_series_);
+                }
+                return;
+            }
             // Read again what's on this computer (no network).
             if (!loading_) {
                 loading_ = true;
@@ -819,7 +913,13 @@ void SettingsWindow::on_key(WPARAM key) {
     }
     focus_ = next;
     show_focus_ = true;
-    ensure_visible(order[static_cast<std::size_t>(focus_)]);
+    const Hit& target = order[static_cast<std::size_t>(focus_)];
+    ensure_visible(target);
+    // A box takes the keys itself.
+    if (FieldEdit* edit = edit_of(target); edit != nullptr) {
+        SetFocus(edit->hwnd());
+        SendMessageW(edit->hwnd(), EM_SETSEL, 0, -1);
+    }
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
@@ -964,6 +1064,14 @@ void SettingsWindow::paint_button(Canvas& c, const RECT& r, bool hover, bool foc
     }
 }
 
+bool SettingsWindow::is_focused(const Hit& hit) const {
+    if (!show_focus_ || GetFocus() != hwnd_ || focus_ < 0) {
+        return false;
+    }
+    const std::vector<Hit> order = focus_order();
+    return std::cmp_less(focus_, order.size()) && order[static_cast<std::size_t>(focus_)] == hit;
+}
+
 void SettingsWindow::paint_ring(Canvas& c, const RECT& r) const {
     RECT ring = r;
     InflateRect(&ring, px(2), px(2));
@@ -981,17 +1089,43 @@ void SettingsWindow::paint_shapes(Canvas& c) const {
     };
 
     // The sidebar: the open section, with the accent mark at its start.
-    c.round_rect(g.nav, pxf(4), p.nav_selected);
-    c.round_rect({g.nav.left, g.nav.top + px(10), g.nav.left + px(3), g.nav.bottom - px(10)}, pxf(1.5F), p.accent);
-    {
-        // Runtimes' icon: two stacked boxes, 16 px.
-        const int ix = g.nav.left + px(12);
-        const int iy = (g.nav.top + g.nav.bottom) / 2 - px(8);
-        c.round_outline({ix + px(2), iy + px(2), ix + px(14), iy + px(7)}, pxf(1), p.text, pxf(1.3F));
-        c.round_outline({ix + px(2), iy + px(9), ix + px(14), iy + px(14)}, pxf(1), p.text, pxf(1.3F));
+    for (std::size_t i = 0; i < g.navs.size(); ++i) {
+        const RECT& nav = g.navs[i];
+        const Hit hit{Part::Nav, static_cast<int>(i), -1};
+        const bool open = static_cast<std::size_t>(section_) == i;
+        if (open) {
+            c.round_rect(nav, pxf(4), p.nav_selected);
+            c.round_rect({nav.left, nav.top + px(10), nav.left + px(3), nav.bottom - px(10)}, pxf(1.5F), p.accent);
+        } else if (hover_ == hit) {
+            c.round_rect(nav, pxf(4), p.row_hover);
+        }
+        const int ix = nav.left + px(12);
+        const int iy = (nav.top + nav.bottom) / 2 - px(8);
+        const auto at = [&](float x, float y) { return std::pair{static_cast<float>(ix) + pxf(x), static_cast<float>(iy) + pxf(y)}; };
+        const auto stroke = [&](float ax, float ay, float bx, float by) {
+            const auto [x1, y1] = at(ax, ay);
+            const auto [x2, y2] = at(bx, by);
+            c.line(x1, y1, x2, y2, p.text, pxf(1.3F));
+        };
+        if (i == 0) {
+            // Runtimes' icon: two stacked boxes, 16 px.
+            c.round_outline({ix + px(2), iy + px(2), ix + px(14), iy + px(7)}, pxf(1), p.text, pxf(1.3F));
+            c.round_outline({ix + px(2), iy + px(9), ix + px(14), iy + px(14)}, pxf(1), p.text, pxf(1.3F));
+        } else {
+            // PHP's: </>, as in the mockup.
+            stroke(5, 5, 2, 8);
+            stroke(2, 8, 5, 11);
+            stroke(11, 5, 14, 8);
+            stroke(14, 8, 11, 11);
+            stroke(9.5F, 3, 6.5F, 13);
+        }
+        if (focused(hit)) {
+            paint_ring(c, nav);
+        }
     }
-    if (focused({Part::Nav, -1, -1})) {
-        paint_ring(c, g.nav);
+    if (section_ == Section::Php) {
+        paint_php_shapes(c);
+        return;
     }
 
     const RECT column{main_left() - px(4), 0, width_, height_};
@@ -1057,8 +1191,17 @@ void SettingsWindow::paint_shapes(Canvas& c) const {
 void SettingsWindow::paint_text(Canvas& c) const {
     const Palette& p = palette(dark_);
     const Geometry& g = geometry_;
-    c.text({g.nav.left + px(38), g.nav.top, g.nav.right - px(8), g.nav.bottom}, w(text(lang_, Str::SettingsRuntimes)),
-           fonts_.body_bold.get(), p.text, Align::Start, false);
+    for (std::size_t i = 0; i < g.navs.size(); ++i) {
+        const RECT& nav = g.navs[i];
+        const bool open = static_cast<std::size_t>(section_) == i;
+        c.text({nav.left + px(38), nav.top, nav.right - px(8), nav.bottom},
+               w(text(lang_, i == 0 ? Str::SettingsRuntimes : Str::SettingsPhp)),
+               open ? fonts_.body_bold.get() : fonts_.body.get(), p.text, Align::Start, false);
+    }
+    if (section_ == Section::Php) {
+        paint_php_text(c);
+        return;
+    }
 
     const RECT column{main_left() - px(4), 0, width_, height_};
     c.clip_text(column);

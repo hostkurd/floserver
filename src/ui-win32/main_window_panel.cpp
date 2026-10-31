@@ -126,7 +126,7 @@ RECT MainWindow::panel_rect() const {
 }
 
 void MainWindow::select(const std::string& project) {
-    if (project == selected_) {
+    if (project == selected_ || !leave_php_part(true)) {
         return;
     }
     selected_ = project;
@@ -142,7 +142,7 @@ void MainWindow::select(const std::string& project) {
 }
 
 void MainWindow::close_panel() {
-    if (selected_.empty()) {
+    if (selected_.empty() || !leave_php_part(true)) {
         return;
     }
     // Keyboard focus goes back to the project it came from.
@@ -184,6 +184,9 @@ std::size_t MainWindow::field_value(const VersionField& field) const {
 }
 
 std::string MainWindow::panel_button_text(PanelAction action) const {
+    if (action == PanelAction::Php) {
+        return std::string(text(lang_, Str::PanelPhpSettings));
+    }
     if (action == PanelAction::Download) {
         const ProjectRow* row = selected_row();
         return row != nullptr ? download_button_text(downloads_for(*row, snap_.installed), lang_) : std::string();
@@ -240,6 +243,10 @@ MainWindow::PanelGeometry MainWindow::panel_geometry(HDC dc) const {
     add_button(PanelAction::Terminal);
     if (snap_.panel.project == row->name && snap_.panel.studio) {
         add_button(PanelAction::Studio);
+    }
+    // The project's own PHP extensions and php.ini values (D20).
+    if (project_uses_php(*row)) {
+        add_button(PanelAction::Php);
     }
     y += px(kButtonH) + px(kPanelGap);
 
@@ -371,6 +378,10 @@ void MainWindow::on_panel_click(const Hit& hit) {
 }
 
 void MainWindow::on_panel_key(WPARAM key) {
+    if (php_open_) {
+        on_php_panel_key(key);
+        return;
+    }
     // The panel was just opened and not painted yet: lay it out first.
     if (panel_geometry_.project != selected_) {
         UpdateWindow(hwnd_);
@@ -443,6 +454,9 @@ void MainWindow::run_panel_action(PanelAction action) {
             break;
         case PanelAction::Download:
             start_downloads_for(row->name);
+            break;
+        case PanelAction::Php:
+            open_php_part();
             break;
     }
 }

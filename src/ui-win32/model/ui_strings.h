@@ -159,6 +159,58 @@ enum class Str : std::uint8_t {
     SettingsRemoving,
     SettingsRemoveFailed,  // {0}: "PHP 8.4.16", {1}: the service's reason
     SettingsDefaultFailed, // {0}: the service's reason
+    // Settings > PHP (D20) and the project panel's PHP part.
+    SettingsPhp,
+    PhpHint,
+    PhpVersion,
+    PhpNoneInstalled,
+    PhpGoToRuntimes,
+    PhpExtensions,
+    PhpExtensionsOn,       // {0} on, {1} in all
+    PhpFindExtension,
+    PhpSlows,
+    PhpMissing,
+    PhpOpcacheNote,
+    PhpMoreCount,          // {0}: how many more
+    PhpShowAll,
+    PhpShowFewer,
+    PhpFixedNote,
+    PhpNoMatch,            // {0}: the search text
+    PhpIni,
+    PhpIniHint,
+    PhpEditFull,
+    PhpCustomIniUsed,
+    PhpReset,
+    PhpDefaultCue,
+    PhpApplies,            // {0}: who: "3 projects and shared sites"
+    PhpAndShared,          // {0}: "3 projects"
+    PhpSharedOnly,
+    PhpAppliesNobody,      // {0}: "8.5"
+    PhpDiscard,
+    PhpSave,
+    PhpSaving,
+    PhpSaved,
+    PhpDontSave,
+    PhpAskSave,            // {0}: "8.5"
+    PhpReadFailed,         // {0}: "8.5", {1}: the service's reason
+    PhpSaveFailed,         // {0}: the service's reason
+    PhpOpenIniFailed,      // {0}: the reason
+    PhpIniOpened,
+    PhpProblems,           // {0}: what the service skipped
+    PanelPhpSettings,
+    ProjectPhpOpenSettings,  // {0}: "8.5"
+    ProjectPhpExtHint,       // {0}: "8.5"
+    ProjectPhpNoChanges,
+    ProjectPhpChange,
+    ProjectPhpIniHint,       // {0}: "8.5"
+    ProjectPhpDefaultChoice, // {0}: the series' value
+    ProjectPhpAnother,
+    ProjectPhpAnotherCue,
+    ProjectPhpSavedIn,       // {0}: "floserver.json"
+    ProjectPhpReset,
+    ProjectPhpAskSave,       // {0}: the project
+    ProjectPhpNoSeries,
+    ProjectPhpBadLine,
     Count_,
 };
 

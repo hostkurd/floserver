@@ -6,6 +6,8 @@
 // floserverd through ServiceWorker.
 
 #include "canvas.h"
+#include "form_parts.h"
+#include "model/php_page.h"
 #include "model/ui_strings.h"
 #include "service_worker.h"
 #include "settings_window.h"
@@ -54,6 +56,14 @@ private:
         PanelField,
         PanelCopyEnv,
         PanelKeep,
+        // The panel's PHP part (D20); `row` is the field's index.
+        PanelPhpBack,
+        PanelPhpSettings,
+        PanelPhpChange,
+        PanelPhpField,
+        PanelPhpReset,
+        PanelPhpDiscard,
+        PanelPhpSave,
         // The New project page; `row` is the card's or field's index.
         WizCard,
         WizField,
@@ -76,10 +86,15 @@ private:
         WwwCopyEnv,
         WwwClose,
     };
-    enum class PanelAction : std::uint8_t { Browser, Folder, Terminal, Studio, Download };
+    enum class PanelAction : std::uint8_t { Browser, Folder, Terminal, Studio, Download, Php };
     [[nodiscard]] static constexpr bool is_panel_part(Part part) {
         return part == Part::PanelClose || part == Part::PanelAddress || part == Part::PanelButton ||
-               part == Part::PanelField || part == Part::PanelCopyEnv || part == Part::PanelKeep;
+               part == Part::PanelField || part == Part::PanelCopyEnv || part == Part::PanelKeep || is_php_part(part);
+    }
+    [[nodiscard]] static constexpr bool is_php_part(Part part) {
+        return part == Part::PanelPhpBack || part == Part::PanelPhpSettings || part == Part::PanelPhpChange ||
+               part == Part::PanelPhpField || part == Part::PanelPhpReset || part == Part::PanelPhpDiscard ||
+               part == Part::PanelPhpSave;
     }
     struct Hit {
         Part part = Part::None;
@@ -121,6 +136,29 @@ private:
         RECT keep_switch{};
         RECT log_label{};
         RECT log_box{};
+    };
+    // The panel's PHP part, from the last paint (or layout()).
+    struct PhpPanelGeometry {
+        std::string project;
+        RECT panel{};
+        RECT close{};
+        RECT title{};
+        RECT line2{};
+        RECT open_settings{};
+        RECT ext_title{};
+        RECT ext_hint{};
+        std::vector<RECT> chips;           // one per php_chips()
+        RECT no_changes{};
+        RECT change{};
+        RECT ini_title{};
+        RECT ini_hint{};
+        std::vector<RECT> labels;          // one per php_keys_
+        std::vector<RECT> boxes;
+        RECT info{};
+        RECT message{};
+        RECT reset{};
+        RECT discard{};
+        RECT save{};
     };
     // The New project page's pieces, from the last paint.
     struct WizardGeometry {
@@ -280,6 +318,33 @@ private:
     // drawn by hand in the shapes pass when the icon font isn't there.
     void paint_gear(Canvas& c, const RECT& r, Rgb color, bool text_pass) const;
 
+    // --- the panel's PHP part (main_window_php.cpp) ---
+    void open_php_part();
+    // Leaves it, asking first about changes not saved when `ask`; false: stay.
+    bool leave_php_part(bool ask);
+    [[nodiscard]] bool php_dirty() const;
+    [[nodiscard]] std::vector<std::pair<std::string, bool>> php_chips() const;  // name, on
+    [[nodiscard]] PhpPanelGeometry php_panel_geometry(HDC dc) const;
+    [[nodiscard]] Hit php_panel_hit_test(int x, int y) const;
+    [[nodiscard]] std::vector<Hit> php_panel_focus_order() const;
+    void on_php_panel_click(const Hit& hit);
+    void on_php_panel_key(WPARAM key);
+    void php_change_menu();
+    void php_display_menu(std::size_t index);
+    bool save_project_php();
+    void set_project_php_read_only(bool read_only);
+    void on_project_php_answers();
+    void sync_project_php();
+    void make_project_php_edits();
+    void place_project_php_edits(HDC dc);
+    void on_php_edit_change(int id);
+    void on_php_edit_focus(int id);
+    bool on_php_edit_key(int id, WPARAM key);
+    [[nodiscard]] FieldEdit* php_edit_of(std::size_t field) const;
+    void paint_php_panel(Canvas& c, bool text_pass) const;
+    // Settings opened on PHP for `series`.
+    void open_settings_php(const std::string& series);
+
     // --- New project (main_window_wizard.cpp) ---
     [[nodiscard]] bool wizard_open() const;
     [[nodiscard]] const TemplateCard* wizard_card() const;
@@ -404,6 +469,29 @@ private:
     int www_focus_ = -1;           // index into www_focus_order(); -1: none shown
     std::vector<VersionField> www_fields_;
     mutable WwwGeometry www_geometry_;
+
+    // The panel's PHP part (D20), for selected_ while php_open_.
+    static constexpr int kPhpEditBase = 2000;                // php_edits_[i] has id kPhpEditBase + i
+    static constexpr UINT kPhpBackMessage = WM_APP + 5;      // Escape in one of its boxes: leave it
+    bool php_open_ = false;
+    std::string php_series_;             // the series its PHP comes from
+    std::optional<PhpSeries> php_info_;  // php.get's answer: placeholders, the extension list
+    bool php_loading_ = false;
+    bool php_saving_ = false;
+    ProjectPhp php_before_;              // what floserver.json has
+    ProjectPhp php_after_;               // with the user's changes
+    std::string php_another_;            // "Another setting", as typed
+    std::string php_message_;
+    bool php_message_error_ = false;
+    std::string php_error_key_;          // the field Save was refused for
+    std::vector<std::string> php_keys_;  // the fields: the common ones, the project's others, "" (Another setting)
+    std::vector<std::unique_ptr<FieldEdit>> php_edits_;
+    std::vector<int> php_field_edit_;    // field -> index in php_edits_, or -1 (a picker)
+    mutable PhpPanelGeometry php_geometry_;
+    bool php_leave_after_save_ = false;  // "Save" chosen on the way out: leave once it's answered
+    bool asking_ = false;                // the panel's save question is open
+    bool quit_after_ask_ = false;        // Quit came meanwhile
+    win::UniqueBrush input_set_brush_;
 
     // Settings (D20): only while it's open; where it was, for next time.
     std::unique_ptr<SettingsWindow> settings_;

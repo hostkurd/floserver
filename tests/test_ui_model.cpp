@@ -1,5 +1,6 @@
 // The window's model (src/ui-win32/model): words, rows, addresses, colours.
 
+#include "model/php_page.h"
 #include "model/runtimes_page.h"
 #include "model/theme.h"
 #include "model/ui_strings.h"
@@ -263,6 +264,8 @@ TEST_CASE("colours: both themes are readable") {
         CHECK(contrast(p.banner_info.text, p.banner_info.fill) >= 4.5);
         CHECK(contrast(p.banner_error.text, p.banner_error.fill) >= 4.5);
         CHECK(contrast(p.text, p.selected) >= 4.5);
+        CHECK(contrast(p.text, p.input_set) >= 4.5);
+        CHECK(contrast(p.chip_added.text, p.chip_added.fill) >= 4.5);
         CHECK(contrast(p.link, p.selected) >= 4.5);
         CHECK(contrast(p.text_subtle, p.panel_box) >= 4.5);
         CHECK(contrast(p.log_text, p.log) >= 4.5);
@@ -823,4 +826,197 @@ TEST_CASE("the Shared sites settings page's pickers") {
     CHECK(fields[0].current == 2);
     CHECK(fields[1].current == 1);
     CHECK(fields[2].choices[fields[2].current].value == "nginx");
+}
+
+// --- Settings > PHP and the project panel's PHP part (D20) ---------------------------
+
+namespace {
+json php_reply() {
+    return json{{"series", "8.5"},
+                {"version", "8.5.12"},
+                {"extensions_fixed", false},
+                {"extensions", json::array({json{{"name", "curl"}, {"on", true}, {"base", true}},
+                                            json{{"name", "intl"}, {"on", false}, {"base", true}},
+                                            json{{"name", "bcmath"}, {"on", true}, {"base", false}},
+                                            json{{"name", "zz_odd"}, {"on", false}, {"base", false}},
+                                            json{{"name", "xdebug"}, {"on", false}, {"base", false}},
+                                            json{{"name", "gone"}, {"on", true}, {"base", false}, {"missing", true}},
+                                            json{{"name", "soap"}, {"on", false}, {"base", false}}})},
+                {"ini", {{"memory_limit", "1G"}, {"display_errors", "On"}, {"post_max_size", "512M"}}},
+                {"changed", {{"memory_limit", "1G"}}},
+                {"custom_ini", "C:/data/php/8.5/custom.ini"},
+                {"custom_ini_exists", true},
+                {"used_by", json::array({"blog", "shop", "_shared"})}};
+}
+}  // namespace
+
+TEST_CASE("php.get's answer") {
+    CHECK_FALSE(php_series_from_reply(json::object()));
+    const auto s = php_series_from_reply(php_reply());
+    REQUIRE(s);
+    CHECK(s->series == "8.5");
+    CHECK(s->version == "8.5.12");
+    REQUIRE(s->extensions.size() == 7);
+    CHECK(s->extensions[5].missing);
+    CHECK(s->changed.at("memory_limit") == "1G");
+    CHECK(s->custom_ini_exists);
+    CHECK(s->used_by.size() == 3);
+
+    auto null_version = php_reply();
+    null_version["version"] = nullptr;
+    CHECK(php_series_from_reply(null_version)->version.empty());
+}
+
+TEST_CASE("the installed PHP series, newest first") {
+    const Installed installed{{"php", {"8.4.27", "8.5.1", "8.5.12", "8.3.29"}}, {"node", {"24.1.0"}}};
+    const auto series = installed_php_series(installed);
+    REQUIRE(series.size() == 3);
+    CHECK(series[0] == std::pair<std::string, std::string>{"8.5", "8.5.12"});
+    CHECK(series[1].first == "8.4");
+    CHECK(series[2].first == "8.3");
+    CHECK(installed_php_series(Installed{}).empty());
+}
+
+TEST_CASE("extensions: those on first, then the popular ones, then by name; the find box") {
+    const auto s = *php_series_from_reply(php_reply());
+    const auto ordered = ordered_extensions(s);
+    std::vector<std::string> names;
+    names.reserve(ordered.size());
+    for (const auto& e : ordered) {
+        names.push_back(e.name);
+    }
+    CHECK(names == std::vector<std::string>{"curl", "bcmath", "gone", "soap", "xdebug", "intl", "zz_odd"});
+    CHECK(extension_matches("pdo_mysql", "MYS"));
+    CHECK(extension_matches("pdo_mysql", "  "));
+    CHECK_FALSE(extension_matches("pdo_mysql", "pg"));
+    CHECK(is_slow_extension("xdebug"));
+    CHECK(settings_php_ini_fields().size() == 8);
+    CHECK(project_php_ini_fields().size() == 5);
+}
+
+TEST_CASE("Settings > PHP: changes until Save, and only what changed is sent") {
+    const auto s = *php_series_from_reply(php_reply());
+    PhpChanges c;
+    CHECK(c.empty());
+    CHECK(extensions_on(s, c) == 3);
+    toggle_extension(s, c, "soap");
+    CHECK(extension_on(s, c, "soap"));
+    CHECK(extensions_on(s, c) == 4);
+    toggle_extension(s, c, "soap");  // back as it was: no change
+    CHECK(c.empty());
+    toggle_extension(s, c, "curl");
+    CHECK_FALSE(extension_on(s, c, "curl"));
+
+    // php.ini: the series' value, a change, the same text again, a reset.
+    CHECK(ini_text(s, c, "memory_limit") == "1G");
+    CHECK(ini_marked(s, c, "memory_limit"));
+    CHECK_FALSE(ini_marked(s, c, "post_max_size"));
+    set_ini_text(s, c, "post_max_size", " 64M ");
+    CHECK(ini_text(s, c, "post_max_size") == "64M");
+    CHECK(ini_marked(s, c, "post_max_size"));
+    set_ini_text(s, c, "post_max_size", "512M");
+    CHECK_FALSE(c.ini.contains("post_max_size"));
+    set_ini_text(s, c, "post_max_size", "");  // the default already
+    CHECK_FALSE(c.ini.contains("post_max_size"));
+    reset_ini(s, c, "memory_limit");
+    CHECK_FALSE(ini_marked(s, c, "memory_limit"));
+    CHECK(ini_text(s, c, "memory_limit").empty());
+    set_ini_text(s, c, "date.timezone", "Asia/Baghdad");
+
+    const json params = php_set_params("8.5", c);
+    CHECK(params == json{{"series", "8.5"},
+                         {"extensions", {{"curl", false}}},
+                         {"ini", {{"memory_limit", nullptr}, {"date.timezone", "Asia/Baghdad"}}}});
+    CHECK(php_set_params("8.5", PhpChanges{}) == json{{"series", "8.5"}});
+}
+
+TEST_CASE("Settings > PHP: what Save restarts") {
+    auto s = *php_series_from_reply(php_reply());
+    CHECK(php_restart_text(s, Lang::En) == "Applies when saved: PHP for 2 projects and shared sites restarts (under a second).");
+    s.used_by = {"blog"};
+    CHECK(php_restart_text(s, Lang::En) == "Applies when saved: PHP for 1 project restarts (under a second).");
+    s.used_by = {"_shared"};
+    CHECK(php_restart_text(s, Lang::En) == "Applies when saved: PHP for shared sites restarts (under a second).");
+    s.used_by.clear();
+    CHECK(php_restart_text(s, Lang::En) == "Applies when saved. Nothing uses PHP 8.5 right now.");
+    CHECK(php_restart_text(s, Lang::Ar).find(kLri + "8.5" + kPdi) != std::string::npos);
+}
+
+TEST_CASE("the project panel's PHP part") {
+    const json list = one({{"name", "shop"},
+                           {"php", "8.4.27"},
+                           {"wants", {{"web", "nginx"}, {"extensions", {"bcmath", "-exif", ""}}, {"php_ini", {{"memory_limit", "1024M"}}}}}});
+    const std::vector<ProjectRow> rows = rows_from_list(list, Lang::En);
+    REQUIRE(rows.size() == 1);
+    const ProjectRow& row = rows[0];
+    CHECK(row.wants.extensions == std::vector<std::string>{"bcmath", "-exif"});
+    CHECK(project_uses_php(row));
+    CHECK(project_php_series(row, {}) == "8.4");
+
+    ProjectRow node;
+    node.wants.known = true;
+    node.wants.node = "24";
+    CHECK_FALSE(project_uses_php(node));
+    const ProjectRow plain;
+    CHECK(project_uses_php(plain));
+    CHECK_FALSE(project_php_series(plain, {}));
+    CHECK(project_php_series(plain, {{"php", {"8.3.29", "8.5.1"}}}) == "8.5");
+
+    const ProjectPhp before = project_php_of(row);
+    CHECK(before.extensions.at("bcmath"));
+    CHECK_FALSE(before.extensions.at("exif"));
+    CHECK(before.ini.at("memory_limit") == "1024M");
+
+    const auto s = *php_series_from_reply(php_reply());
+    ProjectPhp after = before;
+    CHECK(project_extension_on(&s, after, "bcmath"));
+    CHECK_FALSE(project_extension_on(&s, after, "intl"));
+    toggle_project_extension(&s, after, "soap");    // off in the series: on for the project
+    CHECK(after.extensions.at("soap"));
+    toggle_project_extension(&s, after, "soap");    // and back: the change goes
+    CHECK_FALSE(after.extensions.contains("soap"));
+    toggle_project_extension(&s, after, "curl");    // on in the series: off for the project
+    CHECK_FALSE(after.extensions.at("curl"));
+    toggle_project_extension(&s, after, "bcmath");  // on in the series and the project: off
+    toggle_project_extension(&s, after, "bcmath");  // back on, as the series has it: the change goes
+    CHECK_FALSE(after.extensions.contains("bcmath"));
+    CHECK(project_extension_on(&s, after, "bcmath"));
+    after.extensions.erase("exif");
+    set_project_ini(after, "memory_limit", "  ");
+    set_project_ini(after, "max_execution_time", "300");
+
+    CHECK(project_php_params("shop", before, after) ==
+          json{{"name", "shop"},
+               {"extensions", {{"curl", "off"}, {"bcmath", nullptr}, {"exif", nullptr}}},
+               {"ini", {{"max_execution_time", "300"}, {"memory_limit", nullptr}}}});
+    CHECK(project_php_params("shop", before, before) == json{{"name", "shop"}});
+
+    CHECK(parse_ini_line(" date.timezone = Asia/Baghdad ") ==
+          std::pair<std::string, std::string>{"date.timezone", "Asia/Baghdad"});
+    CHECK(parse_ini_line("short_open_tag =") == std::pair<std::string, std::string>{"short_open_tag", ""});
+    CHECK_FALSE(parse_ini_line("no equals"));
+    CHECK_FALSE(parse_ini_line(" = 1"));
+}
+
+TEST_CASE("the php.ini field a refusal is about") {
+    const std::vector<std::string> keys{"memory_limit", "opcache.enable", "opcache.enable_cli", "date.timezone"};
+    CHECK(ini_error_key("memory_limit: put the value in double quotes when it contains = ; \" ' { } [ ] or `", keys) ==
+          "memory_limit");
+    CHECK(ini_error_key("opcache.enable is set by FloServer (opcache always on, edits seen at once) and can't be changed",
+                        keys) == "opcache.enable");
+    CHECK(ini_error_key("opcache.enable_cli: the value can't contain $", keys) == "opcache.enable_cli");
+    CHECK(ini_error_key("memory_limits: no", keys).empty());
+    CHECK(ini_error_key("the config can't be saved", keys).empty());
+}
+
+TEST_CASE("a late PHP answer for what the user has left is dropped") {
+    // Settings shows 8.5: an answer (or error) asked for 8.4 isn't its.
+    CHECK(php_answer_matches("_settings", "8.5", "_settings", "8.5"));
+    CHECK_FALSE(php_answer_matches("_settings", "8.4", "_settings", "8.5"));
+    // The panel: another project's answers, or its old series', aren't the open part's.
+    CHECK_FALSE(php_answer_matches("blog", "8.5", "shop", "8.5"));
+    CHECK_FALSE(php_answer_matches("shop", "8.3", "shop", "8.5"));
+    // projects.php names no series: the project is enough.
+    CHECK(php_answer_matches("shop", "", "shop", "8.5"));
+    CHECK_FALSE(php_answer_matches("shop", "", "_settings", "8.5"));
 }

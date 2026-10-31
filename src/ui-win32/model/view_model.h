@@ -30,6 +30,9 @@ struct Wants {
     std::string python;
     std::string database;  // "mariadb-11.4"
     std::string web = "nginx";
+    // The project's own PHP changes (D20): "bcmath", "-exif"; "memory_limit" -> "1024M".
+    std::vector<std::string> extensions;
+    std::map<std::string, std::string> php_ini;
 };
 
 struct ProjectRow {

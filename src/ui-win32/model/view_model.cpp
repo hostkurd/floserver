@@ -152,6 +152,20 @@ ProjectRow row_from(const json& p, Lang lang) {
         row.wants.python = text_of(want, "python");
         row.wants.database = text_of(want, "database");
         row.wants.web = text_of(want, "web") == "apache" ? "apache" : "nginx";
+        if (want.contains("extensions") && want["extensions"].is_array()) {
+            for (const auto& e : want["extensions"]) {
+                if (e.is_string() && !e.get_ref<const std::string&>().empty()) {
+                    row.wants.extensions.push_back(e.get<std::string>());
+                }
+            }
+        }
+        if (want.contains("php_ini") && want["php_ini"].is_object()) {
+            for (const auto& [key, value] : want["php_ini"].items()) {
+                if (value.is_string()) {
+                    row.wants.php_ini[key] = value.get<std::string>();
+                }
+            }
+        }
     }
     row.static_site = flag_of(p, "static");
     if (row.static_site) {
