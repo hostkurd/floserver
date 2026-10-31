@@ -36,7 +36,7 @@ constexpr int kMinH = 400;
 // No wider or taller than this, and no Maximize: a page of settings
 // stretched across a big screen is hard to read.
 constexpr int kMaxW = 1200;
-constexpr int kMaxH = 1000;
+constexpr int kMaxH = 850;
 constexpr int kSidebarW = 220;
 constexpr int kNarrowSidebarW = 168;  // below kWideFromW
 constexpr int kWideFromW = 760;
