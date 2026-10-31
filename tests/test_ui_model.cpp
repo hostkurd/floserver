@@ -584,9 +584,11 @@ TEST_CASE("Settings > Runtimes: groups and rows from runtimes.list") {
     REQUIRE(page.groups.size() == 5);
     CHECK(page.groups[0].title == "PHP");
     CHECK(page.groups[1].title == "MariaDB");
-    CHECK(page.groups[4].title == "Web servers");
+    CHECK(page.groups[2].title == "Web servers");  // full width, after MariaDB
     CHECK(page.groups[0].wide);
-    CHECK_FALSE(page.groups[2].wide);
+    CHECK(page.groups[2].wide);
+    CHECK(page.groups[3].title == "Node.js");
+    CHECK_FALSE(page.groups[3].wide);
 
     const auto& php = page.groups[0].rows;
     REQUIRE(php.size() == 4);  // 8.5.1 once (the ts build isn't offered), 8.4.16, 8.3.29, 8.2.30
@@ -611,23 +613,23 @@ TEST_CASE("Settings > Runtimes: groups and rows from runtimes.list") {
     CHECK_FALSE(picker.choices[picker.current].value.has_value());
     CHECK(picker.choices[1].value == "8.5");
     CHECK(picker.choices[2].value == "8.4");
-    CHECK_FALSE(page.groups[2].picker);  // Node.js has none
+    CHECK_FALSE(page.groups[3].picker);  // Node.js has none
 
     CHECK(page.groups[1].rows[0].usage == "2 projects · running on port 3306");
     CHECK(page.groups[1].rows[1].action == RowAction::Download);
 
-    const auto& node = page.groups[2].rows;
+    const auto& node = page.groups[3].rows;
     REQUIRE(node.size() == 2);
     CHECK(node[0].is_default);
     CHECK(node[0].used_by.empty());
 
-    const auto& web = page.groups[4].rows;
+    const auto& web = page.groups[2].rows;
     REQUIRE(web.size() == 2);
     CHECK(web[0].label == "nginx 1.30.6");
     CHECK(web[0].always_used);
     CHECK(web[0].action == RowAction::None);
     CHECK(web[1].label == "Apache 2.4.66");
-    CHECK(web[1].note == ".htaccess");
+    CHECK(web[1].note.empty());  // the row shows its size or who uses it
     CHECK(web[1].used_by == "Shared sites");
 }
 
@@ -656,8 +658,10 @@ TEST_CASE("Settings > Runtimes: the stored default, and what the poll says is in
     CHECK(rows[1].folder.empty());
     CHECK(rows[1].action == RowAction::None);
     CHECK(rows[1].used_by.empty());
-    // Node and Apache are gone; Python only to download.
-    CHECK(later.groups[2].rows[0].action == RowAction::Download);
+    // Node and Apache were removed since: only to download now.
+    REQUIRE(later.groups.size() == 5);
+    CHECK(later.groups[3].title == "Node.js");
+    CHECK(later.groups[3].rows[0].action == RowAction::Download);
 }
 
 TEST_CASE("Settings > Runtimes: no list yet, and a check that failed") {
