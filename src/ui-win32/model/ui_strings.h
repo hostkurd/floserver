@@ -71,6 +71,8 @@ enum class Str : std::uint8_t {
     FieldPython,
     ChoiceNone,
     ChoiceNewest,
+    ChoiceAuto,        // PHP: no key, the folder decides
+    ChoiceAutoIs,      // {0}: what's in effect, "None" or "Newest installed"
     NotInstalled,      // {0}: "8.1"
     SavedIn,           // {0}: "floserver.json"
     PhpOffNote,        // under the pickers: PHP off, the folder has .php files

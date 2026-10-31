@@ -24,16 +24,19 @@ bool is_pool_php(const InstalledRuntime& r) {
 
 }  // namespace
 
-bool has_php_files(const fs::path& doc_root) {
+namespace {
+
+// `unreadable`: the answer when the folder can't be read.
+bool find_php_files(const fs::path& doc_root, bool unreadable) {
     std::error_code ec;
     fs::directory_iterator it(doc_root, ec);
     if (ec) {
-        return true;  // can't tell (no such folder yet): a PHP project, as before
+        return unreadable;
     }
     std::size_t looked = 0;
     for (; it != fs::directory_iterator() && looked < 2000; it.increment(ec), ++looked) {
         if (ec) {
-            return true;
+            return unreadable;
         }
         std::string ext = path_to_utf8(it->path().extension());
         std::transform(ext.begin(), ext.end(), ext.begin(), [](char c) { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c; });
@@ -43,6 +46,13 @@ bool has_php_files(const fs::path& doc_root) {
     }
     return false;
 }
+
+}  // namespace
+
+// Can't tell (no such folder yet): a PHP project, as before.
+bool has_php_files(const fs::path& doc_root) { return find_php_files(doc_root, true); }
+
+bool has_php_files_seen(const fs::path& doc_root) { return find_php_files(doc_root, false); }
 
 const InstalledRuntime* best_installed(const std::vector<InstalledRuntime>& installed, const std::string& name,
                                        const std::string& wanted) {
@@ -308,7 +318,7 @@ WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
         // file (or a PHP version) later makes it a PHP project.
         const bool off = php_off(pc);
         if (off) {
-            site.php_files = has_php_files(site.doc_root);
+            site.php_files = has_php_files_seen(site.doc_root);
         }
         if (!php_asked(pc) && !pc.node && !pc.python && !apache && (off || !has_php_files(site.doc_root))) {
             if (pc.database && best_installed(installed, pc.database->family, pc.database->version) == nullptr) {

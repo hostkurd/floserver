@@ -85,6 +85,8 @@ constexpr std::array kTable{
     Entry{Str::FieldPython, "Python", FLO_LRI "Python" FLO_PDI, FLO_LRI "Python" FLO_PDI},
     Entry{Str::ChoiceNone, "None", "بلا", "هیچ"},
     Entry{Str::ChoiceNewest, "Newest installed", "أحدث إصدار مثبّت", "نوێترین وەشانی دامەزراو"},
+    Entry{Str::ChoiceAuto, "Automatic", "تلقائي", "خۆکار"},
+    Entry{Str::ChoiceAutoIs, "Automatic ({0})", "تلقائي ({0})", "خۆکار ({0})"},
     Entry{Str::NotInstalled, "{0} (not installed)", "{0} (غير مثبّت)", "{0} (دانەمەزراوە)"},
     Entry{Str::SavedIn, "Saved in {0}", "يُحفظ في {0}", "پاشەکەوت دەکرێت لە {0}"},
     Entry{Str::PhpOffNote, "PHP is off: .php files are sent as they are, not run.",

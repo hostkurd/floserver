@@ -464,13 +464,23 @@ std::vector<VersionField> fields_of(const ProjectRow& row, const Installed& inst
 
     VersionField php{Field::Php, "php", std::string(text(lang, Str::FieldPhp)), {}, 0};
     if (project) {
+        // Automatic removes the key: the folder decides. Without the key it's
+        // the one shown, with what's in effect: none for a static site or a
+        // Node or Python project, the newest for a PHP one. None and Newest
+        // installed always write the key, so either can be pinned.
+        const bool automatic = w.php.empty() && !w.php_off;
+        if (automatic) {
+            const bool none = !w.node.empty() || !w.python.empty() || row.static_site;
+            php.choices.push_back(
+                {fill(lang, Str::ChoiceAutoIs, {std::string(text(lang, none ? Str::ChoiceNone : Str::ChoiceNewest))}),
+                 std::nullopt});
+        } else {
+            php.choices.push_back({std::string(text(lang, Str::ChoiceAuto)), std::nullopt});
+        }
         php.choices.push_back({std::string(text(lang, Str::ChoiceNone)), std::string(kPhpNone)});
         php.choices.push_back({std::string(text(lang, Str::ChoiceNewest)), std::string(kPhpNewest)});
         const bool newest = w.php == kPhpNewest;
-        // Without the key, what's in effect: none for a static site or a
-        // Node or Python project, the newest for a PHP one.
-        const bool none = w.php_off || (w.php.empty() && (!w.node.empty() || !w.python.empty() || row.static_site));
-        php.current = none ? 0U : 1U;
+        php.current = automatic ? 0U : w.php_off ? 1U : 2U;
         add_series(php, installed, "php", newest ? std::string() : w.php, "", "", lang);
     } else {
         // Without the key, a PHP project gets the newest installed; a Node

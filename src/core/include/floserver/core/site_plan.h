@@ -40,6 +40,8 @@ enum class SiteState : std::uint8_t {
 // Whether a document root holds a .php file at its top level; true when it
 // can't be read (a folder not made yet counts as PHP, as before).
 [[nodiscard]] bool has_php_files(const std::filesystem::path& doc_root);
+// The same, but false when it can't be read: only a .php file seen counts.
+[[nodiscard]] bool has_php_files_seen(const std::filesystem::path& doc_root);
 
 // The newest install of `name` matching `wanted` ("8.2"), or the newest of
 // all when `wanted` is empty; PHP only counts NTS builds (the pools' kind).

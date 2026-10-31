@@ -129,10 +129,11 @@ struct VersionField {
 // The panel's version pickers for a project: PHP, Database, Web server,
 // Node.js, and Python when one is installed or asked for. Each lists what's
 // installed (one entry per series), plus what floserver.json asks for when
-// that isn't installed ("8.1 (not installed)"). PHP starts with None (sends
-// "none": false in the file) and Newest installed ("newest"); without the
-// key, the one in effect is shown: None for a static, Node or Python
-// project, Newest installed for a PHP one.
+// that isn't installed ("8.1 (not installed)"). PHP starts with Automatic
+// (removes the key; without one it's shown as "Automatic (None)" for a
+// static, Node or Python project, "Automatic (Newest installed)" for a PHP
+// one), then None (sends "none": false in the file) and Newest installed
+// ("newest").
 [[nodiscard]] std::vector<VersionField> version_fields(const ProjectRow& row, const Installed& installed, Lang lang);
 
 // The note under the panel's pickers when PHP is off and the folder has

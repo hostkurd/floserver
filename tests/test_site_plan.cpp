@@ -510,6 +510,8 @@ TEST_CASE("an HTML-only project is a static site: no PHP, no download") {
     CHECK_FALSE(has_php_files(tmp.path() / "landing"));
     CHECK(has_php_files(tmp.path() / "shop"));
     CHECK(has_php_files(tmp.path() / "nope"));
+    CHECK_FALSE(has_php_files_seen(tmp.path() / "nope"));  // can't be read: none seen
+    CHECK(has_php_files_seen(tmp.path() / "shop"));
 }
 
 TEST_CASE("\"php\": false is never PHP; \"newest\" always is") {
@@ -522,7 +524,8 @@ TEST_CASE("\"php\": false is never PHP; \"newest\" always is") {
                        {"newest", tmp.path() / "html", true, false, {}},
                        {"offnode", tmp.path() / "code", true, false, {}},
                        {"newnode", tmp.path() / "html", true, false, {}},
-                       {"offapache", tmp.path() / "code", true, false, {}}};
+                       {"offapache", tmp.path() / "code", true, false, {}},
+                       {"offgone", tmp.path() / "not-made-yet", true, false, {}}};
     auto installed = kInstalled;
     installed.push_back(runtime("apache", "2.4.69"));
     const auto files = reader({{"off", R"({"php": false})"},
@@ -530,9 +533,12 @@ TEST_CASE("\"php\": false is never PHP; \"newest\" always is") {
                                {"newest", R"({"php": "newest"})"},
                                {"offnode", R"({"php": false, "node": "24"})"},
                                {"newnode", R"({"php": "newest", "node": "24"})"},
-                               {"offapache", R"({"php": false, "web": "apache"})"}});
+                               {"offapache", R"({"php": false, "web": "apache"})"},
+                               {"offgone", R"({"php": false})"}});
     const auto plan = plan_sites(config, files, installed, std::string("8.4"));
-    REQUIRE(plan.sites.size() == 6);
+    REQUIRE(plan.sites.size() == 7);
+    CHECK(plan.sites[6].static_site);
+    CHECK_FALSE(plan.sites[6].php_files);  // a folder that can't be read has no note
     // .php files, PHP off: a static site, and the window is told.
     CHECK(plan.sites[0].static_site);
     CHECK(plan.sites[0].state == SiteState::Ready);

@@ -331,14 +331,16 @@ TEST_CASE("the panel's version pickers list what's installed and what's asked fo
     REQUIRE(fields.size() == 4);  // no Python installed or asked for
     const VersionField& php = fields[0];
     CHECK(php.key == "php");
-    REQUIRE(php.choices.size() == 5);
-    CHECK(php.choices[0].label == "None");
-    CHECK(php.choices[0].value == std::optional<std::string>("none"));
-    CHECK(php.choices[1].label == "Newest installed");
-    CHECK(php.choices[1].value == std::optional<std::string>("newest"));
-    CHECK(php.choices[2].label == "8.10");
-    CHECK(php.choices[4].value == std::optional<std::string>("8.4"));
-    CHECK(php.current == 4);
+    REQUIRE(php.choices.size() == 6);
+    CHECK(php.choices[0].label == "Automatic");  // a version is set: Automatic removes it
+    CHECK_FALSE(php.choices[0].value);
+    CHECK(php.choices[1].label == "None");
+    CHECK(php.choices[1].value == std::optional<std::string>("none"));
+    CHECK(php.choices[2].label == "Newest installed");
+    CHECK(php.choices[2].value == std::optional<std::string>("newest"));
+    CHECK(php.choices[3].label == "8.10");
+    CHECK(php.choices[5].value == std::optional<std::string>("8.4"));
+    CHECK(php.current == 5);
     CHECK(php_off_note(row, Lang::En).empty());
 
     const VersionField& db = fields[1];
@@ -371,34 +373,43 @@ TEST_CASE("the panel's version pickers list what's installed and what's asked fo
         row.wants.php.clear();
         row.wants.node = "24";
         fields = version_fields(row, installed, Lang::En);
-        CHECK(fields[0].choices[0].label == "None");
+        CHECK(fields[0].choices[0].label == "Automatic (None)");
         CHECK(fields[0].current == 0);
         CHECK(fields[3].choices[fields[3].current].label == "24");
     }
-    SUBCASE("without the key: None for a static site, Newest installed for a PHP one") {
+    SUBCASE("without the key: Automatic, saying what's in effect; None and Newest still write the key") {
         row.wants.php.clear();
         row.static_site = true;
         fields = version_fields(row, installed, Lang::En);
-        CHECK(fields[0].choices.size() == 5);  // nothing "not installed" added
+        REQUIRE(fields[0].choices.size() == 6);  // nothing "not installed" added
         CHECK(fields[0].current == 0);
+        CHECK(fields[0].choices[0].label == "Automatic (None)");
+        CHECK_FALSE(fields[0].choices[0].value);
+        CHECK(fields[0].choices[1].label == "None");  // a different choice: it pins false
+        CHECK(fields[0].choices[1].value == std::optional<std::string>("none"));
         row.static_site = false;
         fields = version_fields(row, installed, Lang::En);
-        CHECK(fields[0].current == 1);
-        CHECK(fields[0].choices[1].label == "Newest installed");
+        CHECK(fields[0].current == 0);
+        CHECK(fields[0].choices[0].label == "Automatic (Newest installed)");
+        CHECK(fields[0].choices[2].value == std::optional<std::string>("newest"));
+        CHECK(version_fields(row, installed, Lang::Ar)[0].choices[0].label.find("تلقائي") == 0);
     }
     SUBCASE("\"php\": \"newest\" picks Newest installed, even with no .php files yet") {
         row.wants.php = "newest";
         row.static_site = false;
         fields = version_fields(row, installed, Lang::En);
-        CHECK(fields[0].choices.size() == 5);
-        CHECK(fields[0].current == 1);
+        CHECK(fields[0].choices.size() == 6);
+        CHECK(fields[0].current == 2);
+        CHECK(fields[0].choices[0].label == "Automatic");
     }
     SUBCASE("\"php\": false picks None, and says so when there are .php files") {
         row.wants.php.clear();
         row.wants.php_off = true;
         row.static_site = true;
         fields = version_fields(row, installed, Lang::En);
-        CHECK(fields[0].current == 0);
+        CHECK(fields[0].current == 1);
+        CHECK(fields[0].choices[0].label == "Automatic");
+        CHECK_FALSE(fields[0].choices[0].value);
         CHECK(php_off_note(row, Lang::En).empty());
         row.php_files = true;
         CHECK(php_off_note(row, Lang::En) == "PHP is off: .php files are sent as they are, not run.");
