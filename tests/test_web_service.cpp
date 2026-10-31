@@ -382,14 +382,17 @@ TEST_CASE("PHP settings (D20): a series' value, its custom.ini and the project's
     web.start();
     const Port http = config.fixed_ports->http;
     const auto page = [&] { return get(http, "shop.localhost"); };
-    REQUIRE(page() == "200 512M 1000");  // FloServer's default, PHP's own
+    // A pool whose key changed starts afresh: on a busy machine the first
+    // request can reach nginx before the new php-cgi answers (502), so each
+    // check waits a little, as the other PHP tests do.
+    REQUIRE(eventually([&] { return page() == "200 512M 1000"; }));  // FloServer's default, PHP's own
 
     // The series' value, as Settings -> PHP saves it; the daemon reloads at once.
     ProjectService projects(data);
     ServiceRefusal refusal;
     REQUIRE(projects.php_set("8.3", nlohmann::json(), {{"memory_limit", "256M"}}, refusal));
     (void)web.reload();
-    CHECK(page() == "200 256M 1000");
+    CHECK(eventually([&] { return page() == "200 256M 1000"; }));
 
     // custom.ini, edited by hand: picked up by the supervisor's own reloads.
     const auto custom = projects.php_custom_ini("8.3", refusal);
@@ -400,7 +403,7 @@ TEST_CASE("PHP settings (D20): a series' value, its custom.ini and the project's
     // The project's own value wins over both.
     REQUIRE(projects.project_php("shop", nlohmann::json(), {{"memory_limit", "1024M"}}, refusal));
     (void)web.reload();
-    CHECK(page() == "200 1024M 4321");
+    CHECK(eventually([&] { return page() == "200 1024M 4321"; }));
     web.stop();
 }
 
