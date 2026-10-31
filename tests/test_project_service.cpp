@@ -107,13 +107,53 @@ TEST_CASE("the window changes one version in a project's floserver.json") {
     CHECK(refusal.code == "unknown_project");
     CHECK_FALSE(service.use("shop", "root", std::string("/"), refusal));
     CHECK(refusal.code == "bad_params");
-    CHECK_FALSE(service.use("shop", "php", std::string("newest"), refusal));
+    CHECK_FALSE(service.use("shop", "php", std::string("latest"), refusal));
+    CHECK(refusal.code == "config_refused");
+    CHECK_FALSE(service.use("shop", "node", std::string("none"), refusal));
     CHECK(refusal.code == "config_refused");
     // Kept with its real, long name (Windows runners have a short temp path).
     const auto folder = service.folder("shop", refusal);
     REQUIRE(folder);
     CHECK(fs::equivalent(*folder, shop));
     CHECK_FALSE(service.folder("nope", refusal));
+}
+
+TEST_CASE("the window turns PHP off, or on with the newest, in floserver.json") {
+    const TempDir data;
+    const fs::path site = data.path() / "work" / "site";
+    test_util::write_file(site / "index.php", "<?php echo 1;");
+    fake_install(data.path(), "php", "8.4.27");
+    fake_install(data.path(), "php", "8.5.12");
+
+    ProjectService service(data.path());
+    ServiceRefusal refusal;
+    REQUIRE(service.add(site, "", refusal));
+
+    // No key: .php files make it a PHP project.
+    auto listed = service.list(refusal);
+    REQUIRE(listed);
+    CHECK((*listed)["projects"][0]["php"] == "8.5.12");
+
+    const auto off = service.use("site", "php", std::string("none"), refusal);
+    REQUIRE(off);
+    CHECK((*off)["wants"]["php"] == false);
+    CHECK((*off)["static"] == true);
+    CHECK((*off)["php_files"] == true);
+    CHECK_FALSE(off->contains("php"));
+    const auto text = read_small_file(site / "floserver.json", 4096);
+    REQUIRE(text);
+    CHECK(text->find("\"php\": false") != std::string::npos);
+
+    const auto newest = service.use("site", "php", std::string("newest"), refusal);
+    REQUIRE(newest);
+    CHECK((*newest)["wants"]["php"] == "newest");
+    CHECK((*newest)["php"] == "8.5.12");
+    CHECK_FALSE(newest->contains("php_files"));
+
+    const auto removed = service.use("site", "php", std::nullopt, refusal);
+    REQUIRE(removed);
+    CHECK_FALSE((*removed)["wants"].contains("php"));
+    CHECK((*removed)["php"] == "8.5.12");
 }
 
 TEST_CASE("a damaged config.json is never overwritten") {

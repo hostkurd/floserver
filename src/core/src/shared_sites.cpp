@@ -117,6 +117,10 @@ std::optional<SharedConfig> read_shared_config(const AppConfig& app, std::string
         error = "shared." + (first.key.empty() ? std::string("settings") : first.key) + " " + first.message;
         return std::nullopt;
     }
+    if (php_off(*parsed.config)) {
+        error = "shared.php can't be false: shared sites always have PHP";
+        return std::nullopt;
+    }
     out.php = parsed.config->php;
     out.web = doc.contains("web") ? parsed.config->web : WebServer::Apache;
     out.database = parsed.config->database;

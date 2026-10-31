@@ -271,7 +271,7 @@ WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
         // Python or Node without PHP: the project's own server, forwarded to
         // (D11, D17). Python serves when both are named (a Django app with a
         // Vite front end); with PHP, they're only there for their tools.
-        if ((pc.node || pc.python) && !pc.php && !apache) {
+        if ((pc.node || pc.python) && !php_asked(pc) && !apache) {
             const AppKind kind = pc.python ? AppKind::Python : AppKind::Node;
             const std::string runtime_name = pc.python ? "python" : "node";
             const std::string wanted = pc.python ? *pc.python : *pc.node;
@@ -303,9 +303,14 @@ WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
         }
 
         // A static site: no PHP, Node or Python asked for and no .php file in
-        // the document root. nginx serves its files as they are; nothing else
-        // runs. A .php file (or a PHP version) later makes it a PHP project.
-        if (!pc.php && !pc.node && !pc.python && !apache && !has_php_files(site.doc_root)) {
+        // the document root, or PHP turned off ("php": false). nginx serves
+        // its files as they are; nothing else runs. Without the key, a .php
+        // file (or a PHP version) later makes it a PHP project.
+        const bool off = php_off(pc);
+        if (off) {
+            site.php_files = has_php_files(site.doc_root);
+        }
+        if (!php_asked(pc) && !pc.node && !pc.python && !apache && (off || !has_php_files(site.doc_root))) {
             if (pc.database && best_installed(installed, pc.database->family, pc.database->version) == nullptr) {
                 site.missing.push_back(pc.database->family + " " + pc.database->version);
                 site.state = SiteState::NeedsDownload;
@@ -316,8 +321,36 @@ WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
             plan.sites.push_back(std::move(site));
             continue;
         }
+        // Apache with PHP off: Apache alone (for .htaccess), no pool.
+        if (apache && off) {
+            const InstalledRuntime* apache_runtime = best_installed(installed, "apache", "");
+            if (apache_runtime == nullptr) {
+                site.missing.emplace_back("apache");
+            }
+            if (pc.node && best_installed(installed, "node", *pc.node) == nullptr) {
+                site.missing.push_back("node " + *pc.node);
+            }
+            if (pc.python && best_installed(installed, "python", *pc.python) == nullptr) {
+                site.missing.push_back("python " + *pc.python);
+            }
+            if (pc.database && best_installed(installed, pc.database->family, pc.database->version) == nullptr) {
+                site.missing.push_back(pc.database->family + " " + pc.database->version);
+            }
+            if (!site.missing.empty() || apache_runtime == nullptr) {
+                site.state = SiteState::NeedsDownload;
+            } else {
+                site.state = SiteState::Ready;
+                site.apache = true;
+                plan.apache_dir = apache_runtime->dir;
+                plan.apache_version = apache_runtime->version;
+            }
+            plan.sites.push_back(std::move(site));
+            continue;
+        }
 
-        const std::string wanted_php = pc.php.value_or(default_php.value_or(""));
+        // "newest" means the newest installed, whatever the default.
+        const std::string wanted_php =
+            pc.php.value_or(pc.php_choice == PhpChoice::Newest ? std::string() : default_php.value_or(""));
         const InstalledRuntime* php = best_installed(installed, "php", wanted_php);
         if (php == nullptr) {
             site.missing.push_back(wanted_php.empty() ? "php" : "php " + wanted_php);
@@ -449,8 +482,8 @@ std::map<std::string, std::vector<std::string>> runtime_users(const AppConfig& c
     // waits for a download (or has a problem such as a missing folder) still
     // needs the rest, and removing one of those would mean two downloads.
     const auto named = [&](const ProjectConfig& pc, const std::string& who) {
-        if (pc.php) {
-            if (const InstalledRuntime* r = best_installed(installed, "php", *pc.php)) {
+        if (php_asked(pc)) {
+            if (const InstalledRuntime* r = best_installed(installed, "php", pc.php.value_or(""))) {
                 use("php", r->dir, who);
             }
         }

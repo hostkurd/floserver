@@ -412,6 +412,10 @@ MainWindow::PanelGeometry MainWindow::panel_geometry(HDC dc) const {
         }
         const int lines = static_cast<int>((fields_.size() + 1) / 2);
         y += lines * cell_h + std::max(0, lines - 1) * px(kFieldGap);
+        if (!php_off_note(*row, lang_).empty()) {
+            g.php_note = {x0, y + px(6), x1, y + px(6) + px(32)};  // two lines at most
+            y = g.php_note.bottom;
+        }
         g.saved_in = {x0, y + px(6), x1, y + px(6) + px(16)};
         y = g.saved_in.bottom + px(kPanelGap);
 
@@ -1134,6 +1138,9 @@ void MainWindow::paint_panel(Canvas& c, HDC dc, bool text_pass) const {
         if (value < field.choices.size()) {
             c.text(inner, w(field.choices[value].label), fonts_.button.get(), p.text, Align::Start, false);
         }
+    }
+    if (g.php_note.right > g.php_note.left) {
+        c.paragraph(g.php_note, w(php_off_note(*row, lang_)), fonts_.caption.get(), p.text_subtle);
     }
     if (g.saved_in.right > g.saved_in.left) {
         c.text(g.saved_in, w(fill(lang_, Str::SavedIn, {core::kProjectConfigFileName})), fonts_.caption.get(),

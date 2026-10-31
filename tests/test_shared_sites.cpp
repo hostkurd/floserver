@@ -83,6 +83,8 @@ TEST_CASE("shared sites settings: defaults, what's read and what's refused") {
     CHECK_FALSE(read_shared_config(with_shared({{"dir", "relative/www"}}), error));
     CHECK_FALSE(read_shared_config(with_shared({{"php", "eight"}}), error));
     CHECK(error.find("shared.php") != std::string::npos);
+    CHECK_FALSE(read_shared_config(with_shared({{"php", false}}), error));  // shared sites always have PHP
+    CHECK(error.find("shared.php") != std::string::npos);
     CHECK_FALSE(read_shared_config(with_shared({{"web", "iis"}}), error));
     CHECK_FALSE(read_shared_config(with_shared("on"), error));
 }

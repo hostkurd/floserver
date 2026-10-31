@@ -73,6 +73,7 @@ enum class Str : std::uint8_t {
     ChoiceNewest,
     NotInstalled,      // {0}: "8.1"
     SavedIn,           // {0}: "floserver.json"
+    PhpOffNote,        // under the pickers: PHP off, the folder has .php files
     DatabaseTitle,     // {0}: the database name
     DatabaseDetail,    // {0}: "127.0.0.1:3306", {1}: the user
     CopyEnv,

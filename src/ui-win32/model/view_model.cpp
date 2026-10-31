@@ -148,6 +148,7 @@ ProjectRow row_from(const json& p, Lang lang) {
         const json& want = p["wants"];
         row.wants.known = true;
         row.wants.php = text_of(want, "php");
+        row.wants.php_off = want.contains("php") && want.at("php").is_boolean() && !want.at("php").get<bool>();
         row.wants.node = text_of(want, "node");
         row.wants.python = text_of(want, "python");
         row.wants.database = text_of(want, "database");
@@ -168,6 +169,7 @@ ProjectRow row_from(const json& p, Lang lang) {
         }
     }
     row.static_site = flag_of(p, "static");
+    row.php_files = flag_of(p, "php_files");
     if (row.static_site) {
         row.chips.emplace_back("Static");  // the mockup's "Static · nginx"
     }
@@ -446,16 +448,37 @@ std::string version_series(std::string_view runtime, std::string_view version) {
     return std::string(version.substr(0, second));
 }
 
-std::vector<VersionField> version_fields(const ProjectRow& row, const Installed& installed, Lang lang) {
+namespace {
+
+// What projects.use takes for PHP besides a version (core's kPhpNone and
+// kPhpNewest; the model doesn't link the core).
+constexpr std::string_view kPhpNone = "none";
+constexpr std::string_view kPhpNewest = "newest";
+
+// The pickers; `project` gives PHP its None and Newest installed choices
+// (a project's panel), else the first PHP choice removes the key and means
+// the newest (shared sites, the new project wizard).
+std::vector<VersionField> fields_of(const ProjectRow& row, const Installed& installed, Lang lang, bool project) {
     std::vector<VersionField> out;
     const Wants& w = row.wants;
 
-    // PHP: without the key, a PHP project gets the newest installed; a Node
-    // or Python project gets none.
     VersionField php{Field::Php, "php", std::string(text(lang, Str::FieldPhp)), {}, 0};
-    const bool own_server = w.php.empty() && (!w.node.empty() || !w.python.empty() || row.static_site);
-    php.choices.push_back({std::string(text(lang, own_server ? Str::ChoiceNone : Str::ChoiceNewest)), std::nullopt});
-    add_series(php, installed, "php", w.php, "", "", lang);
+    if (project) {
+        php.choices.push_back({std::string(text(lang, Str::ChoiceNone)), std::string(kPhpNone)});
+        php.choices.push_back({std::string(text(lang, Str::ChoiceNewest)), std::string(kPhpNewest)});
+        const bool newest = w.php == kPhpNewest;
+        // Without the key, what's in effect: none for a static site or a
+        // Node or Python project, the newest for a PHP one.
+        const bool none = w.php_off || (w.php.empty() && (!w.node.empty() || !w.python.empty() || row.static_site));
+        php.current = none ? 0U : 1U;
+        add_series(php, installed, "php", newest ? std::string() : w.php, "", "", lang);
+    } else {
+        // Without the key, a PHP project gets the newest installed; a Node
+        // or Python project gets none.
+        const bool own_server = w.php.empty() && (!w.node.empty() || !w.python.empty() || row.static_site);
+        php.choices.push_back({std::string(text(lang, own_server ? Str::ChoiceNone : Str::ChoiceNewest)), std::nullopt});
+        add_series(php, installed, "php", w.php, "", "", lang);
+    }
     out.push_back(std::move(php));
 
     VersionField db{Field::Database, "database", std::string(text(lang, Str::FieldDatabase)), {}, 0};
@@ -488,6 +511,16 @@ std::vector<VersionField> version_fields(const ProjectRow& row, const Installed&
         out.push_back(std::move(python));
     }
     return out;
+}
+
+}  // namespace
+
+std::vector<VersionField> version_fields(const ProjectRow& row, const Installed& installed, Lang lang) {
+    return fields_of(row, installed, lang, true);
+}
+
+std::string php_off_note(const ProjectRow& row, Lang lang) {
+    return row.wants.php_off && row.php_files ? std::string(text(lang, Str::PhpOffNote)) : std::string();
 }
 
 std::uint16_t database_port(const json& databases, std::string_view database) {
@@ -827,7 +860,7 @@ std::vector<VersionField> template_fields(const TemplateCard& card, const Instal
                                           const Defaults& defaults) {
     ProjectRow row;
     row.wants = card.config;
-    std::vector<VersionField> all = version_fields(row, installed, lang);
+    std::vector<VersionField> all = fields_of(row, installed, lang, false);
     std::vector<VersionField> out;
     for (VersionField& f : all) {
         const bool keep = (f.field == Field::Php && card.uses_php) ||
@@ -985,7 +1018,7 @@ std::vector<VersionField> shared_fields(const SharedSites& shared, const Install
     row.wants.database = shared.database;
     row.wants.web = shared.web;
     std::vector<VersionField> out;
-    for (VersionField& f : version_fields(row, installed, lang)) {
+    for (VersionField& f : fields_of(row, installed, lang, false)) {
         if (f.field == Field::Php || f.field == Field::Database) {
             out.push_back(std::move(f));
         }

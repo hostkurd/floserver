@@ -32,7 +32,9 @@ public:
     //                  "state": "off" | "ready" | "needs_download" | "problem",
     //                  "php"?: "8.4.27", "missing": ["php 8.2"], "problem"?: "...",
     //                  "database"?: "mariadb-11.4",
-    //                  "wants"?: {"web": "nginx" | "apache", "php"?, "node"?, "python"?, "database"?,
+    //                  "static"?: true, "php_files"?: true (PHP is off and the folder has .php files),
+    //                  "wants"?: {"web": "nginx" | "apache", "php"?: "8.4" | "newest" | false,
+    //                             "node"?, "python"?, "database"?,
     //                             "extensions"?: ["bcmath", "-exif"], "php_ini"?: {"memory_limit": "1024M"}}}],
     //    "projects_dir": "..."}
     [[nodiscard]] std::optional<nlohmann::json> list(ServiceRefusal& refusal) const;
@@ -50,7 +52,8 @@ public:
 
     // Sets one key of the project's floserver.json ("php", "node",
     // "python", "database", "web"; nothing for `value` removes it), keeping
-    // the file's other keys. The reply is that project.
+    // the file's other keys; "php" also takes "none" (written as false) and
+    // "newest". The reply is that project.
     [[nodiscard]] std::optional<nlohmann::json> use(const std::string& name, const std::string& key,
                                                     const std::optional<std::string>& value, ServiceRefusal& refusal);
 

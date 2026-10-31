@@ -60,6 +60,7 @@ void print_help(std::ostream& out) {
         << "  add [folder] [--name <n>] [--json]  Add a folder as a project (this folder if none)\n"
         << "  remove <name>              Forget a project (its files are kept)\n"
         << "  use <php|node|python|mariadb> <v> Set a version in this project's floserver.json\n"
+        << "  use php <none|newest|auto>  ...no PHP, always the newest PHP, or PHP when there are .php files\n"
         << "  php <series>               PHP settings for a series (8.5): extensions and php.ini values\n"
         << "  php <series> ext <name> <on|off|default>   ...turn an extension on or off for every project on it\n"
         << "  php <series> ini <key> <value|default>     ...set a php.ini value: flo php 8.5 ini memory_limit 1G\n"
@@ -614,15 +615,20 @@ std::optional<fs::path> project_folder_for(const fs::path& here) {
 // Sets one version in the project's floserver.json, keeping every other key
 // and its order as it was. The file is the registered project's own when the
 // current folder is inside one; otherwise the nearest one above, or a new one
-// here.
+// here. PHP also takes none (false: no PHP), newest (always PHP, the newest
+// installed) and auto (no key: the folder decides).
 int use(const std::vector<std::string>& args) {
     if (args.size() != 3 || (args[1] != "php" && args[1] != "node" && args[1] != "python" && args[1] != "mariadb")) {
-        std::cerr << "Usage: flo use <php|node|python|mariadb> <version>   for example: flo use php 8.4\n";
+        std::cerr << "Usage: flo use <php|node|python|mariadb> <version>   for example: flo use php 8.4\n"
+                  << "       flo use php <none|newest|auto>   no PHP, always the newest PHP, or as the folder says\n";
         return 2;
     }
+    const bool php_word = args[1] == "php" && (args[2] == floserver::core::kPhpNone ||
+                                               args[2] == floserver::core::kPhpNewest || args[2] == "auto");
     const auto version = floserver::core::Version::parse(args[2]);
-    if (!version) {
-        std::cerr << "\"" << args[2] << "\" is not a version such as 8.4 or 8.4.27\n";
+    if (!version && !php_word) {
+        std::cerr << "\"" << args[2] << "\" is not a version such as 8.4 or 8.4.27"
+                  << (args[1] == "php" ? " (or none, newest or auto)" : "") << "\n";
         return 2;
     }
     const fs::path here = fs::current_path();
@@ -638,11 +644,12 @@ int use(const std::vector<std::string>& args) {
 
     std::string error;
     const auto key = floserver::core::parse_config_key(args[1]);
-    if (!key || !floserver::core::set_project_config_file_value(file.parent_path(), *key, args[1], args[2], error)) {
+    const std::optional<std::string> value = args[2] == "auto" && php_word ? std::nullopt : std::optional(args[2]);
+    if (!key || !floserver::core::set_project_config_file_value(file.parent_path(), *key, args[1], value, error)) {
         std::cerr << shown(file) << ": " << error << "\n";
         return 1;
     }
-    std::cout << shown(file) << ": " << args[1] << " " << version->to_string() << "\n";
+    std::cout << shown(file) << ": " << args[1] << " " << (version ? version->to_string() : args[2]) << "\n";
     if (!registered) {
         std::cout << "(This folder isn't a FloServer project yet. Add it with: flo add)\n";
     }
@@ -908,7 +915,11 @@ int check(const fs::path& start) {
         return 1;
     }
     const auto& c = *result.config;
-    std::cout << "  php " << c.php.value_or("default") << ", node " << c.node.value_or("default")
+    const std::string php = c.php                                              ? *c.php
+                            : c.php_choice == floserver::core::PhpChoice::Off    ? std::string("none")
+                            : c.php_choice == floserver::core::PhpChoice::Newest ? std::string("newest")
+                                                                                 : std::string("default");
+    std::cout << "  php " << php << ", node " << c.node.value_or("default")
               << ", database "
               << (c.database ? c.database->family + "-" + c.database->version : std::string("none"))
               << ", web " << (c.web == floserver::core::WebServer::Apache ? "apache" : "nginx")
@@ -1150,7 +1161,11 @@ int php(const std::vector<std::string>& args) {
     for (const auto& e : wants.value("extensions", nlohmann::json::array())) {
         list += (list.empty() ? "" : " ") + e.get<std::string>();
     }
-    std::cout << text_of(project, "name") << ": PHP " << (wants.contains("php") ? text_of(wants, "php") : std::string("default"))
+    if (wants.contains("php") && wants.at("php").is_boolean()) {
+        std::cout << text_of(project, "name") << ": PHP is off (\"php\": false in its floserver.json)\n";
+    }
+    const std::string wanted_php = text_of(wants, "php");
+    std::cout << text_of(project, "name") << ": PHP " << (wanted_php.empty() || wanted_php == floserver::core::kPhpNewest ? std::string("default") : wanted_php)
               << "'s settings, with these changes (in its floserver.json):\n"
               << "  extensions: " << (list.empty() ? std::string("no changes") : list) << "\n"
               << "  php.ini:    " << (wants.contains("php_ini") ? "" : "no changes") << "\n";

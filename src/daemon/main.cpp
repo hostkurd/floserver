@@ -398,11 +398,17 @@ struct Service {
             result = projects->project_php(name, r.params.is_object() ? r.params.value("extensions", none) : none,
                                            r.params.is_object() ? r.params.value("ini", none) : none, refusal);
         } else if (r.method == "projects.use") {
+            // "php" may be false (no PHP), the same as "none".
             std::optional<std::string> value;
-            if (r.params.contains("value") && r.params["value"].is_string()) {
-                value = r.params["value"].get<std::string>();
-            } else if (r.params.contains("value") && !r.params["value"].is_null()) {
-                return protocol::make_error(r.id, "bad_params", "value is a string, or null to remove the key");
+            const bool php_false = string_param(r.params, "key") == "php" && r.params.contains("value") &&
+                                   r.params.at("value").is_boolean() && !r.params.at("value").get<bool>();
+            if (php_false) {
+                value = std::string(floserver::core::kPhpNone);
+            } else if (r.params.contains("value") && r.params.at("value").is_string()) {
+                value = r.params.at("value").get<std::string>();
+            } else if (r.params.contains("value") && !r.params.at("value").is_null()) {
+                return protocol::make_error(r.id, "bad_params",
+                                            "value is a string (false also turns PHP off), or null to remove the key");
             }
             result = projects->use(name, string_param(r.params, "key"), value, refusal);
         } else {  // projects.set

@@ -55,6 +55,9 @@ struct PlannedSite {
     std::optional<std::size_t> app;     // index into WebPlan::apps; set when Ready (own server)
     bool apache = false;                // served by the shared Apache (D6), PHP from `pool`
     bool static_site = false;           // nginx serves its files as they are; no PHP, no server of its own
+    // PHP is off ("php": false) and the document root has a .php file, which
+    // is sent as it is. Only looked for when PHP is off.
+    bool php_files = false;
     std::vector<std::string> missing;   // "php 8.2", "mariadb 11.4"
     std::string problem;                // plain English, when state is Problem
     std::optional<DatabaseSpec> database;

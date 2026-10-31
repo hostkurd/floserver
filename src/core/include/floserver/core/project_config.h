@@ -3,7 +3,7 @@
 // floserver.json: the per-project versions file (design note D10).
 //
 //   {
-//     "php": "8.2",
+//     "php": "8.2",                  // or false (never PHP), or "newest"
 //     "node": "22",
 //     "python": "3.13",
 //     "database": "mariadb-11.4",
@@ -35,8 +35,17 @@ struct DatabaseSpec {
     bool operator==(const DatabaseSpec&) const = default;
 };
 
+// What "php" says when it isn't a version. Without the key (Auto) the
+// folder decides: a .php file at the document root makes it a PHP project
+// with the newest installed PHP, none a static site (or a Node or Python
+// one). false (Off): never PHP; nginx or Apache send .php files as they
+// are. "newest" (Newest): always PHP, the newest installed, even before
+// there's a .php file.
+enum class PhpChoice : std::uint8_t { Auto, Off, Newest };
+
 struct ProjectConfig {
-    std::optional<std::string> php;        // "8.2", "8.2.27"
+    std::optional<std::string> php;        // "8.2", "8.2.27"; set, it wins over php_choice
+    PhpChoice php_choice = PhpChoice::Auto;
     std::optional<std::string> node;       // "22", "22.11.0"
     std::optional<std::string> python;     // "3.13" (D17)
     std::optional<DatabaseSpec> database;  // absent: the project needs no database
@@ -55,6 +64,16 @@ struct ProjectConfig {
 
     bool operator==(const ProjectConfig&) const = default;
 };
+
+// PHP is turned off ("php": false).
+[[nodiscard]] inline bool php_off(const ProjectConfig& c) { return !c.php && c.php_choice == PhpChoice::Off; }
+// PHP is asked for: a version or "newest".
+[[nodiscard]] inline bool php_asked(const ProjectConfig& c) { return c.php || c.php_choice == PhpChoice::Newest; }
+
+// The words `flo use php` and projects.use take besides a version: "none"
+// writes false, "newest" writes "newest".
+inline constexpr std::string_view kPhpNone = "none";
+inline constexpr std::string_view kPhpNewest = "newest";
 
 struct ConfigProblem {
     std::string key;      // "php", "extensions[1]", "" for the whole file
@@ -90,7 +109,8 @@ enum class ConfigKey : std::uint8_t { Php, Node, Python, Database, Web };
 
 // Sets one key in the text of a floserver.json, keeping every other key and
 // its order; nothing for `value` removes the key. Versions are checked
-// (Version::parse); "database" takes "mariadb-11.4", and "mariadb" takes the
+// (Version::parse), and "php" also takes "none" (written as false) and
+// "newest"; "database" takes "mariadb-11.4", and "mariadb" takes the
 // version alone; "web" takes "nginx" (the default, so the key is removed) or
 // "apache". Empty text is an empty file. Returns the new text, or nothing
 // with `error` (plain English) when the old text or the new value is wrong.

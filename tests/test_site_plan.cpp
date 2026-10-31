@@ -512,6 +512,73 @@ TEST_CASE("an HTML-only project is a static site: no PHP, no download") {
     CHECK(has_php_files(tmp.path() / "nope"));
 }
 
+TEST_CASE("\"php\": false is never PHP; \"newest\" always is") {
+    const test_util::TempDir tmp;
+    test_util::write_file(tmp.path() / "code" / "index.php", "<?php");
+    test_util::write_file(tmp.path() / "html" / "index.html", "<h1>hi</h1>");
+    AppConfig config;
+    config.projects = {{"off", tmp.path() / "code", true, false, {}},
+                       {"offhtml", tmp.path() / "html", true, false, {}},
+                       {"newest", tmp.path() / "html", true, false, {}},
+                       {"offnode", tmp.path() / "code", true, false, {}},
+                       {"newnode", tmp.path() / "html", true, false, {}},
+                       {"offapache", tmp.path() / "code", true, false, {}}};
+    auto installed = kInstalled;
+    installed.push_back(runtime("apache", "2.4.69"));
+    const auto files = reader({{"off", R"({"php": false})"},
+                               {"offhtml", R"({"php": false})"},
+                               {"newest", R"({"php": "newest"})"},
+                               {"offnode", R"({"php": false, "node": "24"})"},
+                               {"newnode", R"({"php": "newest", "node": "24"})"},
+                               {"offapache", R"({"php": false, "web": "apache"})"}});
+    const auto plan = plan_sites(config, files, installed, std::string("8.4"));
+    REQUIRE(plan.sites.size() == 6);
+    // .php files, PHP off: a static site, and the window is told.
+    CHECK(plan.sites[0].static_site);
+    CHECK(plan.sites[0].state == SiteState::Ready);
+    CHECK_FALSE(plan.sites[0].pool);
+    CHECK(plan.sites[0].php_files);
+    CHECK(plan.sites[1].static_site);
+    CHECK_FALSE(plan.sites[1].php_files);
+    // No .php file yet, "newest": PHP, the newest installed (not the default).
+    CHECK_FALSE(plan.sites[2].static_site);
+    REQUIRE(plan.sites[2].pool);
+    CHECK(plan.pools.at(*plan.sites[2].pool).version == "8.5.12");
+    CHECK_FALSE(plan.sites[2].php_files);
+    // Node with PHP off runs its own server; with "newest", Node is a tool.
+    CHECK(plan.sites[3].app);
+    CHECK_FALSE(plan.sites[3].pool);
+    CHECK_FALSE(plan.sites[4].app);
+    CHECK(plan.sites[4].pool);
+    // Apache with PHP off: Apache alone, no pool.
+    CHECK(plan.sites[5].apache);
+    CHECK(plan.sites[5].state == SiteState::Ready);
+    CHECK_FALSE(plan.sites[5].pool);
+    CHECK_FALSE(plan.sites[5].static_site);
+    CHECK(plan.sites[5].php_files);
+    CHECK(plan.apache_version == "2.4.69");
+    REQUIRE(plan.pools.size() == 1);
+    CHECK(plan.pools[0].sites == std::vector<std::string>{"newest", "newnode"});
+
+    // Apache's config for it sends files as they are.
+    ApacheSpec spec;
+    spec.server_root = kBase / "apache";
+    spec.modules_dir = kBase / "apache" / "modules";
+    spec.work_dir = kBase / "work";
+    spec.sites.push_back({"offapache", plan.sites[5].doc_root, {}, false});
+    std::string error;
+    const auto text = make_apache_config(spec, error);
+    REQUIRE_MESSAGE(text, error);
+    CHECK(text->find("proxy:fcgi") == std::string::npos);
+
+    // Who uses what: the newest PHP for the "newest" projects only.
+    const auto users = runtime_users(config, files, installed, std::nullopt);
+    using V = std::vector<std::string>;
+    CHECK(users.at("php/8.5.12") == V{"newest", "newnode"});
+    CHECK_FALSE(users.contains("php/8.4.27"));
+    CHECK(users.at("apache/2.4.69") == V{"offapache"});
+}
+
 TEST_CASE("runtime_users: who uses each installed runtime, off projects included (D20)") {
     AppConfig config;
     config.projects = {project("shop"), project("blog", false), project("legacy"), project("app"), project("py")};

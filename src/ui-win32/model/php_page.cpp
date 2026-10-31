@@ -417,6 +417,9 @@ int tab_padding(const std::vector<int>& label_widths, int width, int most, int l
 // --- the project panel's PHP part -------------------------------------------------
 
 bool project_uses_php(const ProjectRow& row) {
+    if (row.wants.php_off) {
+        return false;
+    }
     if (!row.php.empty() || !row.wants.php.empty()) {
         return true;
     }

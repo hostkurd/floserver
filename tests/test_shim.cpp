@@ -160,6 +160,24 @@ TEST_CASE("each shim runs the version the nearest floserver.json asks for") {
     CHECK(php->env[0] == std::pair<std::string, std::string>{"PHPRC", php->args[1]});
 }
 
+TEST_CASE("php in a project with PHP off or \"newest\" runs the newest installed") {
+    const test_util::TempDir tmp;
+    const fs::path data = tmp.path() / "data";
+    (void)add_php(data, "8.4.27");
+    (void)add_php(data, "8.5.12");
+    fake_runtime(data, "composer", "2.10.3");
+    test_util::write_file(runtimes_dir(data) / "composer" / "2.10.3" / "composer.phar", "");
+    std::string error;
+    for (const char* config : {R"({"php": false})", R"({"php": "newest"})"}) {
+        const fs::path site = tmp.path() / "site";
+        test_util::write_file(site / "floserver.json", config);
+        const auto php = resolve_shim("php", site, data, error);
+        REQUIRE_MESSAGE(php, error);
+        CHECK(php->version == "8.5.12");
+        CHECK(resolve_shim("composer", site, data, error));
+    }
+}
+
 #ifndef _WIN32
 TEST_CASE("outside a project, with none of FloServer's, a shim runs the one that was there") {
     const test_util::TempDir tmp;

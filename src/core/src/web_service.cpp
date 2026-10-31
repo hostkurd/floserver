@@ -322,7 +322,8 @@ void WebService::reload_locked() {
         bool keep = false;
         for (const PlannedSite& p : plan.sites) {
             if (p.state == SiteState::Ready && p.apache) {
-                as.sites.push_back({p.name, p.doc_root, plan.pools.at(*p.pool).ports, tls});
+                // No pool: PHP is off ("php": false), so Apache sends files as they are.
+                as.sites.push_back({p.name, p.doc_root, p.pool ? plan.pools.at(*p.pool).ports : std::vector<Port>{}, tls});
                 const Project* project = find_project(*app, p.name);
                 keep = keep || (project != nullptr && project->keep_running);
             }
@@ -448,15 +449,17 @@ void WebService::reload_locked() {
         if (p.apache) {
             const auto spec = std::find_if(plan.apps.begin(), plan.apps.end(),
                                            [](const AppSpec& a) { return a.name == kApacheAppName; });
-            const PhpPool& pool = plan.pools.at(*p.pool);
+            const PhpPool* pool = p.pool ? &plan.pools.at(*p.pool) : nullptr;
             std::string why = apache_error;
             if (why.empty() && spec != plan.apps.end()) {
                 if (const auto e = app_errors.find(spec->name); e != app_errors.end()) {
                     why = e->second;
                 }
             }
-            if (const auto e = pool_errors.find(pool.key); why.empty() && e != pool_errors.end()) {
-                why = e->second;
+            if (pool != nullptr) {
+                if (const auto e = pool_errors.find(pool->key); why.empty() && e != pool_errors.end()) {
+                    why = e->second;
+                }
             }
             if (!why.empty() || spec == plan.apps.end()) {
                 site.state_override = "problem";
@@ -470,7 +473,9 @@ void WebService::reload_locked() {
             ns.name = p.name;
             ns.doc_root = p.doc_root;
             ns.app_port = spec->port;
-            ns.php_access_log = pools.at(pool.key)->access_log();
+            if (pool != nullptr) {
+                ns.php_access_log = pools.at(pool->key)->access_log();
+            }
             ns.tls = site_tls;
             site.app = true;
             site.app_kind = "apache";

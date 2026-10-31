@@ -141,6 +141,7 @@ private:
         std::vector<std::pair<RECT, PanelAction>> buttons;
         RECT versions{};
         std::vector<std::pair<RECT, RECT>> fields;  // label, box; one per fields_ entry
+        RECT php_note{};  // empty unless PHP is off and the folder has .php files
         RECT saved_in{};
         RECT db_box{};
         RECT db_title{};
