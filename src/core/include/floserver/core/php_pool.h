@@ -11,9 +11,11 @@
 // time, php-cgi is stopped and the socket stays.
 //
 // php.ini is written by FloServer for each pool: development settings, the
-// base extensions every project gets, plus the ones floserver.json lists.
+// base extensions every project gets, and the series' and project's own
+// extensions and values (php_settings.h).
 
 #include "floserver/core/child_process.h"
+#include "floserver/core/php_settings.h"
 #include "floserver/core/site_plan.h"
 
 #include <chrono>
@@ -25,22 +27,28 @@
 
 namespace floserver::core {
 
-// Extensions every project gets when the PHP install has them, so the
-// common frameworks (FloCMS, Laravel, WordPress) run without listing any.
-[[nodiscard]] const std::vector<std::string>& base_php_extensions();
-
 // The php-cgi program in a PHP install, or nothing when it has none.
 [[nodiscard]] std::optional<std::filesystem::path> php_cgi_program(const std::filesystem::path& php_dir);
+
+// The extensions in an ext folder: "gd" for php_gd.dll, sorted.
+[[nodiscard]] std::vector<std::string> php_extensions_in(const std::filesystem::path& ext_dir);
+
+// The extensions a PHP install can turn on: on Windows, its ext/php_*.dll.
+// Nothing elsewhere: there they come with the build and can't be changed.
+[[nodiscard]] std::optional<std::vector<std::string>> available_php_extensions(const std::filesystem::path& php_dir);
 
 struct PhpIniResult {
     std::string text;
     std::vector<std::string> missing;  // listed extensions the install doesn't have
 };
 
-// php.ini for a pool. On Windows an extension is php_<name>.dll in ext/; a
-// listed one that's missing is reported, a missing base one is skipped.
-// Elsewhere extensions come with the build and aren't checked.
-[[nodiscard]] PhpIniResult make_php_ini(const std::filesystem::path& php_dir, const std::vector<std::string>& extensions,
+// php.ini for a pool (php_settings.h): FloServer's defaults, then the
+// series' values, its custom.ini and the project's values, so later ones
+// win. On Windows an extension is php_<name>.dll in ext/; one turned on
+// that's missing is reported, a missing base one is skipped. Elsewhere
+// extensions come with the build and aren't named. Reads no files beyond
+// checking ext/ on Windows: the caller reads custom.ini.
+[[nodiscard]] PhpIniResult make_php_ini(const std::filesystem::path& php_dir, const PhpIniSettings& settings,
                                         const std::filesystem::path& error_log);
 
 enum class PoolState : std::uint8_t { Sleeping, Running, Failed };

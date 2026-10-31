@@ -22,14 +22,6 @@ bool is_pool_php(const InstalledRuntime& r) {
     return r.name == "php" && (r.variant.empty() || r.variant == "nts");
 }
 
-std::string pool_key(const std::string& version, const std::vector<std::string>& extensions) {
-    std::string key = "php-" + version;
-    for (const std::string& e : extensions) {
-        key += "+" + e;
-    }
-    return key;
-}
-
 }  // namespace
 
 bool has_php_files(const fs::path& doc_root) {
@@ -122,16 +114,37 @@ ConfigResult read_project_config_file(const Project& project) {
 
 namespace {
 
-// The pool for this PHP install and these extensions, made when new; the
+// The PHP settings (D20) for a site on this install: the series' from
+// config.json, its custom.ini (read once per series), and the project's.
+class PhpSettingsSource {
+public:
+    PhpSettingsSource(const AppConfig& config, const CustomIniReader& custom_ini)
+        : series_(read_php_settings(config)), custom_ini_(&custom_ini) {}
+
+    PhpIniSettings operator()(const InstalledRuntime& php, const ProjectConfig* project) {
+        const std::string series = php_series_of(php.version).value_or(php.version);
+        auto text = custom_.find(series);
+        if (text == custom_.end()) {
+            text = custom_.emplace(series, *custom_ini_ ? (*custom_ini_)(series) : std::string()).first;
+        }
+        const auto found = series_.find(series);
+        return effective_php_settings(series, found != series_.end() ? &found->second : nullptr, text->second, project);
+    }
+
+private:
+    PhpSettings series_;
+    const CustomIniReader* custom_ini_;
+    std::map<std::string, std::string> custom_;
+};
+
+// The pool for this PHP install and these settings, made when new; the
 // site joins it.
-std::size_t add_to_pool(WebPlan& plan, const InstalledRuntime& php, std::vector<std::string> extensions,
+std::size_t add_to_pool(WebPlan& plan, const InstalledRuntime& php, PhpIniSettings settings,
                         const std::string& site, bool keep_running) {
-    std::sort(extensions.begin(), extensions.end());
-    extensions.erase(std::unique(extensions.begin(), extensions.end()), extensions.end());
-    const std::string key = pool_key(php.version, extensions);
+    const std::string key = "php-" + php.version + php_settings_key(settings);
     auto it = std::find_if(plan.pools.begin(), plan.pools.end(), [&key](const PhpPool& p) { return p.key == key; });
     if (it == plan.pools.end()) {
-        plan.pools.push_back({key, php.version, php.dir, extensions, {}, false, {}});
+        plan.pools.push_back({key, php.version, php.dir, std::move(settings), {}, false, {}});
         it = std::prev(plan.pools.end());
     }
     it->sites.push_back(site);
@@ -142,7 +155,7 @@ std::size_t add_to_pool(WebPlan& plan, const InstalledRuntime& php, std::vector<
 // Shared sites (D19): one site for the whole www folder, PHP from a pool
 // like any project's, Apache or nginx as the settings say.
 void plan_shared(WebPlan& plan, const AppConfig& config, const std::vector<InstalledRuntime>& installed,
-                 const std::optional<std::string>& default_php) {
+                 const std::optional<std::string>& default_php, PhpSettingsSource& php_settings) {
     PlannedSite site;
     site.name = std::string(kSharedSiteName);
     std::string error;
@@ -197,7 +210,8 @@ void plan_shared(WebPlan& plan, const AppConfig& config, const std::vector<Insta
         plan.shared = std::move(site);
         return;
     }
-    site.pool = add_to_pool(plan, *php, {}, site.name, false);
+    // The series' settings; shared sites have no project's own.
+    site.pool = add_to_pool(plan, *php, php_settings(*php, nullptr), site.name, false);
     site.state = SiteState::Ready;
     if (apache) {
         site.apache = true;
@@ -210,8 +224,10 @@ void plan_shared(WebPlan& plan, const AppConfig& config, const std::vector<Insta
 }  // namespace
 
 WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
-                   const std::vector<InstalledRuntime>& installed, const std::optional<std::string>& default_php) {
+                   const std::vector<InstalledRuntime>& installed, const std::optional<std::string>& default_php,
+                   const CustomIniReader& custom_ini) {
     WebPlan plan;
+    PhpSettingsSource php_settings(config, custom_ini);
     for (const Project& project : config.projects) {
         PlannedSite site;
         site.name = project.name;
@@ -325,7 +341,7 @@ WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
             continue;
         }
 
-        site.pool = add_to_pool(plan, *php, pc.extensions, project.name, project.keep_running);
+        site.pool = add_to_pool(plan, *php, php_settings(*php, &pc), project.name, project.keep_running);
         site.state = SiteState::Ready;
         if (apache) {
             site.apache = true;
@@ -334,7 +350,7 @@ WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
         }
         plan.sites.push_back(std::move(site));
     }
-    plan_shared(plan, config, installed, default_php);
+    plan_shared(plan, config, installed, default_php, php_settings);
     return plan;
 }
 

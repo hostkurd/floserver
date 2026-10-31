@@ -354,7 +354,7 @@ jobs:
           $pyOut = (& "$shims\python.exe" -c "import sys; print(sys.prefix != sys.base_prefix, sys.version_info[:2])" 2>&1 | Out-String).Trim()
           $pipOut = (& "$shims\pip.exe" --version 2>&1 | Out-String).Trim()
           Pop-Location
-          if ($phpOut -notlike "8.5.* intl 8.5.*intl.ini" -or $composerOut -notlike "Composer version *" -or
+          if ($phpOut -notlike "8.5.* intl 8.5.*.ini" -or $composerOut -notlike "Composer version *" -or
               $nodeOut -notlike "v24.* a b|c" -or $npmOut -notmatch "^\d+\.\d+" -or
               $pyOut -ne "True (3, 13)" -or $pipOut -notlike "pip *ci-api*") {
             Fail "shims" "php: $phpOut || composer: $composerOut || node: $nodeOut || npm: $npmOut || python: $pyOut || pip: $pipOut"

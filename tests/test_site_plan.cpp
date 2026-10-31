@@ -59,8 +59,8 @@ TEST_CASE("sites get the newest matching PHP and share pools by version and exte
     config.projects = {project("shop"), project("blog"), project("api"), project("legacy"), project("off", false),
                        project("plain")};
     const auto plan = plan_sites(config,
-                                 reader({{"shop", R"({"php": "8.4", "extensions": ["intl", "gd"], "root": "public"})"},
-                                         {"blog", R"({"php": "8.4.27", "extensions": ["gd", "intl", "gd"]})"},
+                                 reader({{"shop", R"({"php": "8.4", "extensions": ["soap", "bcmath"], "root": "public"})"},
+                                         {"blog", R"({"php": "8.4.27", "extensions": ["bcmath", "soap", "bcmath"]})"},
                                          {"api", R"({"php": "8.4"})"},
                                          {"legacy", R"({"php": "8.3"})"}}),
                                  kInstalled, std::nullopt);
@@ -71,7 +71,7 @@ TEST_CASE("sites get the newest matching PHP and share pools by version and exte
     CHECK(shop.state == SiteState::Ready);
     CHECK(shop.doc_root == kBase / "projects" / "shop" / "public");
     REQUIRE(shop.pool);
-    CHECK(plan.pools[*shop.pool].key == "php-8.4.27+gd+intl");
+    CHECK(plan.pools[*shop.pool].key == "php-8.4.27+bcmath+soap");
     CHECK(plan.pools[*shop.pool].php_dir == kBase / "runtimes" / "php" / "8.4.27");
 
     // Same version and extensions (order and repeats don't matter): same pool.

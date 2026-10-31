@@ -388,6 +388,11 @@ struct Service {
                     std::filesystem::remove(core::request_log_file(core::web_dir(*data), name), ec);
                 }
             }
+        } else if (r.method == "projects.php") {
+            // The project's own PHP extensions and php.ini values (D20), in its floserver.json.
+            const json none;
+            result = projects->project_php(name, r.params.is_object() ? r.params.value("extensions", none) : none,
+                                           r.params.is_object() ? r.params.value("ini", none) : none, refusal);
         } else if (r.method == "projects.use") {
             std::optional<std::string> value;
             if (r.params.contains("value") && r.params["value"].is_string()) {
@@ -408,6 +413,36 @@ struct Service {
         }
         if (result && databases) {
             (void)databases->reload();
+        }
+        return result ? protocol::make_result(r.id, *result) : protocol::make_error(r.id, refusal.code, refusal.message);
+    }
+
+    // The reply to one php.* request: Settings → PHP (D20), per series.
+    //   php.get {series}; php.set {series, extensions?, ini?}; php.custom_ini {series} -> {"path"}
+    [[nodiscard]] std::string php_request(const protocol::Request& r) const {
+        if (!projects) {
+            return protocol::make_error(r.id, "no_data_folder",
+                                        "FloServer can't find a folder to keep its settings in (LOCALAPPDATA or HOME)");
+        }
+        floserver::core::ServiceRefusal refusal;
+        const std::string series = string_param(r.params, "series");
+        if (r.method == "php.custom_ini") {
+            // Made here, opened by the window; its text is read on the next reload.
+            const auto path = projects->php_custom_ini(series, refusal);
+            return path ? protocol::make_result(r.id, {{"path", floserver::core::path_to_utf8(*path)}})
+                        : protocol::make_error(r.id, refusal.code, refusal.message);
+        }
+        std::optional<json> result;
+        if (r.method == "php.get") {
+            result = projects->php_get(series, refusal);
+        } else {
+            const json none;
+            result = projects->php_set(series, r.params.is_object() ? r.params.value("extensions", none) : none,
+                                       r.params.is_object() ? r.params.value("ini", none) : none, refusal);
+            // Pools on the series get new keys: they restart with the new php.ini now.
+            if (result && web) {
+                (void)web->reload();
+            }
         }
         return result ? protocol::make_result(r.id, *result) : protocol::make_error(r.id, refusal.code, refusal.message);
     }
@@ -625,8 +660,12 @@ struct Service {
             } else if (request->method == "projects.list" || request->method == "projects.add" ||
                        request->method == "projects.remove" || request->method == "projects.set" ||
                        request->method == "projects.use" || request->method == "projects.log" ||
+                       request->method == "projects.php" ||
                        request->method == "shared.get" || request->method == "shared.set") {
                 reply = project_request(*request);
+            } else if (request->method == "php.get" || request->method == "php.set" ||
+                       request->method == "php.custom_ini") {
+                reply = php_request(*request);
             } else if (request->method == "certs.status" || request->method == "certs.ensure_ca" ||
                        request->method == "certs.remove") {
                 reply = cert_request(*request);

@@ -31,7 +31,8 @@ public:
     //                  "state": "off" | "ready" | "needs_download" | "problem",
     //                  "php"?: "8.4.27", "missing": ["php 8.2"], "problem"?: "...",
     //                  "database"?: "mariadb-11.4",
-    //                  "wants"?: {"web": "nginx" | "apache", "php"?, "node"?, "python"?, "database"?}}],
+    //                  "wants"?: {"web": "nginx" | "apache", "php"?, "node"?, "python"?, "database"?,
+    //                             "extensions"?: ["bcmath", "-exif"], "php_ini"?: {"memory_limit": "1024M"}}}],
     //    "projects_dir": "..."}
     [[nodiscard]] std::optional<nlohmann::json> list(ServiceRefusal& refusal) const;
 
@@ -81,6 +82,31 @@ public:
     [[nodiscard]] std::optional<nlohmann::json> set_default(const std::string& runtime,
                                                             const std::optional<std::string>& series,
                                                             ServiceRefusal& refusal);
+
+    // Settings → PHP (D20) for one series ("8.5"):
+    //   {"series": "8.5", "version": "8.5.12" | null (the install used: the newest of the series),
+    //    "extensions_fixed": bool (true: they come with the build and can't be changed here),
+    //    "extensions": [{"name", "on", "base", "missing"?}],
+    //    "ini": {every value the series gives: FloServer's defaults and its own},
+    //    "changed": {the series' own values}, "custom_ini": "<data>/php/8.5/custom.ini",
+    //    "custom_ini_exists": bool, "used_by": ["blog", "_shared"], "problems"?: ["..."]}
+    // Reads the install's ext folder and every project's floserver.json:
+    // for a request, never a timer.
+    [[nodiscard]] std::optional<nlohmann::json> php_get(const std::string& series, ServiceRefusal& refusal) const;
+    // Changes the series' settings: `extensions` {"bcmath": true|false|null},
+    // `ini` {"memory_limit": "1G"|null}; null goes back to the default. Either
+    // may be null. The reply is php_get()'s.
+    [[nodiscard]] std::optional<nlohmann::json> php_set(const std::string& series, const nlohmann::json& extensions,
+                                                        const nlohmann::json& ini, ServiceRefusal& refusal);
+    // The series' custom.ini, made (with a comment saying what it's for) when
+    // it isn't there.
+    [[nodiscard]] std::optional<std::filesystem::path> php_custom_ini(const std::string& series,
+                                                                      ServiceRefusal& refusal) const;
+    // A project's own PHP changes, in its floserver.json: `extensions`
+    // {"bcmath": "on"|"off"|null}, `ini` {"memory_limit": "1024M"|null}; null
+    // goes back to the series' setting. The reply is that project.
+    [[nodiscard]] std::optional<nlohmann::json> project_php(const std::string& name, const nlohmann::json& extensions,
+                                                            const nlohmann::json& ini, ServiceRefusal& refusal);
 
     // The registered folder of a project, or nothing.
     [[nodiscard]] std::optional<std::filesystem::path> folder(const std::string& name, ServiceRefusal& refusal) const;

@@ -60,6 +60,11 @@ void print_help(std::ostream& out) {
         << "  add [folder] [--name <n>] [--json]  Add a folder as a project (this folder if none)\n"
         << "  remove <name>              Forget a project (its files are kept)\n"
         << "  use <php|node|python|mariadb> <v> Set a version in this project's floserver.json\n"
+        << "  php <series>               PHP settings for a series (8.5): extensions and php.ini values\n"
+        << "  php <series> ext <name> <on|off|default>   ...turn an extension on or off for every project on it\n"
+        << "  php <series> ini <key> <value|default>     ...set a php.ini value: flo php 8.5 ini memory_limit 1G\n"
+        << "  php <series> edit          ...make its custom.ini (your own lines, added to every php.ini) and show where\n"
+        << "  php <project> [ext ...|ini ...]  A project's own changes, kept in its floserver.json\n"
         << "  db                         Show the databases and the projects using them\n"
         << "  shared [on|off]            Shared sites: every folder in the www folder at localhost (D19)\n"
         << "  shared php <v|newest>      ...their PHP version; shared web <apache|nginx>; shared dir <folder|default>\n"
@@ -1023,6 +1028,138 @@ int shared(const std::vector<std::string>& args) {
     return 0;
 }
 
+// Settings → PHP (D20) from the terminal:
+//   flo php <series> [ext <name> on|off|default | ini <key> <value|default> | edit]
+//   flo php <project> [ext <name> on|off|default | ini <key> <value|default>]
+// A series is two numbers ("8.5"), which no project name can be.
+int php(const std::vector<std::string>& args) {
+    const auto usage = [] {
+        std::cerr << "Usage: flo php <series|project> [ext <name> <on|off|default> | ini <key> <value|default>]"
+                     " | flo php <series> edit\n"
+                     "  for example: flo php 8.5 ini memory_limit 1G, flo php shop ext bcmath on\n";
+        return 2;
+    };
+    if (args.size() < 2) {
+        return usage();
+    }
+    const auto version = floserver::core::Version::parse(args[1]);
+    const bool series = version && version->parts().size() == 2;
+    nlohmann::json extensions = nlohmann::json::object();
+    nlohmann::json ini = nlohmann::json::object();
+    bool edit = false;
+    if (args.size() == 5 && args[2] == "ext" && (args[4] == "on" || args[4] == "off" || args[4] == "default")) {
+        if (args[4] == "default") {
+            extensions[args[3]] = nullptr;
+        } else if (series) {
+            extensions[args[3]] = args[4] == "on";
+        } else {
+            extensions[args[3]] = args[4];
+        }
+    } else if (args.size() == 5 && args[2] == "ini") {
+        ini[args[3]] = args[4] == "default" ? nlohmann::json(nullptr) : nlohmann::json(args[4]);
+    } else if (args.size() == 3 && args[2] == "edit" && series) {
+        edit = true;
+    } else if (args.size() != 2) {
+        return usage();
+    }
+    auto client = connect_or_start(std::chrono::seconds(60));
+    if (!client) {
+        return 1;
+    }
+    const bool change = !extensions.empty() || !ini.empty();
+    if (edit) {
+        const auto reply = client->call("php.custom_ini", {{"series", args[1]}});
+        if (!reply || !reply->ok) {
+            return print_refusal(reply);
+        }
+        std::cout << text_of(reply->result, "path") << "\n"
+                  << "Your lines there are added after FloServer's settings in every php.ini for PHP " << args[1]
+                  << ";\nPHP restarts with them within a few seconds of saving.\n";
+        return 0;
+    }
+    if (series) {
+        const auto reply = change ? client->call("php.set", {{"series", args[1]}, {"extensions", extensions}, {"ini", ini}})
+                                  : client->call("php.get", {{"series", args[1]}});
+        if (!reply || !reply->ok) {
+            return print_refusal(reply);
+        }
+        const auto& r = reply->result;
+        const auto& v = r.value("version", nlohmann::json());
+        std::cout << "PHP " << text_of(r, "series")
+                  << (v.is_string() ? " (" + v.get<std::string>() + " installed)" : std::string(" (not installed)")) << "\n";
+        std::string on;
+        std::string off;
+        for (const auto& e : r["extensions"]) {
+            const std::string name = text_of(e, "name") + (e.value("missing", false) ? " (missing)" : "");
+            if (e.value("on", false)) {
+                on += (on.empty() ? "" : " ") + name;
+            } else {
+                off += (off.empty() ? "" : " ") + name;
+            }
+        }
+        std::cout << "  extensions on:  " << on << "\n";
+        if (r.value("extensions_fixed", false)) {
+            std::cout << "  (these come with this PHP build and can't be changed here)\n";
+        } else if (!off.empty()) {
+            std::cout << "  extensions off: " << off << "\n";
+        }
+        std::cout << "  php.ini:\n";
+        const auto& changed = r["changed"];
+        for (const auto& [key, value] : r["ini"].items()) {
+            std::cout << "    " << std::left << std::setw(28) << key << value.get<std::string>()
+                      << (changed.contains(key) ? "  (changed)" : "") << "\n";
+        }
+        std::cout << "  custom.ini:     " << text_of(r, "custom_ini")
+                  << (r.value("custom_ini_exists", false) ? "" : " (none yet: flo php " + args[1] + " edit)") << "\n";
+        std::string users;
+        for (const auto& u : r["used_by"]) {
+            const std::string n = u.get<std::string>();
+            users += (users.empty() ? "" : ", ") + (n == "_shared" ? std::string("shared sites") : n);
+        }
+        std::cout << "  used by:        " << (users.empty() ? std::string("nothing") : users) << "\n";
+        for (const auto& p : r.value("problems", nlohmann::json::array())) {
+            std::cout << "  problem: " << p.get<std::string>() << "\n";
+        }
+        return 0;
+    }
+    nlohmann::json project;
+    if (change) {
+        const auto reply =
+            client->call("projects.php", {{"name", args[1]}, {"extensions", extensions}, {"ini", ini}});
+        if (!reply || !reply->ok) {
+            return print_refusal(reply);
+        }
+        project = reply->result;
+    } else {
+        const auto reply = client->call("projects.list");
+        if (!reply || !reply->ok) {
+            return print_refusal(reply);
+        }
+        for (const auto& p : reply->result["projects"]) {
+            if (text_of(p, "name") == args[1]) {
+                project = p;
+            }
+        }
+        if (project.is_null()) {
+            std::cerr << "There's no project called " << args[1] << " (a PHP series is two numbers, such as 8.5)\n";
+            return 1;
+        }
+    }
+    const auto& wants = project.value("wants", nlohmann::json::object());
+    std::string list;
+    for (const auto& e : wants.value("extensions", nlohmann::json::array())) {
+        list += (list.empty() ? "" : " ") + e.get<std::string>();
+    }
+    std::cout << text_of(project, "name") << ": PHP " << (wants.contains("php") ? text_of(wants, "php") : std::string("default"))
+              << "'s settings, with these changes (in its floserver.json):\n"
+              << "  extensions: " << (list.empty() ? std::string("no changes") : list) << "\n"
+              << "  php.ini:    " << (wants.contains("php_ini") ? "" : "no changes") << "\n";
+    for (const auto& [key, value] : wants.value("php_ini", nlohmann::json::object()).items()) {
+        std::cout << "    " << std::left << std::setw(28) << key << value.get<std::string>() << "\n";
+    }
+    return 0;
+}
+
 int db() {
     auto client = connect_or_start(std::chrono::seconds(60));
     if (!client) {
@@ -1278,6 +1415,9 @@ int run_command(const std::vector<std::string>& args, const std::vector<fs::path
     }
     if (args[0] == "shared") {
         return shared(args);
+    }
+    if (args[0] == "php") {
+        return php(args);
     }
     if (args[0] == "db" && args.size() == 1) {
         return db();

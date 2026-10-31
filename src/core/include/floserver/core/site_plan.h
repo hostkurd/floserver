@@ -5,15 +5,16 @@
 // missing; and the PHP FastCGI pools those projects need.
 //
 // Pools: D10 gives each PHP version in use its own pool. A php-cgi process
-// reads one php.ini, so projects asking for different extensions on the same
-// version can't share one; a pool is therefore one PHP install plus one set
-// of extensions. Projects with the same pair share it, and a shared pool may
+// reads one php.ini, so projects asking for different extensions or php.ini
+// values on the same version can't share one; a pool is therefore one PHP
+// install plus one php.ini. Projects with the same pair share it, and a shared pool may
 // sleep only when none of its projects has "Keep running" on (D11).
 //
 // Planning reads no files and starts nothing: the caller passes in each
-// project's floserver.json result and the installed runtimes, so it can be
-// tested with plain values.
+// project's floserver.json result, each PHP series' custom.ini and the
+// installed runtimes, so it can be tested with plain values.
 
+#include "floserver/core/php_settings.h"
 #include "floserver/core/ports.h"
 #include "floserver/core/project_config.h"
 #include "floserver/core/project_registry.h"
@@ -63,10 +64,12 @@ struct PlannedSite {
 };
 
 struct PhpPool {
-    std::string key;                       // "php-8.4.27+gd+intl": stable while nothing changes
+    // "php-8.4.27+gd+intl", with "-<hash>" when other settings differ
+    // (php_settings_key()): stable while nothing changes.
+    std::string key;
     std::string version;                   // "8.4.27"
     std::filesystem::path php_dir;         // the install folder
-    std::vector<std::string> extensions;   // sorted, no duplicates
+    PhpIniSettings settings;               // extensions and php.ini values
     std::vector<std::string> sites;        // project names, in list order
     bool keep_running = false;             // any of its projects has Keep running on
     // One port per php-cgi worker, given by assign_pool_ports(). One process
@@ -118,12 +121,18 @@ using ConfigReader = std::function<ConfigResult(const Project&)>;
 // gives the defaults; a missing folder or an unreadable file gives an error.
 [[nodiscard]] ConfigResult read_project_config_file(const Project& project);
 
+// The text of a PHP series' custom.ini ("8.5"), read_php_custom_ini().
+using CustomIniReader = std::function<std::string(const std::string& series)>;
+
 // `default_php` is the version to use for projects whose floserver.json names
 // none ("8.5"); nothing means the newest installed PHP. Shared sites are
-// planned from config.json's "shared" (shared_sites.h).
+// planned from config.json's "shared" (shared_sites.h). PHP settings come
+// from config.json's "php" and each project's floserver.json; `custom_ini`
+// is asked once per series in use (none: no custom.ini).
 [[nodiscard]] WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
                                  const std::vector<InstalledRuntime>& installed,
-                                 const std::optional<std::string>& default_php);
+                                 const std::optional<std::string>& default_php,
+                                 const CustomIniReader& custom_ini = {});
 
 // Which installed runtimes the projects and shared sites use (D20), so
 // Settings can show it and a removal can be refused: "php/8.5.12" (name /
