@@ -66,6 +66,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <utility>
 #include <set>
 #include <string>
 #include <vector>
@@ -789,6 +790,9 @@ private:
     std::string folders_ask_;
     std::string folders_set_ask_;
     std::string cleaning_ask_;
+    // A change's or clean-up's words that came while another section was
+    // shown, said when Folders opens again (and whether it's a problem).
+    std::optional<std::pair<std::string, bool>> folders_held_message_;
     bool picking_folder_ = false;   // a folder picker is open (it runs its own message loop)
     // Shared sites (both sections): the main window's shared.get snapshot,
     // and the user's changes until the worker reports them done (the keys

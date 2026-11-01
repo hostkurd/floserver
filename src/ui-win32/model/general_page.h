@@ -54,8 +54,9 @@ inline constexpr std::string_view kWindowPrefsFile = "window.json";
 // window.json on disk. A missing file is the defaults. One that's there but
 // isn't a JSON object (cut short, edited by hand, unreadable) is "damaged":
 // the defaults are used, and it's never written over silently. The next save
-// first keeps it beside it as window.json.bad (window.json.bad.2, .3... when
-// that's taken), then writes a new one.
+// writes the new file beside it, moves the damaged one to window.json.bad
+// (window.json.bad.2, .3... when that's taken; never over an earlier copy),
+// then puts the new one in its place.
 struct WindowPrefsLoad {
     WindowPrefs prefs;
     bool damaged = false;
@@ -66,7 +67,8 @@ struct WindowPrefsLoad {
 [[nodiscard]] std::filesystem::path window_prefs_bad_copy(const std::filesystem::path& file);
 // Saves `prefs` to `file` atomically, keeping the keys this version doesn't
 // know. `kept_as` is where a damaged file was kept (empty when none was).
-// False with `error` when nothing could be written; the file is then as it was.
+// False with `error` when the new file isn't in place: the old one is then
+// still at `file`, or (said in `error`) at `kept_as`.
 [[nodiscard]] bool save_window_prefs_file(const std::filesystem::path& file, const WindowPrefs& prefs,
                                           std::filesystem::path& kept_as, std::string& error);
 

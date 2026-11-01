@@ -49,8 +49,9 @@ void merge_folders_reply(FoldersInfo& info, const nlohmann::json& result);
 // What a clean-up left, as folders.clean names it ("skipped_items").
 struct SkippedItem {
     std::string path;    // in the data folder, '/' separated
-    std::string why;     // "in_use", "link", "protected", "unreadable", "not_allowed"
+    std::string why;     // "in_use", "link", "hard_link", "protected", "unreadable", "not_allowed"
     std::string reason;  // the service's English, for a code this window doesn't know
+    std::string inside;  // "protected": "project:<name>", "projects" or "www" it lies in; empty when not said
 };
 [[nodiscard]] std::vector<SkippedItem> skipped_from_reply(const nlohmann::json& result);
 

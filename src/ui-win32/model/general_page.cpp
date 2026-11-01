@@ -162,29 +162,55 @@ bool save_window_prefs_file(const fs::path& file, const WindowPrefs& prefs, fs::
     kept_as.clear();
     json existing = json::object();
     std::error_code ec;
-    if (fs::exists(fs::symlink_status(file, ec))) {
-        const WindowPrefsLoad now = load_window_prefs_file(file);
-        if (now.damaged) {
-            // Kept for the user to look at, never just written over; an
-            // earlier damaged copy stays as it is.
-            const fs::path copy = window_prefs_bad_copy(file);
-            if (copy.empty()) {
-                error = "can't keep the damaged " + core::path_to_utf8(file) + ": too many copies kept already";
-                return false;
+    const bool there = fs::exists(fs::symlink_status(file, ec));
+    const WindowPrefsLoad now = there ? load_window_prefs_file(file) : WindowPrefsLoad{};
+    if (!there || !now.damaged) {
+        if (there) {
+            if (const auto text = core::read_small_file(file, kMaxPrefsBytes)) {
+                existing = json::parse(*text, nullptr, false);  // the keys this version doesn't know, as they are now
             }
-            fs::rename(file, copy, ec);
-            if (ec) {
-                error = "can't keep the damaged " + core::path_to_utf8(file) + " as " + core::path_to_utf8(copy) + ": " +
-                        core::error_text(ec);
-                return false;
-            }
+        }
+        fs::create_directories(file.parent_path(), ec);
+        return core::write_file_atomically(file, window_prefs_json(prefs, existing), error);
+    }
+    // Damaged: kept for the user to look at, never just written over. The
+    // new file is written first (beside it), then the damaged one moved to
+    // the first free .bad name (never over an earlier copy, even one made
+    // meanwhile), then the new one put in its place. If anything fails the
+    // damaged file is still at window.json or at `kept_as`, and `error` says so.
+    fs::path fresh = file;
+    fresh += ".new";
+    if (!core::write_file_atomically(fresh, window_prefs_json(prefs, existing), error)) {
+        return false;
+    }
+    std::string move_error;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        const fs::path copy = window_prefs_bad_copy(file);
+        if (copy.empty()) {
+            move_error = "too many copies kept already";
+            break;
+        }
+        if (core::rename_no_replace(file, copy, move_error)) {
             kept_as = copy;
-        } else if (const auto text = core::read_small_file(file, kMaxPrefsBytes)) {
-            existing = json::parse(*text, nullptr, false);  // the keys this version doesn't know, as they are now
+            break;
+        }
+        if (!fs::exists(fs::symlink_status(copy, ec))) {
+            break;  // not taken meanwhile: the move itself failed
         }
     }
-    fs::create_directories(file.parent_path(), ec);
-    return core::write_file_atomically(file, window_prefs_json(prefs, existing), error);
+    if (kept_as.empty()) {
+        fs::remove(fresh, ec);
+        error = "can't keep the damaged " + core::path_to_utf8(file) + ": " + move_error;
+        return false;
+    }
+    fs::rename(fresh, file, ec);
+    if (ec) {
+        error = "the damaged " + core::path_to_utf8(file) + " was kept as " + core::path_to_utf8(kept_as) +
+                ", but the new one couldn't be put in its place: " + core::error_text(ec);
+        fs::remove(fresh, ec);
+        return false;
+    }
+    return true;
 }
 
 Lang resolve_lang(LangChoice choice, const char* forced, const std::vector<std::string>& windows_langs) {

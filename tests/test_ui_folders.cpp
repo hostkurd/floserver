@@ -84,8 +84,20 @@ TEST_CASE("a clean-up's skips are named: up to three, then how many more") {
     CHECK(clean_done_text(five, Lang::En) ==
           "Freed 0 KB. Left as they are: web (it's a link); templates/job-www (it's a project's folder, the projects "
           "folder or the www folder); downloads/a.part (in use by another program); and 2 more.");
+    // Inside which protected folder, and a hard link.
+    CHECK(skipped_list_text({{"web/logs", "protected", "...", "project:shop"}}, Lang::En) ==
+          "web/logs (it's inside project shop)");
+    CHECK(skipped_list_text({{"downloads", "protected", "...", "www"}}, Lang::En) == "downloads (it's inside the www folder)");
+    CHECK(skipped_list_text({{"templates", "protected", "...", "projects"}}, Lang::En) ==
+          "templates (it's inside the projects folder)");
+    CHECK(skipped_list_text({{"web/logs/x.log", "hard_link", "...", ""}}, Lang::En) ==
+          "web/logs/x.log (it's a hard link: the same file has another name)");
+    const json inside = json::parse(R"({"freed": 0, "skipped": 1, "skipped_items": [
+        {"path": "web/logs", "why": "protected", "reason": "...", "inside": "project:shop"}]})");
+    REQUIRE(skipped_from_reply(inside).size() == 1);
+    CHECK(skipped_from_reply(inside)[0].inside == "project:shop");
     // A code this window doesn't know: the service's own words.
-    CHECK(skipped_list_text({{"x", "new_code", "a reason a newer service has"}}, Lang::En) ==
+    CHECK(skipped_list_text({{"x", "new_code", "a reason a newer service has", ""}}, Lang::En) ==
           "x (a reason a newer service has)");
     // Paths read left to right in Arabic and Kurdish; Western digits.
     const std::string lre{'\xE2', '\x80', '\xAA'};

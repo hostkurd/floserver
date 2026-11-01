@@ -42,7 +42,22 @@
 // the www folder are skipped (with anything inside them, and any leftover
 // holding one) should one lie in a clean-up place, which only setting it by
 // hand can do. A file another program holds is skipped and named; one file
-// never stops the rest.
+// never stops the rest. A current log with more than one hard link (the same
+// file under another name, maybe outside the data folder) is never emptied.
+//
+// Each file is opened without following a link (Windows:
+// FILE_FLAG_OPEN_REPARSE_POINT; POSIX: O_NOFOLLOW), checked again on that
+// handle (not a link, a plain file, one link, and for a current log its
+// last-write time), and emptied or deleted through the same handle (POSIX
+// deletes by name in its folder, opened O_NOFOLLOW, after an lstat there),
+// so a file swapped for a link after it was listed is never written through.
+// What's left: a folder above it swapped for a link between the check and
+// the open. Only a program of the same user can do that, and it can already
+// write anywhere the user can.
+//
+// The protected folders are compared both as given and as the file system
+// names them (real_folder(): Windows' long names, so an 8.3 short
+// LOCALAPPDATA still matches a project's full path).
 
 #include <chrono>
 #include <cstdint>
@@ -78,14 +93,21 @@ struct CleanItem {
 // the same in plain English for anything else that reads the reply.
 struct CleanSkip {
     std::string path;  // relative to the data folder, '/' separated
-    std::string why;   // "in_use", "link", "protected", "not_allowed", "unreadable"
+    std::string why;   // "in_use", "link", "hard_link", "protected", "not_allowed", "unreadable"
     std::string reason;
+    // "protected" for lying inside one: which ("project:shop", "projects",
+    // "www"; CleanOptions::protected_kinds). Empty for one that holds a
+    // protected folder, or when it isn't named.
+    std::string inside;
 };
 
 struct CleanOptions {
     // Never touched, nor anything inside them, nor a leftover holding one:
     // every project's folder, the projects folder, the www folder.
     std::vector<std::filesystem::path> protected_dirs;
+    // What each is, beside it: "project:<name>", "projects" or "www"; a skip
+    // inside one says which (CleanSkip::inside). Shorter or empty: unnamed.
+    std::vector<std::string> protected_kinds;
     std::filesystem::file_time_type now = std::filesystem::file_time_type::clock::now();
     // The file operations, replaceable so tests can play a file another
     // program holds; the real ones when empty. Each sets `ec` when it
@@ -93,6 +115,14 @@ struct CleanOptions {
     std::function<void(const std::filesystem::path&, std::error_code&)> remove_file;
     std::function<void(const std::filesystem::path&, std::error_code&)> empty_file;
 };
+
+// The ways a file operation is refused once the file is open (the real
+// operations set these; replacements may too).
+inline constexpr int kCleanIsLink = 1;      // it turned out to be a link
+inline constexpr int kCleanHardLinked = 2;  // more than one hard link
+inline constexpr int kCleanWritten = 3;     // a current log written to within the day
+inline constexpr int kCleanGone = 4;        // not there any more
+[[nodiscard]] const std::error_category& clean_category();
 
 // The logs "Clear old logs" deletes or empties (see above), with their sizes;
 // empty ones are left out. What can't be gone into (a link, a protected

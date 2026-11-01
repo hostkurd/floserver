@@ -75,12 +75,21 @@ std::string www_host(const SharedSites& shared) {
 // --- what's asked, what comes back ------------------------------------------------
 
 void SettingsWindow::load_folders() {
+    // A change's or clean-up's answer that came while another section was
+    // shown: said now.
+    if (folders_held_message_) {
+        show_message(std::move(folders_held_message_->first), folders_held_message_->second);
+        folders_held_message_.reset();
+    }
+    // One folders.get at a time: its answer is on its way (start_side_call's
+    // one-at-a-time check doesn't see it, each purpose being new).
+    if (!folders_ask_.empty()) {
+        return;
+    }
     folders_loading_ = true;
-    // A new opening: what an earlier one asked is no longer waited for.
-    folders_setting_ = false;
-    cleaning_.clear();
-    folders_set_ask_.clear();
-    cleaning_ask_.clear();
+    // A change or clean-up still on its way is waited for: its answer is
+    // shown when it comes, even after leaving the section and coming back,
+    // and its button stays off meanwhile. Only the size is asked again.
     folders_ask_ = folders_purpose("folders.get");
     // The one request the section makes; the service counts the data folder for it.
     worker_.database_call("folders.get", json::object(), folders_ask_);
@@ -90,6 +99,14 @@ void SettingsWindow::load_folders() {
 
 void SettingsWindow::on_folders_answers(const Snapshot& snap) {
     const auto service_words = [this](const std::string& s) { return rtl_ ? isolate_ltr(s) : s; };
+    // Said in Folders: held while another section is shown, said on coming back.
+    const auto say = [this](std::string words, bool error) {
+        if (section_ == Section::Folders) {
+            show_message(std::move(words), error);
+        } else {
+            folders_held_message_.emplace(std::move(words), error);
+        }
+    };
     for (const Snapshot::DbAnswer& answer : snap.db) {
         if (!answer.method.starts_with("folders.")) {
             continue;
@@ -102,7 +119,7 @@ void SettingsWindow::on_folders_answers(const Snapshot& snap) {
             folders_ask_.clear();
             folders_loading_ = false;
             if (failed) {
-                show_message(fill(lang_, Str::FoldersReadFailed, {service_words(answer.error)}), true);
+                say(fill(lang_, Str::FoldersReadFailed, {service_words(answer.error)}), true);
             } else {
                 folders_ = folders_from_reply(*answer.reply);
             }
@@ -113,10 +130,10 @@ void SettingsWindow::on_folders_answers(const Snapshot& snap) {
             folders_set_ask_.clear();
             folders_setting_ = false;
             if (failed) {
-                show_message(fill(lang_, Str::FoldersChangeFailed, {service_words(answer.error)}), true);
+                say(fill(lang_, Str::FoldersChangeFailed, {service_words(answer.error)}), true);
             } else if (folders_) {
                 merge_folders_reply(*folders_, *answer.reply);
-                show_message(fill(lang_, Str::FoldersProjectsChanged, {folders_->projects_dir}), false);
+                say(fill(lang_, Str::FoldersProjectsChanged, {folders_->projects_dir}), false);
             }
         } else if (answer.method == "folders.clean") {
             if (answer.purpose != cleaning_ask_) {
@@ -125,13 +142,13 @@ void SettingsWindow::on_folders_answers(const Snapshot& snap) {
             cleaning_ask_.clear();
             cleaning_.clear();
             if (failed) {
-                show_message(fill(lang_, Str::FoldersCleanFailed, {service_words(answer.error)}), true);
+                say(fill(lang_, Str::FoldersCleanFailed, {service_words(answer.error)}), true);
             } else {
                 if (folders_) {
                     merge_folders_reply(*folders_, *answer.reply);
                 }
                 // What was left, by name: shown as a problem so it's read.
-                show_message(clean_done_text(*answer.reply, lang_), !skipped_from_reply(*answer.reply).empty());
+                say(clean_done_text(*answer.reply, lang_), !skipped_from_reply(*answer.reply).empty());
             }
         }
     }

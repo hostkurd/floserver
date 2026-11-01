@@ -242,6 +242,12 @@ std::optional<fs::path> projects_folder_to_keep(const fs::path& dir, std::string
         rest.push_back(at.filename());
         at = at.parent_path();
     }
+    if (!fs::exists(at, ec)) {
+        // Walked up to the root and nothing's there: a drive that isn't ("Z:").
+        const std::string drive = path_to_utf8(normal.root_name());
+        error = drive.empty() ? "there's no folder " + path_to_utf8(at) : "there's no drive " + drive;
+        return std::nullopt;
+    }
     if (!fs::is_directory(at, ec)) {
         error = path_to_utf8(at) + " is a file, not a folder";
         return std::nullopt;

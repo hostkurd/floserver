@@ -408,6 +408,10 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     FoldersSkipInUse,        // why one was left: another program has it open
     FoldersSkipLink,         // ... it's a link
     FoldersSkipProtected,    // ... it's a project's folder, the projects folder or the www folder
+    FoldersSkipInProject,    // ... it's inside project {0}
+    FoldersSkipInProjects,   // ... it's inside the projects folder
+    FoldersSkipInWww,        // ... it's inside the www folder
+    FoldersSkipHardLink,     // ... it has another name (a hard link)
     FoldersSkipUnreadable,   // ... it couldn't be read
     FoldersSkipNotAllowed,   // ... it isn't something the clean-up removes
     FoldersOpenMade,         // {0}: the projects folder, made just now to open it

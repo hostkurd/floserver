@@ -93,7 +93,8 @@ std::vector<SkippedItem> skipped_from_reply(const json& result) {
     }
     for (const json& item : result.at("skipped_items")) {
         if (item.is_object() && !string_of(item, "path").empty()) {
-            out.push_back({string_of(item, "path"), string_of(item, "why"), string_of(item, "reason")});
+            out.push_back(
+                {string_of(item, "path"), string_of(item, "why"), string_of(item, "reason"), string_of(item, "inside")});
         }
     }
     return out;
@@ -106,7 +107,19 @@ std::string skip_reason_text(const SkippedItem& item, Lang lang) {
     if (item.why == "link") {
         return std::string(text(lang, Str::FoldersSkipLink));
     }
+    if (item.why == "hard_link") {
+        return std::string(text(lang, Str::FoldersSkipHardLink));
+    }
     if (item.why == "protected") {
+        if (item.inside.starts_with("project:")) {
+            return fill(lang, Str::FoldersSkipInProject, {item.inside.substr(8)});
+        }
+        if (item.inside == "projects") {
+            return std::string(text(lang, Str::FoldersSkipInProjects));
+        }
+        if (item.inside == "www") {
+            return std::string(text(lang, Str::FoldersSkipInWww));
+        }
         return std::string(text(lang, Str::FoldersSkipProtected));
     }
     if (item.why == "unreadable") {

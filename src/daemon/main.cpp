@@ -891,7 +891,8 @@ struct Service {
     // request only, and given up after a few seconds); folders.set
     // {"projects_dir": "..." | null}; folders.clean {"what": "logs" | "leftovers"},
     // answered with {"what", "freed", "done", "skipped": count (older windows),
-    // "skipped_items": [{"path" (in the data folder), "why" (code), "reason"}]}.
+    // "skipped_items": [{"path" (in the data folder), "why" (code), "reason",
+    // "inside"? ("project:<name>", "projects", "www": for "protected")}]}.
     // Every reply ends with what the clean-ups would free now:
     //   {"logs_bytes", "leftovers_bytes", "installing": bool (an install or a
     //    New project is running: its downloads and work folder are left alone)}
@@ -915,18 +916,34 @@ struct Service {
         }
         // What the clean-ups never touch, should one lie in their places
         // (only by hand): every project's folder, the projects folder, the www folder.
+        // Each is compared as given and in its real names (data_folder.h), and
+        // named, so a skip can say which it lies inside.
         core::CleanOptions options;
+        const auto guard = [&options](const std::filesystem::path& dir, std::string kind) {
+            options.protected_dirs.push_back(dir);
+            options.protected_kinds.push_back(std::move(kind));
+        };
         if (const auto config = projects->config(refusal)) {
             for (const core::Project& p : config->projects) {
-                options.protected_dirs.push_back(p.dir);
+                guard(p.dir, "project:" + p.name);
             }
             if (const auto dir = config->projects_dir ? config->projects_dir : core::default_projects_dir()) {
-                options.protected_dirs.push_back(*dir);
+                guard(*dir, "projects");
             }
             std::string ignored;
             if (const auto shared = core::read_shared_config(*config, ignored)) {
                 if (const auto www = core::shared_dir(*shared)) {
-                    options.protected_dirs.push_back(*www);
+                    guard(*www, "www");
+                }
+            } else {
+                // "shared" can't be read: still keep its folder, as far as it
+                // can be told, and the default one.
+                const json& raw = config->other.is_object() ? config->other.value("shared", json::object()) : json();
+                if (raw.is_object() && raw.contains("dir") && raw.at("dir").is_string()) {
+                    guard(core::path_from_utf8(raw.at("dir").get<std::string>()), "www");
+                }
+                if (const auto www = core::default_shared_dir()) {
+                    guard(*www, "www");
                 }
             }
         } else {
@@ -961,7 +978,11 @@ struct Service {
             }
             json skipped = json::array();
             for (const core::CleanSkip& s : done.skipped_items) {
-                skipped.push_back({{"path", s.path}, {"why", s.why}, {"reason", s.reason}});
+                json item = {{"path", s.path}, {"why", s.why}, {"reason", s.reason}};
+                if (!s.inside.empty()) {
+                    item["inside"] = s.inside;  // "project:shop", "projects", "www"
+                }
+                skipped.push_back(std::move(item));
             }
             out = {{"what", what},
                    {"freed", done.freed},

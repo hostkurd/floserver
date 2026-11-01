@@ -313,6 +313,21 @@ TEST_CASE("window.json: a damaged file is kept as .bad, never lost") {
     CHECK(kept == dir.path() / "window.json.bad.3");
     CHECK(window_prefs_bad_copy(file) == dir.path() / "window.json.bad.4");
 
+    // An earlier copy is never written over: the move refuses a name that's taken.
+    test_util::write_file(file, "{");
+    test_util::write_file(dir.path() / "window.json.bad.4", "made meanwhile");
+    REQUIRE(save_window_prefs_file(file, next, kept, error));
+    CHECK(kept == dir.path() / "window.json.bad.5");
+    CHECK(test_util::read_file(dir.path() / "window.json.bad.4") == "made meanwhile");
+    CHECK(test_util::read_file(dir.path() / "window.json.bad.5") == "{");
+    CHECK_FALSE(fs::exists(dir.path() / "window.json.new"));  // the new file went in place
+    std::string move_error;
+    test_util::write_file(dir.path() / "a", "a");
+    CHECK_FALSE(floserver::core::rename_no_replace(dir.path() / "a", dir.path() / "window.json.bad", move_error));
+    CHECK_FALSE(move_error.empty());
+    CHECK(test_util::read_file(dir.path() / "a") == "a");
+    CHECK(test_util::read_file(dir.path() / "window.json.bad") == R"({"language": "ar", "theme": )");
+
     // Unknown values in a valid file aren't damage: kept as they are.
     test_util::write_file(file, R"({"language": "fr", "theme": 3})");
     CHECK_FALSE(load_window_prefs_file(file).damaged);

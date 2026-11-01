@@ -7,6 +7,8 @@
 #else
 #include <fcntl.h>
 #include <unistd.h>
+
+#include <cerrno>
 #endif
 
 #include <array>
@@ -186,6 +188,29 @@ bool write_file_atomically(const fs::path& file, std::string_view bytes, std::st
 
 bool write_private_file_atomically(const fs::path& file, std::string_view bytes, std::string& error) {
     return write_atomically(file, bytes, true, error);
+}
+
+bool rename_no_replace(const fs::path& from, const fs::path& to, std::string& error) {
+#ifdef _WIN32
+    if (MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_WRITE_THROUGH) == FALSE) {
+        error = "can't move " + path_to_utf8(from) + " to " + path_to_utf8(to) + ": " +
+                error_text(std::error_code(static_cast<int>(GetLastError()), std::system_category()));
+        return false;
+    }
+#else
+    // link() fails when `to` exists; then the old name goes.
+    if (::link(from.c_str(), to.c_str()) != 0) {
+        error = "can't move " + path_to_utf8(from) + " to " + path_to_utf8(to) + ": " +
+                error_text(std::error_code(errno, std::generic_category()));
+        return false;
+    }
+    if (::unlink(from.c_str()) != 0) {
+        error = "can't move " + path_to_utf8(from) + ": " + error_text(std::error_code(errno, std::generic_category()));
+        (void)::unlink(to.c_str());
+        return false;
+    }
+#endif
+    return true;
 }
 
 std::optional<std::string> read_small_file(const fs::path& file, std::size_t max_bytes) {
