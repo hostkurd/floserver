@@ -67,6 +67,37 @@ TEST_CASE("sizes and what a clean-up button says") {
     CHECK(clean_done_text(json{{"freed", 1024}, {"skipped", 0}}, Lang::Ar).find(lri + "1 KB") != std::string::npos);
 }
 
+TEST_CASE("a clean-up's skips are named: up to three, then how many more") {
+    const json one = json::parse(R"({"freed": 2048, "skipped": 1, "skipped_items": [
+        {"path": "web/logs/nginx-error.log", "why": "in_use", "reason": "in use by another program"}]})");
+    CHECK(clean_done_text(one, Lang::En) ==
+          "Freed 2 KB. Left as they are: web/logs/nginx-error.log (in use by another program).");
+    REQUIRE(skipped_from_reply(one).size() == 1);
+    CHECK(skipped_from_reply(one)[0].why == "in_use");
+
+    const json five = json::parse(R"({"freed": 0, "skipped": 5, "skipped_items": [
+        {"path": "web", "why": "link", "reason": "it's a link; FloServer doesn't follow links"},
+        {"path": "templates/job-www", "why": "protected", "reason": "..."},
+        {"path": "downloads/a.part", "why": "in_use", "reason": "..."},
+        {"path": "downloads/b.part", "why": "in_use", "reason": "..."},
+        {"path": "x", "why": "new_code", "reason": "a reason a newer service has"}]})");
+    CHECK(clean_done_text(five, Lang::En) ==
+          "Freed 0 KB. Left as they are: web (it's a link); templates/job-www (it's a project's folder, the projects "
+          "folder or the www folder); downloads/a.part (in use by another program); and 2 more.");
+    // A code this window doesn't know: the service's own words.
+    CHECK(skipped_list_text({{"x", "new_code", "a reason a newer service has"}}, Lang::En) ==
+          "x (a reason a newer service has)");
+    // Paths read left to right in Arabic and Kurdish; Western digits.
+    const std::string lre{'\xE2', '\x80', '\xAA'};
+    const std::string ar = clean_done_text(five, Lang::Ar);
+    CHECK(ar.find(lre + "web") != std::string::npos);
+    CHECK(ar.find(lre + "2") != std::string::npos);
+    CHECK(clean_done_text(five, Lang::Ku).find(lre + "templates/job-www") != std::string::npos);
+    // An older service: only the count, as before.
+    CHECK(clean_done_text(json{{"freed", 1024}, {"skipped", 2}}, Lang::En) == "Freed 1 KB. 2 in use were left as they are.");
+    CHECK(skipped_from_reply(json{{"skipped_items", "not a list"}}).empty());
+}
+
 TEST_CASE("Settings > Shared sites: hint, pickers and the www login") {
     const Installed installed = {{"php", {"8.5.12", "8.4.27"}}, {"mariadb", {"11.4.13"}}, {"apache", {"2.4.65"}}};
     const json servers = {{"servers", json::array({{{"series", "11.4"}, {"version", "11.4.13"}, {"port", 3307}}})}};

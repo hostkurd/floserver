@@ -101,10 +101,15 @@ void SettingsWindow::show_general() {
     focus_ = static_cast<int>(Section::General);
 }
 
-void SettingsWindow::set_prefs(const WindowPrefs& prefs, const std::string& error) {
+void SettingsWindow::set_prefs(const WindowPrefs& prefs, const std::string& error, const std::string& kept_as) {
     prefs_ = prefs;
     if (!error.empty()) {
         show_message(fill(lang_, Str::GeneralSaveFailed, {error}), true);
+        return;
+    }
+    if (!kept_as.empty()) {
+        // window.json couldn't be read: it was kept, and a new one written.
+        show_message(fill(lang_, Str::GeneralPrefsKept, {kept_as}), false);
         return;
     }
     relayout();

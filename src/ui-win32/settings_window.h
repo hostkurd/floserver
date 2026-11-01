@@ -120,7 +120,7 @@ public:
     // Opens the General section (after the windows were made again in another language).
     void show_general();
     // The owner's preferences after a change (or a failed save: `error`).
-    void set_prefs(const WindowPrefs& prefs, const std::string& error);
+    void set_prefs(const WindowPrefs& prefs, const std::string& error, const std::string& kept_as = {});
     // The theme changed (Settings > General, or Windows'): drawn again.
     void refresh_theme();
     // Closing FloServer's window quits (Settings > General): closes as
@@ -133,9 +133,15 @@ public:
     void destroy_now();
 
 private:
-    // In the sidebar's order.
-    enum class Section : std::uint8_t { Runtimes, Php, Ports, Database, Apache, Folders, Shared, General };
+    // In the sidebar's order: the sidebar's entries, its focus order and its
+    // hit groups are this enum's values. Nothing is saved by number.
+    enum class Section : std::uint8_t { General, Runtimes, Php, Ports, Database, Apache, Folders, Shared };
     static constexpr std::size_t kSections = 8;
+    static_assert(kSections == kSettingsSidebar.size(), "a sidebar label for each Section, in its order");
+    static_assert(kSettingsSidebar[static_cast<std::size_t>(Section::General)] == Str::SettingsGeneral &&
+                      kSettingsSidebar[static_cast<std::size_t>(Section::Runtimes)] == Str::SettingsRuntimes &&
+                      kSettingsSidebar[static_cast<std::size_t>(Section::Shared)] == Str::SharedSites,
+                  "Section and kSettingsSidebar list the sections in the same order");
     enum class Part : std::uint8_t {
         None,
         Nav,     // row: the section
@@ -458,7 +464,7 @@ private:
         RECT copy_env{};
     };
     struct Geometry {
-        std::array<RECT, kSections> navs{};  // Runtimes, PHP, Ports & HTTPS, Database, Apache, Folders, Shared sites, General
+        std::array<RECT, kSections> navs{};  // by Section: General, Runtimes, PHP, Ports & HTTPS, Database, Apache, Folders, Shared sites
         RECT title{};
         RECT hint{};
         RECT check{};
@@ -628,8 +634,9 @@ private:
     void paint_folders_text(Canvas& c) const;
     // A folder box: its outline (shapes) or the path inside it (text).
     void paint_folder_box(Canvas& c, const RECT& box, const std::string& path, bool text_pass) const;
-    // Opens a folder in Explorer, or says why it couldn't.
-    void explore(const std::string& folder);
+    // Opens a folder in Explorer, or says why it couldn't. `make`: it's made
+    // first when it isn't there yet (the projects folder may be set so).
+    void explore(const std::string& folder, bool make = false);
     [[nodiscard]] static bool is_folders_part(Part part) {
         return part >= Part::FoldersProjectsChange && part <= Part::FoldersLeftovers;
     }
@@ -709,7 +716,7 @@ private:
     std::string message_;
     bool message_error_ = false;
 
-    Section section_ = Section::Runtimes;
+    Section section_ = Section::General;  // opening Settings plainly opens General
     // Settings > PHP: the series shown, its php.get answer, and the changes
     // not saved yet.
     std::string php_series_;
@@ -776,6 +783,12 @@ private:
     bool folders_loading_ = false;
     bool folders_setting_ = false;  // folders.set
     std::string cleaning_;          // "logs" or "leftovers" while folders.clean is on its way
+    // Each request's purpose ("folders.get#7"), unique for the life of the
+    // program: an answer for an earlier opening of the section (or an
+    // earlier Settings window) doesn't match and is dropped.
+    std::string folders_ask_;
+    std::string folders_set_ask_;
+    std::string cleaning_ask_;
     bool picking_folder_ = false;   // a folder picker is open (it runs its own message loop)
     // Shared sites (both sections): the main window's shared.get snapshot,
     // and the user's changes until the worker reports them done (the keys

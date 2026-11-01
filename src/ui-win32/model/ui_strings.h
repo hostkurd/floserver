@@ -8,6 +8,7 @@
 // right to left, because the values are code words: names, addresses,
 // versions, ports, commands. Numbers use Western digits in every language.
 
+#include <array>
 #include <cstdint>
 #include <initializer_list>
 #include <optional>
@@ -402,6 +403,14 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     FoldersChangeFailed,     // {0}: the service's reason
     FoldersProjectsChanged,  // {0}: the folder
     FoldersCleanFailed,      // {0}: the service's reason
+    FoldersFreedLeft,        // {0}: "12 MB", {1}: what was left and why ("web/logs/x.log (it's a link); ...")
+    FoldersSkippedMore,      // {0}: how many more were left
+    FoldersSkipInUse,        // why one was left: another program has it open
+    FoldersSkipLink,         // ... it's a link
+    FoldersSkipProtected,    // ... it's a project's folder, the projects folder or the www folder
+    FoldersSkipUnreadable,   // ... it couldn't be read
+    FoldersSkipNotAllowed,   // ... it isn't something the clean-up removes
+    FoldersOpenMade,         // {0}: the projects folder, made just now to open it
     // Settings > General.
     SettingsGeneral,
     GeneralHint,
@@ -431,6 +440,7 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     GeneralLicencesOpened,
     GeneralLicencesFailed,   // {0}: the reason
     GeneralSaveFailed,       // {0}: the reason
+    GeneralPrefsKept,        // {0}: where the damaged window.json was kept
     // The licences file (Notepad): no direction marks.
     LicencesTitle,           // {0}: FloServer's version
     LicencesOwn,
@@ -443,6 +453,12 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
 };
 
 [[nodiscard]] std::string_view text(Lang lang, Str key);
+
+// The Settings sidebar, top to bottom (SettingsWindow::Section has the same
+// order). Opening Settings with no section asked for opens the first.
+inline constexpr std::array<Str, 8> kSettingsSidebar = {
+    Str::SettingsGeneral,  Str::SettingsRuntimes, Str::SettingsPhp,     Str::SettingsPorts,
+    Str::SettingsDatabase, Str::SettingsApache,   Str::SettingsFolders, Str::SharedSites};
 
 // U+202A LEFT-TO-RIGHT EMBEDDING, the text, U+202C POP DIRECTIONAL
 // FORMATTING. Embeddings, not the newer isolates (U+2066...), because

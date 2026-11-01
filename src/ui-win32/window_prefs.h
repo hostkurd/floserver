@@ -15,8 +15,9 @@ namespace floserver::ui {
 
 // window.json, or the defaults when it isn't there or can't be read.
 [[nodiscard]] WindowPrefs load_window_prefs();
-// False with `error` when it couldn't be written.
-[[nodiscard]] bool save_window_prefs(const WindowPrefs& prefs, std::string& error);
+// False with `error` when it couldn't be written. `kept_as`: where a damaged
+// window.json was kept before the new one was written (empty when none was).
+[[nodiscard]] bool save_window_prefs(const WindowPrefs& prefs, std::string& error, std::string& kept_as);
 
 // Windows' display languages for this user, most wanted first ("ar-IQ", "en-US").
 [[nodiscard]] std::vector<std::string> windows_display_languages();

@@ -430,6 +430,12 @@ void SettingsWindow::on_create() {
 
     apply_theme();
     rebuild();
+    // Settings opens on General (section_'s start): what open_section()
+    // would do for it. A link to another section opens that one after this.
+    focus_ = static_cast<int>(section_);
+    if (section_ == Section::General) {
+        load_general();
+    }
 }
 
 void SettingsWindow::on_destroy() {
@@ -1376,18 +1382,19 @@ void SettingsWindow::paint_shapes(Canvas& c) const {
             const auto [x2, y2] = at(bx, by);
             c.line(x1, y1, x2, y2, p.text, pxf(1.3F));
         };
-        if (i == 0) {
+        const auto section = static_cast<Section>(i);
+        if (section == Section::Runtimes) {
             // Runtimes' icon: two stacked boxes, 16 px.
             c.round_outline({ix + px(2), iy + px(2), ix + px(14), iy + px(7)}, pxf(1), p.text, pxf(1.3F));
             c.round_outline({ix + px(2), iy + px(9), ix + px(14), iy + px(14)}, pxf(1), p.text, pxf(1.3F));
-        } else if (i == 2) {
+        } else if (section == Section::Ports) {
             // Ports & HTTPS': a padlock.
             c.round_outline({ix + px(3), iy + px(7), ix + px(13), iy + px(14)}, pxf(1.5F), p.text, pxf(1.3F));
             stroke(5.5F, 7, 5.5F, 4.5F);
             stroke(10.5F, 7, 10.5F, 4.5F);
             stroke(5.5F, 4.5F, 8, 2);
             stroke(8, 2, 10.5F, 4.5F);
-        } else if (i == static_cast<std::size_t>(Section::General)) {
+        } else if (section == Section::General) {
             // General's: a gear, a ring with eight teeth.
             const float cx = static_cast<float>(ix) + pxf(8);
             const float cy = static_cast<float>(iy) + pxf(8);
@@ -1399,21 +1406,21 @@ void SettingsWindow::paint_shapes(Canvas& c) const {
             for (const auto& [dx, dy] : kTeeth) {
                 c.line(cx + dx * pxf(4.5F), cy + dy * pxf(4.5F), cx + dx * pxf(7), cy + dy * pxf(7), p.text, pxf(1.8F));
             }
-        } else if (i == 5) {
+        } else if (section == Section::Folders) {
             // Folders': a folder, its tab then its body.
             stroke(1.5F, 3, 6, 3);
             stroke(6, 3, 7.5F, 5);
             c.round_outline({ix + px(1), iy + px(5), ix + px(15), iy + px(14)}, pxf(1.5F), p.text, pxf(1.3F));
-        } else if (i == 6) {
+        } else if (section == Section::Shared) {
             // Shared sites': two pages, one behind the other.
             c.round_outline({ix + px(4), iy + px(1), ix + px(15), iy + px(11)}, pxf(1.5F), p.text, pxf(1.3F));
             c.round_outline({ix + px(1), iy + px(5), ix + px(12), iy + px(15)}, pxf(1.5F), p.text, pxf(1.3F));
-        } else if (i == 4) {
+        } else if (section == Section::Apache) {
             // Apache's: a globe, for the web server.
             c.circle(static_cast<float>(ix) + pxf(8), static_cast<float>(iy) + pxf(8), pxf(6), p.text, pxf(1.3F));
             c.round_outline({ix + px(5), iy + px(2), ix + px(11), iy + px(14)}, pxf(3), p.text, pxf(1.3F));
             stroke(2, 8, 14, 8);
-        } else if (i == 1) {
+        } else if (section == Section::Php) {
             // PHP's: </>, as in the mockup.
             stroke(5, 5, 2, 8);
             stroke(2, 8, 5, 11);
@@ -1527,10 +1534,7 @@ void SettingsWindow::paint_text(Canvas& c) const {
     for (std::size_t i = 0; i < g.navs.size(); ++i) {
         const RECT& nav = g.navs[i];
         const bool open = static_cast<std::size_t>(section_) == i;
-        constexpr std::array<Str, kSections> kLabels = {
-            Str::SettingsRuntimes, Str::SettingsPhp,     Str::SettingsPorts, Str::SettingsDatabase,
-            Str::SettingsApache,   Str::SettingsFolders, Str::SharedSites,   Str::SettingsGeneral};
-        c.text({nav.left + px(38), nav.top, nav.right - px(8), nav.bottom}, w(text(lang_, kLabels.at(i))),
+        c.text({nav.left + px(38), nav.top, nav.right - px(8), nav.bottom}, w(text(lang_, kSettingsSidebar.at(i))),
                open ? fonts_.body_bold.get() : fonts_.body.get(), p.text, Align::Start, false);
     }
     if (section_ == Section::Folders) {

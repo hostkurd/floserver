@@ -13,7 +13,8 @@ add_library(floserver_ui_model STATIC
     model/general_page.cpp
     model/folders_page.cpp)
 target_include_directories(floserver_ui_model PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(floserver_ui_model PUBLIC floserver_third_party)
+# Core for paths.h's file helpers (window.json is read and written here, testably).
+target_link_libraries(floserver_ui_model PUBLIC floserver_third_party PRIVATE floserver_core)
 floserver_code_rules(floserver_ui_model)
 
 if(NOT WIN32)
