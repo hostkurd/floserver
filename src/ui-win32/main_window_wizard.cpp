@@ -83,6 +83,13 @@ void MainWindow::open_wizard() {
     }
     // Settings' defaults for the versions (D20): asked once per opening.
     worker_->load_defaults();
+    make_name_edit();
+    ShowWindow(name_edit_, SW_HIDE);
+    layout();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void MainWindow::make_name_edit() {
     if (name_edit_ == nullptr) {
         name_edit_ = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL | ES_LOWERCASE, 0, 0, 0, 0,
                                      hwnd_, nullptr, instance_, nullptr);
@@ -90,9 +97,15 @@ void MainWindow::open_wizard() {
         SendMessageW(name_edit_, EM_LIMITTEXT, 63, 0);  // a project name's most
         SendMessageW(name_edit_, WM_SETFONT, reinterpret_cast<WPARAM>(fonts_.body.get()), TRUE);
     }
-    ShowWindow(name_edit_, SW_HIDE);
-    layout();
-    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void MainWindow::remake_wizard_edit(const std::string& name) {
+    if (!wizard_open()) {
+        return;
+    }
+    make_name_edit();
+    SetWindowTextW(name_edit_, w(name).c_str());
+    ShowWindow(name_edit_, wizard_.step == 1 ? SW_SHOW : SW_HIDE);
 }
 
 void MainWindow::close_wizard() {

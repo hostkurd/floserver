@@ -70,9 +70,10 @@ bool is_empty(const RECT& r) { return r.right <= r.left || r.bottom <= r.top; }
 
 }  // namespace
 
-SettingsWindow::SettingsWindow(HINSTANCE instance, Lang lang, ServiceWorker& worker, HWND owner, UINT closed_message)
+SettingsWindow::SettingsWindow(HINSTANCE instance, Lang lang, const WindowPrefs& prefs, ServiceWorker& worker,
+                               HWND owner, UINT closed_message, UINT prefs_message)
     : instance_(instance), lang_(lang), rtl_(is_rtl(lang)), worker_(worker), owner_(owner),
-      closed_message_(closed_message) {}
+      closed_message_(closed_message), prefs_message_(prefs_message), prefs_(prefs) {}
 
 bool SettingsWindow::close() {
     if (asking_) {
@@ -83,6 +84,25 @@ bool SettingsWindow::close() {
         try_close();  // the closed message follows, as for the user closing it
     }
     return hwnd_ == nullptr;
+}
+
+bool SettingsWindow::close_and_quit() {
+    if (asking_) {
+        bring_to_front();  // its question is open: answered there first
+        return false;
+    }
+    if (hwnd_ == nullptr) {
+        return true;
+    }
+    quit_on_close_ = true;
+    try_close();
+    if (hwnd_ == nullptr) {
+        return true;
+    }
+    if (after_save_ != AfterSave::Close) {
+        quit_on_close_ = false;  // Cancel, or nothing could be sent: nothing quits
+    }
+    return false;
 }
 
 SettingsWindow::~SettingsWindow() {
@@ -184,7 +204,7 @@ LRESULT CALLBACK SettingsWindow::window_proc(HWND hwnd, UINT msg, WPARAM wparam,
         // The owner lets go of this object once the message arrives.
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         self->hwnd_ = nullptr;
-        PostMessageW(self->owner_, self->closed_message_, 0, 0);
+        PostMessageW(self->owner_, self->closed_message_, self->quit_on_close_ ? 1 : 0, 0);
         return DefWindowProcW(hwnd, msg, wparam, lparam);
     }
     return self->handle(msg, wparam, lparam);
@@ -544,6 +564,9 @@ void SettingsWindow::on_snapshot(const Snapshot& snap) {
     const bool close_php = on_php_answers(snap);
     const bool close_apache = on_apache_answers(snap);
     const bool close_now = on_db_answers(snap) || close_php || close_apache;
+    if (!close_now && after_save_ != AfterSave::Close) {
+        quit_on_close_ = false;  // the Save on the way out was refused: Settings stays, and so does FloServer
+    }
     rebuild();
     if (close_now) {
         DestroyWindow(hwnd_);  // the Save chosen on the way out is done
@@ -581,6 +604,10 @@ SettingsWindow::Geometry SettingsWindow::layout(HDC dc) const {
     const int x0 = main_left();
     const int x1 = std::max(x0 + px(200), width_ - px(24));
     int y = px(4) - scroll_;
+    if (section_ == Section::General) {
+        layout_general(dc, g, x0, x1, y);
+        return g;
+    }
     if (section_ == Section::Apache) {
         layout_apache(dc, g, x0, x1, y);
         return g;
@@ -864,6 +891,9 @@ const RECT* SettingsWindow::rect_of(const Hit& hit) const {
         case Part::PortsOpenCert:
             return ports_rect_of(hit);
         default:
+            if (is_general_part(hit.part)) {
+                return general_rect_of(hit);
+            }
             if (is_apache_part(hit.part)) {
                 return apache_rect_of(hit);
             }
@@ -873,8 +903,14 @@ const RECT* SettingsWindow::rect_of(const Hit& hit) const {
 }
 
 std::vector<SettingsWindow::Hit> SettingsWindow::focus_order() const {
-    std::vector<Hit> order{{Part::Nav, 0, -1}, {Part::Nav, 1, -1}, {Part::Nav, 2, -1}, {Part::Nav, 3, -1},
-                           {Part::Nav, 4, -1}};
+    std::vector<Hit> order;
+    for (std::size_t i = 0; i < kSections; ++i) {
+        order.push_back({Part::Nav, static_cast<int>(i), -1});
+    }
+    if (section_ == Section::General) {
+        general_focus_order(order);
+        return order;
+    }
     if (section_ == Section::Apache) {
         apache_focus_order(order);
         return order;
@@ -993,11 +1029,10 @@ void SettingsWindow::on_click(const Hit& hit) {
             run_button(hit);
             break;
         case Part::Nav:
-            open_section(hit.group == 1   ? Section::Php
-                         : hit.group == 2 ? Section::Ports
-                         : hit.group == 3 ? Section::Database
-                         : hit.group == 4 ? Section::Apache
-                                          : Section::Runtimes);
+            // The sidebar lists the sections in their enum's order.
+            if (hit.group >= 0 && std::cmp_less(hit.group, kSections)) {
+                open_section(static_cast<Section>(hit.group));
+            }
             break;
         case Part::None:
             break;
@@ -1012,7 +1047,9 @@ void SettingsWindow::on_click(const Hit& hit) {
             on_ports_click(hit);
             break;
         default:
-            if (is_apache_part(hit.part)) {
+            if (is_general_part(hit.part)) {
+                on_general_click(hit);
+            } else if (is_apache_part(hit.part)) {
                 on_apache_click(hit);
             } else if (is_db_part(hit.part)) {
                 on_db_click(hit);
@@ -1061,6 +1098,10 @@ void SettingsWindow::on_key(WPARAM key) {
             scroll_to(scroll_ - std::max(px(kRowH), height_ - px(kRowH)));
             return;
         case VK_F5:
+            if (section_ == Section::General) {
+                load_general();  // the Run entry read again
+                return;
+            }
             if (section_ == Section::Apache) {
                 if (apache_changes_.empty() && !apache_loading_ && !apache_saving_) {
                     load_apache();  // the modules folder and custom.conf read again
@@ -1304,6 +1345,18 @@ void SettingsWindow::paint_shapes(Canvas& c) const {
             stroke(10.5F, 7, 10.5F, 4.5F);
             stroke(5.5F, 4.5F, 8, 2);
             stroke(8, 2, 10.5F, 4.5F);
+        } else if (i == static_cast<std::size_t>(Section::General)) {
+            // General's: a gear, a ring with eight teeth.
+            const float cx = static_cast<float>(ix) + pxf(8);
+            const float cy = static_cast<float>(iy) + pxf(8);
+            c.circle(cx, cy, pxf(4.5F), p.text, pxf(1.3F));
+            c.circle(cx, cy, pxf(1.6F), p.text, pxf(1.2F));
+            constexpr std::array<std::pair<float, float>, 8> kTeeth = {
+                {{1.0F, 0.0F}, {0.7071F, 0.7071F}, {0.0F, 1.0F}, {-0.7071F, 0.7071F}, {-1.0F, 0.0F},
+                 {-0.7071F, -0.7071F}, {0.0F, -1.0F}, {0.7071F, -0.7071F}}};
+            for (const auto& [dx, dy] : kTeeth) {
+                c.line(cx + dx * pxf(4.5F), cy + dy * pxf(4.5F), cx + dx * pxf(7), cy + dy * pxf(7), p.text, pxf(1.8F));
+            }
         } else if (i == 4) {
             // Apache's: a globe, for the web server.
             c.circle(static_cast<float>(ix) + pxf(8), static_cast<float>(iy) + pxf(8), pxf(6), p.text, pxf(1.3F));
@@ -1331,6 +1384,10 @@ void SettingsWindow::paint_shapes(Canvas& c) const {
         if (focused(hit)) {
             paint_ring(c, nav);
         }
+    }
+    if (section_ == Section::General) {
+        paint_general_shapes(c);
+        return;
     }
     if (section_ == Section::Apache) {
         paint_apache_shapes(c);
@@ -1411,13 +1468,14 @@ void SettingsWindow::paint_text(Canvas& c) const {
     for (std::size_t i = 0; i < g.navs.size(); ++i) {
         const RECT& nav = g.navs[i];
         const bool open = static_cast<std::size_t>(section_) == i;
-        const Str label = i == 0   ? Str::SettingsRuntimes
-                          : i == 1 ? Str::SettingsPhp
-                          : i == 2 ? Str::SettingsPorts
-                          : i == 3 ? Str::SettingsDatabase
-                                   : Str::SettingsApache;
-        c.text({nav.left + px(38), nav.top, nav.right - px(8), nav.bottom}, w(text(lang_, label)),
+        constexpr std::array<Str, kSections> kLabels = {Str::SettingsRuntimes, Str::SettingsPhp,    Str::SettingsPorts,
+                                                        Str::SettingsDatabase, Str::SettingsApache, Str::SettingsGeneral};
+        c.text({nav.left + px(38), nav.top, nav.right - px(8), nav.bottom}, w(text(lang_, kLabels.at(i))),
                open ? fonts_.body_bold.get() : fonts_.body.get(), p.text, Align::Start, false);
+    }
+    if (section_ == Section::General) {
+        paint_general_text(c);
+        return;
     }
     if (section_ == Section::Apache) {
         paint_apache_text(c);

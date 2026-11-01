@@ -7,12 +7,14 @@
 #include "main_window.h"
 #include "model/ui_strings.h"
 #include "win_util.h"
+#include "window_prefs.h"
+#include "window_style.h"
 
 #include "floserver/core/ipc.h"
-#include "floserver/core/process.h"
 
 #include <windows.h>
 #include <commctrl.h>
+#include <shellapi.h>
 #include <objbase.h>
 
 #include <cstdlib>
@@ -39,6 +41,21 @@ bool hand_over_to_running_window(const std::wstring& class_name) {
     return false;
 }
 
+// FloServer.exe [--tray] [--instance <suffix>], as the Run entry writes it.
+floserver::ui::StartArgs start_args() {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (argv == nullptr) {
+        return {};
+    }
+    std::vector<std::string> args;
+    for (int i = 1; i < argc; ++i) {
+        args.push_back(floserver::ui::win::narrow(argv[i]));  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic): argv from Windows
+    }
+    LocalFree(argv);
+    return floserver::ui::parse_start_args(args);
+}
+
 // COM for this thread, for as long as the window lives.
 class ComSession {
 public:
@@ -60,12 +77,23 @@ private:
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE /*prev*/, PWSTR /*cmd*/, int show) {
+    // Started with Windows (Settings > General's Run entry): --tray makes the
+    // window but doesn't show it (the service starts as it always does), and
+    // --instance stands for FLOSERVER_INSTANCE, which floserverd inherits.
+    const floserver::ui::StartArgs args = start_args();
+    const bool tray = args.tray;
+    if (!args.instance.empty()) {
+        SetEnvironmentVariableW(L"FLOSERVER_INSTANCE", widen(args.instance).c_str());
+    }
     const std::string service_instance = floserver::core::ipc::default_instance();
     const std::wstring class_name = L"FloServerWindow." + widen(service_instance);
     const std::wstring mutex_name = L"Local\\FloServerWindow." + widen(service_instance);
 
     const floserver::ui::win::UniqueHandle single(CreateMutexW(nullptr, FALSE, mutex_name.c_str()));
     if (single && GetLastError() == ERROR_ALREADY_EXISTS) {
+        if (tray) {
+            return 0;  // already running: nothing to bring forward at sign-in
+        }
         return hand_over_to_running_window(class_name) ? 0 : 1;
     }
 
@@ -82,11 +110,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE /*prev*/, PWSTR /*cmd*/, int s
         return 1;
     }
 
-    // The language setting moves to the service later; for now FLOSERVER_LANG (en, ar, ku).
-    const auto lang_setting = floserver::core::get_env("FLOSERVER_LANG");
-    floserver::ui::MainWindow window(instance, floserver::ui::lang_from_setting(lang_setting ? lang_setting->c_str() : nullptr),
-                                     class_name);
-    if (!window.create(show)) {
+    // Settings > General's choices (window.json): the language (else
+    // FLOSERVER_LANG, else Windows' display language) and the theme.
+    const floserver::ui::WindowPrefs prefs = floserver::ui::load_window_prefs();
+    floserver::ui::set_theme_choice(prefs.theme);
+    floserver::ui::MainWindow window(instance, floserver::ui::window_lang(prefs), prefs, class_name);
+    if (!window.create(tray ? SW_HIDE : show)) {
         return 1;
     }
 

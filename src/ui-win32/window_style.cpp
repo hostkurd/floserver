@@ -42,9 +42,16 @@ void set_face(LOGFONTW& lf, const std::wstring& face) {
     *(std::begin(lf.lfFaceName) + n) = L'\0';
 }
 
+ThemeChoice g_theme = ThemeChoice::System;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables): the UI thread's
+
 }  // namespace
 
+void set_theme_choice(ThemeChoice choice) { g_theme = choice; }
+
 bool apps_use_dark_theme() {
+    if (g_theme != ThemeChoice::System) {
+        return resolve_dark(g_theme, nullptr, false);
+    }
     wchar_t forced[8] = {};
     if (GetEnvironmentVariableW(L"FLOSERVER_THEME", forced, 8) > 0) {
         return std::wstring_view(forced) == L"dark";
