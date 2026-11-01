@@ -167,7 +167,9 @@ std::string mariadb_config(const MariaDbFiles& files, Port port, bool as_root, b
     // Never without passwords, and reached only through FloServer's port.
     c << "skip-grant-tables=0" << nl << "skip-networking=0" << nl;
 #ifdef _WIN32
-    c << "named-pipe=0" << nl << "shared-memory=0" << nl;
+    // loose-: a build without one of these (MariaDB on Windows has no
+    // shared-memory option) warns and starts, instead of refusing to start.
+    c << "loose-named-pipe=0" << nl << "loose-shared-memory=0" << nl;
 #endif
     c << nl << "[client]" << nl << "port=" << port << nl;
     return c.str();
@@ -178,8 +180,10 @@ std::vector<std::string> mariadb_command_line_guards(const MariaDbFiles& files, 
     std::vector<std::string> args = {"--port=" + std::to_string(port), "--bind-address=127.0.0.1",
                                      "--skip-grant-tables=0", "--skip-networking=0"};
 #ifdef _WIN32
-    args.emplace_back("--named-pipe=0");
-    args.emplace_back("--shared-memory=0");
+    // --loose-: as above; "unknown variable 'shared-memory=0'" stopped
+    // MariaDB 11.8 starting on Windows (found on a real PC, 1 Nov).
+    args.emplace_back("--loose-named-pipe=0");
+    args.emplace_back("--loose-shared-memory=0");
 #endif
     if (!files.socket.empty()) {
         args.push_back("--socket=" + path_to_utf8(files.socket.filename()));
