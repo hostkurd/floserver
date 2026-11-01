@@ -107,6 +107,11 @@ public:
     void set_prefs(const WindowPrefs& prefs, const std::string& error);
     // The theme changed (Settings > General, or Windows'): drawn again.
     void refresh_theme();
+    // Closing FloServer's window quits (Settings > General): closes as
+    // close() does, and once it's gone the owner is told to quit (the closed
+    // message with wparam 1), also after a Save chosen on the way is done.
+    // False: it stays (Cancel, a refusal, or that Save on its way).
+    bool close_and_quit();
     // Gone now, without asking (nothing in General waits for Save); the
     // closed message still follows. placement() then says where it was.
     void destroy_now();
@@ -597,6 +602,7 @@ private:
     bool php_saving_ = false;
     bool asking_ = false;
     bool quit_after_ask_ = false;
+    bool quit_on_close_ = false;  // close_and_quit(): the owner quits once this window is gone
     AfterSave after_save_ = AfterSave::Stay;
     std::string after_save_series_;
     PhpChanges php_changes_;

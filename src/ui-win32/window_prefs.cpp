@@ -32,6 +32,25 @@ std::string status_text(LSTATUS status) {
 std::wstring run_key() { return win::widen(kRunKey); }
 std::wstring value_name() { return win::widen(run_value_name(core::ipc::default_instance())); }
 
+// The entry's StartupApproved\Run value (binary); empty when there's none.
+std::vector<unsigned char> approved_value() {
+    const std::wstring key = win::widen(kStartupApprovedKey);
+    const std::wstring name = value_name();
+    DWORD bytes = 0;
+    if (RegGetValueW(HKEY_CURRENT_USER, key.c_str(), name.c_str(), RRF_RT_REG_BINARY, nullptr, nullptr, &bytes) !=
+            ERROR_SUCCESS ||
+        bytes == 0) {
+        return {};
+    }
+    std::vector<unsigned char> value(bytes);
+    if (RegGetValueW(HKEY_CURRENT_USER, key.c_str(), name.c_str(), RRF_RT_REG_BINARY, nullptr, value.data(), &bytes) !=
+        ERROR_SUCCESS) {
+        return {};
+    }
+    value.resize(bytes);
+    return value;
+}
+
 }  // namespace
 
 WindowPrefs load_window_prefs() {
@@ -124,6 +143,10 @@ std::optional<RunEntry> read_run_entry(std::string& error) {
         return std::nullopt;
     }
     value.resize(wcsnlen(value.c_str(), value.size()));
+    // Turned off in Task Manager (Startup apps): Windows skips it, so it's shown off.
+    if (startup_disabled(approved_value())) {
+        return std::nullopt;
+    }
     auto entry = parse_run_command(win::narrow(value));
     if (!entry) {
         return RunEntry{};  // there, but empty: Windows starts nothing; shown as on so it can be turned off
@@ -134,6 +157,14 @@ std::optional<RunEntry> read_run_entry(std::string& error) {
 bool write_run_entry(bool on, bool tray, std::string& error) {
     const std::wstring key = run_key();
     const std::wstring name = value_name();
+    // Task Manager's off mark goes either way: turned on here means on, and
+    // off leaves nothing behind.
+    const std::wstring approved = win::widen(kStartupApprovedKey);
+    if (const LSTATUS status = RegDeleteKeyValueW(HKEY_CURRENT_USER, approved.c_str(), name.c_str());
+        status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND) {
+        error = status_text(status);
+        return false;
+    }
     if (!on) {
         const LSTATUS status = RegDeleteKeyValueW(HKEY_CURRENT_USER, key.c_str(), name.c_str());
         if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND) {
@@ -142,7 +173,7 @@ bool write_run_entry(bool on, bool tray, std::string& error) {
         }
         return true;
     }
-    const std::string command = run_command(own_exe_path(), tray);
+    const std::string command = run_command(own_exe_path(), tray, core::ipc::default_instance());
     if (command.empty()) {
         error = "FloServer.exe's path can't be written in the Run entry";
         return false;

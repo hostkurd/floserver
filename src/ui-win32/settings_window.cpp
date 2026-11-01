@@ -86,6 +86,25 @@ bool SettingsWindow::close() {
     return hwnd_ == nullptr;
 }
 
+bool SettingsWindow::close_and_quit() {
+    if (asking_) {
+        bring_to_front();  // its question is open: answered there first
+        return false;
+    }
+    if (hwnd_ == nullptr) {
+        return true;
+    }
+    quit_on_close_ = true;
+    try_close();
+    if (hwnd_ == nullptr) {
+        return true;
+    }
+    if (after_save_ != AfterSave::Close) {
+        quit_on_close_ = false;  // Cancel, or nothing could be sent: nothing quits
+    }
+    return false;
+}
+
 SettingsWindow::~SettingsWindow() {
     if (hwnd_ != nullptr) {
         DestroyWindow(hwnd_);
@@ -185,7 +204,7 @@ LRESULT CALLBACK SettingsWindow::window_proc(HWND hwnd, UINT msg, WPARAM wparam,
         // The owner lets go of this object once the message arrives.
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         self->hwnd_ = nullptr;
-        PostMessageW(self->owner_, self->closed_message_, 0, 0);
+        PostMessageW(self->owner_, self->closed_message_, self->quit_on_close_ ? 1 : 0, 0);
         return DefWindowProcW(hwnd, msg, wparam, lparam);
     }
     return self->handle(msg, wparam, lparam);
@@ -545,6 +564,9 @@ void SettingsWindow::on_snapshot(const Snapshot& snap) {
     const bool close_php = on_php_answers(snap);
     const bool close_apache = on_apache_answers(snap);
     const bool close_now = on_db_answers(snap) || close_php || close_apache;
+    if (!close_now && after_save_ != AfterSave::Close) {
+        quit_on_close_ = false;  // the Save on the way out was refused: Settings stays, and so does FloServer
+    }
     rebuild();
     if (close_now) {
         DestroyWindow(hwnd_);  // the Save chosen on the way out is done

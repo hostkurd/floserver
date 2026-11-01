@@ -85,27 +85,63 @@ TEST_CASE("language names are in their own script whatever the window shows") {
 }
 
 TEST_CASE("the Run entry: the full path in quotes, and --tray") {
-    CHECK(run_command(R"(C:\Program Files\FloServer\FloServer.exe)", true) ==
+    CHECK(run_command(R"(C:\Program Files\FloServer\FloServer.exe)", true, "floserverd") ==
           R"("C:\Program Files\FloServer\FloServer.exe" --tray)");
-    CHECK(run_command(R"(C:\FloServer\FloServer.exe)", false) == R"("C:\FloServer\FloServer.exe")");
-    CHECK(run_command(R"(\\server\share\FloServer.exe)", false) == R"("\\server\share\FloServer.exe")");
+    CHECK(run_command(R"(C:\FloServer\FloServer.exe)", false, "floserverd") == R"("C:\FloServer\FloServer.exe")");
+    CHECK(run_command(R"(\\server\share\FloServer.exe)", false, "floserverd") == R"("\\server\share\FloServer.exe")");
     // A path with letters outside ASCII is kept as it is (UTF-8).
-    CHECK(run_command("C:\\Users\\دلشاد\\FloServer.exe", true) == "\"C:\\Users\\دلشاد\\FloServer.exe\" --tray");
+    CHECK(run_command("C:\\Users\\دلشاد\\FloServer.exe", true, "floserverd") == "\"C:\\Users\\دلشاد\\FloServer.exe\" --tray");
     // Not written: nothing, relative, a quote or a line break in it.
-    CHECK(run_command("", true).empty());
-    CHECK(run_command("FloServer.exe", true).empty());
-    CHECK(run_command(R"(C:\a"b\FloServer.exe)", true).empty());
-    CHECK(run_command("C:\\a\nb\\FloServer.exe", true).empty());
+    CHECK(run_command("", true, "floserverd").empty());
+    CHECK(run_command("FloServer.exe", true, "floserverd").empty());
+    CHECK(run_command(R"(C:\a"b\FloServer.exe)", true, "floserverd").empty());
+    CHECK(run_command("C:\\a\nb\\FloServer.exe", true, "floserverd").empty());
 
     CHECK(run_value_name("floserverd") == "FloServer");
     CHECK(run_value_name("floserverd-dev") == "FloServer (dev)");
     CHECK(run_value_name("something") == "FloServer");
 }
 
+TEST_CASE("the Run entry of a copy that isn't the default carries its instance") {
+    const std::string exe = R"(C:\FloServer\FloServer.exe)";
+    CHECK(run_command(exe, true, "floserverd-dev") == R"("C:\FloServer\FloServer.exe" --tray --instance dev)");
+    CHECK(run_command(exe, false, "floserverd-test-2") == R"("C:\FloServer\FloServer.exe" --instance test-2)");
+    CHECK(run_command(exe, false, "floserverd") == R"("C:\FloServer\FloServer.exe")");
+    CHECK(instance_suffix("floserverd-dev") == "dev");
+    CHECK(instance_suffix("floserverd").empty());
+
+    const auto entry = parse_run_command(run_command(exe, true, "floserverd-dev"));
+    REQUIRE(entry);
+    CHECK(entry->exe == exe);
+    CHECK(entry->tray);
+    CHECK(entry->instance == "dev");
+
+    // FloServer.exe's own arguments.
+    const StartArgs both = parse_start_args({"--instance", "dev", "--tray"});
+    CHECK(both.tray);
+    CHECK(both.instance == "dev");
+    CHECK(parse_start_args({}).instance.empty());
+    CHECK_FALSE(parse_start_args({}).tray);
+    CHECK(parse_start_args({"--instance"}).instance.empty());           // no value
+    CHECK(parse_start_args({"--instance", "Dev!"}).instance.empty());   // not an instance name
+    CHECK(parse_start_args({"--instance", std::string(40, 'a')}).instance.empty());  // too long
+    const StartArgs flag_next = parse_start_args({"--instance", "--tray"});
+    CHECK(flag_next.instance.empty());
+    CHECK(flag_next.tray);  // not taken as the instance
+}
+
+TEST_CASE("Task Manager's Startup apps off mark") {
+    CHECK_FALSE(startup_disabled({}));
+    CHECK_FALSE(startup_disabled({0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}));
+    CHECK(startup_disabled({0x03, 0x11, 0x22, 0x33, 0, 0, 0, 0, 0, 0, 0, 0}));
+    CHECK(startup_disabled({0x01}));
+    CHECK_FALSE(startup_disabled({0x06}));
+}
+
 TEST_CASE("the Run entry read back") {
     for (const bool tray : {true, false}) {
         const std::string exe = R"(C:\Program Files\FloServer\FloServer.exe)";
-        const auto entry = parse_run_command(run_command(exe, tray));
+        const auto entry = parse_run_command(run_command(exe, tray, "floserverd"));
         REQUIRE(entry);
         CHECK(entry->exe == exe);
         CHECK(entry->tray == tray);

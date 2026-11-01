@@ -133,12 +133,18 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             } else {
                 // Settings belongs to this window; it would otherwise stay
                 // on screen with no taskbar button.
+                if (prefs_.close == CloseAction::Quit) {
+                    // Settings > General: closing quits, as the tray's Quit does. A
+                    // Save chosen in Settings on the way is done first; quit follows
+                    // (its closed message); Cancel stays.
+                    if (settings_ && !settings_->close_and_quit()) {
+                        return 0;
+                    }
+                    quit();
+                    return 0;
+                }
                 if (settings_ && !settings_->close()) {
                     return 0;  // PHP changes not saved, and the user chose to stay
-                }
-                if (prefs_.close == CloseAction::Quit) {
-                    quit();  // Settings > General: closing quits, as the tray's Quit does
-                    return 0;
                 }
                 ShowWindow(hwnd_, SW_HIDE);
             }
@@ -626,10 +632,10 @@ void MainWindow::on_pref_change(WPARAM change, LPARAM value) {
     if (prefs_ == before) {
         return;
     }
+    // Not saved: still used now, only not kept. Settings shows `error` with
+    // fill(), which isolates it left to right in Arabic and Kurdish.
     std::string error;
-    if (!save_window_prefs(prefs_, error)) {
-        error = rtl_ ? isolate_ltr(error) : error;  // it's still used now; it's only not kept
-    }
+    (void)save_window_prefs(prefs_, error);
     if (prefs_.theme != before.theme) {
         set_theme_choice(prefs_.theme);
         if (const bool dark = apps_use_dark_theme(); dark != dark_) {

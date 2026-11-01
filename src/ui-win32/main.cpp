@@ -41,22 +41,19 @@ bool hand_over_to_running_window(const std::wstring& class_name) {
     return false;
 }
 
-// FloServer.exe --tray (the Run entry's "Start in the tray").
-bool started_in_tray() {
+// FloServer.exe [--tray] [--instance <suffix>], as the Run entry writes it.
+floserver::ui::StartArgs start_args() {
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (argv == nullptr) {
-        return false;
+        return {};
     }
-    const std::wstring flag = widen(floserver::ui::kTrayFlag);
-    bool found = false;
+    std::vector<std::string> args;
     for (int i = 1; i < argc; ++i) {
-        if (flag == argv[i]) {  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic): argv from Windows
-            found = true;
-        }
+        args.push_back(floserver::ui::win::narrow(argv[i]));  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic): argv from Windows
     }
     LocalFree(argv);
-    return found;
+    return floserver::ui::parse_start_args(args);
 }
 
 // COM for this thread, for as long as the window lives.
@@ -80,12 +77,17 @@ private:
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE /*prev*/, PWSTR /*cmd*/, int show) {
+    // Started with Windows (Settings > General's Run entry): --tray makes the
+    // window but doesn't show it (the service starts as it always does), and
+    // --instance stands for FLOSERVER_INSTANCE, which floserverd inherits.
+    const floserver::ui::StartArgs args = start_args();
+    const bool tray = args.tray;
+    if (!args.instance.empty()) {
+        SetEnvironmentVariableW(L"FLOSERVER_INSTANCE", widen(args.instance).c_str());
+    }
     const std::string service_instance = floserver::core::ipc::default_instance();
     const std::wstring class_name = L"FloServerWindow." + widen(service_instance);
     const std::wstring mutex_name = L"Local\\FloServerWindow." + widen(service_instance);
-    // Started with Windows in the tray (Settings > General's Run entry): the
-    // window is made but not shown; the service starts as it always does.
-    const bool tray = started_in_tray();
 
     const floserver::ui::win::UniqueHandle single(CreateMutexW(nullptr, FALSE, mutex_name.c_str()));
     if (single && GetLastError() == ERROR_ALREADY_EXISTS) {

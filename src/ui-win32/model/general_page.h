@@ -66,22 +66,43 @@ inline constexpr std::string_view kWindowPrefsFile = "window.json";
 inline constexpr std::string_view kRunKey = R"(Software\Microsoft\Windows\CurrentVersion\Run)";
 // FloServer.exe opened with it starts in the tray, the window hidden.
 inline constexpr std::string_view kTrayFlag = "--tray";
+// FloServer.exe --instance dev: the service instance "floserverd-dev", as
+// FLOSERVER_INSTANCE=dev would (a Run entry has no environment of its own).
+inline constexpr std::string_view kInstanceFlag = "--instance";
+// HKCU\...\Explorer\StartupApproved\Run: Task Manager's on/off for Run entries.
+inline constexpr std::string_view kStartupApprovedKey =
+    R"(Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run)";
 
 // The Run value's name: "FloServer", or "FloServer (dev)" for the service
 // instance "floserverd-dev" (FLOSERVER_INSTANCE), so copies don't clash.
 [[nodiscard]] std::string run_value_name(std::string_view service_instance);
 
+// The instance's suffix ("dev" for "floserverd-dev"); empty for the default one.
+[[nodiscard]] std::string instance_suffix(std::string_view service_instance);
+
 // "C:\Program Files\FloServer\FloServer.exe" --tray: the full path, always
-// in quotes. Empty when the path can't be written that way (empty, not
-// absolute, or holding a quote or a line break).
-[[nodiscard]] std::string run_command(std::string_view exe_path, bool tray);
+// in quotes, then --instance <suffix> for a copy that isn't the default.
+// Empty when the path can't be written that way (empty, not absolute, or
+// holding a quote or a line break).
+[[nodiscard]] std::string run_command(std::string_view exe_path, bool tray, std::string_view service_instance);
 
 struct RunEntry {
     std::string exe;  // the program, without quotes
     bool tray = false;
+    std::string instance;  // --instance's suffix; empty: the default
 };
 // What a Run value holds, read back; nothing when it's empty.
 [[nodiscard]] std::optional<RunEntry> parse_run_command(std::string_view command);
+
+// FloServer.exe's arguments (without the program): --tray and --instance's suffix.
+struct StartArgs {
+    bool tray = false;
+    std::string instance;  // empty: none given, or not a usable name
+};
+[[nodiscard]] StartArgs parse_start_args(const std::vector<std::string>& args);
+
+// A StartupApproved\Run value: Task Manager turned it off (its first byte odd: 0x03, 0x01).
+[[nodiscard]] bool startup_disabled(const std::vector<unsigned char>& value);
 
 // --- licences ------------------------------------------------------------------
 

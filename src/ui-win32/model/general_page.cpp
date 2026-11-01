@@ -163,7 +163,45 @@ std::string run_value_name(std::string_view service_instance) {
     return "FloServer (" + std::string(service_instance.substr(kDefault.size() + 1)) + ")";
 }
 
-std::string run_command(std::string_view exe_path, bool tray) {
+std::string instance_suffix(std::string_view service_instance) {
+    constexpr std::string_view kPrefix = "floserverd-";
+    if (!service_instance.starts_with(kPrefix)) {
+        return {};
+    }
+    return std::string(service_instance.substr(kPrefix.size()));
+}
+
+namespace {
+
+// As core::ipc::is_instance_name would take "floserverd-<suffix>".
+bool usable_suffix(std::string_view suffix) {
+    constexpr std::size_t kMaxName = 48;
+    constexpr std::size_t kPrefix = 11;  // "floserverd-"
+    return !suffix.empty() && suffix.size() + kPrefix <= kMaxName &&
+           std::all_of(suffix.begin(), suffix.end(),
+                       [](char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-'; });
+}
+
+}  // namespace
+
+StartArgs parse_start_args(const std::vector<std::string>& args) {
+    StartArgs out;
+    for (std::size_t i = 0; i < args.size(); ++i) {
+        if (args[i] == kTrayFlag) {
+            out.tray = true;
+        } else if (args[i] == kInstanceFlag && i + 1 < args.size() && !args[i + 1].starts_with('-')) {
+            ++i;
+            out.instance = usable_suffix(args[i]) ? args[i] : std::string();
+        }
+    }
+    return out;
+}
+
+bool startup_disabled(const std::vector<unsigned char>& value) {
+    return !value.empty() && (value.front() & 1U) != 0;
+}
+
+std::string run_command(std::string_view exe_path, bool tray, std::string_view service_instance) {
     if (exe_path.empty() || exe_path.find_first_of("\"\r\n") != std::string_view::npos) {
         return {};
     }
@@ -179,6 +217,14 @@ std::string run_command(std::string_view exe_path, bool tray) {
     if (tray) {
         out += ' ';
         out += kTrayFlag;
+    }
+    // A copy started with FLOSERVER_INSTANCE: the Run entry has no
+    // environment, so the instance goes on the command line.
+    if (const std::string suffix = instance_suffix(service_instance); usable_suffix(suffix)) {
+        out += ' ';
+        out += kInstanceFlag;
+        out += ' ';
+        out += suffix;
     }
     return out;
 }
@@ -209,7 +255,8 @@ std::optional<RunEntry> parse_run_command(std::string_view command) {
         entry.exe = std::string(command.substr(0, end));
         rest = end == std::string_view::npos ? std::string_view{} : command.substr(end);
     }
-    // The flag as a word of its own.
+    // The flags as words of their own.
+    std::vector<std::string> words;
     while (!rest.empty()) {
         const auto start = rest.find_first_not_of(" \t");
         if (start == std::string_view::npos) {
@@ -217,11 +264,12 @@ std::optional<RunEntry> parse_run_command(std::string_view command) {
         }
         rest.remove_prefix(start);
         const auto end = rest.find_first_of(" \t");
-        if (rest.substr(0, end) == kTrayFlag) {
-            entry.tray = true;
-        }
+        words.emplace_back(rest.substr(0, end));
         rest = end == std::string_view::npos ? std::string_view{} : rest.substr(end);
     }
+    const StartArgs args = parse_start_args(words);
+    entry.tray = args.tray;
+    entry.instance = args.instance;
     return entry;
 }
 

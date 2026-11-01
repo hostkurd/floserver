@@ -90,11 +90,16 @@ ServiceWorker::~ServiceWorker() {
 
 void ServiceWorker::retarget(HWND window, Lang lang) {
     lang_ = lang;
-    const std::lock_guard lock(mutex_);
-    window_ = window;
-    // A message posted to the old window may have gone with it: post again.
-    posted_ = false;
-    publish();
+    {
+        const std::lock_guard lock(mutex_);
+        window_ = window;
+        // A message posted to the old window may have gone with it: post again.
+        posted_ = false;
+        publish();
+    }
+    // The rows, footer and errors in hand were worded in the old language:
+    // asked again now rather than at the next 2 s poll.
+    refresh();
 }
 
 void ServiceWorker::push(Command command) {

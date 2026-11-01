@@ -16,6 +16,7 @@
 #include "window_prefs.h"
 
 #include "floserver/core/build_info.h"
+#include "floserver/core/ipc.h"
 #include "floserver/core/paths.h"
 
 #include <shellapi.h>
@@ -163,7 +164,7 @@ void SettingsWindow::set_start(bool on, bool tray) {
     }
     // What was written, without reading the registry again.
     if (on) {
-        run_entry_ = RunEntry{own_exe_, tray};
+        run_entry_ = RunEntry{own_exe_, tray, instance_suffix(core::ipc::default_instance())};
     } else {
         run_entry_.reset();
     }
