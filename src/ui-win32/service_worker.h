@@ -16,6 +16,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -135,6 +136,11 @@ public:
     ServiceWorker& operator=(const ServiceWorker&) = delete;
     ServiceWorker(ServiceWorker&&) = delete;
     ServiceWorker& operator=(ServiceWorker&&) = delete;
+
+    // FloServer's window was made again (another language): snapshots go to
+    // `window` from now on, and the worker's own words are in `lang`. The
+    // latest snapshot is posted to it at once.
+    void retarget(HWND window, Lang lang);
 
     // Each change reports a key in Snapshot::settled when it's done:
     // on_key(), keep_key(), use_key().
@@ -282,9 +288,9 @@ private:
     void start_refresh();
     void start_side_call(const std::string& method, const nlohmann::json& params, const std::string& purpose);
 
-    HWND window_;
+    HWND window_;  // guarded by mutex_ (retarget)
     UINT message_;
-    Lang lang_;
+    std::atomic<Lang> lang_;  // read on the worker's threads, changed by retarget
     std::mutex mutex_;
     std::condition_variable_any wake_;
     std::deque<Command> commands_;

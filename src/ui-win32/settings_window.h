@@ -21,6 +21,12 @@
 // user's own httpd.conf lines. apache.get once when it's opened (the service
 // reads the modules folder then), apache.set on Save.
 //
+// General is the last: the window's language and theme, starting with
+// Windows, what closing the window does, and About. Opening it reads the
+// Run entry once (no request to the service). The language, theme and
+// closing choices belong to FloServer's window: they're posted to the owner
+// (`prefs_message`), which keeps and saves them and applies them at once.
+//
 // Nothing runs while it's closed: it's destroyed on close, and while open it
 // adds no timer or poll. Opening asks runtimes.list {"cached": true} once (no
 // network); what's installed then comes from the main window's 2 s
@@ -31,6 +37,7 @@
 #include "form_parts.h"
 #include "model/apache_page.h"
 #include "model/database_page.h"
+#include "model/general_page.h"
 #include "model/php_page.h"
 #include "model/ports_page.h"
 #include "model/runtimes_page.h"
@@ -54,13 +61,21 @@
 
 namespace floserver::ui {
 
+// What Settings > General asks FloServer's window to change: the wparam of
+// its `prefs_message`; the lparam is the choice's index (kLangChoices,
+// kThemeChoices, CloseAction, or 1 for "start in the tray").
+enum class PrefChange : std::uint8_t { Language, Theme, Close, StartInTray };
+
 class SettingsWindow {
 public:
     // `closed_message` is posted to `owner` once the window is gone (wparam 0),
     // or with wparam 1 when the owner asked to quit while Settings was asking
     // whether to save (quit_when_asked()): the owner quits then. So the
     // owner can let go of this object outside its window procedure.
-    SettingsWindow(HINSTANCE instance, Lang lang, ServiceWorker& worker, HWND owner, UINT closed_message);
+    // `prefs` are the window's preferences as they are now; a change made in
+    // General is posted to `owner` as `prefs_message` (see PrefChange).
+    SettingsWindow(HINSTANCE instance, Lang lang, const WindowPrefs& prefs, ServiceWorker& worker, HWND owner,
+                   UINT closed_message, UINT prefs_message);
     ~SettingsWindow();
     SettingsWindow(const SettingsWindow&) = delete;
     SettingsWindow& operator=(const SettingsWindow&) = delete;
@@ -86,10 +101,20 @@ public:
     // FloServer is quitting while asking(): the owner is told to go on once
     // the question is answered.
     void quit_when_asked() { quit_after_ask_ = true; }
+    // Opens the General section (after the windows were made again in another language).
+    void show_general();
+    // The owner's preferences after a change (or a failed save: `error`).
+    void set_prefs(const WindowPrefs& prefs, const std::string& error);
+    // The theme changed (Settings > General, or Windows'): drawn again.
+    void refresh_theme();
+    // Gone now, without asking (nothing in General waits for Save); the
+    // closed message still follows. placement() then says where it was.
+    void destroy_now();
 
 private:
     // In the sidebar's order.
-    enum class Section : std::uint8_t { Runtimes, Php, Ports, Database, Apache };
+    enum class Section : std::uint8_t { Runtimes, Php, Ports, Database, Apache, General };
+    static constexpr std::size_t kSections = 6;
     enum class Part : std::uint8_t {
         None,
         Nav,     // row: the section
@@ -146,6 +171,14 @@ private:
         ApacheEditConf,
         ApacheDiscard,
         ApacheSave,
+        // Settings > General; `row` is the choice's index.
+        GeneralLang,
+        GeneralTheme,
+        GeneralStart,      // the Start with Windows switch
+        GeneralStartMode,  // row 0: open the window, 1: start in the tray
+        GeneralClose,      // row 0: keep running in the tray, 1: quit
+        GeneralUpdates,
+        GeneralLicences,
     };
     enum class Button : std::uint8_t { None, Remove, RemoveDisabled, Download, Cancel };
     struct Hit {
@@ -313,8 +346,38 @@ private:
         RECT discard{};
         RECT save{};
     };
+    // A radio button's or a switch's row: the whole row, its label and the note under it.
+    struct ChoiceGeometry {
+        RECT row{};
+        RECT label{};
+        RECT note{};  // empty when there's none
+    };
+    struct GeneralGeometry {
+        RECT lang_card{};
+        RECT lang_title{};
+        std::array<ChoiceGeometry, kLangChoices.size()> langs{};
+        RECT lang_note{};
+        RECT theme_card{};
+        RECT theme_title{};
+        std::array<ChoiceGeometry, kThemeChoices.size()> themes{};
+        RECT start_card{};
+        RECT start_title{};
+        ChoiceGeometry start;
+        RECT start_switch{};
+        std::array<ChoiceGeometry, 2> modes{};  // open the window, start in the tray
+        RECT elsewhere{};  // the Run entry starts another FloServer.exe
+        RECT close_card{};
+        RECT close_title{};
+        std::array<ChoiceGeometry, 2> closes{};  // keep running in the tray, quit
+        RECT about_card{};
+        RECT about_title{};
+        RECT version{};
+        RECT updates{};
+        RECT licences{};
+        RECT updates_note{};
+    };
     struct Geometry {
-        std::array<RECT, 5> navs{};  // Runtimes, PHP, Ports & HTTPS, Database, Apache
+        std::array<RECT, kSections> navs{};  // Runtimes, PHP, Ports & HTTPS, Database, Apache, General
         RECT title{};
         RECT hint{};
         RECT check{};
@@ -325,6 +388,7 @@ private:
         PortsGeometry ports;
         DbGeometry db;
         ApacheGeometry apache;
+        GeneralGeometry general;
         int content_h = 0;  // of the main column, unscrolled
     };
 
@@ -464,7 +528,25 @@ private:
     void discard_apache();
     void paint_apache_shapes(Canvas& c) const;
     void paint_apache_text(Canvas& c) const;
-    [[nodiscard]] static bool is_apache_part(Part part) { return part >= Part::ApacheVersion; }
+    [[nodiscard]] static bool is_apache_part(Part part) {
+        return part >= Part::ApacheVersion && part <= Part::ApacheSave;
+    }
+
+    // --- Settings > General (settings_general.cpp) ---
+    void load_general();  // the Run entry, read once as the section opens
+    void layout_general(HDC dc, Geometry& g, int x0, int x1, int y) const;
+    [[nodiscard]] const RECT* general_rect_of(const Hit& hit) const;
+    void general_focus_order(std::vector<Hit>& order) const;
+    void on_general_click(const Hit& hit);
+    void post_pref(PrefChange change, std::size_t value);
+    void set_start(bool on, bool tray);
+    [[nodiscard]] bool shown_start_tray() const;
+    [[nodiscard]] bool run_elsewhere() const;
+    void open_licences();
+    void paint_general_shapes(Canvas& c) const;
+    void paint_general_text(Canvas& c) const;
+    void paint_radio(Canvas& c, const ChoiceGeometry& choice, bool on, const Hit& hit) const;
+    [[nodiscard]] static bool is_general_part(Part part) { return part >= Part::GeneralLang; }
 
     HINSTANCE instance_;
     Lang lang_;
@@ -472,6 +554,8 @@ private:
     ServiceWorker& worker_;
     HWND owner_;
     UINT closed_message_;
+    UINT prefs_message_;
+    WindowPrefs prefs_;
     HWND hwnd_ = nullptr;
     HWND tooltip_ = nullptr;
     std::wstring tip_text_;
@@ -561,6 +645,10 @@ private:
     std::string apache_query_;
     bool apache_all_ = false;  // "show all" modules
     std::vector<std::unique_ptr<FieldEdit>> apache_edits_;  // the find box; only while the section is shown
+    // Settings > General: the Run entry as read when the section opened (or
+    // as written since), and this FloServer.exe's path.
+    std::optional<RunEntry> run_entry_;
+    std::string own_exe_;
     win::UniqueBrush input_brush_;
     win::UniqueBrush input_set_brush_;
 

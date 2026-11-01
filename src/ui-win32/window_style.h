@@ -3,6 +3,7 @@
 // What the main window and Settings share so they look the same: Windows'
 // light or dark app theme, the title bar's colours and the fonts.
 
+#include "model/general_page.h"
 #include "model/ui_strings.h"
 #include "win_util.h"
 
@@ -10,8 +11,11 @@
 
 namespace floserver::ui {
 
-// Windows' app theme, unless FLOSERVER_THEME says "light" or "dark" (for
-// screenshots and tests).
+// The theme chosen in Settings > General (Same as Windows until it's set).
+// For the window's thread only; both windows read it.
+void set_theme_choice(ThemeChoice choice);
+// Dark or not: the choice in Settings, else FLOSERVER_THEME ("light" or
+// "dark", for screenshots and tests), else Windows' app theme.
 [[nodiscard]] bool apps_use_dark_theme();
 
 // The title bar in the theme's window colour (Windows 11; older ones keep theirs).

@@ -207,6 +207,9 @@ void SettingsWindow::open_section(Section section, const std::string& series) {
         make_port_edits();
         load_ports();  // each time the section opens: one web.settings.get, nothing else
     }
+    if (section == Section::General) {
+        load_general();  // the Run entry, read once; no request to the service
+    }
     relayout();
     InvalidateRect(hwnd_, nullptr, FALSE);
 }

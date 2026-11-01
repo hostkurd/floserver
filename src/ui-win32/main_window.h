@@ -31,7 +31,8 @@ inline constexpr UINT kShowWindowMessage = WM_APP + 1;
 
 class MainWindow {
 public:
-    MainWindow(HINSTANCE instance, Lang lang, std::wstring class_name);
+    // `prefs`: window.json (Settings > General); `lang` is what they resolve to.
+    MainWindow(HINSTANCE instance, Lang lang, const WindowPrefs& prefs, std::wstring class_name);
     ~MainWindow() = default;
     MainWindow(const MainWindow&) = delete;
     MainWindow& operator=(const MainWindow&) = delete;
@@ -407,6 +408,9 @@ private:
     [[nodiscard]] Hit wizard_hit_test(int x, int y) const;
     [[nodiscard]] std::vector<RECT> card_chips(HDC dc, const RECT& card, const TemplateCard& t) const;
     void open_wizard();
+    void make_name_edit();
+    // After the window was made again: the name box back, with `name` in it.
+    void remake_wizard_edit(const std::string& name);
     void close_wizard();
     void wizard_next();
     void wizard_back();
@@ -443,6 +447,14 @@ private:
     static LRESULT CALLBACK name_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, UINT_PTR id, DWORD_PTR self);
     // Settings (D20): its own window, one at a time.
     void open_settings();
+    // Settings > General changed one of the window's preferences (PrefChange, the choice's index).
+    void on_pref_change(WPARAM change, LPARAM value);
+    // Both windows made again in `lang` (its direction set at creation),
+    // keeping where they are, what's open and what's typed.
+    void change_language(Lang lang);
+    // The top-level window, at `placement` when there's one (shown as
+    // `show` says), else centred on its screen.
+    [[nodiscard]] bool make_window(int show, const WINDOWPLACEMENT* placement);
     void show_window();
     void quit();
     void add_tray_icon();
@@ -468,6 +480,8 @@ private:
     HINSTANCE instance_;
     Lang lang_;
     bool rtl_;
+    WindowPrefs prefs_;  // window.json: language, theme, closing, starting in the tray
+    bool rebuilding_ = false;  // the window is being made again in another language
     std::wstring class_name_;
     HWND hwnd_ = nullptr;
     HWND search_ = nullptr;

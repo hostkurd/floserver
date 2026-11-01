@@ -3,6 +3,7 @@
 #include "main_window_layout.h"
 #include "model/theme.h"
 #include "model/view_model.h"
+#include "window_prefs.h"
 #include "window_style.h"
 
 #include <commctrl.h>
@@ -24,6 +25,8 @@ namespace {
 constexpr UINT kSnapshotMessage = WM_APP + 2;
 constexpr UINT kTrayMessage = WM_APP + 3;
 constexpr UINT kSettingsClosedMessage = WM_APP + 4;
+// WM_APP + 5 and + 6 are the panel's (main_window.h).
+constexpr UINT kPrefsMessage = WM_APP + 7;  // Settings > General: a preference changed
 constexpr UINT_PTR kErrorTimer = 1;
 constexpr UINT kErrorShownMs = 8000;
 constexpr UINT_PTR kNoticeTimer = 2;
@@ -39,8 +42,8 @@ std::wstring w(std::string_view s) { return win::widen(s); }
 
 }  // namespace
 
-MainWindow::MainWindow(HINSTANCE instance, Lang lang, std::wstring class_name)
-    : instance_(instance), lang_(lang), rtl_(is_rtl(lang)), class_name_(std::move(class_name)) {}
+MainWindow::MainWindow(HINSTANCE instance, Lang lang, const WindowPrefs& prefs, std::wstring class_name)
+    : instance_(instance), lang_(lang), rtl_(is_rtl(lang)), prefs_(prefs), class_name_(std::move(class_name)) {}
 
 bool MainWindow::create(int show) {
     WNDCLASSEXW wc{};
@@ -52,6 +55,10 @@ bool MainWindow::create(int show) {
     if (RegisterClassExW(&wc) == 0) {
         return false;
     }
+    return make_window(show, nullptr);
+}
+
+bool MainWindow::make_window(int show, const WINDOWPLACEMENT* placement) {
     const auto system_dpi = static_cast<int>(GetDpiForSystem());
     RECT work{};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
@@ -64,6 +71,16 @@ bool MainWindow::create(int show) {
                         MulDiv(open_w, system_dpi, 96), MulDiv(open_h, system_dpi, 96), nullptr, nullptr, instance_,
                         this) == nullptr) {
         return false;
+    }
+    if (placement != nullptr) {
+        // Where the window it replaces was (a new language), shown as it was.
+        WINDOWPLACEMENT wp = *placement;
+        wp.length = sizeof wp;
+        wp.flags = 0;
+        wp.showCmd = static_cast<UINT>(show);
+        SetWindowPlacement(hwnd_, &wp);
+        UpdateWindow(hwnd_);
+        return true;
     }
     // Centred on the screen it opened on (Windows would put it near the
     // top-left corner), at that screen's scale.
@@ -118,6 +135,10 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
                 // on screen with no taskbar button.
                 if (settings_ && !settings_->close()) {
                     return 0;  // PHP changes not saved, and the user chose to stay
+                }
+                if (prefs_.close == CloseAction::Quit) {
+                    quit();  // Settings > General: closing quits, as the tray's Quit does
+                    return 0;
                 }
                 ShowWindow(hwnd_, SW_HIDE);
             }
@@ -324,6 +345,9 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
                 step_panel_tab(wparam == 1 ? 1 : -1);
             }
             return 0;
+        case kPrefsMessage:
+            on_pref_change(wparam, lparam);
+            return 0;
         case kSettingsClosedMessage:
             if (wparam == 1) {
                 quit();  // asked while Settings' save question was open; it's answered now
@@ -379,12 +403,18 @@ void MainWindow::on_create() {
     apply_theme();
     layout();
     add_tray_icon();
-    worker_ = std::make_unique<ServiceWorker>(hwnd_, kSnapshotMessage, lang_);
+    if (worker_) {
+        worker_->retarget(hwnd_, lang_);  // made again in another language: the same link to the service
+    } else {
+        worker_ = std::make_unique<ServiceWorker>(hwnd_, kSnapshotMessage, lang_);
+    }
 }
 
 void MainWindow::on_destroy() {
     KillTimer(hwnd_, kErrorTimer);
     KillTimer(hwnd_, kNoticeTimer);
+    list_bar_.cancel(hwnd_);
+    panel_bar_.cancel(hwnd_);
     if (tray_added_) {
         NOTIFYICONDATAW nid{};
         nid.cbSize = sizeof nid;
@@ -392,6 +422,9 @@ void MainWindow::on_destroy() {
         nid.uID = kTrayId;
         Shell_NotifyIconW(NIM_DELETE, &nid);
         tray_added_ = false;
+    }
+    if (rebuilding_) {
+        return;  // made again at once: Settings, the worker and the message loop stay
     }
     settings_.reset();  // before the worker it uses
     worker_.reset();
@@ -560,12 +593,146 @@ void MainWindow::open_settings() {
     snap_.runtimes_error.clear();
     snap_.runtimes_refresh = false;
     snap_.settings_error.clear();
-    settings_ = std::make_unique<SettingsWindow>(instance_, lang_, *worker_, hwnd_, kSettingsClosedMessage);
+    settings_ = std::make_unique<SettingsWindow>(instance_, lang_, prefs_, *worker_, hwnd_, kSettingsClosedMessage,
+                                                 kPrefsMessage);
     if (!settings_->create(settings_placement_)) {
         settings_.reset();
         return;
     }
     settings_->on_snapshot(snap_);  // the link, what's installed, the installs running
+}
+
+void MainWindow::on_pref_change(WPARAM change, LPARAM value) {
+    const auto index = static_cast<std::size_t>(value);
+    const WindowPrefs before = prefs_;
+    switch (static_cast<PrefChange>(change)) {
+        case PrefChange::Language:
+            if (index < kLangChoices.size()) {
+                prefs_.lang = kLangChoices.at(index);
+            }
+            break;
+        case PrefChange::Theme:
+            if (index < kThemeChoices.size()) {
+                prefs_.theme = kThemeChoices.at(index);
+            }
+            break;
+        case PrefChange::Close:
+            prefs_.close = index == 1 ? CloseAction::Quit : CloseAction::Tray;
+            break;
+        case PrefChange::StartInTray:
+            prefs_.start_in_tray = index == 1;
+            break;
+    }
+    if (prefs_ == before) {
+        return;
+    }
+    std::string error;
+    if (!save_window_prefs(prefs_, error)) {
+        error = rtl_ ? isolate_ltr(error) : error;  // it's still used now; it's only not kept
+    }
+    if (prefs_.theme != before.theme) {
+        set_theme_choice(prefs_.theme);
+        if (const bool dark = apps_use_dark_theme(); dark != dark_) {
+            dark_ = dark;
+            apply_theme();
+        }
+        if (settings_) {
+            settings_->refresh_theme();
+        }
+    }
+    if (prefs_.lang != before.lang) {
+        const Lang lang = window_lang(prefs_);
+        if (lang != lang_) {
+            change_language(lang);  // Settings is made again with prefs_; an error shows there
+            if (settings_ && !error.empty()) {
+                settings_->set_prefs(prefs_, error);
+            }
+            return;
+        }
+    }
+    if (settings_) {
+        settings_->set_prefs(prefs_, error);
+    }
+}
+
+void MainWindow::change_language(Lang lang) {
+    // Not while a save question is open (its code runs under the dialog):
+    // the language is kept and shown the next time FloServer starts.
+    if (quitting_ || hwnd_ == nullptr || asking_ || (settings_ && settings_->asking())) {
+        return;
+    }
+    // Settings first: it belongs to this window. Nothing in it waits for a
+    // Save while General is shown (each section settles its changes when
+    // it's left), so it goes without asking and comes back on General.
+    const bool settings_open = settings_ && settings_->is_open();
+    if (settings_) {
+        settings_->destroy_now();
+        settings_placement_ = settings_->placement();
+        settings_.reset();
+    }
+    // What the new window keeps: where it is, whether it's shown, what's typed.
+    WINDOWPLACEMENT wp{};
+    wp.length = sizeof wp;
+    const bool placed = GetWindowPlacement(hwnd_, &wp) != FALSE;
+    const bool visible = IsWindowVisible(hwnd_) != FALSE;
+    int show = SW_HIDE;
+    if (visible) {
+        show = IsIconic(hwnd_) != FALSE ? SW_SHOWMINNOACTIVE : IsZoomed(hwnd_) != FALSE ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL;
+    }
+    const std::string wizard_text = wizard_name();
+    const int list_scroll = scroll_;
+    const int panel_scroll = panel_scroll_;
+    // The child windows go with it: their owners let go of them first.
+    php_edits_.clear();
+    php_field_edit_.clear();
+    rebuilding_ = true;
+    DestroyWindow(hwnd_);
+    rebuilding_ = false;
+    hwnd_ = nullptr;
+    search_ = nullptr;
+    tooltip_ = nullptr;
+    name_edit_ = nullptr;
+    hover_ = {};
+    pressed_ = {};
+    tracking_mouse_ = false;
+
+    // The direction is set when a window is made (WS_EX_LAYOUTRTL), so
+    // the new one is made in the new language.
+    lang_ = lang;
+    rtl_ = is_rtl(lang);
+    if (!make_window(show, placed ? &wp : nullptr)) {
+        PostQuitMessage(1);  // no window: nothing left to show or to quit from
+        return;
+    }
+    if (!query_.empty()) {
+        const std::string query = query_;
+        SetWindowTextW(search_, w(query).c_str());  // EN_CHANGE sets query_ again
+    }
+    remake_wizard_edit(wizard_text);
+    if (php_open_) {
+        make_project_php_edits();  // from what's typed (php_after_, php_another_)
+    }
+    // The words made from the snapshot, in the new language.
+    update_fields();
+    if (www_open()) {
+        www_fields_ = shared_fields(snap_.shared, snap_.installed, lang_);
+    }
+    if (!change_error_.empty()) {
+        SetTimer(hwnd_, kErrorTimer, kErrorShownMs, nullptr);
+    }
+    if (!notice_.text.empty()) {
+        SetTimer(hwnd_, kNoticeTimer, kNoticeShownMs, nullptr);
+    }
+    layout();
+    scroll_to(list_scroll);
+    panel_scroll_to(panel_scroll);
+    InvalidateRect(hwnd_, nullptr, FALSE);
+    if (settings_open) {
+        open_settings();
+        if (settings_) {
+            settings_->show_general();
+        }
+    }
 }
 
 void MainWindow::show_window() {

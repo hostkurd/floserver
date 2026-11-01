@@ -88,6 +88,15 @@ ServiceWorker::~ServiceWorker() {
     wake_.notify_all();
 }
 
+void ServiceWorker::retarget(HWND window, Lang lang) {
+    lang_ = lang;
+    const std::lock_guard lock(mutex_);
+    window_ = window;
+    // A message posted to the old window may have gone with it: post again.
+    posted_ = false;
+    publish();
+}
+
 void ServiceWorker::push(Command command) {
     {
         const std::lock_guard lock(mutex_);

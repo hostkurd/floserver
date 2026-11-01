@@ -372,6 +372,43 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     ApacheOpenFailed,        // {0}: the reason
     ApacheConfOpened,
     ApacheFinalOpened,
+    // Settings > General.
+    SettingsGeneral,
+    GeneralHint,
+    GeneralLanguage,
+    GeneralSameAsWindows,
+    GeneralLanguageNote,
+    GeneralTheme,
+    GeneralLight,
+    GeneralDark,
+    GeneralStartup,
+    GeneralStartWithWindows,
+    GeneralStartNote,
+    GeneralStartOpen,
+    GeneralStartTray,
+    GeneralStartFailed,      // {0}: the reason
+    GeneralStartElsewhere,   // {0}: the program the Run entry starts
+    GeneralClosing,
+    GeneralCloseTray,
+    GeneralCloseTrayNote,
+    GeneralCloseQuit,
+    GeneralCloseQuitNote,
+    GeneralAbout,
+    GeneralVersion,          // {0}: "0.9.0"
+    GeneralCheckUpdates,
+    GeneralUpdatesNote,      // {0}: "floserver.org"
+    GeneralLicences,
+    GeneralLicencesOpened,
+    GeneralLicencesFailed,   // {0}: the reason
+    GeneralSaveFailed,       // {0}: the reason
+    // The licences file (Notepad): no direction marks.
+    LicencesTitle,           // {0}: FloServer's version
+    LicencesOwn,
+    LicencesLibraries,
+    LicencesTestOnly,
+    LicencesRuntimes,
+    LicencesNoRuntimes,
+    LicencesNotRead,
     Count_,
 };
 
