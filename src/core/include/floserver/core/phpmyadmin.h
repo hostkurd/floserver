@@ -167,4 +167,24 @@ private:
 // `address` is phpMyAdmin's address ("https://phpmyadmin.localhost:8443").
 [[nodiscard]] std::string signon_url(std::string_view address, std::string_view token, std::string_view lang);
 
+class DatabaseService;
+struct ServiceRefusal;
+
+// phpmyadmin.login: what was asked. `series` ("11.4", as root) or `project`
+// (its own user, its database only); `lang` is the window's.
+struct PhpMyAdminLoginRequest {
+    std::string series;
+    std::string project;
+    std::string lang;
+};
+
+// One click: the series' server (or the project's) is started when it
+// sleeps or never ran, and waited for (its first start makes root's
+// password); a project's user and database are made as its own login makes
+// them; config.inc.php is brought up to date and a token made. The link for
+// phpMyAdmin at `address`, or nothing (with `refusal`).
+[[nodiscard]] std::optional<std::string> phpmyadmin_login(DatabaseService& databases, PhpMyAdminConfigWriter& writer,
+                                                          const std::filesystem::path& data, std::string_view address,
+                                                          const PhpMyAdminLoginRequest& request, ServiceRefusal& refusal);
+
 }  // namespace floserver::core

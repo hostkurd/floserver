@@ -21,7 +21,7 @@ namespace floserver::ui {
 
 // One server, as databases.list (or database.get's "server") has it.
 struct DbServer {
-    bool exists = false;     // false: nothing uses the series and it isn't kept running
+    bool exists = false;     // false: no server yet (every installed series gets one)
     std::string state;       // sleeping, starting, running, stopping, failed
     int port = 0;
     int port_wanted = 0;     // the port chosen in Settings, when another program has it

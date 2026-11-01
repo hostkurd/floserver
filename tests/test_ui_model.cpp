@@ -814,13 +814,20 @@ TEST_CASE("Settings > Runtimes: phpMyAdmin in the Tools card, with how it's serv
     reply["phpmyadmin"] = {{"address", "https://phpmyadmin.localhost"}, {"version", "5.2.3"}, {"run", "sleeping"}};
     const RuntimesPage page = runtimes_page(reply, nullptr, json(), Lang::En);
     REQUIRE(page.groups.size() == 6);
-    const RuntimeGroup& tools = page.groups.back();
+    // Full width after Web servers, before Node.js and Python (never a third card in a row).
+    CHECK(page.groups[2].title == "Web servers");
+    const RuntimeGroup& tools = page.groups[3];
     CHECK(tools.title == "Tools");
-    CHECK_FALSE(tools.wide);
+    CHECK(tools.wide);
     CHECK_FALSE(tools.picker);
+    CHECK(page.groups[4].title == "Node.js");
+    CHECK(page.groups[5].title == "Python");
+    CHECK_FALSE(page.groups[4].wide);
+    CHECK_FALSE(page.groups[5].wide);
     REQUIRE(tools.rows.size() == 2);
     CHECK(tools.rows[0].label == "phpMyAdmin 5.2.4");
     CHECK(tools.rows[0].action == RowAction::Download);
+    CHECK(tools.rows[0].size == 15100000);  // shown like the other full-width cards' downloads
     CHECK(tools.rows[1].label == "phpMyAdmin 5.2.3");
     CHECK(tools.rows[1].action == RowAction::Remove);  // nobody holds on to it
     CHECK(tools.rows[1].usage == "Opens at https://phpmyadmin.localhost");
@@ -830,6 +837,28 @@ TEST_CASE("Settings > Runtimes: phpMyAdmin in the Tools card, with how it's serv
     CHECK(phpmyadmin_line({{"missing", json::array({"php"})}}, Lang::En) == "Needs PHP: download a version above");
     CHECK(phpmyadmin_line({{"problem", "nginx says no"}}, Lang::En) == "nginx says no");
     CHECK(phpmyadmin_line(json(), Lang::En).empty());
+
+    // The pressed button while its server is started first, then while phpMyAdmin opens.
+    CHECK(phpmyadmin_busy_text("11.8", "sleeping", Lang::En) == "Starting MariaDB 11.8…");
+    CHECK(phpmyadmin_busy_text("11.8", "starting", Lang::En) == "Starting MariaDB 11.8…");
+    CHECK(phpmyadmin_busy_text("11.8", "", Lang::En) == "Starting MariaDB 11.8…");
+    CHECK(phpmyadmin_busy_text("11.8", "running", Lang::En) == "Opening phpMyAdmin…");
+    CHECK(phpmyadmin_busy_text("", "", Lang::En) == "Opening phpMyAdmin…");
+    CHECK(phpmyadmin_busy_text("11.8", "sleeping", Lang::Ar).find("11.8") != std::string::npos);
+    const json servers = {{"servers", json::array({{{"series", "11.8"}, {"version", "11.8.9"}, {"port", 3306},
+                                                     {"state", "sleeping"}}})}};
+    CHECK(database_server(servers, "mariadb-11.8").series == "11.8");
+    CHECK(database_server(servers, "mariadb-11.8").state == "sleeping");
+    CHECK(database_server(servers, "mariadb-11.4").series.empty());
+    CHECK(database_server(json(), "mariadb-11.8").state.empty());
+
+    // At most two narrow cards in a row; one when two don't fit.
+    CHECK(runtime_grid_columns(2000, 240, 16, 3) == 2);
+    CHECK(runtime_grid_columns(2000, 240, 16, 2) == 2);
+    CHECK(runtime_grid_columns(496, 240, 16, 2) == 2);
+    CHECK(runtime_grid_columns(495, 240, 16, 2) == 1);
+    CHECK(runtime_grid_columns(2000, 240, 16, 1) == 1);
+    CHECK(runtime_grid_columns(2000, 240, 16, 0) == 1);
 
     // Not installed: no Tools card until the list offers it; the buttons wait.
     CHECK(runtimes_page(runtimes_reply(), nullptr, json(), Lang::En).groups.size() == 5);

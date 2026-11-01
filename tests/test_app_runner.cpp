@@ -286,31 +286,46 @@ TEST_CASE("a Python app's setup: .venv, then its packages when the list changes"
 
 namespace {
 
-// GET over plain http; "<status> <body>", or "" when it couldn't connect.
-std::string get(Port port, const std::string& path = "/") {
-    const int s = socket(AF_INET, SOCK_STREAM, 0);
+// GET over plain http; "<status> <body>", or "(no answer ...)" saying why
+// there was none. `wait`: how long to wait for the answer, which for a
+// request that wakes a server includes its start (the runner holds the
+// connection until the server takes connections, up to its start_limit).
+std::string get(Port port, const std::string& path = "/", std::chrono::seconds wait = 30s) {
+    const auto started = std::chrono::steady_clock::now();
+    const auto no_answer = [&](const std::string& why) {
+        const auto ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
+        return "(no answer after " + std::to_string(ms) + " ms: " + why + ")";
+    };
+    const int s = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    timeval tv{30, 0};
+    timeval tv{static_cast<time_t>(wait.count()), 0};
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
     if (connect(s, reinterpret_cast<const sockaddr*>(&addr), sizeof addr) != 0) {
         close(s);
-        return "";
+        return no_answer("can't connect");
     }
     const std::string req = "GET " + path + " HTTP/1.0\r\nHost: web.localhost\r\n\r\n";
     (void)send(s, req.data(), req.size(), 0);
     std::string resp;
     char buf[4096];  // NOLINT(modernize-avoid-c-arrays)
-    for (ssize_t n = 0; (n = recv(s, buf, sizeof buf, 0)) > 0;) {
+    ssize_t n = 0;
+    while ((n = recv(s, buf, sizeof buf, 0)) > 0) {
         resp.append(buf, static_cast<std::size_t>(n));
     }
+    const int recv_errno = n < 0 ? errno : 0;
     close(s);
     const auto sp = resp.find(' ');
     const auto body = resp.find("\r\n\r\n");
     if (sp == std::string::npos || body == std::string::npos) {
-        return "";
+        if (recv_errno == EAGAIN || recv_errno == EWOULDBLOCK) {
+            return no_answer("timed out, " + std::to_string(resp.size()) + " bytes");
+        }
+        return no_answer(std::string(recv_errno != 0 ? "connection reset" : "connection closed") + ", " +
+                         std::to_string(resp.size()) + " bytes");
     }
     return resp.substr(sp + 1, 3) + " " + resp.substr(body + 4);
 }
@@ -626,10 +641,16 @@ http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
     CHECK(fs::exists(venv_python(app.dir)));
     CHECK(fs::exists(app.dir / ".venv" / ".floserver-installed"));
 
-    // Asleep and woken: no new venv, no new pip run.
+    // Asleep and woken: no new venv, no new pip run. The waking request is
+    // held until the new server takes connections (the runner allows
+    // start_limit for that), so one request is enough, given that long: on
+    // CI's sanitizer machine the restart took longer than the 30 s this
+    // client used to wait (main's run 183: the new uvicorn logged nothing).
     runner->tick(AppRunner::Clock::now() + 3600s, 1s);
     CHECK(eventually([&] { return runner->state() == AppState::Sleeping; }));
-    CHECK(get(app.port, "/") == "200 main:app True .venv");
+    const std::string woken = get(app.port, "/", 150s);
+    INFO(runner->describe().dump());
+    CHECK(woken == "200 main:app True .venv");
     const std::string log = read_small_file(runner->log_file(), 1 << 20).value_or("");
     std::size_t pips = 0;
     for (auto at = log.find("--- FloServer: pip install"); at != std::string::npos;

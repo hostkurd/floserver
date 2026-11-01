@@ -13,6 +13,7 @@
 #include "floserver/core/project_service.h"
 #include "floserver/core/shared_sites.h"
 #include "floserver/core/paths.h"
+#include "floserver/core/phpmyadmin.h"
 #include "floserver/core/process.h"
 #include "floserver/core/project_registry.h"
 #include "floserver/core/runtime_store.h"
@@ -264,25 +265,41 @@ TEST_CASE("a project's database runs on the real MariaDB, sleeps when idle and w
         const auto pid2 = s["pid"].get<std::uint32_t>();
         CHECK(pid2 != pid);
 
-        // Turning the projects off: the server goes, and a connection
-        // doesn't bring it back.
+        // Turning the projects off: the installed series keeps its server
+        // and port; it sleeps when idle and a connection still wakes it
+        // (phpMyAdmin's, say). The project's login still works.
         app.projects[0].on = false;
         app.projects[2].on = false;
         REQUIRE(save_app_config(app_config_file(data), app, error));
-        CHECK(db.reload()["servers"].empty());
-        CHECK(eventually([&] { return ::kill(static_cast<pid_t>(pid2), 0) != 0; }, 10s));
-        CHECK(query(port, "my_shop", login->password, "SELECT 1").starts_with("ERROR"));
-        CHECK_FALSE(db.project_login("my-shop", refusal));
-        CHECK(refusal.code == "database_off");
-        std::this_thread::sleep_for(1s);
-        CHECK(server_status(db).is_null());  // still off: nothing started again
+        s = db.reload()["servers"][0];
+        CHECK(s["projects"] == nlohmann::json::array());
+        CHECK(s["port"] == port);
+        CHECK(eventually([&] { return ::kill(static_cast<pid_t>(pid2), 0) != 0; }, 20s));
+        CHECK(server_status(db)["state"] == "sleeping");
+        CHECK(query(port, "my_shop", login->password, "USE my_shop; SHOW TABLES") == "t");
+        const auto off_login = db.project_login("my-shop", refusal);
+        REQUIRE_MESSAGE(off_login, refusal.message);
+        CHECK(off_login->password == login->password);
 
         // On again: the same port (.env files have it).
         app.projects[0].on = true;
         REQUIRE(save_app_config(app_config_file(data), app, error));
-        CHECK(eventually([&] { return server_status(db).is_object(); }, 15s));
+        CHECK(eventually([&] { return server_status(db)["projects"] == nlohmann::json{"my-shop"}; }, 15s));
         CHECK(server_status(db)["port"] == port);
         CHECK(query(port, "my_shop", login->password, "USE my_shop; SHOW TABLES") == "t");
+
+        // Removed: the server goes, and a connection doesn't bring it back.
+        const auto pid3 = server_status(db)["pid"].get<std::uint32_t>();
+        db.hold_series("10.11");  // as runtimes.remove does: shut down first
+        CHECK(::kill(static_cast<pid_t>(pid3), 0) != 0);
+        CHECK(db.status()["servers"].empty());
+        fs::remove_all(m);
+        db.release_series("10.11");
+        CHECK(db.reload()["servers"].empty());
+        CHECK(query(port, "my_shop", login->password, "SELECT 1").starts_with("ERROR"));
+        CHECK_FALSE(db.project_login("my-shop", refusal));
+        CHECK(refusal.code == "not_installed");
+        CHECK(refusal.message.find("Settings → Runtimes") != std::string::npos);
     }
 
     SUBCASE("a lost root password is replaced") {
@@ -458,7 +475,7 @@ TEST_CASE("Settings > Database on the real MariaDB: my.ini values, custom.ini's 
     CHECK(::kill(static_cast<pid_t>(pid2), 0) != 0);
     CHECK_FALSE(db.server_action("10.11", "jump", refusal));
     CHECK_FALSE(db.server_action("11.4", "start", refusal));
-    CHECK(refusal.code == "database_off");
+    CHECK(refusal.code == "not_installed");
     // A connection wakes it with the new password, and the data is there.
     CHECK(query(port, "root", pw, "SELECT x FROM blog.kept") == "7");
     CHECK(secrets.read("mariadb-10.11/root") == std::optional<std::string>(pw));  // not replaced at the start
@@ -481,6 +498,134 @@ TEST_CASE("Settings > Database on the real MariaDB: my.ini values, custom.ini's 
     (void)db.reload();
     CHECK(eventually([&] { return query(*other, "root", pw, "SELECT 1") == "1"; }, 60s));
     CHECK(server_status(db)["port"] == *other);
+    db.stop();
+}
+
+TEST_CASE("phpMyAdmin in one click on the real MariaDB: a series never started, a sleeping one, a project's") {
+    std::error_code ec;
+    if (!fs::is_regular_file("/usr/sbin/mariadbd", ec) || !fs::is_regular_file("/usr/bin/mariadb-install-db", ec)) {
+        REQUIRE_MESSAGE(!get_env("CI"), "MariaDB is missing from this CI machine");
+        MESSAGE("MariaDB isn't installed here; skipped");
+        return;
+    }
+    const test_util::TempDir tmp;
+    const fs::path data = tmp.path() / "data";
+    fake_runtime(data, "php", "8.3.6", "nts");
+    // Two series; nothing uses either, and neither is kept running.
+    for (const char* version : {"10.11.14", "11.4.2"}) {
+        fake_runtime(data, "mariadb", version, "");
+        const fs::path m = runtimes_dir(data) / "mariadb" / version;
+        fs::create_directories(m / "bin");
+        fs::create_directories(m / "sbin");
+        for (const char* t : {"mariadb", "mariadb-admin", "mariadb-install-db", "my_print_defaults", "resolveip"}) {
+            fs::create_symlink(fs::path("/usr/bin") / t, m / "bin" / t, ec);
+        }
+        fs::create_symlink("/usr/sbin/mariadbd", m / "sbin" / "mariadbd");
+        fs::create_directory_symlink("/usr/share", m / "share");
+    }
+    const fs::path shop = tmp.path() / "shop";
+    test_util::write_file(shop / "floserver.json", R"({"php": "8.3", "database": "mariadb-10.11"})");
+    AppConfig app;
+    std::string error;
+    REQUIRE(add_project(app, shop, "", error));  // off
+    REQUIRE(save_app_config(app_config_file(data), app, error));
+
+    const SecretStore secrets(data);
+    DatabaseServiceConfig cfg;
+    cfg.data_dir = data;
+    cfg.idle_after = 3s;
+    cfg.reload_every = 1s;
+    cfg.probe = [](Port p) { return p != 3306 && can_listen_on_loopback(p); };
+    DatabaseService db(cfg, secrets);
+    db.start();
+    // As the service's: every server the database service has.
+    PhpMyAdminConfigWriter writer(data, secrets, [&db] {
+        std::vector<PhpMyAdminServer> out;
+        const nlohmann::json status = db.status();
+        for (const auto& s : status.at("servers")) {
+            out.push_back({s.at("series").get<std::string>(), s.at("port").get<Port>()});
+        }
+        return out;
+    });
+    const std::string address = "https://phpmyadmin.localhost:8443";
+    // The token a link names, as the signon script reads it.
+    const auto token_of = [&](const std::string& url) {
+        const auto at = url.find("token=");
+        REQUIRE(at != std::string::npos);
+        const std::string token = url.substr(at + 6, 64);
+        return nlohmann::json::parse(test_util::read_file(phpmyadmin_paths(data).tokens / (token + ".json")));
+    };
+
+    // Both series have a sleeping server, each on its own port.
+    const auto servers = db.status().at("servers");
+    REQUIRE(servers.size() == 2);
+    CHECK(servers[0].at("state") == "sleeping");
+    CHECK(servers[1].at("state") == "sleeping");
+    const Port port = servers[0].at("series") == "10.11" ? servers[0].at("port").get<Port>() : servers[1].at("port").get<Port>();
+    const Port port114 = servers[0].at("series") == "11.4" ? servers[0].at("port").get<Port>() : servers[1].at("port").get<Port>();
+    CHECK(port != port114);
+    CHECK_FALSE(secrets.read("mariadb-10.11/root"));
+
+    // Never started: the login starts it (root's password is made) and waits.
+    ServiceRefusal refusal;
+    PhpMyAdminLoginRequest ask;
+    ask.series = "10.11";
+    ask.lang = "ar";
+    auto url = phpmyadmin_login(db, writer, data, address, ask, refusal);
+    REQUIRE_MESSAGE(url, refusal.message);
+    CHECK(url->starts_with(address + "/floserver-signon.php?token="));
+    CHECK(url->ends_with("&lang=ar"));
+    const auto root = secrets.read("mariadb-10.11/root");
+    REQUIRE(root);
+    CHECK(query(port, "root", *root, "SELECT 1") == "1");
+    CHECK(db.series_status("10.11").at("server").at("state") == "running");
+    auto token = token_of(*url);
+    CHECK(token.at("user") == "root");
+    CHECK(token.at("password") == *root);
+    CHECK(token.at("port") == port);
+    CHECK(token.at("server") == 1);  // 10.11 is listed first
+    CHECK(token.at("session") == "FloServerSignon_10_11");
+    // config.inc.php lists every installed series with its port, the one
+    // that never ran too: its login form reaches it as well.
+    const std::string config = test_util::read_file(phpmyadmin_paths(data).config);
+    CHECK(config.find("'MariaDB 10.11'") != std::string::npos);
+    CHECK(config.find("'MariaDB 11.4'") != std::string::npos);
+    CHECK(config.find("['port'] = '" + std::to_string(port) + "'") != std::string::npos);
+    CHECK(config.find("['port'] = '" + std::to_string(port114) + "'") != std::string::npos);
+    CHECK(config.find("'ar'") != std::string::npos);
+    CHECK(config.find("AllowNoPassword'] = false") != std::string::npos);
+
+    // Then it sleeps when idle like any other (it isn't kept running).
+    CHECK(eventually([&] { return db.series_status("10.11").at("server").at("state") == "sleeping"; }, 20s));
+
+    // Asleep: woken again, the same root password.
+    url = phpmyadmin_login(db, writer, data, address, ask, refusal);
+    REQUIRE_MESSAGE(url, refusal.message);
+    CHECK(db.series_status("10.11").at("server").at("state") == "running");
+    CHECK(token_of(*url).at("password") == *root);
+    CHECK(secrets.read("mariadb-10.11/root") == root);
+
+    // A project (off): its own user and database are made; its database only.
+    ask.series.clear();
+    ask.project = "shop";
+    url = phpmyadmin_login(db, writer, data, address, ask, refusal);
+    REQUIRE_MESSAGE(url, refusal.message);
+    token = token_of(*url);
+    CHECK(token.at("user") == "shop");
+    CHECK(token.at("only_db") == "shop");
+    CHECK(token.at("port") == port);
+    CHECK(token.at("server") == 1);
+    CHECK(query(port, "shop", token.at("password").get<std::string>(), "USE shop; SELECT 1") == "1");
+
+    // Nothing to start: a plain reason that says what to download where.
+    ask.project.clear();
+    ask.series = "11.8";
+    CHECK_FALSE(phpmyadmin_login(db, writer, data, address, ask, refusal));
+    CHECK(refusal.code == "not_installed");
+    CHECK(refusal.message == "MariaDB 11.8 isn't installed: download it in Settings → Runtimes (or: flo install mariadb 11.8)");
+    ask.series = "x";
+    CHECK_FALSE(phpmyadmin_login(db, writer, data, address, ask, refusal));
+    CHECK(refusal.code == "bad_params");
     db.stop();
 }
 

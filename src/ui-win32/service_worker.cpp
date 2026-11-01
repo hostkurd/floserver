@@ -30,6 +30,9 @@ constexpr std::size_t kLogLines = 60;
 // projects.set waits until nginx serves the change, so it's generous; the
 // window never waits for it, only this thread does.
 constexpr auto kRequestTimeout = 30s;
+// phpmyadmin.login waits for MariaDB to start; its first start sets up the
+// data folder too (the service allows 90 s for each).
+constexpr auto kPhpMyAdminTimeout = 200s;
 
 // A string member of a reply, or empty.
 std::string string_field(const nlohmann::json& j, const char* key) {
@@ -217,7 +220,48 @@ void ServiceWorker::project_php(const std::string& project, const nlohmann::json
     push({Command::Kind::ProjectPhp, project, false, {}, std::nullopt, {}, params});
 }
 void ServiceWorker::database_call(const std::string& method, const nlohmann::json& params, const std::string& purpose) {
+    if (method == "phpmyadmin.login") {
+        start_side_call(method, params, purpose);  // off the polling path: see SideBox
+        return;
+    }
     push({Command::Kind::DatabaseCall, purpose, false, method, std::nullopt, {}, params});
+}
+
+void ServiceWorker::start_side_call(const std::string& method, const nlohmann::json& params, const std::string& purpose) {
+    {
+        const std::lock_guard lock(side_->mutex);
+        if (!side_->running.insert(purpose).second) {
+            return;  // one at a time; its answer is on its way
+        }
+    }
+    std::thread([box = side_, window = window_, message = message_, method, params, purpose,
+                 lost = std::string(text(lang_, Str::ConnectionLost))] {
+        Snapshot::DbAnswer answer{method, string_field(params, "series"), purpose, std::nullopt, {}};
+        try {
+            std::string error;
+            const std::string instance = core::ipc::default_instance();
+            if (auto client = core::ServiceClient::connect(instance, error, kPhpMyAdminTimeout)) {
+                if (auto got = client->call(method, params); !got) {
+                    answer.error = lost;
+                } else if (!got->ok) {
+                    answer.error = got->error_message;
+                } else {
+                    answer.reply = std::move(got->result);
+                }
+            } else {
+                answer.error = error.empty() ? lost : error;
+            }
+        } catch (const std::exception& e) {
+            answer.error = e.what();
+        }
+        {
+            const std::lock_guard lock(box->mutex);
+            box->running.erase(purpose);
+            box->answers.push_back(std::move(answer));
+        }
+        // Gone windows ignore it; the box lives as long as this thread needs it.
+        PostMessageW(window, message, 0, 0);
+    }).detach();
 }
 void ServiceWorker::load_defaults() {
     {
@@ -246,6 +290,13 @@ Snapshot ServiceWorker::take() {
     Snapshot out = latest_;
     out.clipboard = std::move(clipboard);
     out.db = std::move(db);
+    {
+        const std::lock_guard side_lock(side_->mutex);
+        for (Snapshot::DbAnswer& answer : side_->answers) {
+            out.db.push_back(std::move(answer));
+        }
+        side_->answers.clear();
+    }
     {
         const std::lock_guard refresh_lock(refresh_->mutex);
         // A cached answer waiting in this snapshot goes first; the check's follows.

@@ -115,6 +115,18 @@ private:
     F f_;
 };
 
+ServiceRefusal not_installed(const std::string& version) {
+    return {"not_installed",
+            "MariaDB " + version + " isn't installed: download it in Settings → Runtimes (or: flo install mariadb " +
+                version + ")"};
+}
+
+// Installed, but its server isn't there yet: its old one is still shutting
+// down (a newer patch release, a new port), or no port is free.
+ServiceRefusal no_server_yet(const std::string& series) {
+    return {"database_off", "MariaDB " + series + " can't take connections yet (its port is busy); try again in a few seconds"};
+}
+
 }  // namespace
 
 // The internal ports in use or chosen, across servers.
@@ -919,6 +931,24 @@ void DatabaseService::reload_locked() {
             }
         }
     }
+    // Every other installed series has a server too, asleep until something
+    // connects: phpMyAdmin (its own login form or FloServer's one click) and
+    // other clients reach any installed MariaDB, which then sleeps when idle.
+    for (const InstalledRuntime& one : installed) {
+        if (one.name != "mariadb") {
+            continue;
+        }
+        const std::string series = mariadb_series(one.version);
+        if (wanted.contains(series)) {
+            continue;
+        }
+        if (const InstalledRuntime* r = best_mariadb(installed, series); r != nullptr && mariadb_series(r->version) == series) {
+            wanted[series].runtime = r;
+        }
+    }
+    for (const auto& [series, count] : held_) {
+        wanted.erase(series);
+    }
     const auto chosen_port = [&settings](const std::string& series) -> std::optional<Port> {
         const auto it = settings.find(series);
         if (it == settings.end()) {
@@ -1119,21 +1149,21 @@ std::optional<DatabaseLogin> DatabaseService::project_login(const std::string& p
                                     "(flo remove " + project + ", then flo add --name <other name>)"};
         return std::nullopt;
     }
+    // Every installed series has a server, so this works with the project
+    // off too (phpMyAdmin, .env lines).
     std::shared_ptr<Server> server;
-    if (p->on) {
+    {
         const auto installed = list_installed(runtimes_dir(config_.data_dir));
         const InstalledRuntime* r = best_mariadb(installed, cfg.config->database->version);
-        const std::lock_guard lock(mutex_);
-        reload_locked();
-        if (r != nullptr) {
-            if (const auto it = servers_.find(mariadb_series(r->version)); it != servers_.end()) {
-                server = it->second;
-            }
+        if (r == nullptr) {
+            refusal = not_installed(cfg.config->database->version);
+            return std::nullopt;
         }
-    }
-    if (!server) {
-        refusal = {"database_off", project + "'s database runs while the project is on: flo start " + project};
-        return std::nullopt;
+        server = server_of(mariadb_series(r->version));
+        if (!server) {
+            refusal = no_server_yet(mariadb_series(r->version));
+            return std::nullopt;
+        }
     }
     // Counts as a connection: the server doesn't go to sleep meanwhile.
     server->connection_opened();
@@ -1272,9 +1302,15 @@ json DatabaseService::series_status(const std::string& series) const {
 
 namespace {
 
-ServiceRefusal no_server(const std::string& series) {
-    return {"database_off", "MariaDB " + series +
-                                " isn't in use: it runs while a project that uses it is on, or when it's set to keep running"};
+// Why a series has no server: it isn't installed (the usual reason: every
+// installed series has one), or it can't have one just now.
+ServiceRefusal no_server(const fs::path& data_dir, const std::string& series) {
+    const auto installed = list_installed(runtimes_dir(data_dir));
+    const InstalledRuntime* r = best_mariadb(installed, series);
+    if (r == nullptr || mariadb_series(r->version) != series) {
+        return not_installed(series);
+    }
+    return no_server_yet(series);
 }
 
 }  // namespace
@@ -1286,7 +1322,7 @@ bool DatabaseService::server_action(const std::string& series, const std::string
     }
     auto server = server_of(series);
     if (!server) {
-        refusal = no_server(series);
+        refusal = no_server(config_.data_dir, series);
         return false;
     }
     run_later([server = std::move(server), action] {
@@ -1331,6 +1367,62 @@ std::optional<std::string> DatabaseService::root_password(const std::string& ser
     return password;
 }
 
+void DatabaseService::hold_series(const std::string& series) {
+    std::vector<std::shared_ptr<Server>> going;
+    {
+        const std::lock_guard lock(mutex_);
+        ++held_[series];
+        for (const auto& w : retired_) {
+            if (const auto s = w.lock(); s && s->files().series == series) {
+                going.push_back(s);
+            }
+        }
+        if (const auto it = servers_.find(series); it != servers_.end()) {
+            going.push_back(it->second);
+        }
+        reload_locked();  // retires it
+    }
+    for (const auto& s : going) {
+        s->stop(true);  // waits for a stop under way too
+    }
+}
+
+void DatabaseService::release_series(const std::string& series) {
+    const std::lock_guard lock(mutex_);
+    if (const auto it = held_.find(series); it != held_.end() && --it->second <= 0) {
+        held_.erase(it);
+    }
+    reload_locked();
+}
+
+std::optional<DatabaseLogin> DatabaseService::root_login(const std::string& series, ServiceRefusal& refusal) {
+    const auto server = server_of(series);
+    if (!server) {
+        refusal = no_server(config_.data_dir, series);
+        return std::nullopt;
+    }
+    // Counts as a connection meanwhile; afterwards the idle time starts
+    // from now, so it sleeps as usual unless it's kept running.
+    server->connection_opened();
+    const AtExit closed([&server] { server->connection_closed(); });
+    server->clear_failure();  // asked for by the user: a failed start is tried again now
+    std::string error;
+    if (!server->ensure_running(error)) {
+        refusal = {"database_failed", "MariaDB " + series + " didn't start: " + error};
+        return std::nullopt;
+    }
+    auto password = secrets_.read(server->root_name());
+    if (!password) {
+        refusal = {"no_password", "root's password for MariaDB " + series + " is missing from the secure store"};
+        return std::nullopt;
+    }
+    DatabaseLogin login;
+    login.port = server->port();
+    login.user = "root";
+    login.password = std::move(*password);
+    return login;
+}
+
 bool DatabaseService::set_root_password(const std::string& series, const std::string& password, ServiceRefusal& refusal) {
     if (const auto problem = root_password_problem(password)) {
         refusal = {"bad_params", *problem};
@@ -1338,7 +1430,7 @@ bool DatabaseService::set_root_password(const std::string& series, const std::st
     }
     const auto server = server_of(series);
     if (!server) {
-        refusal = no_server(series);
+        refusal = no_server(config_.data_dir, series);
         return false;
     }
     std::string error;

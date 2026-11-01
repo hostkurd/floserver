@@ -1,7 +1,8 @@
 #pragma once
 
-// The MariaDB servers (D11, D12): one per series in use, shared by the
-// projects that ask for it, each project with its own database and user.
+// The MariaDB servers (D11, D12): one per installed series, shared by the
+// projects that ask for it, each project with its own database and user. A
+// series nothing uses sleeps until something connects (phpMyAdmin, say).
 //
 // Sleep when idle: MariaDB can't be handed a listening socket the way
 // php-cgi is (Q1), so the service holds the public port itself (3306, or the
@@ -70,7 +71,7 @@ public:
     [[nodiscard]] nlohmann::json status() const;
 
     // The login for a project's database, made the first time (the server
-    // starts if it sleeps). The project must be On and ask for a database.
+    // starts if it sleeps). The project must ask for a database; it may be off.
     [[nodiscard]] std::optional<DatabaseLogin> project_login(const std::string& project, ServiceRefusal& refusal);
 
     // Shared sites' login (D19, user "www"), made the first time. Shared
@@ -79,7 +80,7 @@ public:
 
     // Settings → Database for one series ("11.4"):
     //   {"server": that server as status() lists it, or null when it has none
-    //              (nothing uses the series and it isn't kept running),
+    //              (the series isn't installed),
     //    "databases": ["blog", "_shared"]: the projects (and shared sites)
     //                 whose own database has been made on it}
     [[nodiscard]] nlohmann::json series_status(const std::string& series) const;
@@ -92,6 +93,15 @@ public:
     // background when it runs (a sleeping one reads them when it wakes).
     // True when a restart was started.
     bool restart_if_running(const std::string& series);
+    // root's login on the series' server, started (and waited for) when it
+    // sleeps or never ran: its first start makes root's password. It then
+    // sleeps when idle like any other, unless it's kept running.
+    [[nodiscard]] std::optional<DatabaseLogin> root_login(const std::string& series, ServiceRefusal& refusal);
+    // Before one of the series' installs is removed: its server shuts down
+    // (this waits for it, so no file is in use) and isn't made again until
+    // release_series().
+    void hold_series(const std::string& series);
+    void release_series(const std::string& series);
     // root's password, from the secure store.
     [[nodiscard]] std::optional<std::string> root_password(const std::string& series, ServiceRefusal& refusal) const;
     // A new password for root (root_password_problem() says which are
@@ -123,6 +133,7 @@ private:
     mutable std::mutex mutex_;
     std::map<std::string, std::shared_ptr<Server>> servers_;  // by series
     std::vector<std::weak_ptr<Server>> retired_;              // may still hold their port
+    std::map<std::string, int> held_;                         // series being removed: no server
     std::atomic<bool> stopping_{false};
     bool stopped_ = false;
     std::thread thread_;

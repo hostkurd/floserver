@@ -138,8 +138,19 @@ void FieldEdit::place(const RECT& box, int pad, int height, bool visible) {
         return;
     }
     const int top = static_cast<int>(box.top) + (static_cast<int>(box.bottom - box.top) - height) / 2;
-    SetWindowPos(hwnd_, nullptr, static_cast<int>(box.left) + pad, top, w, height,
-                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    const RECT at{static_cast<int>(box.left) + pad, top, static_cast<int>(box.left) + pad + w, top + height};
+    if (EqualRect(&at, &placed_) != FALSE && IsWindowVisible(hwnd_) != FALSE) {
+        return;  // where it is: nothing to repaint (relayout runs on every key typed)
+    }
+    placed_ = at;
+    // SWP_NOCOPYBITS: a moved control repaints itself. Without it Windows
+    // copies the pixels at its old place to the new one; when a form's
+    // boxes all move (a line above them appears), a box moving onto the
+    // spot another box just moved into copies that box's text, and keeps
+    // showing it: collation-server showed innodb_buffer_pool_size's 64M
+    // (the user's screenshot, 1 Nov) until a save set the texts again.
+    SetWindowPos(hwnd_, nullptr, at.left, at.top, w, height,
+                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOCOPYBITS);
 }
 
 void FieldEdit::place(const RECT& box, int pad, int height, bool visible, int clip_top, int clip_bottom) {

@@ -23,6 +23,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -265,10 +266,21 @@ private:
         std::string error;
     };
 
+    // phpmyadmin.login may wait for MariaDB to start (its first start sets
+    // it up: up to a minute or more). Like "Check for updates" it runs on a
+    // short-lived thread and pipe connection of its own, one at a time per
+    // purpose; take() hands its answer over in Snapshot::db.
+    struct SideBox {
+        std::mutex mutex;
+        std::set<std::string> running;  // purposes with a request on its way
+        std::vector<Snapshot::DbAnswer> answers;
+    };
+
     void push(Command command);
     void run(const std::stop_token& stop);
     void publish();
     void start_refresh();
+    void start_side_call(const std::string& method, const nlohmann::json& params, const std::string& purpose);
 
     HWND window_;
     UINT message_;
@@ -279,6 +291,7 @@ private:
     Snapshot latest_;
     bool posted_ = false;
     std::shared_ptr<RefreshBox> refresh_ = std::make_shared<RefreshBox>();
+    std::shared_ptr<SideBox> side_ = std::make_shared<SideBox>();
     std::jthread thread_;  // last: it starts after everything above exists
 };
 
