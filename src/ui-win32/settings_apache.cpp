@@ -402,13 +402,17 @@ void SettingsWindow::layout_apache(HDC dc, Geometry& g, int x0, int x1, int y) c
     const int text_w = std::max(px(80), x1 - x0 - save_w - discard_w - px(8) - px(kGap));
     const int text_h = text_height(dc, w(restart), fonts_.caption.get(), text_w, rtl_);
     const int footer_h = std::max(px(kControlH), text_h);
-    const int footer_top = std::max(y, height_ - px(16) - footer_h);
+    // y is on screen (scrolled); the pinned place is the window's bottom
+    // with nothing scrolled. Both in page terms, so a page that gets shorter
+    // ("show fewer") can scroll back up instead of keeping a blank stretch.
+    const int footer_page_top = std::max(y + scroll_, height_ - px(16) - footer_h);
+    const int footer_top = footer_page_top - scroll_;
     ag.save = {x1 - save_w, footer_top, x1, footer_top + px(kControlH)};
     ag.discard = {static_cast<int>(ag.save.left) - px(8) - discard_w, footer_top, static_cast<int>(ag.save.left) - px(8),
                   footer_top + px(kControlH)};
     const int text_top = footer_top + std::max(0, (px(kControlH) - text_h) / 2);
     ag.footer_text = {x0, text_top, x0 + text_w, text_top + text_h};
-    g.content_h = footer_top + footer_h + scroll_ + px(16);
+    g.content_h = footer_page_top + footer_h + px(16);
 }
 
 const RECT* SettingsWindow::apache_rect_of(const Hit& hit) const {
