@@ -157,6 +157,13 @@ bool phpmyadmin_installed(const Installed& installed) {
     return it != installed.end() && !it->second.empty();
 }
 
+std::string phpmyadmin_busy_text(std::string_view series, std::string_view state, Lang lang) {
+    if (series.empty() || state == "running") {
+        return std::string(text(lang, Str::PmaOpening));
+    }
+    return fill(lang, Str::PmaStarting, {std::string(series)});
+}
+
 std::optional<RuntimeJob> runtime_job(const json& job) {
     RuntimeJob out;
     if (!job.is_object() || !job.contains("id") || !job["id"].is_number_integer()) {
@@ -356,8 +363,11 @@ RuntimesPage runtimes_page(const json& reply, const Installed* installed, const 
     }
 
     // Tools: phpMyAdmin, with how it's served on the newest install's row.
+    // Full width after Web servers (the user, 1 Nov: a third card in a row
+    // cut its rows off), before Node.js and Python.
     RuntimeGroup tools;
     tools.title = std::string(text(lang, Str::SettingsTools));
+    tools.wide = true;
     tools.rows = take_rows("phpmyadmin");
     const json& served = reply.is_object() && reply.contains("phpmyadmin") ? reply["phpmyadmin"] : json();
     for (RuntimeRow& row : tools.rows) {
@@ -373,9 +383,20 @@ RuntimesPage runtimes_page(const json& reply, const Installed* installed, const 
         break;  // the newest is the one served
     }
     if (!tools.rows.empty()) {
-        page.groups.push_back(std::move(tools));
+        const auto first_narrow = std::find_if(page.groups.begin(), page.groups.end(),
+                                               [](const RuntimeGroup& g) { return !g.wide; });
+        page.groups.insert(first_narrow, std::move(tools));
     }
     return page;
+}
+
+int runtime_grid_columns(int avail, int min_w, int gap, std::size_t cards) {
+    int cols = 1;
+    while (cols < kRuntimeGridMaxColumns && static_cast<std::size_t>(cols) < cards &&
+           avail >= (cols + 1) * min_w + cols * gap) {
+        ++cols;
+    }
+    return cols;
 }
 
 json merge_runtimes_reply(const json& before, const json& fresh) {

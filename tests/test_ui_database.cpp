@@ -52,7 +52,7 @@ TEST_CASE("database.get's answer and the server's state from databases.list") {
     CHECK(db_state_text(*s, s->server, Lang::En) == "Running on port 3306");
     CHECK(db_state_text(*s, failed, Lang::En).starts_with("Couldn't start: boom"));
     CHECK(db_state_text(*s, failed, Lang::En).find("Port 3310 is in use") != std::string::npos);
-    CHECK(db_state_text(*s, DbServer{}, Lang::En).starts_with("Not in use"));
+    CHECK(db_state_text(*s, DbServer{}, Lang::En).starts_with("Not ready yet"));
     const DbActions running = db_actions(s->server);
     CHECK((!running.start && running.stop && running.restart));
     const DbActions stopped = db_actions(failed);

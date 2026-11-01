@@ -48,7 +48,7 @@ constexpr int kPickerH = 28;
 constexpr int kChipH = 20;
 constexpr int kVersionW = 110;
 constexpr int kBarW = 140;
-constexpr int kGridMinW = 240;  // a Node.js, Python or Web servers card
+constexpr int kGridMinW = 240;  // a Node.js or Python card
 constexpr int kGap = 12;
 constexpr int kRowPad = 16;
 
@@ -687,7 +687,9 @@ SettingsWindow::Geometry SettingsWindow::layout(HDC dc) const {
             }
             const int end = (rg.button_kind != Button::None ? static_cast<int>(rg.button.left) : right) - px(kGap);
 
-            const int vw = wide ? px(kVersionW) : Canvas::measure(dc, w(row.label), fonts_.body.get(), false) + px(2);
+            // Full-width cards line their versions up; a longer label ("phpMyAdmin 5.2.3") gets its room.
+            const int label_w = Canvas::measure(dc, w(row.label), fonts_.body.get(), false) + px(2);
+            const int vw = wide ? std::max(px(kVersionW), label_w) : label_w;
             rg.version = {x, mid - px(10), std::min(end, x + vw), mid + px(10)};
             x = static_cast<int>(rg.version.right) + px(kGap);
 
@@ -724,8 +726,8 @@ SettingsWindow::Geometry SettingsWindow::layout(HDC dc) const {
         return px(kHeadH) + static_cast<int>(group.rows.size()) * px(kRowH);
     };
 
-    // PHP, MariaDB and Web servers take the full width; Node.js and Python
-    // share a row of cards.
+    // PHP, MariaDB, Web servers and Tools take the full width; Node.js and
+    // Python share a row of cards (never more than two in a row).
     std::vector<std::size_t> grid;
     for (std::size_t i = 0; i < page_.groups.size(); ++i) {
         const RuntimeGroup& group = page_.groups[i];
@@ -741,8 +743,7 @@ SettingsWindow::Geometry SettingsWindow::layout(HDC dc) const {
     }
     if (!grid.empty()) {
         const int avail = x1 - x0;
-        const auto fits = [&](int n) { return avail >= n * px(kGridMinW) + (n - 1) * px(kGap); };
-        const int cols = std::min(static_cast<int>(grid.size()), fits(3) ? 3 : fits(2) ? 2 : 1);
+        const int cols = runtime_grid_columns(avail, px(kGridMinW), px(kGap), grid.size());
         const int col_w = (avail - (cols - 1) * px(kGap)) / cols;
         for (std::size_t k = 0; k < grid.size(); k += static_cast<std::size_t>(cols)) {
             int line_h = 0;

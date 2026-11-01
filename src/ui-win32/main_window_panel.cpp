@@ -434,8 +434,12 @@ MainWindow::PanelGeometry MainWindow::panel_geometry(HDC dc) const {
         g.db_detail = {x0 + px(12), y + px(28), g.copy_env.left - px(12), y + px(46)};
         y = g.db_box.bottom + px(kPanelGap);
         // Open in phpMyAdmin: the project's own login, its database only.
-        const int pw = std::max(Canvas::measure(dc, w(text(lang_, Str::PmaOpenProject)), fonts_.caption.get(), rtl_),
-                                Canvas::measure(dc, w(text(lang_, Str::PmaOpening)), fonts_.caption.get(), rtl_)) +
+        const DatabaseServerState server = database_server(
+            snap_.databases, !row->database.empty() ? row->database : row->wants.database);
+        const int pw = std::max({Canvas::measure(dc, w(text(lang_, Str::PmaOpenProject)), fonts_.caption.get(), rtl_),
+                                 Canvas::measure(dc, w(text(lang_, Str::PmaOpening)), fonts_.caption.get(), rtl_),
+                                 Canvas::measure(dc, w(phpmyadmin_busy_text(server.series, {}, lang_)),
+                                                 fonts_.caption.get(), rtl_)}) +
                        px(24);
         g.pma = {x0, y, std::min(x1, x0 + pw), y + px(28)};
         if (!phpmyadmin_installed(snap_.installed)) {
@@ -1187,8 +1191,12 @@ void MainWindow::paint_panel(Canvas& c, HDC dc, bool text_pass) const {
     }
     if (g.pma.right > g.pma.left) {
         const bool can = phpmyadmin_installed(snap_.installed) && !pma_busy_ && snap_.link == Link::Connected;
-        c.text(g.pma, w(text(lang_, pma_busy_ ? Str::PmaOpening : Str::PmaOpenProject)), fonts_.caption.get(),
-               can ? p.text : p.button_disabled_text, Align::Center, false);
+        // While it waits: "Starting MariaDB 11.8…" until the server runs.
+        const DatabaseServerState server = database_server(
+            snap_.databases, !row->database.empty() ? row->database : row->wants.database);
+        const std::string label = pma_busy_ ? phpmyadmin_busy_text(server.series, server.state, lang_)
+                                            : std::string(text(lang_, Str::PmaOpenProject));
+        c.text(g.pma, w(label), fonts_.caption.get(), can ? p.text : p.button_disabled_text, Align::Center, false);
         if (g.pma_hint.right > g.pma_hint.left) {
             c.text(g.pma_hint, w(text(lang_, Str::PmaNotInstalled)), fonts_.caption.get(), p.text_subtle, Align::Start,
                    false);

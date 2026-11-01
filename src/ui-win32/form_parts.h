@@ -66,6 +66,7 @@ private:
     Rgb cue_color_ = 0x5F5F5F;
     bool setting_ = false;
     bool clipped_ = false;  // a window region cuts it at a scrolling part's edge
+    RECT placed_{};         // where place() last put it (parent's client coordinates)
 };
 
 // Puts a secret (a password, .env lines with one) on the clipboard, kept

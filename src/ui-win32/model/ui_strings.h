@@ -334,7 +334,8 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     PmaOpenProject,
     PmaNotInstalled,
     PmaOpening,
-    PmaOpenFailed,           // {0}: the service's reason
+    PmaStarting,             // {0}: the MariaDB series, "11.8"
+    PmaOpenFailed,          // {0}: the service's reason
     PmaAddress,              // {0}: "https://phpmyadmin.localhost"
     PmaNameTaken,
     PmaNeedsPhp,

@@ -52,7 +52,7 @@ struct RuntimeRow {
 struct RuntimeGroup {
     std::string title;    // "PHP", "MariaDB", "Node.js", "Python", "Web servers"
     std::string runtime;  // runtimes.default's name; empty for Web servers
-    bool wide = false;    // PHP and MariaDB take the full width; the rest share a row
+    bool wide = false;    // PHP, MariaDB, Web servers and Tools take the full width; the rest share a row
     // The default for new projects: "Newest installed" and each installed
     // series (PHP and MariaDB). Its key is the runtime's name.
     std::optional<VersionField> picker;
@@ -71,6 +71,12 @@ struct RuntimesPage {
 [[nodiscard]] RuntimesPage runtimes_page(const nlohmann::json& reply, const Installed* installed,
                                          const nlohmann::json& databases, Lang lang);
 
+// The narrow cards (Node.js, Python) share rows of at most two: a third
+// would cut its rows off (the user, 1 Nov). Two when both fit `avail` at
+// `min_w` each, else one.
+inline constexpr int kRuntimeGridMaxColumns = 2;
+[[nodiscard]] int runtime_grid_columns(int avail, int min_w, int gap, std::size_t cards);
+
 // The Tools card's line for phpMyAdmin from runtimes.list's "phpmyadmin"
 // (web.status's): "Opens at https://phpmyadmin.localhost", or why it isn't
 // served. Empty when there's nothing to say.
@@ -79,6 +85,11 @@ struct RuntimesPage {
 // Whether phpMyAdmin is installed (the window's poll): "Open phpMyAdmin"
 // buttons are disabled with a hint until it is.
 [[nodiscard]] bool phpmyadmin_installed(const Installed& installed);
+
+// A pressed "Open phpMyAdmin" button: "Starting MariaDB 11.8…" while the
+// server it opens isn't running (it's started first and waited for), else
+// "Opening phpMyAdmin…". `state` is databases.list's for that server.
+[[nodiscard]] std::string phpmyadmin_busy_text(std::string_view series, std::string_view state, Lang lang);
 
 // True for http(s)://phpmyadmin.localhost followed by '/', ':' or nothing:
 // the only links phpmyadmin.login's answer may open.

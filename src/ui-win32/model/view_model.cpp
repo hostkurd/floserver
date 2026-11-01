@@ -564,6 +564,22 @@ std::uint16_t database_port(const json& databases, std::string_view database) {
     return 0;
 }
 
+DatabaseServerState database_server(const json& databases, std::string_view database) {
+    const std::size_t dash = database.find('-');
+    if (dash == std::string_view::npos || !databases.is_object() || !databases.contains("servers") ||
+        !databases["servers"].is_array()) {
+        return {};
+    }
+    const std::string series = version_series(database.substr(0, dash), database.substr(dash + 1));
+    for (const json& server : databases["servers"]) {
+        if (version_series("mariadb", text_of(server, "series")) == series ||
+            version_series("mariadb", text_of(server, "version")) == series) {
+            return {text_of(server, "series"), text_of(server, "state")};
+        }
+    }
+    return {};
+}
+
 std::vector<LogLine> log_lines(const json& result, const std::function<void(std::int64_t, int&, int&, int&)>& local) {
     std::vector<LogLine> out;
     if (!result.is_object() || !result.contains("entries") || !result["entries"].is_array()) {

@@ -599,7 +599,8 @@ void SettingsWindow::layout_db(HDC dc, Geometry& g, int x0, int x1, int y) const
     top = y + px(14);
     dg.root_card = {x0, y, x1, y};
     // Open phpMyAdmin (as root, on this series) beside the title.
-    const int pma_w = std::max(button_w(Str::PmaOpen), button_w(Str::PmaOpening));
+    const int pma_w = std::max({button_w(Str::PmaOpen), button_w(Str::PmaOpening),
+                                measure(fill(lang_, Str::PmaStarting, {db_series_}), fonts_.button.get()) + px(24)});
     dg.pma = {std::max(cx0, cx1 - pma_w), top, cx1, top + px(kControlH)};
     dg.root_title = {cx0, top, std::max(cx0, static_cast<int>(dg.pma.left) - px(kGap)), top + px(kControlH)};
     yy = top + px(kControlH) + px(4);
@@ -1116,8 +1117,13 @@ void SettingsWindow::paint_db_text(Canvas& c) const {
     }
     label(dg.root_show, root_shown_.empty() ? Str::DbShow : Str::DbHide, connected_ || !root_shown_.empty());
     label(dg.root_copy, Str::DbCopy, connected_ && !root_busy_);
-    label(dg.pma, pma_busy_ ? Str::PmaOpening : Str::PmaOpen,
-          connected_ && !pma_busy_ && phpmyadmin_installed(installed_));
+    {
+        // While it waits: "Starting MariaDB 11.8…" until the server runs.
+        const bool enabled = connected_ && !pma_busy_ && phpmyadmin_installed(installed_);
+        const std::string busy = phpmyadmin_busy_text(db_series_, db_server_.state, lang_);
+        c.text(dg.pma, w(pma_busy_ ? std::string_view(busy) : text(lang_, Str::PmaOpen)), fonts_.button.get(),
+               enabled ? p.text : p.button_disabled_text, Align::Center, false);
+    }
     if (!is_empty(dg.pma_hint)) {
         c.paragraph(dg.pma_hint, w(text(lang_, Str::PmaNotInstalled)), fonts_.caption.get(), p.text_subtle);
     }

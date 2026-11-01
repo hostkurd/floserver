@@ -1,7 +1,8 @@
 #pragma once
 
-// The MariaDB servers (D11, D12): one per series in use, shared by the
-// projects that ask for it, each project with its own database and user.
+// The MariaDB servers (D11, D12): one per installed series, shared by the
+// projects that ask for it, each project with its own database and user. A
+// series nothing uses sleeps until something connects (phpMyAdmin, say).
 //
 // Sleep when idle: MariaDB can't be handed a listening socket the way
 // php-cgi is (Q1), so the service holds the public port itself (3306, or the
@@ -32,6 +33,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace floserver::core {
@@ -70,8 +72,11 @@ public:
     [[nodiscard]] nlohmann::json status() const;
 
     // The login for a project's database, made the first time (the server
-    // starts if it sleeps). The project must be On and ask for a database.
-    [[nodiscard]] std::optional<DatabaseLogin> project_login(const std::string& project, ServiceRefusal& refusal);
+    // starts if it sleeps). The project must ask for a database; it may be off.
+    // `retry_failed`: asked for by the user (phpMyAdmin), so a start that
+    // failed is tried again now rather than its error repeated for 30 s.
+    [[nodiscard]] std::optional<DatabaseLogin> project_login(const std::string& project, ServiceRefusal& refusal,
+                                                             bool retry_failed = false);
 
     // Shared sites' login (D19, user "www"), made the first time. Shared
     // sites must be on and have a database.
@@ -79,7 +84,7 @@ public:
 
     // Settings → Database for one series ("11.4"):
     //   {"server": that server as status() lists it, or null when it has none
-    //              (nothing uses the series and it isn't kept running),
+    //              (the series isn't installed),
     //    "databases": ["blog", "_shared"]: the projects (and shared sites)
     //                 whose own database has been made on it}
     [[nodiscard]] nlohmann::json series_status(const std::string& series) const;
@@ -92,6 +97,38 @@ public:
     // background when it runs (a sleeping one reads them when it wakes).
     // True when a restart was started.
     bool restart_if_running(const std::string& series);
+    // root's login on the series' server, started (and waited for) when it
+    // sleeps or never ran: its first start makes root's password. It then
+    // sleeps when idle like any other, unless it's kept running.
+    [[nodiscard]] std::optional<DatabaseLogin> root_login(const std::string& series, ServiceRefusal& refusal);
+    // Before the MariaDB install `version` ("11.4.2") is removed: when a
+    // server of its series runs from it (or is still shutting down from
+    // it), or it's the series' last install, that server shuts down (this
+    // waits, so no file is in use) and none is made for the series until
+    // the hold ends. An older patch release nothing runs from holds nothing:
+    // the series' server stays up. The hold ends with the returned guard.
+    class RemovalHold {
+    public:
+        RemovalHold() = default;
+        RemovalHold(DatabaseService* service, std::string series)
+            : service_(service), series_(std::move(series)) {}
+        RemovalHold(const RemovalHold&) = delete;
+        RemovalHold& operator=(const RemovalHold&) = delete;
+        RemovalHold(RemovalHold&& other) noexcept
+            : service_(std::exchange(other.service_, nullptr)), series_(std::move(other.series_)) {}
+        RemovalHold& operator=(RemovalHold&&) = delete;
+        ~RemovalHold() {
+            if (service_ != nullptr) {
+                service_->release_series(series_);
+            }
+        }
+        [[nodiscard]] bool held() const { return service_ != nullptr; }
+
+    private:
+        DatabaseService* service_ = nullptr;
+        std::string series_;
+    };
+    [[nodiscard]] RemovalHold hold_for_removal(const std::string& version);
     // root's password, from the secure store.
     [[nodiscard]] std::optional<std::string> root_password(const std::string& series, ServiceRefusal& refusal) const;
     // A new password for root (root_password_problem() says which are
@@ -108,6 +145,7 @@ public:
 
 private:
     void supervise();
+    void release_series(const std::string& series) noexcept;
     void reload_locked();
     [[nodiscard]] std::shared_ptr<Server> server_of(const std::string& series);
     // Runs `work` on a thread of its own, joined at stop().
@@ -123,6 +161,7 @@ private:
     mutable std::mutex mutex_;
     std::map<std::string, std::shared_ptr<Server>> servers_;  // by series
     std::vector<std::weak_ptr<Server>> retired_;              // may still hold their port
+    std::map<std::string, int> held_;                         // series being removed: no server
     std::atomic<bool> stopping_{false};
     bool stopped_ = false;
     std::thread thread_;

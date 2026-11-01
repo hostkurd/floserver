@@ -310,9 +310,17 @@ struct Service {
                                                     "; give them another version first");
                 }
             }
-            return runtimes->remove(string_param(r.params, "name"), string_param(r.params, "version"), refusal)
-                       ? protocol::make_result(r.id, json::object())
-                       : protocol::make_error(r.id, refusal.code, refusal.message);
+            // Every installed MariaDB has a server (asleep, or woken by
+            // phpMyAdmin): one running from this install lets go of its
+            // files first. The hold ends with `hold`, whatever happens.
+            const std::string name = string_param(r.params, "name");
+            const std::string version = string_param(r.params, "version");
+            const floserver::core::DatabaseService::RemovalHold hold =
+                name == "mariadb" && databases ? databases->hold_for_removal(version)
+                                               : floserver::core::DatabaseService::RemovalHold();
+            const bool removed = runtimes->remove(name, version, refusal);
+            return removed ? protocol::make_result(r.id, json::object())
+                           : protocol::make_error(r.id, refusal.code, refusal.message);
         }
         const auto id = job_id(r.params);
         if (!id) {
@@ -587,7 +595,8 @@ struct Service {
         return out;
     }
 
-    // The MariaDB servers phpMyAdmin offers: those the service runs or holds now.
+    // The MariaDB servers phpMyAdmin offers: every installed series' (asleep
+    // ones wake on phpMyAdmin's connection).
     [[nodiscard]] std::vector<floserver::core::PhpMyAdminServer> phpmyadmin_servers() const {
         std::vector<floserver::core::PhpMyAdminServer> out;
         if (!databases) {
@@ -626,78 +635,31 @@ struct Service {
         const std::string address =
             pma.contains("address") && pma.at("address").is_string() ? pma.at("address").get<std::string>() : "";
         if (address.empty()) {
-            std::string why = pma.contains("problem") && pma.at("problem").is_string()
-                                  ? pma.at("problem").get<std::string>()
-                                  : std::string("it isn't being served yet");
-            if (pma.contains("missing") && pma.at("missing").is_array() && !pma.at("missing").empty()) {
-                why = "it needs " + pma.at("missing").front().get<std::string>() + " first";
+            if (pma.contains("missing") && pma.at("missing").is_array() && !pma.at("missing").empty() &&
+                pma.at("missing").front().is_string()) {
+                const std::string missing = pma.at("missing").front().get<std::string>();
+                const std::string name = missing == "php" ? std::string("PHP") : missing;
+                return protocol::make_error(r.id, "not_served",
+                                            "phpMyAdmin needs " + name + ", which isn't installed: download " + name +
+                                                " in Settings → Runtimes");
             }
+            const std::string why = pma.contains("problem") && pma.at("problem").is_string()
+                                        ? pma.at("problem").get<std::string>()
+                                        : std::string("it isn't being served yet; try again in a few seconds");
             return protocol::make_error(r.id, "not_served", "phpMyAdmin can't be opened: " + why);
         }
-        const std::string lang = string_param(r.params, "lang");
-        if (!lang.empty()) {
-            phpmyadmin->set_lang(lang);
-        }
-        const std::vector<core::PhpMyAdminServer> running = phpmyadmin_servers();
+        core::PhpMyAdminLoginRequest ask;
+        ask.series = string_param(r.params, "series");
+        ask.project = string_param(r.params, "project");
+        ask.lang = string_param(r.params, "lang");
+        // This may wait for MariaDB to start: the window asks on a connection
+        // of its own, and each client has its own thread here.
         core::ServiceRefusal refusal;
-        core::SignonLogin login;
-        const std::string project = string_param(r.params, "project");
-        if (!project.empty()) {
-            auto own = databases->project_login(project, refusal);
-            if (!own) {
-                return protocol::make_error(r.id, refusal.code, refusal.message);
-            }
-            const auto found = std::find_if(running.begin(), running.end(),
-                                             [&own](const core::PhpMyAdminServer& s) { return s.port == own->port; });
-            if (found == running.end()) {
-                return protocol::make_error(r.id, "no_server", "the project's MariaDB server isn't running");
-            }
-            login.series = found->series;
-            login.user = std::move(own->user);
-            login.password = std::move(own->password);
-            login.port = own->port;
-            login.only_db = std::move(own->database);
-        } else {
-            const std::string text = string_param(r.params, "series");
-            const auto series = core::mariadb_request_series(text);
-            if (!series) {
-                return protocol::make_error(r.id, "bad_params", "name a MariaDB series such as 11.4, or a project");
-            }
-            const auto found = std::find_if(running.begin(), running.end(),
-                                             [&series](const core::PhpMyAdminServer& s) { return s.series == *series; });
-            if (found == running.end()) {
-                return protocol::make_error(r.id, "no_server",
-                                            "MariaDB " + *series +
-                                                " has no server now: no project uses it. Turn on Keep running in "
-                                                "Settings → Database to open it in phpMyAdmin");
-            }
-            auto password = databases->root_password(*series, refusal);
-            if (!password) {
-                return protocol::make_error(r.id, refusal.code, refusal.message);
-            }
-            login.series = *series;
-            login.user = "root";
-            login.password = std::move(*password);
-            login.port = found->port;
+        const auto url = core::phpmyadmin_login(*databases, *phpmyadmin, *data, address, ask, refusal);
+        if (!url) {
+            return protocol::make_error(r.id, refusal.code, refusal.message);
         }
-        std::string error;
-        std::vector<core::PhpMyAdminServer> listed;
-        if (!phpmyadmin->update(error, &listed)) {
-            return protocol::make_error(r.id, "phpmyadmin_failed", error);
-        }
-        const auto index = std::find_if(listed.begin(), listed.end(), [&login](const core::PhpMyAdminServer& s) {
-            return s.series == login.series && s.port == login.port;
-        });
-        if (index == listed.end()) {
-            return protocol::make_error(r.id, "no_server", "MariaDB " + login.series + " isn't running");
-        }
-        login.server = static_cast<std::size_t>(index - listed.begin()) + 1;
-        const auto token = core::create_signon_token(core::phpmyadmin_paths(*data).tokens, login,
-                                                      std::chrono::system_clock::now(), error);
-        if (!token) {
-            return protocol::make_error(r.id, "phpmyadmin_failed", error);
-        }
-        return protocol::make_result(r.id, {{"url", core::signon_url(address, *token, lang)}});
+        return protocol::make_result(r.id, {{"url", *url}});
     }
 
     // web.status, web.reload: what runs, or bring it in line now (after

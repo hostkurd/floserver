@@ -1,6 +1,8 @@
 #include "floserver/core/phpmyadmin.h"
 
 #include "floserver/core/crypto.h"
+#include "floserver/core/database_service.h"
+#include "floserver/core/mariadb_settings.h"
 #include "floserver/core/encoding.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/version.h"
@@ -448,6 +450,71 @@ std::string signon_url(std::string_view address, std::string_view token, std::st
     }
     return url + "/" + std::string(kSignonScriptName) + "?token=" + std::string(token) +
            "&lang=" + phpmyadmin_lang(lang);
+}
+
+std::optional<std::string> phpmyadmin_login(DatabaseService& databases, PhpMyAdminConfigWriter& writer,
+                                            const fs::path& data, std::string_view address,
+                                            const PhpMyAdminLoginRequest& request, ServiceRefusal& refusal) {
+    if (!request.lang.empty()) {
+        writer.set_lang(request.lang);
+    }
+    SignonLogin login;
+    if (!request.project.empty()) {
+        auto own = databases.project_login(request.project, refusal, true);  // asked for now: a failed start is tried again
+        if (!own) {
+            return std::nullopt;
+        }
+        // Its series: the server on its port.
+        const json status = databases.status();
+        if (status.contains("servers") && status.at("servers").is_array()) {
+            for (const json& s : status.at("servers")) {
+                if (s.is_object() && s.contains("port") && s.at("port").is_number_unsigned() &&
+                    s.at("port").get<std::uint64_t>() == own->port && s.contains("series") && s.at("series").is_string()) {
+                    login.series = s.at("series").get<std::string>();
+                }
+            }
+        }
+        login.user = std::move(own->user);
+        login.password = std::move(own->password);
+        login.port = own->port;
+        login.only_db = std::move(own->database);
+    } else {
+        const auto series = mariadb_request_series(request.series);
+        if (!series) {
+            refusal = {"bad_params", "name a MariaDB series such as 11.4, or a project"};
+            return std::nullopt;
+        }
+        auto root = databases.root_login(*series, refusal);
+        if (!root) {
+            return std::nullopt;
+        }
+        login.series = *series;
+        login.user = std::move(root->user);
+        login.password = std::move(root->password);
+        login.port = root->port;
+    }
+    std::string error;
+    std::vector<PhpMyAdminServer> listed;
+    if (!writer.update(error, &listed)) {
+        refusal = {"phpmyadmin_failed", error};
+        return std::nullopt;
+    }
+    const auto index = std::find_if(listed.begin(), listed.end(), [&login](const PhpMyAdminServer& s) {
+        return s.series == login.series && s.port == login.port;
+    });
+    if (login.series.empty() || index == listed.end()) {
+        // Its server was replaced meanwhile (a new port, a newer release).
+        refusal = {"database_off", "MariaDB " + (login.series.empty() ? std::string("for this project") : login.series) +
+                                       " is moving to another port; try again in a few seconds"};
+        return std::nullopt;
+    }
+    login.server = static_cast<std::size_t>(index - listed.begin()) + 1;
+    const auto token = create_signon_token(phpmyadmin_paths(data).tokens, login, std::chrono::system_clock::now(), error);
+    if (!token) {
+        refusal = {"phpmyadmin_failed", error};
+        return std::nullopt;
+    }
+    return signon_url(address, *token, request.lang);
 }
 
 }  // namespace floserver::core
