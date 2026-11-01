@@ -142,6 +142,9 @@ TEST_CASE("the real service starts, answers, refuses a second copy and stops") {
     REQUIRE(cleaned->ok);
     CHECK(cleaned->result["freed"] == 4);
     CHECK(cleaned->result["leftovers_bytes"] == 0);
+    CHECK(cleaned->result["skipped"] == 0);
+    CHECK(cleaned->result["skipped_items"].is_array());
+    CHECK(cleaned->result["skipped_items"].empty());
     CHECK_FALSE(std::filesystem::exists(data.path() / "downloads" / "php-8.5.1.zip.part"));
     const auto bad_clean = client->call("folders.clean", {{"what", "everything"}});
     REQUIRE(bad_clean.has_value());

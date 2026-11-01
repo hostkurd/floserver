@@ -15,8 +15,6 @@ namespace floserver::ui {
 
 namespace {
 
-constexpr std::size_t kMaxPrefsBytes = 16 * 1024;
-
 std::optional<std::filesystem::path> prefs_file() {
     auto data = core::data_dir();
     if (!data) {
@@ -58,23 +56,24 @@ WindowPrefs load_window_prefs() {
     if (!file) {
         return {};
     }
-    const auto text = core::read_small_file(*file, kMaxPrefsBytes);
-    return text ? parse_window_prefs(*text) : WindowPrefs{};
+    // A damaged file: the defaults now; it's kept as window.json.bad when
+    // the next change is saved (save_window_prefs_file), never lost.
+    return load_window_prefs_file(*file).prefs;
 }
 
-bool save_window_prefs(const WindowPrefs& prefs, std::string& error) {
+bool save_window_prefs(const WindowPrefs& prefs, std::string& error, std::string& kept_as) {
+    kept_as.clear();
     const auto file = prefs_file();
     if (!file) {
         error = "there's no folder for FloServer's files (LOCALAPPDATA isn't set)";
         return false;
     }
-    std::error_code ec;
-    std::filesystem::create_directories(file->parent_path(), ec);
-    if (ec) {
-        error = core::error_text(ec);
-        return false;
+    std::filesystem::path kept;
+    const bool saved = save_window_prefs_file(*file, prefs, kept, error);
+    if (!kept.empty()) {
+        kept_as = core::path_to_utf8(kept);
     }
-    return core::write_file_atomically(*file, window_prefs_json(prefs), error);
+    return saved;
 }
 
 std::vector<std::string> windows_display_languages() {

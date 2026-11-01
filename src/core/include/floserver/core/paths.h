@@ -54,6 +54,12 @@ namespace floserver::core {
 [[nodiscard]] bool write_private_file_atomically(const std::filesystem::path& file, std::string_view bytes,
                                                  std::string& error);
 
+// Renames `from` to `to` only when nothing is at `to` (never replacing it):
+// Windows' MoveFileExW without MOVEFILE_REPLACE_EXISTING, POSIX link() then
+// unlink(). False with `error` otherwise; `from` is then where it was.
+[[nodiscard]] bool rename_no_replace(const std::filesystem::path& from, const std::filesystem::path& to,
+                                     std::string& error);
+
 // The whole file, or nothing if it can't be read or is larger than `max_bytes`.
 [[nodiscard]] std::optional<std::string> read_small_file(const std::filesystem::path& file,
                                                          std::size_t max_bytes);

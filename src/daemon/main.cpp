@@ -889,7 +889,10 @@ struct Service {
     // Settings → Folders (data_folder.h). folders.get: where projects are
     // made, the data folder and how much it holds (walked now, for this
     // request only, and given up after a few seconds); folders.set
-    // {"projects_dir": "..." | null}; folders.clean {"what": "logs" | "leftovers"}.
+    // {"projects_dir": "..." | null}; folders.clean {"what": "logs" | "leftovers"},
+    // answered with {"what", "freed", "done", "skipped": count (older windows),
+    // "skipped_items": [{"path" (in the data folder), "why" (code), "reason",
+    // "inside"? ("project:<name>", "projects", "www": for "protected")}]}.
     // Every reply ends with what the clean-ups would free now:
     //   {"logs_bytes", "leftovers_bytes", "installing": bool (an install or a
     //    New project is running: its downloads and work folder are left alone)}
@@ -911,6 +914,42 @@ struct Service {
             const auto result = projects->set_projects_folder(dir, refusal);
             return result ? protocol::make_result(r.id, *result) : protocol::make_error(r.id, refusal.code, refusal.message);
         }
+        // What the clean-ups never touch, should one lie in their places
+        // (only by hand): every project's folder, the projects folder, the www folder.
+        // Each is compared as given and in its real names (data_folder.h), and
+        // named, so a skip can say which it lies inside.
+        core::CleanOptions options;
+        const auto guard = [&options](const std::filesystem::path& dir, std::string kind) {
+            options.protected_dirs.push_back(dir);
+            options.protected_kinds.push_back(std::move(kind));
+        };
+        if (const auto config = projects->config(refusal)) {
+            for (const core::Project& p : config->projects) {
+                guard(p.dir, "project:" + p.name);
+            }
+            if (const auto dir = config->projects_dir ? config->projects_dir : core::default_projects_dir()) {
+                guard(*dir, "projects");
+            }
+            std::string ignored;
+            if (const auto shared = core::read_shared_config(*config, ignored)) {
+                if (const auto www = core::shared_dir(*shared)) {
+                    guard(*www, "www");
+                }
+            } else {
+                // "shared" can't be read: still keep its folder, as far as it
+                // can be told, and the default one.
+                const json& raw = config->other.is_object() ? config->other.value("shared", json::object()) : json();
+                if (raw.is_object() && raw.contains("dir") && raw.at("dir").is_string()) {
+                    guard(core::path_from_utf8(raw.at("dir").get<std::string>()), "www");
+                }
+                if (const auto www = core::default_shared_dir()) {
+                    guard(*www, "www");
+                }
+            }
+        } else {
+            // Without config.json the projects aren't known: nothing is cleaned.
+            return protocol::make_error(r.id, refusal.code, refusal.message);
+        }
         // One clean-up (or size walk) at a time, all of it within one deadline.
         const std::lock_guard lock(folders_mutex);
         const auto deadline = Clock::now() + kFolderWalkTime;
@@ -918,19 +957,38 @@ struct Service {
         if (r.method == "folders.clean") {
             const std::string what = string_param(r.params, "what");
             core::CleanResult done;
+            std::vector<core::CleanSkip> places;  // places that couldn't be gone into (a link, a protected folder)
             if (what == "logs") {
-                done = core::empty_logs(*data, core::log_files(*data));
+                done = core::empty_logs(*data, core::log_files(*data, options, &places), options);
             } else if (what == "leftovers") {
                 // Installs, removals and New project are held off while the
                 // leftovers are listed and deleted, and the clean-up leaves
                 // alone what one of them was already doing: checked and held
                 // under each service's own lock, so nothing starts in between.
                 const CleanupGate gate(runtimes.get(), templates.get());
-                done = core::remove_leftovers(*data, core::leftovers(*data, !gate.runtimes, !gate.templates, deadline));
+                done = core::remove_leftovers(
+                    *data, core::leftovers(*data, !gate.runtimes, !gate.templates, deadline, options, &places), options);
             } else {
                 return protocol::make_error(r.id, "bad_params", R"("what" is "logs" or "leftovers")");
             }
-            out = {{"what", what}, {"freed", done.freed}, {"done", done.done}, {"skipped", done.skipped}};
+            for (core::CleanSkip& s : places) {
+                if (std::ranges::none_of(done.skipped_items, [&](const core::CleanSkip& d) { return d.path == s.path; })) {
+                    done.skipped_items.push_back(std::move(s));
+                }
+            }
+            json skipped = json::array();
+            for (const core::CleanSkip& s : done.skipped_items) {
+                json item = {{"path", s.path}, {"why", s.why}, {"reason", s.reason}};
+                if (!s.inside.empty()) {
+                    item["inside"] = s.inside;  // "project:shop", "projects", "www"
+                }
+                skipped.push_back(std::move(item));
+            }
+            out = {{"what", what},
+                   {"freed", done.freed},
+                   {"done", done.done},
+                   {"skipped", done.skipped_items.size()},
+                   {"skipped_items", std::move(skipped)}};
         } else {
             auto folder = projects->projects_folder(refusal);
             if (!folder) {
@@ -945,8 +1003,9 @@ struct Service {
         // Only counted here (nothing is deleted), so a plain look at who's busy will do.
         const bool runtimes_busy = runtimes && runtimes->busy();
         const bool templates_busy = templates && templates->busy();
-        out["logs_bytes"] = core::total_bytes(core::log_files(*data));
-        out["leftovers_bytes"] = core::total_bytes(core::leftovers(*data, runtimes_busy, templates_busy, deadline));
+        out["logs_bytes"] = core::total_bytes(core::log_files(*data, options));
+        out["leftovers_bytes"] =
+            core::total_bytes(core::leftovers(*data, runtimes_busy, templates_busy, deadline, options));
         out["installing"] = runtimes_busy || templates_busy;
         return protocol::make_result(r.id, out);
     }

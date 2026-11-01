@@ -10,6 +10,10 @@
 
 #include <doctest/doctest.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include <algorithm>
 #include <cstdlib>
 #include <string>
@@ -125,39 +129,491 @@ TEST_CASE("on Windows a junction or folder link in a work folder goes as a link,
 }
 #endif
 
-TEST_CASE("clear old logs lists FloServer's logs only and empties them") {
+namespace {
+
+// Every log has been quiet for two days.
+CleanOptions quiet() {
+    CleanOptions o;
+    o.now = fs::file_time_type::clock::now() + std::chrono::hours(48);
+    return o;
+}
+
+bool skipped_path(const std::vector<CleanSkip>& items, const std::string& path, const std::string& why = {}) {
+    return std::any_of(items.begin(), items.end(),
+                       [&](const CleanSkip& s) { return s.path == path && (why.empty() || s.why == why); });
+}
+
+}  // namespace
+
+TEST_CASE("clear old logs: FloServer's quiet logs are emptied, never a project's request log") {
     const FakeData f;
-    const auto logs = log_files(f.d);
-    CHECK(logs.size() == 4);
+    const CleanOptions o = quiet();
+    const auto logs = log_files(f.d, o);
+    CHECK(logs.size() == 3);
     CHECK(listed(logs, f.d / "web" / "logs" / "nginx-error.log"));
-    CHECK(listed(logs, f.d / "web" / "logs" / "sites" / "shop.log"));
     CHECK(listed(logs, f.d / "web" / "apps" / "api.log"));
     CHECK(listed(logs, f.d / "cli" / "php" / "php-errors.log"));
-    // Never the database's own log, a pid file, a template's step log (a leftover instead).
+    // Never a project's request log (the panel's Log tab), the database's own
+    // log, a pid file, a template's step log (a leftover instead).
+    CHECK_FALSE(listed(logs, f.d / "web" / "logs" / "sites" / "shop.log"));
     CHECK_FALSE(listed(logs, f.d / "data" / "mariadb-11.8" / "mariadbd.err"));
     CHECK_FALSE(listed(logs, f.d / "web" / "logs" / "nginx.pid"));
-    CHECK(total_bytes(logs) == 11 + 15 + 15 + 7);
+    CHECK(total_bytes(logs) == 11 + 15 + 7);
 
-    const CleanResult done = empty_logs(f.d, logs);
-    CHECK(done.done == 4);
-    CHECK(done.freed == 48);
+    const CleanResult done = empty_logs(f.d, logs, o);
+    CHECK(done.done == 3);
+    CHECK(done.freed == 33);
+    CHECK(done.skipped == 0);
     // Emptied, not deleted: a server's open handle writes on.
     CHECK(fs::is_regular_file(f.d / "web" / "logs" / "nginx-error.log"));
     CHECK(fs::file_size(f.d / "web" / "logs" / "nginx-error.log") == 0);
-    CHECK(log_files(f.d).empty());  // empty logs aren't listed again
+    CHECK(log_files(f.d, o).empty());  // empty logs aren't listed again
+    CHECK(test_util::read_file(f.d / "web" / "logs" / "sites" / "shop.log") == "1 200 0.1 GET /");
     CHECK(test_util::read_file(f.d / "web" / "logs" / "nginx.pid") == "123");
     CHECK(test_util::read_file(f.d / "data" / "mariadb-11.8" / "mariadbd.err") == "database log");
 
-    // A list that names anything else is refused item by item.
-    const std::vector<CleanItem> forged{{f.d / "config.json", 10, false},
-                                        {f.d / "web" / "logs" / ".." / ".." / "certs" / "ca.log", 1, false},
-                                        {f.d / "data" / "mariadb-11.8" / "mariadbd.err", 12, false}};
-    const CleanResult refused = empty_logs(f.d, forged);
+    // A list that names anything else is refused item by item, and named.
+    const std::vector<CleanItem> forged{{f.d / "config.json", 10, false, false},
+                                        {f.d / "web" / "logs" / ".." / ".." / "certs" / "ca.log", 1, false, true},
+                                        {f.d / "data" / "mariadb-11.8" / "mariadbd.err", 12, false, true},
+                                        {f.d / "web" / "logs" / "sites" / "shop.log", 15, false, false}};
+    const CleanResult refused = empty_logs(f.d, forged, o);
     CHECK(refused.done == 0);
-    CHECK(refused.skipped == 3);
+    CHECK(refused.skipped == 4);
+    CHECK(refused.skipped_items.size() == 4);
+    CHECK(skipped_path(refused.skipped_items, "config.json", "not_allowed"));
     CHECK(test_util::read_file(f.d / "config.json") == R"({"projects": [], "mine": 1})");
+    CHECK(test_util::read_file(f.d / "web" / "logs" / "sites" / "shop.log") == "1 200 0.1 GET /");
 }
 
+TEST_CASE("clear old logs: older copies go, a log written within the day stays, the sleep markers are never touched") {
+    const FakeData f;
+    write_file(f.d / "web" / "logs" / "nginx-error.log.1", "12345");
+    write_file(f.d / "web" / "logs" / "apache-error.log.old", "123");
+    write_file(f.d / "web" / "logs" / "php.log.bak", "12");
+    write_file(f.d / "web" / "logs" / "nginx-error.log.2.gz", "1");
+    write_file(f.d / "web" / "logs" / "nginx-access.log.gz", "1");
+    write_file(f.d / "web" / "apps" / "api.log.20261031", "1234");
+    write_file(f.d / "web" / "logs" / "8.5-a1b2.access.log", "1730000000.1");    // a PHP pool's idle log
+    write_file(f.d / "web" / "logs" / "8.5-a1b2.access.log.1", "1730000000.1");  // not a copy of ours either
+    write_file(f.d / "web" / "logs" / "sites" / "shop.log.1", "old requests");    // the Log tab's: not a place
+    write_file(f.d / "web" / "logs" / "deep" / "x.log.1", "a sub-folder");
+    write_file(f.d / "data" / "mariadb-11.8" / "mariadbd.err.1", "database");
+    write_file(f.d / "data" / "mariadb-11.8" / "slow.log.1", "database");
+    write_file(f.d / "web" / "logs" / "notes.log.txt", "not a log");
+
+    // Just written: only the older copies go.
+    const CleanOptions now;
+    const auto fresh = log_files(f.d, now);
+    CHECK(fresh.size() == 6);
+    for (const CleanItem& item : fresh) {
+        CHECK(item.remove);
+    }
+    const CleanResult done = empty_logs(f.d, fresh, now);
+    CHECK(done.done == 6);
+    CHECK(done.freed == 5 + 3 + 2 + 1 + 1 + 4);
+    for (const char* gone : {"nginx-error.log.1", "apache-error.log.old", "php.log.bak", "nginx-error.log.2.gz",
+                             "nginx-access.log.gz"}) {
+        CHECK_FALSE(fs::exists(f.d / "web" / "logs" / gone));
+    }
+    CHECK_FALSE(fs::exists(f.d / "web" / "apps" / "api.log.20261031"));
+    // The current logs, written just now, are as they were.
+    CHECK(test_util::read_file(f.d / "web" / "logs" / "nginx-error.log") == "error lines");
+    CHECK(test_util::read_file(f.d / "web" / "apps" / "api.log") == "uvicorn running");
+
+    // A day later they're emptied; the rest never.
+    const CleanOptions later_on = quiet();
+    (void)empty_logs(f.d, log_files(f.d, later_on), later_on);
+    CHECK(fs::file_size(f.d / "web" / "logs" / "nginx-error.log") == 0);
+    CHECK(test_util::read_file(f.d / "web" / "logs" / "8.5-a1b2.access.log") == "1730000000.1");
+    CHECK(test_util::read_file(f.d / "web" / "logs" / "8.5-a1b2.access.log.1") == "1730000000.1");
+    CHECK(test_util::read_file(f.d / "web" / "logs" / "sites" / "shop.log.1") == "old requests");
+    CHECK(test_util::read_file(f.d / "web" / "logs" / "sites" / "shop.log") == "1 200 0.1 GET /");
+    CHECK(test_util::read_file(f.d / "web" / "logs" / "deep" / "x.log.1") == "a sub-folder");
+    CHECK(test_util::read_file(f.d / "data" / "mariadb-11.8" / "mariadbd.err.1") == "database");
+    CHECK(test_util::read_file(f.d / "data" / "mariadb-11.8" / "slow.log.1") == "database");
+    CHECK(test_util::read_file(f.d / "data" / "mariadb-11.8" / "mariadbd.err") == "database log");
+    CHECK(test_util::read_file(f.d / "web" / "logs" / "notes.log.txt") == "not a log");
+
+    // A current log the list says is due, but written to since: left.
+    write_file(f.d / "web" / "logs" / "nginx-error.log", "new line");
+    const CleanResult recheck = empty_logs(f.d, {{f.d / "web" / "logs" / "nginx-error.log", 8, false, false}}, now);
+    CHECK(recheck.done == 0);
+    CHECK(test_util::read_file(f.d / "web" / "logs" / "nginx-error.log") == "new line");
+
+    CHECK(is_rotated_log_name("x.log.1"));
+    CHECK(is_rotated_log_name("X.LOG.OLD"));
+    CHECK(is_rotated_log_name("x.log.2026-10-31"));
+    CHECK_FALSE(is_rotated_log_name("x.log"));
+    CHECK_FALSE(is_rotated_log_name("x.log.txt"));
+    CHECK_FALSE(is_rotated_log_name(".log.1"));
+    CHECK_FALSE(is_log_file(f.d, f.d / "web" / "logs" / "pool.access.log"));
+}
+
+TEST_CASE("a file another program holds is skipped and named; the rest goes on") {
+    const FakeData f;
+    write_file(f.d / "web" / "logs" / "nginx-error.log.1", "12345");
+    write_file(f.d / "web" / "logs" / "php.log.old", "123");
+    CleanOptions o = quiet();
+    const auto locked = [](const fs::path& p) {
+        const std::string name = path_to_utf8(p.filename());
+        return name == "nginx-error.log" || name == "nginx-error.log.1" || name == "php-8.5.2.zip.part" ||
+               name == "php.exe";
+    };
+    o.remove_file = [&](const fs::path& p, std::error_code& ec) {
+        if (locked(p)) {
+            ec = std::make_error_code(std::errc::permission_denied);  // what Windows says for a held file
+            return;
+        }
+        fs::remove(p, ec);
+    };
+    o.empty_file = [&](const fs::path& p, std::error_code& ec) {
+        if (locked(p)) {
+            ec = std::make_error_code(std::errc::device_or_resource_busy);
+            return;
+        }
+        fs::resize_file(p, 0, ec);
+    };
+    const CleanResult logs = empty_logs(f.d, log_files(f.d, o), o);
+    CHECK(logs.freed == 3 + 15 + 7);  // php.log.old, api.log, php-errors.log
+    CHECK(logs.skipped == 2);
+    REQUIRE(logs.skipped_items.size() == 2);
+    CHECK(skipped_path(logs.skipped_items, "web/logs/nginx-error.log", "in_use"));
+    CHECK(skipped_path(logs.skipped_items, "web/logs/nginx-error.log.1", "in_use"));
+    CHECK(logs.skipped_items[0].reason == "in use by another program");
+    CHECK(test_util::read_file(f.d / "web" / "logs" / "nginx-error.log") == "error lines");
+    CHECK_FALSE(fs::exists(f.d / "web" / "logs" / "php.log.old"));
+
+    const CleanResult left = remove_leftovers(f.d, leftovers(f.d, false, false, later(), o), o);
+    CHECK(left.skipped == 2);
+    CHECK(skipped_path(left.skipped_items, "downloads/php-8.5.2.zip.part", "in_use"));
+    CHECK(skipped_path(left.skipped_items, "runtimes/php/.staging-8.5.2-ab12", "in_use"));
+    CHECK(fs::exists(f.d / "runtimes" / "php" / ".staging-8.5.2-ab12" / "php.exe"));
+    CHECK_FALSE(fs::exists(f.d / "runtimes" / "php" / ".removing-8.4.0-cd34"));
+    CHECK_FALSE(fs::exists(f.d / "templates" / "job-7"));
+    CHECK_FALSE(fs::exists(f.d / "downloads" / "php-8.5.2.zip.download"));
+}
+
+TEST_CASE("projects, the projects folder and the www folder in a clean-up place are never touched") {
+    const FakeData f;
+    // Odd, but possible by hand: a project in web/apps, the www folder a work
+    // folder, the projects folder inside the downloads.
+    write_file(f.d / "web" / "apps" / "old.log.1", "a project's file");
+    write_file(f.d / "templates" / "job-www" / "index.php", "a www site");
+    write_file(f.d / "downloads" / "mine" / "keep.txt", "the user's");
+    CleanOptions o = quiet();
+    o.protected_dirs = {f.d / "web" / "apps", f.d / "templates" / "job-www", f.d / "downloads" / "mine"};
+    std::vector<CleanSkip> places;
+    const auto logs = log_files(f.d, o, &places);
+    CHECK_FALSE(listed(logs, f.d / "web" / "apps" / "api.log"));
+    CHECK_FALSE(listed(logs, f.d / "web" / "apps" / "old.log.1"));
+    CHECK(skipped_path(places, "web/apps", "protected"));
+    (void)empty_logs(f.d, logs, o);
+    CHECK(test_util::read_file(f.d / "web" / "apps" / "old.log.1") == "a project's file");
+    CHECK(test_util::read_file(f.d / "web" / "apps" / "api.log") == "uvicorn running");
+
+    const auto items = leftovers(f.d, false, false, later(), o, &places);
+    CHECK_FALSE(listed(items, f.d / "templates" / "job-www"));
+    CHECK(skipped_path(places, "templates/job-www", "protected"));
+    // The downloads folder holds the projects folder: its leftovers still go,
+    // what's in the protected folder is never looked at.
+    CHECK(listed(items, f.d / "downloads" / "php-8.5.2.zip.part"));
+    write_file(f.d / "downloads" / "mine.part", "x");
+    CleanOptions mine = o;
+    mine.protected_dirs.push_back(f.d / "downloads" / "mine.part");
+    std::vector<CleanSkip> mine_places;
+    CHECK_FALSE(listed(leftovers(f.d, false, false, later(), mine, &mine_places), f.d / "downloads" / "mine.part"));
+    CHECK(skipped_path(mine_places, "downloads/mine.part", "protected"));
+    fs::remove(f.d / "downloads" / "mine.part");
+    (void)remove_leftovers(f.d, items, o);
+    CHECK(test_util::read_file(f.d / "templates" / "job-www" / "index.php") == "a www site");
+    CHECK(test_util::read_file(f.d / "downloads" / "mine" / "keep.txt") == "the user's");
+    // The rest still went.
+    CHECK_FALSE(fs::exists(f.d / "templates" / "job-7"));
+    CHECK_FALSE(fs::exists(f.d / "runtimes" / "php" / ".staging-8.5.2-ab12"));
+    CHECK(fs::file_size(f.d / "web" / "logs" / "nginx-error.log") == 0);
+
+    // A list naming a protected leftover is refused too.
+    const CleanResult refused = remove_leftovers(f.d, {{f.d / "templates" / "job-www", 0, true, true}}, o);
+    CHECK(refused.done == 0);
+    CHECK(skipped_path(refused.skipped_items, "templates/job-www", "protected"));
+
+    // A protected folder that holds the data folder: nothing is touched.
+    const FakeData g;
+    CleanOptions all = quiet();
+    all.protected_dirs = {g.d};
+    CHECK(log_files(g.d, all).empty());
+    CHECK(leftovers(g.d, false, false, later(), all).empty());
+}
+
+#ifndef _WIN32
+TEST_CASE("a linked top-level folder is never gone into; it's named") {
+    const FakeData f;
+    const TempDir outside;
+    write_file(outside.path() / "logs" / "a.log.1", "keep");
+    write_file(outside.path() / "logs" / "b.log", "keep");
+    write_file(outside.path() / "dl" / "a.part", "keep");
+    write_file(outside.path() / "rt" / "php" / ".staging-x" / "f", "keep");
+    write_file(outside.path() / "tpl" / "job-1" / "f", "keep");
+    write_file(outside.path() / "cli" / "php-errors.log", "keep");
+    for (const char* top : {"web", "downloads", "runtimes", "templates", "cli"}) {
+        fs::remove_all(f.d / top);
+    }
+    fs::create_directory_symlink(outside.path(), f.d / "web");  // web/logs is then outside/logs
+    fs::create_directory_symlink(outside.path() / "dl", f.d / "downloads");
+    fs::create_directory_symlink(outside.path() / "rt", f.d / "runtimes");
+    fs::create_directory_symlink(outside.path() / "tpl", f.d / "templates");
+    fs::create_directories(f.d / "cli");
+    fs::create_directory_symlink(outside.path() / "cli", f.d / "cli" / "php");
+
+    const CleanOptions o = quiet();
+    std::vector<CleanSkip> places;
+    CHECK(log_files(f.d, o, &places).empty());
+    CHECK(leftovers(f.d, false, false, later(), o, &places).empty());
+    CHECK(skipped_path(places, "web", "link"));
+    CHECK(skipped_path(places, "downloads", "link"));
+    CHECK(skipped_path(places, "runtimes", "link"));
+    CHECK(skipped_path(places, "templates", "link"));
+    CHECK(skipped_path(places, "cli/php", "link"));
+    CHECK(places[0].reason == "it's a link; FloServer doesn't follow links");
+
+    // A list naming files through the links is refused too.
+    const CleanResult logs = empty_logs(f.d, {{f.d / "web" / "logs" / "a.log.1", 4, false, true},
+                                              {f.d / "web" / "logs" / "b.log", 4, false, false}}, o);
+    CHECK(logs.done == 0);
+    CHECK(skipped_path(logs.skipped_items, "web/logs/a.log.1", "link"));
+    const CleanResult left = remove_leftovers(f.d, {{f.d / "downloads" / "a.part", 4, false, true},
+                                                    {f.d / "runtimes" / "php" / ".staging-x", 4, true, true},
+                                                    {f.d / "templates" / "job-1", 4, true, true}}, o);
+    CHECK(left.done == 0);
+    CHECK(left.skipped == 3);
+    CHECK(skipped_path(left.skipped_items, "downloads", "link"));
+    for (const fs::path& kept : {outside.path() / "logs" / "a.log.1", outside.path() / "logs" / "b.log",
+                                 outside.path() / "dl" / "a.part", outside.path() / "rt" / "php" / ".staging-x" / "f",
+                                 outside.path() / "tpl" / "job-1" / "f", outside.path() / "cli" / "php-errors.log"}) {
+        INFO(path_to_utf8(kept));
+        CHECK(test_util::read_file(kept) == "keep");
+    }
+
+    // A linked runtime's own folder (runtimes/<name>) isn't gone into either.
+    const FakeData g;
+    write_file(outside.path() / "node" / ".staging-1" / "f", "keep");
+    fs::create_directory_symlink(outside.path() / "node", g.d / "runtimes" / "node");
+    std::vector<CleanSkip> g_places;
+    const auto items = leftovers(g.d, false, false, later(), o, &g_places);
+    CHECK(skipped_path(g_places, "runtimes/node", "link"));
+    (void)remove_leftovers(g.d, items, o);
+    CHECK(test_util::read_file(outside.path() / "node" / ".staging-1" / "f") == "keep");
+    // A log that's a link to a file is left and named, not emptied through.
+    write_file(outside.path() / "linked-target.log", "keep");
+    fs::create_symlink(outside.path() / "linked-target.log", g.d / "web" / "logs" / "linked.log");
+    std::vector<CleanSkip> log_places;
+    (void)empty_logs(g.d, log_files(g.d, o, &log_places), o);
+    CHECK(skipped_path(log_places, "web/logs/linked.log", "link"));
+    CHECK(test_util::read_file(outside.path() / "linked-target.log") == "keep");
+}
+#endif
+
+#ifdef _WIN32
+namespace {
+
+// A junction (no rights needed) made with cmd's mklink.
+void make_junction(const fs::path& at, const fs::path& to) {
+    const std::wstring command = L"mklink /J \"" + at.wstring() + L"\" \"" + to.wstring() + L"\" >nul";
+    REQUIRE(_wsystem(command.c_str()) == 0);
+}
+
+}  // namespace
+
+TEST_CASE("on Windows a junction anywhere above a clean-up place is never gone into; it's named") {
+    const TempDir outside;
+    for (const char* sub : {"web", "logs", "apps", "dl", "rt", "node", "tpl", "cli"}) {
+        write_file(outside.path() / sub / "keep.txt", "keep");
+    }
+    write_file(outside.path() / "web" / "logs" / "a.log.1", "keep");
+    write_file(outside.path() / "logs" / "b.log", "keep");
+    write_file(outside.path() / "logs" / "b.log.1", "keep");
+    write_file(outside.path() / "dl" / "a.part", "keep");
+    write_file(outside.path() / "rt" / "php" / ".staging-x" / "f", "keep");
+    write_file(outside.path() / "node" / ".staging-1" / "f", "keep");
+    write_file(outside.path() / "tpl" / "job-1" / "f", "keep");
+    write_file(outside.path() / "cli" / "php-errors.log", "keep");
+    const CleanOptions o = quiet();
+
+    // web itself a junction.
+    {
+        const FakeData f;
+        fs::remove_all(f.d / "web");
+        make_junction(f.d / "web", outside.path() / "web");
+        std::vector<CleanSkip> places;
+        const auto logs = log_files(f.d, o, &places);
+        CHECK(skipped_path(places, "web", "link"));
+        (void)empty_logs(f.d, logs, o);
+        (void)empty_logs(f.d, {{f.d / "web" / "logs" / "a.log.1", 4, false, true}}, o);
+        CHECK(test_util::read_file(outside.path() / "web" / "logs" / "a.log.1") == "keep");
+    }
+    // web/logs, downloads, runtimes, templates, cli/php junctions; runtimes/<name> in another data folder.
+    {
+        const FakeData f;
+        for (const char* top : {"downloads", "runtimes", "templates"}) {
+            fs::remove_all(f.d / top);
+        }
+        fs::remove_all(f.d / "web" / "logs");
+        fs::remove_all(f.d / "cli" / "php");
+        make_junction(f.d / "web" / "logs", outside.path() / "logs");
+        make_junction(f.d / "downloads", outside.path() / "dl");
+        make_junction(f.d / "runtimes", outside.path() / "rt");
+        make_junction(f.d / "templates", outside.path() / "tpl");
+        make_junction(f.d / "cli" / "php", outside.path() / "cli");
+        std::vector<CleanSkip> places;
+        const auto logs = log_files(f.d, o, &places);
+        const auto items = leftovers(f.d, false, false, later(), o, &places);
+        for (const char* linked : {"web/logs", "downloads", "runtimes", "templates", "cli/php"}) {
+            CAPTURE(linked);
+            CHECK(skipped_path(places, linked, "link"));
+        }
+        (void)empty_logs(f.d, logs, o);
+        (void)remove_leftovers(f.d, items, o);
+        // A list naming files through them is refused too.
+        const CleanResult forced_logs = empty_logs(f.d, {{f.d / "web" / "logs" / "b.log", 4, false, false},
+                                                         {f.d / "web" / "logs" / "b.log.1", 4, false, true}}, o);
+        CHECK(forced_logs.done == 0);
+        const CleanResult forced = remove_leftovers(f.d, {{f.d / "downloads" / "a.part", 4, false, true},
+                                                          {f.d / "runtimes" / "php" / ".staging-x", 4, true, true},
+                                                          {f.d / "templates" / "job-1", 4, true, true}}, o);
+        CHECK(forced.done == 0);
+        CHECK(forced.skipped == 3);
+    }
+    {
+        const FakeData g;
+        make_junction(g.d / "runtimes" / "node", outside.path() / "node");
+        std::vector<CleanSkip> places;
+        const auto items = leftovers(g.d, false, false, later(), o, &places);
+        CHECK(skipped_path(places, "runtimes/node", "link"));
+        (void)remove_leftovers(g.d, items, o);
+        // A file-level link in web/logs, where Windows allows one (Developer Mode or an administrator).
+        std::error_code ec;
+        fs::create_symlink(outside.path() / "logs" / "b.log", g.d / "web" / "logs" / "linked.log", ec);
+        if (!ec) {
+            std::vector<CleanSkip> log_places;
+            (void)empty_logs(g.d, log_files(g.d, o, &log_places), o);
+            CHECK(skipped_path(log_places, "web/logs/linked.log", "link"));
+        } else {
+            MESSAGE("file symlink not allowed here (" << ec.message() << "): that part skipped");
+        }
+    }
+    for (const fs::path& kept :
+         {outside.path() / "web" / "logs" / "a.log.1", outside.path() / "logs" / "b.log", outside.path() / "logs" / "b.log.1",
+          outside.path() / "dl" / "a.part", outside.path() / "rt" / "php" / ".staging-x" / "f",
+          outside.path() / "node" / ".staging-1" / "f", outside.path() / "tpl" / "job-1" / "f",
+          outside.path() / "cli" / "php-errors.log"}) {
+        INFO(path_to_utf8(kept));
+        CHECK(test_util::read_file(kept) == "keep");
+    }
+}
+#endif
+
+TEST_CASE("a current log with another name (a hard link) is never emptied") {
+    const FakeData f;
+    const TempDir outside;
+    write_file(outside.path() / "mine.log", "the user's own");
+    std::error_code ec;
+    fs::create_hard_link(outside.path() / "mine.log", f.d / "web" / "logs" / "hard.log", ec);
+    if (ec) {
+        MESSAGE("hard links not possible here (" << ec.message() << "): skipped");
+        return;
+    }
+    const CleanOptions o = quiet();
+    std::vector<CleanSkip> places;
+    const auto logs = log_files(f.d, o, &places);
+    CHECK_FALSE(listed(logs, f.d / "web" / "logs" / "hard.log"));
+    CHECK(skipped_path(places, "web/logs/hard.log", "hard_link"));
+    // Named in the list anyway: still refused, and named.
+    const CleanResult forced = empty_logs(f.d, {{f.d / "web" / "logs" / "hard.log", 14, false, false}}, o);
+    CHECK(forced.done == 0);
+    CHECK(skipped_path(forced.skipped_items, "web/logs/hard.log", "hard_link"));
+    CHECK(test_util::read_file(outside.path() / "mine.log") == "the user's own");
+    // The rest still goes.
+    (void)empty_logs(f.d, logs, o);
+    CHECK(fs::file_size(f.d / "web" / "logs" / "nginx-error.log") == 0);
+}
+
+TEST_CASE("a log or leftover swapped or gone after it was listed") {
+    const FakeData f;
+    const CleanOptions o = quiet();
+    const auto logs = log_files(f.d, o);
+    const auto items = leftovers(f.d, false, false, later(), o);
+    // Gone meanwhile (an install finished, another clean-up ran): not "in use".
+    fs::remove_all(f.d / "runtimes" / "php" / ".staging-8.5.2-ab12");
+    fs::remove(f.d / "downloads" / "php-8.5.2.zip.part");
+    fs::remove(f.d / "web" / "apps" / "api.log");
+    const CleanResult left = remove_leftovers(f.d, items, o);
+    CHECK(left.skipped == 0);
+    CHECK(left.done == 3);
+    const CleanResult emptied = empty_logs(f.d, logs, o);
+    CHECK(emptied.skipped == 0);
+    CHECK(emptied.done == 2);
+
+#ifndef _WIN32
+    // Swapped for a link after listing: the open file is checked again, nothing is written through.
+    const FakeData g;
+    const TempDir outside;
+    write_file(outside.path() / "target.log", "keep");
+    const auto again = log_files(g.d, o);
+    fs::remove(g.d / "web" / "logs" / "nginx-error.log");
+    fs::create_symlink(outside.path() / "target.log", g.d / "web" / "logs" / "nginx-error.log");
+    const CleanResult swapped = empty_logs(g.d, again, o);
+    CHECK(skipped_path(swapped.skipped_items, "web/logs/nginx-error.log", "link"));
+    CHECK(test_util::read_file(outside.path() / "target.log") == "keep");
+    CHECK(fs::is_symlink(fs::symlink_status(g.d / "web" / "logs" / "nginx-error.log")));
+#endif
+}
+
+TEST_CASE("a place inside a project says which project; real names are compared too") {
+    const FakeData f;
+    CleanOptions o = quiet();
+    // A project folder that holds the whole data folder: every place is inside it.
+    o.protected_dirs = {f.d.parent_path(), f.d / "nowhere"};
+    o.protected_kinds = {"project:shop", "www"};
+    std::vector<CleanSkip> places;
+    CHECK(log_files(f.d, o, &places).empty());
+    CHECK(leftovers(f.d, false, false, later(), o, &places).empty());
+    REQUIRE_FALSE(places.empty());
+    CHECK(skipped_path(places, "web/logs", "protected"));
+    for (const CleanSkip& s : places) {
+        CHECK(s.inside == "project:shop");
+        CHECK(s.reason == "it's inside project shop");
+    }
+    // Kinds not given: the general words.
+    CleanOptions plain = quiet();
+    plain.protected_dirs = {f.d};
+    std::vector<CleanSkip> plain_places;
+    (void)log_files(f.d, plain, &plain_places);
+    REQUIRE_FALSE(plain_places.empty());
+    CHECK(plain_places[0].inside.empty());
+    CHECK(plain_places[0].reason == "it's a project's folder, the projects folder or the www folder");
+
+#ifndef _WIN32
+    // The data folder reached through another name (as an 8.3 short
+    // LOCALAPPDATA is on Windows): a project given by its real name still matches.
+    const TempDir alias_dir;
+    const fs::path alias = alias_dir.path() / "short";
+    fs::create_directory_symlink(f.d, alias);
+    write_file(f.d / "templates" / "job-proj" / "index.php", "a project's file");
+    CleanOptions by_real = quiet();
+    std::string error;
+    const auto real = real_folder(f.d, error);
+    REQUIRE(real);
+    by_real.protected_dirs = {*real / "templates" / "job-proj"};
+    by_real.protected_kinds = {"project:proj"};
+    std::vector<CleanSkip> alias_places;
+    const auto items = leftovers(alias, false, false, later(), by_real, &alias_places);
+    CHECK_FALSE(listed(items, alias / "templates" / "job-proj"));
+    CHECK(skipped_path(alias_places, "templates/job-proj", "protected"));
+    (void)remove_leftovers(alias, {{alias / "templates" / "job-proj", 0, true, true}}, by_real);
+    CHECK(test_util::read_file(f.d / "templates" / "job-proj" / "index.php") == "a project's file");
+#endif
+}
 TEST_CASE("leftovers are the cut-off downloads, half-made installs and work folders only") {
     const FakeData f;
     const auto items = leftovers(f.d, false, false, later());
@@ -195,12 +651,12 @@ TEST_CASE("leftovers are the cut-off downloads, half-made installs and work fold
 TEST_CASE("remove_leftovers refuses anything that isn't a leftover, whatever the list says") {
     const FakeData f;
     const std::vector<CleanItem> forged{
-        {f.d / "runtimes" / "php" / "8.5.1", 13, true},
-        {f.d / "runtimes" / ".staging-x", 0, true},  // not inside a runtime's folder
-        {f.d / "data", 0, true},
-        {f.d / "downloads" / ".." / "certs" / "ca.key.part", 0, false},
-        {f.d / "templates" / "job-7" / ".." / ".." / "secrets", 0, true},
-        {f.d.parent_path() / "downloads" / "x.part", 0, false},
+        {f.d / "runtimes" / "php" / "8.5.1", 13, true, true},
+        {f.d / "runtimes" / ".staging-x", 0, true, true},  // not inside a runtime's folder
+        {f.d / "data", 0, true, true},
+        {f.d / "downloads" / ".." / "certs" / "ca.key.part", 0, false, true},
+        {f.d / "templates" / "job-7" / ".." / ".." / "secrets", 0, true, true},
+        {f.d.parent_path() / "downloads" / "x.part", 0, false, true},
     };
     const CleanResult refused = remove_leftovers(f.d, forged);
     CHECK(refused.done == 0);
@@ -211,7 +667,8 @@ TEST_CASE("remove_leftovers refuses anything that isn't a leftover, whatever the
 
     CHECK(is_leftover(f.d, f.d / "runtimes" / "node" / ".removing-24.1.0-x"));
     CHECK_FALSE(is_leftover(f.d, f.d / "runtimes" / "node" / "staging-24.1.0"));
-    CHECK(is_log_file(f.d, f.d / "web" / "logs" / "sites" / "blog.log"));
+    CHECK(is_log_file(f.d, f.d / "web" / "logs" / "nginx-error.log"));
+    CHECK_FALSE(is_log_file(f.d, f.d / "web" / "logs" / "sites" / "blog.log"));  // the Log tab's
     CHECK_FALSE(is_log_file(f.d, f.d / "web" / "logs" / "sites" / "deeper" / "blog.log"));
     CHECK_FALSE(is_log_file(f.d, f.d / "data" / "mariadb-11.8" / "x.log"));
 }
@@ -246,14 +703,46 @@ TEST_CASE("the projects folder is kept in config.json, with the other keys") {
     CHECK(saved->other["web"]["http_port"] == 8080);
     CHECK(saved->other["from_a_newer_window"]["x"].size() == 2);
 
-    // Refused: not a full path, missing, inside FloServer's data folder.
+    // Refused: not a full path, a file, inside FloServer's data folder (made
+    // or not yet), a network share.
     CHECK_FALSE(service.set_projects_folder(fs::path("projects"), refusal));
     CHECK(refusal.code == "bad_params");
-    CHECK_FALSE(service.set_projects_folder(chosen.path() / "missing", refusal));
+    write_file(chosen.path() / "a-file", "x");
+    CHECK_FALSE(service.set_projects_folder(chosen.path() / "a-file", refusal));
+    CHECK(refusal.code == "bad_folder");
+    CHECK_FALSE(service.set_projects_folder(chosen.path() / "a-file" / "below", refusal));
     fs::create_directories(data.path() / "runtimes");
     CHECK_FALSE(service.set_projects_folder(data.path() / "runtimes", refusal));
     CHECK_FALSE(service.set_projects_folder(data.path(), refusal));
+    CHECK_FALSE(service.set_projects_folder(data.path() / "not-yet" / "made", refusal));
+    CHECK(refusal.message.find("data folder") != std::string::npos);
+#ifdef _WIN32
+    // A drive that isn't there: said so (not "is a file").
+    for (wchar_t letter = L'Z'; letter > L'D'; --letter) {
+        const std::wstring root = std::wstring(1, letter) + L":\\";
+        if (GetDriveTypeW(root.c_str()) == DRIVE_NO_ROOT_DIR) {
+            CHECK_FALSE(service.set_projects_folder(fs::path(root + L"projects"), refusal));
+            CHECK(refusal.message == "there's no drive " + std::string(1, static_cast<char>(letter)) + ":");
+            break;
+        }
+    }
+    CHECK_FALSE(service.set_projects_folder(fs::path(LR"(\\server\share\projects)"), refusal));
+#else
+    CHECK_FALSE(service.set_projects_folder(fs::path("//server/share/projects"), refusal));
+#endif
+    CHECK(refusal.message.find("network share") != std::string::npos);
     CHECK(load_app_config(app_config_file(data.path()), error)->projects_dir.has_value());  // unchanged
+
+    // A folder that isn't there yet: kept (made when the first project goes
+    // there, or Open is pressed), the part that's there in its real names.
+    const fs::path later_dir = chosen.path() / "not yet" / path_from_utf8("پڕۆژەکان");
+    const auto pending = service.set_projects_folder(later_dir, refusal);
+    INFO(refusal.message);
+    REQUIRE(pending);
+    CHECK((*pending)["custom"] == true);
+    CHECK_FALSE(fs::exists(later_dir));
+    CHECK(path_from_utf8((*pending)["projects_dir"].get<std::string>()) ==
+          *real / "not yet" / path_from_utf8("پڕۆژەکان"));
 
     // Back to the default: the key goes, the others stay.
     const auto reset = service.set_projects_folder(std::nullopt, refusal);

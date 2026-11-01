@@ -46,7 +46,23 @@ void merge_folders_reply(FoldersInfo& info, const nlohmann::json& result);
 // leftovers while something installs) to wait.
 [[nodiscard]] std::string clean_size_text(std::uint64_t bytes, bool installing, Lang lang);
 
-// After a clean-up: "Freed 12 MB." and how many were left because they're in use.
+// What a clean-up left, as folders.clean names it ("skipped_items").
+struct SkippedItem {
+    std::string path;    // in the data folder, '/' separated
+    std::string why;     // "in_use", "link", "hard_link", "protected", "unreadable", "not_allowed"
+    std::string reason;  // the service's English, for a code this window doesn't know
+    std::string inside;  // "protected": "project:<name>", "projects" or "www" it lies in; empty when not said
+};
+[[nodiscard]] std::vector<SkippedItem> skipped_from_reply(const nlohmann::json& result);
+
+// How many skipped paths a message names before "and N more".
+inline constexpr std::size_t kSkippedShown = 3;
+
+// "web/logs/a.log (in use by another program); downloads (it's a link); and 2 more".
+[[nodiscard]] std::string skipped_list_text(const std::vector<SkippedItem>& items, Lang lang);
+
+// After a clean-up: "Freed 12 MB." and, by name, what was left and why (up
+// to three, then "and N more"); from an older service, how many.
 [[nodiscard]] std::string clean_done_text(const nlohmann::json& result, Lang lang);
 
 // Settings > Shared sites: the hint under the title (what they do, or

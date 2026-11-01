@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <array>
 #include <map>
+#include <ranges>
 #include <set>
 #include <string_view>
 
@@ -212,6 +213,56 @@ bool same_or_inside(const fs::path& child, const fs::path& parent) {
     return c == p || (c.size() > p.size() && c.starts_with(p) && (p.ends_with("/") || c[p.size()] == '/'));
 }
 
+// The projects folder as it's kept: as the file system names it when it's
+// there (real_folder()); when it isn't yet (it's made when the first project
+// goes there, or Open is pressed), its nearest existing folder so named with
+// the rest as typed. Refused: a network share, a file.
+std::optional<fs::path> projects_folder_to_keep(const fs::path& dir, std::string& error) {
+    const std::string text = path_to_utf8(dir);
+    if (text.starts_with("\\\\") || text.starts_with("//")) {
+        error = text + " is on a network share; FloServer projects must be on a local drive";
+        return std::nullopt;
+    }
+#ifdef _WIN32
+    const std::wstring root = dir.root_name().native();
+    if (root.size() != 2 || root[1] != L':') {
+        error = text + " is on a network share; FloServer projects must be on a local drive";
+        return std::nullopt;
+    }
+#endif
+    std::error_code ec;
+    const fs::path normal = dir.lexically_normal();
+    if (fs::exists(normal, ec)) {
+        return real_folder(normal, error);  // a file is refused there ("there's no folder")
+    }
+    // The nearest folder that's there, and the parts below it still to make.
+    fs::path at = normal;
+    std::vector<fs::path> rest;
+    while (!at.empty() && at != at.root_path() && !fs::exists(at, ec)) {
+        rest.push_back(at.filename());
+        at = at.parent_path();
+    }
+    if (!fs::exists(at, ec)) {
+        // Walked up to the root and nothing's there: a drive that isn't ("Z:").
+        const std::string drive = path_to_utf8(normal.root_name());
+        error = drive.empty() ? "there's no folder " + path_to_utf8(at) : "there's no drive " + drive;
+        return std::nullopt;
+    }
+    if (!fs::is_directory(at, ec)) {
+        error = path_to_utf8(at) + " is a file, not a folder";
+        return std::nullopt;
+    }
+    const auto real = real_folder(at, error);
+    if (!real) {
+        return std::nullopt;
+    }
+    fs::path out = *real;
+    for (const fs::path& part : std::ranges::reverse_view(rest)) {
+        out /= part;
+    }
+    return out;
+}
+
 json describe_projects_folder(const AppConfig& config) {
     const auto fallback = default_projects_dir();
     const auto dir = config.projects_dir ? config.projects_dir : fallback;
@@ -239,7 +290,7 @@ std::optional<json> ProjectService::set_projects_folder(const std::optional<fs::
             return std::nullopt;
         }
         std::string error;
-        chosen = real_folder(*dir, error);
+        chosen = projects_folder_to_keep(*dir, error);
         if (!chosen) {
             refusal = {"bad_folder", error};
             return std::nullopt;

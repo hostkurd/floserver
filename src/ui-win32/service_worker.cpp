@@ -240,8 +240,10 @@ void ServiceWorker::database_call(const std::string& method, const nlohmann::jso
     }
     // Settings > Folders: folders.get counts the data folder and
     // folders.clean deletes files; seconds, maybe. Off the polling path too.
+    // The window's purpose names the opening it's for, so a late answer to
+    // an earlier one is told apart (and dropped there).
     if (method == "folders.get" || method == "folders.clean") {
-        start_side_call(method, params, method);
+        start_side_call(method, params, purpose.empty() ? method : purpose);
         return;
     }
     push({Command::Kind::DatabaseCall, purpose, false, method, std::nullopt, {}, params});

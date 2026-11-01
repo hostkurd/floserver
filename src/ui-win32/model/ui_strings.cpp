@@ -707,9 +707,9 @@ constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
     Entry{Str::FoldersCleanUp, "Clean up", "تنظيف", "پاککردنەوە"},
     Entry{Str::FoldersClearLogs, "Clear old logs", "مسح السجلات القديمة", "سڕینەوەی لۆگە کۆنەکان"},
     Entry{Str::FoldersClearLogsNote,
-          "Empties the logs of the web servers, PHP, Node.js and Python, and each project's request log. Running servers keep writing to them.",
-          "يُفرغ سجلات خوادم الويب و" FLO_LRI "PHP" FLO_PDI " و" FLO_LRI "Node.js" FLO_PDI " و" FLO_LRI "Python" FLO_PDI " وسجل طلبات كل مشروع. تواصل الخوادم العاملة الكتابة فيها.",
-          "لۆگەکانی ڕاژەکارەکانی وێب، " FLO_LRI "PHP" FLO_PDI "، " FLO_LRI "Node.js" FLO_PDI " و " FLO_LRI "Python" FLO_PDI " و لۆگی داواکارییەکانی هەر پڕۆژەیەک بەتاڵ دەکاتەوە. ڕاژەکارە کارکەرەکان بەردەوام تێیان دەنووسن."},
+          "Deletes older copies of the web servers', PHP's, Node.js' and Python's logs, and empties a log nothing has written to for a day. Each project's Log tab is kept.",
+          "يحذف النسخ القديمة من سجلات خوادم الويب و" FLO_LRI "PHP" FLO_PDI " و" FLO_LRI "Node.js" FLO_PDI " و" FLO_LRI "Python" FLO_PDI "، ويُفرغ السجل الذي لم يُكتب فيه منذ يوم. يبقى تبويب السجل لكل مشروع كما هو.",
+          "کۆپییە کۆنەکانی لۆگی ڕاژەکارەکانی وێب، " FLO_LRI "PHP" FLO_PDI "، " FLO_LRI "Node.js" FLO_PDI " و " FLO_LRI "Python" FLO_PDI " دەسڕێتەوە، و ئەو لۆگەی ڕۆژێکە هیچی تێدا نەنووسراوە بەتاڵ دەکاتەوە. تابی لۆگی هەر پڕۆژەیەک دەمێنێتەوە."},
     Entry{Str::FoldersLeftovers, "Remove leftover downloads", "إزالة التنزيلات المتبقية", "لابردنی داگرتنە ماوەکان"},
     Entry{Str::FoldersLeftoversNote,
           "Deletes downloads that were cut off, and installs and new projects that didn't finish.",
@@ -736,6 +736,27 @@ constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
     Entry{Str::FoldersProjectsChanged, "New projects will be made in {0}.", "ستُنشأ المشاريع الجديدة في {0}.",
           "پڕۆژە نوێیەکان لە {0} دروست دەکرێن."},
     Entry{Str::FoldersCleanFailed, "Couldn't clean up: {0}", "تعذّر التنظيف: {0}", "نەتوانرا پاک بکرێتەوە: {0}"},
+    Entry{Str::FoldersFreedLeft, "Freed {0}. Left as they are: {1}.", "تم تحرير {0}. تُركت كما هي: {1}.",
+          "{0} ئازاد کرا. وەک خۆیان مانەوە: {1}."},
+    Entry{Str::FoldersSkippedMore,"and {0} more", "و{0} غيرها", "و {0} ی تر"},
+    Entry{Str::FoldersSkipInUse, "in use by another program", "يستخدمه برنامج آخر",
+          "بەرنامەیەکی تر بەکاری دەهێنێت"},
+    Entry{Str::FoldersSkipLink, "it's a link", "إنه رابط", "بەستەرێکە"},
+    Entry{Str::FoldersSkipProtected, "it's a project's folder, the projects folder or the www folder",
+          "إنه مجلد مشروع أو مجلد المشاريع أو مجلد " FLO_LRI "www" FLO_PDI,
+          "بوخچەی پڕۆژەیەکە، یان بوخچەی پڕۆژەکان، یان بوخچەی " FLO_LRI "www" FLO_PDI},
+    Entry{Str::FoldersSkipInProject, "it's inside project {0}", "إنه داخل المشروع {0}", "لەناو پڕۆژەی {0} دایە"},
+    Entry{Str::FoldersSkipInProjects, "it's inside the projects folder", "إنه داخل مجلد المشاريع",
+          "لەناو بوخچەی پڕۆژەکان دایە"},
+    Entry{Str::FoldersSkipInWww, "it's inside the www folder", "إنه داخل مجلد " FLO_LRI "www" FLO_PDI,
+          "لەناو بوخچەی " FLO_LRI "www" FLO_PDI " دایە"},
+    Entry{Str::FoldersSkipHardLink, "it's a hard link: the same file has another name", "إنه رابط صلب: للملف نفسه اسم آخر",
+          "بەستەرێکی ڕەقە: هەمان پەڕگە ناوێکی تری هەیە"},
+    Entry{Str::FoldersSkipUnreadable, "it couldn't be read", "تعذّرت قراءته", "نەتوانرا بخوێندرێتەوە"},
+    Entry{Str::FoldersSkipNotAllowed, "not something the clean-up removes", "ليس مما يزيله التنظيف",
+          "شتێک نییە پاککردنەوە لای ببات"},
+    Entry{Str::FoldersOpenMade, "{0} wasn't there yet, so it was made.", "لم يكن {0} موجودًا بعد، فأُنشئ.",
+          "{0} هێشتا نەبوو، بۆیە دروست کرا."},
     // Settings > General. Arabic and Kurdish need a native read.
     Entry{Str::SettingsGeneral, "General", "عام", "گشتی"},
     Entry{Str::GeneralHint, "Language, theme, starting with Windows, and what closing the window does.",
@@ -786,6 +807,10 @@ constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
           "نەتوانرا مۆڵەتەکان بکرێنەوە: {0}"},
     Entry{Str::GeneralSaveFailed, "Couldn't save the setting: {0}", "تعذّر حفظ الإعداد: {0}",
           "نەتوانرا ڕێکخستنەکە پاشەکەوت بکرێت: {0}"},
+    Entry{Str::GeneralPrefsKept,
+          "window.json couldn't be read, so it was kept as {0} and a new one was saved.",
+          "تعذّرت قراءة " FLO_LRI "window.json" FLO_PDI "، فحُفظ باسم {0} وحُفظ ملف جديد.",
+          FLO_LRI "window.json" FLO_PDI " نەخوێندرایەوە، بۆیە وەک {0} هەڵگیرا و یەکێکی نوێ پاشەکەوت کرا."},
     Entry{Str::LicencesTitle, "FloServer {0}: licences", "FloServer {0}: التراخيص", "FloServer {0}: مۆڵەتەکان"},
     Entry{Str::LicencesOwn, "FloServer is made by HostKurd (https://floserver.org).",
           "FloServer من صنع HostKurd (https://floserver.org).",
@@ -834,7 +859,8 @@ std::optional<Lang> parse_lang(std::string_view code) {
         return Lang::Ar;
     }
     if (base == "ku" || base == "ckb") {
-        return Lang::Ku;
+        // Sorani only: Kurmanji is written in Latin letters ("ku-Latn-TR").
+        return lower_ascii(code).find("latn") == std::string::npos ? std::optional(Lang::Ku) : std::nullopt;
     }
     return std::nullopt;
 }

@@ -4,15 +4,20 @@
 #include "model/general_page.h"
 #include "model/ui_strings.h"
 
+#include "floserver/core/paths.h"
+#include "test_util.h"
+
 #include <doctest/doctest.h>
 
 #include <nlohmann/json.hpp>
 
+#include <filesystem>
 #include <string>
 #include <vector>
 
 using namespace floserver::ui;
 using nlohmann::json;
+namespace fs = std::filesystem;
 
 TEST_CASE("window preferences: defaults, round trip, and what isn't understood") {
     const WindowPrefs defaults;
@@ -66,6 +71,44 @@ TEST_CASE("the window's language: the choice, FLOSERVER_LANG, Windows' display l
     CHECK(resolve_lang(LangChoice::En, "ar", {"ar-IQ"}) == Lang::En);
     CHECK(resolve_lang(LangChoice::Ar, nullptr, none) == Lang::Ar);
     CHECK(resolve_lang(LangChoice::Ku, "en", {"en-US"}) == Lang::Ku);
+}
+
+TEST_CASE("the Settings sidebar starts with General") {
+    CHECK(kSettingsSidebar.front() == Str::SettingsGeneral);
+    const std::vector<std::string> en = [] {
+        std::vector<std::string> out;
+        out.reserve(kSettingsSidebar.size());
+        for (const Str s : kSettingsSidebar) {
+            out.emplace_back(text(Lang::En, s));
+        }
+        return out;
+    }();
+    CHECK(en == std::vector<std::string>{"General", "Runtimes", "PHP", "Ports & HTTPS", "Database", "Apache", "Folders",
+                                         "Shared sites"});
+}
+
+TEST_CASE("Same as Windows: only Sorani is Kurdish; Kurmanji falls back") {
+    // Sorani (Central Kurdish), in Arabic letters.
+    for (const char* sorani : {"ckb", "ckb-IQ", "CKB-Arab-IQ", "ckb_IR", "ku", "ku-IQ", "ku-Arab", "ku-Arab-IQ", "KU-arab"}) {
+        CAPTURE(sorani);
+        CHECK(windows_lang(sorani) == Lang::Ku);
+        CHECK(resolve_lang(LangChoice::System, nullptr, {sorani}) == Lang::Ku);
+    }
+    // Kurmanji, in Latin letters: not ours, so the next language, else English.
+    for (const char* kurmanji : {"ku-Latn", "ku-Latn-TR", "KU-LATN-tr", "ku_Latn_SY", "ku-TR-Latn", "kmr", "kmr-Latn-TR",
+                                 "ckb-Latn"}) {
+        CAPTURE(kurmanji);
+        CHECK_FALSE(windows_lang(kurmanji));
+        CHECK(resolve_lang(LangChoice::System, nullptr, {kurmanji}) == Lang::En);
+    }
+    CHECK(resolve_lang(LangChoice::System, nullptr, {"ku-Latn-TR", "ar-IQ"}) == Lang::Ar);
+    CHECK(resolve_lang(LangChoice::System, nullptr, {"ku-Latn-TR", "ckb-IQ"}) == Lang::Ku);
+    CHECK_FALSE(windows_lang(""));
+    CHECK_FALSE(windows_lang("kurdish"));
+    // FLOSERVER_LANG the same way.
+    CHECK(resolve_lang(LangChoice::System, "ku-Latn-TR", {"ar-IQ"}) == Lang::En);
+    CHECK_FALSE(parse_lang("ku-Latn"));
+    CHECK(parse_lang("ku-Arab") == Lang::Ku);
 }
 
 TEST_CASE("the theme: the choice, FLOSERVER_THEME, Windows' app theme") {
@@ -206,4 +249,89 @@ TEST_CASE("licences: the libraries, and the runtimes installed") {
     const std::string arabic = licences_text(Lang::Ar, "0.9.0", &reply);
     CHECK(arabic.find(std::string{'\xE2', '\x80', '\xAA'}) == std::string::npos);
     CHECK(arabic.find("PHP 8.10.1") != std::string::npos);
+}
+
+TEST_CASE("window.json: saving keeps keys it doesn't know") {
+    const test_util::TempDir dir;
+    // A non-ASCII folder, as some Windows user names are.
+    const fs::path file = dir.path() / floserver::core::path_from_utf8("کاربەر") / "window.json";
+    test_util::write_file(file, R"({"language": "ar", "from_a_newer_floserver": {"x": [1, 2]}, "zoom": 1.25})");
+    const WindowPrefsLoad loaded = load_window_prefs_file(file);
+    CHECK_FALSE(loaded.damaged);
+    CHECK(loaded.prefs.lang == LangChoice::Ar);
+
+    WindowPrefs next = loaded.prefs;
+    next.theme = ThemeChoice::Dark;
+    fs::path kept;
+    std::string error;
+    REQUIRE(save_window_prefs_file(file, next, kept, error));
+    CHECK(kept.empty());
+    const json saved = json::parse(test_util::read_file(file));
+    CHECK(saved["theme"] == "dark");
+    CHECK(saved["language"] == "ar");
+    CHECK(saved["from_a_newer_floserver"]["x"].size() == 2);
+    CHECK(saved["zoom"] == 1.25);
+    CHECK(load_window_prefs_file(file).prefs == next);
+
+    // Not there yet: the defaults, not damaged; saving makes it (and its folder).
+    const fs::path fresh = dir.path() / "new" / "window.json";
+    CHECK_FALSE(load_window_prefs_file(fresh).damaged);
+    REQUIRE(save_window_prefs_file(fresh, next, kept, error));
+    CHECK(kept.empty());
+    CHECK(load_window_prefs_file(fresh).prefs == next);
+}
+
+TEST_CASE("window.json: a damaged file is kept as .bad, never lost") {
+    const test_util::TempDir dir;
+    const fs::path file = dir.path() / "window.json";
+    test_util::write_file(file, R"({"language": "ar", "theme": )");  // cut short
+    const WindowPrefsLoad loaded = load_window_prefs_file(file);
+    CHECK(loaded.damaged);
+    CHECK(loaded.problem.find("valid JSON") != std::string::npos);
+    CHECK(loaded.prefs == WindowPrefs{});
+    // Loading alone never changes it.
+    CHECK(test_util::read_file(file) == R"({"language": "ar", "theme": )");
+
+    WindowPrefs next;
+    next.lang = LangChoice::Ku;
+    fs::path kept;
+    std::string error;
+    REQUIRE(save_window_prefs_file(file, next, kept, error));
+    CHECK(kept == dir.path() / "window.json.bad");
+    CHECK(test_util::read_file(dir.path() / "window.json.bad") == R"({"language": "ar", "theme": )");
+    CHECK(load_window_prefs_file(file).prefs == next);
+    CHECK_FALSE(load_window_prefs_file(file).damaged);
+
+    // Damaged again: the first copy stays, the next goes beside it.
+    test_util::write_file(file, "[1, 2]");
+    REQUIRE(save_window_prefs_file(file, next, kept, error));
+    CHECK(kept == dir.path() / "window.json.bad.2");
+    CHECK(test_util::read_file(dir.path() / "window.json.bad") == R"({"language": "ar", "theme": )");
+    CHECK(test_util::read_file(dir.path() / "window.json.bad.2") == "[1, 2]");
+    test_util::write_file(file, "");
+    REQUIRE(save_window_prefs_file(file, next, kept, error));
+    CHECK(kept == dir.path() / "window.json.bad.3");
+    CHECK(window_prefs_bad_copy(file) == dir.path() / "window.json.bad.4");
+
+    // An earlier copy is never written over: the move refuses a name that's taken.
+    test_util::write_file(file, "{");
+    test_util::write_file(dir.path() / "window.json.bad.4", "made meanwhile");
+    REQUIRE(save_window_prefs_file(file, next, kept, error));
+    CHECK(kept == dir.path() / "window.json.bad.5");
+    CHECK(test_util::read_file(dir.path() / "window.json.bad.4") == "made meanwhile");
+    CHECK(test_util::read_file(dir.path() / "window.json.bad.5") == "{");
+    CHECK_FALSE(fs::exists(dir.path() / "window.json.new"));  // the new file went in place
+    std::string move_error;
+    test_util::write_file(dir.path() / "a", "a");
+    CHECK_FALSE(floserver::core::rename_no_replace(dir.path() / "a", dir.path() / "window.json.bad", move_error));
+    CHECK_FALSE(move_error.empty());
+    CHECK(test_util::read_file(dir.path() / "a") == "a");
+    CHECK(test_util::read_file(dir.path() / "window.json.bad") == R"({"language": "ar", "theme": )");
+
+    // Unknown values in a valid file aren't damage: kept as they are.
+    test_util::write_file(file, R"({"language": "fr", "theme": 3})");
+    CHECK_FALSE(load_window_prefs_file(file).damaged);
+    REQUIRE(save_window_prefs_file(file, next, kept, error));
+    CHECK(kept.empty());
+    CHECK(json::parse(test_util::read_file(file))["language"] == "ku");
 }

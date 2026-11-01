@@ -130,10 +130,12 @@ public:
     //   {"projects_dir": "C:/Users/me/FloServer/projects" | null (no home folder),
     //    "default_projects_dir": "..." | null, "custom": bool (set here, not the default)}
     [[nodiscard]] std::optional<nlohmann::json> projects_folder(ServiceRefusal& refusal) const;
-    // Sets it to an existing folder on a drive (stored as real_folder()
-    // names it), or back to the default with nothing (or the default's own
-    // path). Projects already made stay where they are. Refused inside
-    // FloServer's data folder. The reply is projects_folder()'s.
+    // Sets it to a folder on a drive (stored as real_folder() names it), or
+    // back to the default with nothing (or the default's own path). It needn't
+    // exist yet: it's made when the first project goes there (or Open is
+    // pressed). Projects already made stay where they are. Refused: a network
+    // share, a file, inside FloServer's data folder. The reply is
+    // projects_folder()'s.
     [[nodiscard]] std::optional<nlohmann::json> set_projects_folder(const std::optional<std::filesystem::path>& dir,
                                                                     ServiceRefusal& refusal);
 

@@ -13,6 +13,8 @@
 #include "main_window_layout.h"
 #include "model/theme.h"
 
+#include <shlobj.h>
+
 #include <algorithm>
 #include <initializer_list>
 #include <iterator>
@@ -31,6 +33,18 @@ constexpr int kControlH = 30;
 constexpr int kTitleH = 22;
 
 std::wstring w(std::string_view s) { return win::widen(s); }
+
+// "folders.get#7": a request's purpose, unique for the life of the program,
+// so an answer for an earlier opening (or Settings window) never matches.
+std::string folders_purpose(std::string_view method) {
+    static unsigned asks = 0;
+    return std::string(method) + "#" + std::to_string(++asks);
+}
+
+// A full path on a drive ("C:\..."): never a \\server\share one.
+bool local_full_path(const std::wstring& p) {
+    return p.size() >= 3 && p[1] == L':' && (p[2] == L'\\' || p[2] == L'/');
+}
 bool is_empty(const RECT& r) { return r.right <= r.left || r.bottom <= r.top; }
 
 int text_height(HDC dc, std::wstring_view s, HFONT font, int width, bool rtl) {
@@ -61,44 +75,80 @@ std::string www_host(const SharedSites& shared) {
 // --- what's asked, what comes back ------------------------------------------------
 
 void SettingsWindow::load_folders() {
+    // A change's or clean-up's answer that came while another section was
+    // shown: said now.
+    if (folders_held_message_) {
+        show_message(std::move(folders_held_message_->first), folders_held_message_->second);
+        folders_held_message_.reset();
+    }
+    // One folders.get at a time: its answer is on its way (start_side_call's
+    // one-at-a-time check doesn't see it, each purpose being new).
+    if (!folders_ask_.empty()) {
+        return;
+    }
     folders_loading_ = true;
+    // A change or clean-up still on its way is waited for: its answer is
+    // shown when it comes, even after leaving the section and coming back,
+    // and its button stays off meanwhile. Only the size is asked again.
+    folders_ask_ = folders_purpose("folders.get");
     // The one request the section makes; the service counts the data folder for it.
-    worker_.database_call("folders.get", json::object());
+    worker_.database_call("folders.get", json::object(), folders_ask_);
     relayout();
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 void SettingsWindow::on_folders_answers(const Snapshot& snap) {
     const auto service_words = [this](const std::string& s) { return rtl_ ? isolate_ltr(s) : s; };
+    // Said in Folders: held while another section is shown, said on coming back.
+    const auto say = [this](std::string words, bool error) {
+        if (section_ == Section::Folders) {
+            show_message(std::move(words), error);
+        } else {
+            folders_held_message_.emplace(std::move(words), error);
+        }
+    };
     for (const Snapshot::DbAnswer& answer : snap.db) {
         if (!answer.method.starts_with("folders.")) {
             continue;
         }
         const bool failed = !answer.error.empty() || !answer.reply || !answer.reply->is_object();
         if (answer.method == "folders.get") {
+            if (answer.purpose != folders_ask_) {
+                continue;  // an earlier opening's
+            }
+            folders_ask_.clear();
             folders_loading_ = false;
             if (failed) {
-                show_message(fill(lang_, Str::FoldersReadFailed, {service_words(answer.error)}), true);
+                say(fill(lang_, Str::FoldersReadFailed, {service_words(answer.error)}), true);
             } else {
                 folders_ = folders_from_reply(*answer.reply);
             }
         } else if (answer.method == "folders.set") {
+            if (answer.purpose != folders_set_ask_) {
+                continue;
+            }
+            folders_set_ask_.clear();
             folders_setting_ = false;
             if (failed) {
-                show_message(fill(lang_, Str::FoldersChangeFailed, {service_words(answer.error)}), true);
+                say(fill(lang_, Str::FoldersChangeFailed, {service_words(answer.error)}), true);
             } else if (folders_) {
                 merge_folders_reply(*folders_, *answer.reply);
-                show_message(fill(lang_, Str::FoldersProjectsChanged, {folders_->projects_dir}), false);
+                say(fill(lang_, Str::FoldersProjectsChanged, {folders_->projects_dir}), false);
             }
         } else if (answer.method == "folders.clean") {
+            if (answer.purpose != cleaning_ask_) {
+                continue;
+            }
+            cleaning_ask_.clear();
             cleaning_.clear();
             if (failed) {
-                show_message(fill(lang_, Str::FoldersCleanFailed, {service_words(answer.error)}), true);
+                say(fill(lang_, Str::FoldersCleanFailed, {service_words(answer.error)}), true);
             } else {
                 if (folders_) {
                     merge_folders_reply(*folders_, *answer.reply);
                 }
-                show_message(clean_done_text(*answer.reply, lang_), false);
+                // What was left, by name: shown as a problem so it's read.
+                say(clean_done_text(*answer.reply, lang_), !skipped_from_reply(*answer.reply).empty());
             }
         }
     }
@@ -135,7 +185,8 @@ void SettingsWindow::change_projects_folder() {
     }
     folders_setting_ = true;
     message_.clear();
-    worker_.database_call("folders.set", {{"projects_dir", *picked}});
+    folders_set_ask_ = folders_purpose("folders.set");
+    worker_.database_call("folders.set", {{"projects_dir", *picked}}, folders_set_ask_);
     relayout();
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
@@ -150,15 +201,28 @@ void SettingsWindow::clean_up(const std::string& what) {
     }
     cleaning_ = what;
     message_.clear();
+    cleaning_ask_ = folders_purpose("folders.clean");
     // The service lists what to remove again itself: nothing named here is deleted.
-    worker_.database_call("folders.clean", {{"what", what}});
+    worker_.database_call("folders.clean", {{"what", what}}, cleaning_ask_);
     relayout();
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
-void SettingsWindow::explore(const std::string& folder) {
+void SettingsWindow::explore(const std::string& folder, bool make) {
+    // The projects folder may be set before it's there: Open makes it (on a
+    // drive only; the service refuses network shares when it's set).
+    bool made = false;
+    if (make && !folder.empty()) {
+        std::wstring wide = w(folder);
+        std::replace(wide.begin(), wide.end(), L'/', L'\\');
+        if (local_full_path(wide) && GetFileAttributesW(wide.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            made = SHCreateDirectoryExW(hwnd_, wide.c_str(), nullptr) == ERROR_SUCCESS;
+        }
+    }
     if (!explore_folder(hwnd_, folder)) {
         show_message(fill(lang_, Str::OpenFailed, {folder}), true);
+    } else if (made) {
+        show_message(fill(lang_, Str::FoldersOpenMade, {folder}), false);
     }
 }
 
@@ -317,13 +381,14 @@ void SettingsWindow::on_folders_click(const Hit& hit) {
             change_projects_folder();
             break;
         case Part::FoldersProjectsOpen:
-            explore(folders_->projects_dir);
+            explore(folders_->projects_dir, true);
             break;
         case Part::FoldersProjectsDefault:
             if (connected_ && !folders_setting_ && folders_->custom) {
                 folders_setting_ = true;
                 message_.clear();
-                worker_.database_call("folders.set", {{"projects_dir", nullptr}});
+                folders_set_ask_ = folders_purpose("folders.set");
+                worker_.database_call("folders.set", {{"projects_dir", nullptr}}, folders_set_ask_);
                 relayout();
             }
             break;

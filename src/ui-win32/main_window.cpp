@@ -637,7 +637,8 @@ void MainWindow::on_pref_change(WPARAM change, LPARAM value) {
     // Not saved: still used now, only not kept. Settings shows `error` with
     // fill(), which isolates it left to right in Arabic and Kurdish.
     std::string error;
-    (void)save_window_prefs(prefs_, error);
+    std::string kept_as;  // a damaged window.json, kept beside the new one
+    (void)save_window_prefs(prefs_, error, kept_as);
     if (prefs_.theme != before.theme) {
         set_theme_choice(prefs_.theme);
         if (const bool dark = apps_use_dark_theme(); dark != dark_) {
@@ -652,14 +653,14 @@ void MainWindow::on_pref_change(WPARAM change, LPARAM value) {
         const Lang lang = window_lang(prefs_);
         if (lang != lang_) {
             change_language(lang);  // Settings is made again with prefs_; an error shows there
-            if (settings_ && !error.empty()) {
-                settings_->set_prefs(prefs_, error);
+            if (settings_ && (!error.empty() || !kept_as.empty())) {
+                settings_->set_prefs(prefs_, error, kept_as);
             }
             return;
         }
     }
     if (settings_) {
-        settings_->set_prefs(prefs_, error);
+        settings_->set_prefs(prefs_, error, kept_as);
     }
 }
 

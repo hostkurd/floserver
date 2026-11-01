@@ -15,6 +15,7 @@
 
 #include <array>
 #include <cstdint>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -45,13 +46,41 @@ struct WindowPrefs {
 // window.json's text; anything missing or not understood keeps its default.
 [[nodiscard]] WindowPrefs parse_window_prefs(std::string_view text);
 [[nodiscard]] std::string window_prefs_json(const WindowPrefs& prefs);
+// The same written over `existing` (window.json as it is now): keys this
+// version doesn't know (a newer FloServer's) are kept as they are.
+[[nodiscard]] std::string window_prefs_json(const WindowPrefs& prefs, const nlohmann::json& existing);
 inline constexpr std::string_view kWindowPrefsFile = "window.json";
+
+// window.json on disk. A missing file is the defaults. One that's there but
+// isn't a JSON object (cut short, edited by hand, unreadable) is "damaged":
+// the defaults are used, and it's never written over silently. The next save
+// writes the new file beside it, moves the damaged one to window.json.bad
+// (window.json.bad.2, .3... when that's taken; never over an earlier copy),
+// then puts the new one in its place.
+struct WindowPrefsLoad {
+    WindowPrefs prefs;
+    bool damaged = false;
+    std::string problem;  // why, in plain English
+};
+[[nodiscard]] WindowPrefsLoad load_window_prefs_file(const std::filesystem::path& file);
+// Where a damaged `file` is kept: the first of file.bad, file.bad.2, ... not there yet.
+[[nodiscard]] std::filesystem::path window_prefs_bad_copy(const std::filesystem::path& file);
+// Saves `prefs` to `file` atomically, keeping the keys this version doesn't
+// know. `kept_as` is where a damaged file was kept (empty when none was).
+// False with `error` when the new file isn't in place: the old one is then
+// still at `file`, or (said in `error`) at `kept_as`.
+[[nodiscard]] bool save_window_prefs_file(const std::filesystem::path& file, const WindowPrefs& prefs,
+                                          std::filesystem::path& kept_as, std::string& error);
 
 // The language the window shows. A choice made in Settings wins; "Same as
 // Windows" takes FLOSERVER_LANG when it's set (screenshots, tests), else the
 // first of Windows' display languages FloServer has ("ar-IQ", "ku-Arab-IQ",
 // "ckb-IQ"...), else English.
 [[nodiscard]] Lang resolve_lang(LangChoice choice, const char* forced, const std::vector<std::string>& windows_langs);
+// One Windows display language as FloServer's: Arabic, English, or Kurdish
+// for Sorani only ("ckb", "ckb-*", "ku", "ku-IQ", "ku-Arab*"); Kurmanji
+// ("ku-Latn*") and anything else is nothing.
+[[nodiscard]] std::optional<Lang> windows_lang(std::string_view tag);
 
 // Dark or not: a choice made in Settings wins; "Same as Windows" takes
 // FLOSERVER_THEME ("light", "dark") when it's set, else Windows' app theme.
