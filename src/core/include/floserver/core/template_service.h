@@ -77,6 +77,13 @@ public:
     //  "folder"?: "...", "error"?: "..."}
     [[nodiscard]] std::optional<nlohmann::json> job(std::int64_t id) const;
     bool cancel(std::int64_t id);
+    // Whether a project is being made (its work folder is in use).
+    [[nodiscard]] bool busy() const;
+    // Settings → Folders' clean-up of the work folders: false while busy();
+    // else, until end_cleanup(), create() is refused with a plain message.
+    // Checked under the same lock create() takes.
+    [[nodiscard]] bool begin_cleanup();
+    void end_cleanup();
     // Cancels every job and waits for them.
     void stop();
 
@@ -93,6 +100,7 @@ private:
     std::map<std::int64_t, std::shared_ptr<Job>> jobs_;  // each holds its thread
     std::int64_t next_id_ = 1;
     bool stopping_ = false;
+    bool cleaning_ = false;  // begin_cleanup() .. end_cleanup()
 };
 
 // wp-config-sample.php with the database login and new keys and salts, or

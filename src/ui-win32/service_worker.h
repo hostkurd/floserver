@@ -186,7 +186,9 @@ public:
     // The panel's PHP part: projects.php, answered to the project.
     void project_php(const std::string& project, const nlohmann::json& params);
     // Settings > Database: one database.* request ({"series", ...}); its
-    // answer comes back in Snapshot::db with `purpose`.
+    // answer comes back in Snapshot::db with `purpose`. Apache's and
+    // Folders' requests too; phpmyadmin.login, folders.get and folders.clean
+    // run on a short-lived thread of their own (they can take a while).
     void database_call(const std::string& method, const nlohmann::json& params, const std::string& purpose = {});
     // New project: runtimes.list (cached) once, for its defaults.
     void load_defaults();

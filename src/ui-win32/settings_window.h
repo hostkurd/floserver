@@ -21,6 +21,16 @@
 // user's own httpd.conf lines. apache.get once when it's opened (the service
 // reads the modules folder then), apache.set on Save.
 //
+// Folders is the sixth: where new projects are made, the www folder, and
+// FloServer's data folder with how much it uses and two clean-ups.
+// folders.get once when it's opened (the service counts the data folder
+// then, off the polling thread); each change is sent at once.
+//
+// Shared sites is the seventh (D19's settings page, moved here): the switch,
+// the www folder, PHP, database and web server, and the www login. It asks
+// nothing: what it shows is the main window's shared.get snapshot. The gear
+// on the main window's Shared sites row opens Settings here.
+//
 // General is the last: the window's language and theme, starting with
 // Windows, what closing the window does, and About. Opening it reads the
 // Run entry once (no request to the service). The language, theme and
@@ -38,6 +48,7 @@
 #include "model/apache_page.h"
 #include "model/database_page.h"
 #include "model/general_page.h"
+#include "model/folders_page.h"
 #include "model/php_page.h"
 #include "model/ports_page.h"
 #include "model/runtimes_page.h"
@@ -95,8 +106,13 @@ public:
     [[nodiscard]] bool is_open() const { return hwnd_ != nullptr; }
     // Opens the PHP section on `series` ("8.5"), from a project's panel.
     void show_php(const std::string& series);
-    // The Save / Don't save / Cancel question is open: the owner mustn't
-    // destroy this object or ask it to close meanwhile.
+    // Opens the Shared sites section, from the main window's Shared sites row.
+    void show_shared();
+    // Shared sites' .env lines went on the clipboard (or couldn't): said
+    // here when Copy .env was pressed here.
+    void env_copied(bool done);
+    // The Save / Don't save / Cancel question (or a folder picker) is open:
+    // the owner mustn't destroy this object or ask it to close meanwhile.
     [[nodiscard]] bool asking() const { return asking_; }
     // FloServer is quitting while asking(): the owner is told to go on once
     // the question is answered.
@@ -118,8 +134,8 @@ public:
 
 private:
     // In the sidebar's order.
-    enum class Section : std::uint8_t { Runtimes, Php, Ports, Database, Apache, General };
-    static constexpr std::size_t kSections = 6;
+    enum class Section : std::uint8_t { Runtimes, Php, Ports, Database, Apache, Folders, Shared, General };
+    static constexpr std::size_t kSections = 8;
     enum class Part : std::uint8_t {
         None,
         Nav,     // row: the section
@@ -176,6 +192,21 @@ private:
         ApacheEditConf,
         ApacheDiscard,
         ApacheSave,
+        // Settings > Folders.
+        FoldersProjectsChange,
+        FoldersProjectsOpen,
+        FoldersProjectsDefault,
+        FoldersWwwChange,
+        FoldersWwwOpen,
+        FoldersDataOpen,
+        FoldersClearLogs,
+        FoldersLeftovers,
+        // Settings > Shared sites; `row` is the picker's index.
+        SharedSwitch,
+        SharedChange,
+        SharedOpen,
+        SharedField,
+        SharedCopyEnv,
         // Settings > General; `row` is the choice's index.
         GeneralLang,
         GeneralTheme,
@@ -381,8 +412,53 @@ private:
         RECT licences{};
         RECT updates_note{};
     };
+    struct FoldersGeometry {
+        RECT note{};  // Loading…
+        RECT projects_card{};
+        RECT projects_title{};
+        RECT projects_note{};
+        RECT projects_box{};
+        RECT projects_change{};
+        RECT projects_open{};
+        RECT projects_default{};  // empty unless a folder of the user's is set
+        RECT www_card{};          // empty while shared.get hasn't answered
+        RECT www_title{};
+        RECT www_note{};
+        RECT www_box{};
+        RECT www_change{};
+        RECT www_open{};
+        RECT data_card{};
+        RECT data_title{};
+        RECT data_note{};
+        RECT data_box{};
+        RECT data_open{};
+        RECT data_usage{};
+        RECT clean_card{};
+        RECT clean_title{};
+        RECT logs{};         // the button
+        RECT logs_size{};
+        RECT logs_note{};
+        RECT leftovers{};    // the button
+        RECT leftovers_size{};
+        RECT leftovers_note{};
+        RECT never_note{};
+    };
+    struct SharedGeometry {
+        RECT toggle{};
+        RECT note{};  // while shared.get hasn't answered
+        RECT card{};
+        RECT folder_label{};
+        RECT folder_box{};
+        RECT change{};
+        RECT open{};
+        std::vector<std::pair<RECT, RECT>> fields;  // label, box; one per picker
+        RECT db_box{};   // empty when there's no login to show
+        RECT db_title{};
+        RECT db_detail{};
+        RECT copy_env{};
+    };
     struct Geometry {
-        std::array<RECT, kSections> navs{};  // Runtimes, PHP, Ports & HTTPS, Database, Apache, General
+        std::array<RECT, kSections> navs{};  // Runtimes, PHP, Ports & HTTPS, Database, Apache, Folders, Shared sites, General
         RECT title{};
         RECT hint{};
         RECT check{};
@@ -393,6 +469,8 @@ private:
         PortsGeometry ports;
         DbGeometry db;
         ApacheGeometry apache;
+        FoldersGeometry folders;
+        SharedGeometry shared;
         GeneralGeometry general;
         int content_h = 0;  // of the main column, unscrolled
     };
@@ -537,6 +615,44 @@ private:
         return part >= Part::ApacheVersion && part <= Part::ApacheSave;
     }
 
+    // --- Settings > Folders (settings_folders.cpp) ---
+    void load_folders();
+    void on_folders_answers(const Snapshot& snap);
+    void layout_folders(HDC dc, Geometry& g, int x0, int x1, int y) const;
+    [[nodiscard]] const RECT* folders_rect_of(const Hit& hit) const;
+    void folders_focus_order(std::vector<Hit>& order) const;
+    void on_folders_click(const Hit& hit);
+    void change_projects_folder();
+    void clean_up(const std::string& what);
+    void paint_folders_shapes(Canvas& c) const;
+    void paint_folders_text(Canvas& c) const;
+    // A folder box: its outline (shapes) or the path inside it (text).
+    void paint_folder_box(Canvas& c, const RECT& box, const std::string& path, bool text_pass) const;
+    // Opens a folder in Explorer, or says why it couldn't.
+    void explore(const std::string& folder);
+    [[nodiscard]] static bool is_folders_part(Part part) {
+        return part >= Part::FoldersProjectsChange && part <= Part::FoldersLeftovers;
+    }
+
+    // --- Settings > Shared sites (settings_shared.cpp) ---
+    void on_shared_answers(const Snapshot& snap);
+    // The www folder picker (from either section); sent at once.
+    void change_www_folder();
+    [[nodiscard]] std::string shown_www_dir() const;
+    [[nodiscard]] bool shown_shared_on() const;
+    [[nodiscard]] std::size_t shared_field_value(const VersionField& field) const;
+    void send_shared(const nlohmann::json& changes, const std::string& key);
+    void toggle_shared();
+    void shared_field_menu(std::size_t index);
+    void layout_shared(HDC dc, Geometry& g, int x0, int x1, int y) const;
+    [[nodiscard]] const RECT* shared_rect_of(const Hit& hit) const;
+    void shared_focus_order(std::vector<Hit>& order) const;
+    void on_shared_click(const Hit& hit);
+    void paint_shared_shapes(Canvas& c) const;
+    void paint_shared_text(Canvas& c) const;
+    void paint_switch(Canvas& c, const RECT& r, bool on, bool hover) const;
+    [[nodiscard]] static bool is_shared_part(Part part) { return part >= Part::SharedSwitch && part <= Part::SharedCopyEnv; }
+
     // --- Settings > General (settings_general.cpp) ---
     void load_general();  // the Run entry, read once as the section opens
     void layout_general(HDC dc, Geometry& g, int x0, int x1, int y) const;
@@ -655,6 +771,21 @@ private:
     // as written since), and this FloServer.exe's path.
     std::optional<RunEntry> run_entry_;
     std::string own_exe_;
+    // Settings > Folders: folders.get's answer, and what's on its way.
+    std::optional<FoldersInfo> folders_;
+    bool folders_loading_ = false;
+    bool folders_setting_ = false;  // folders.set
+    std::string cleaning_;          // "logs" or "leftovers" while folders.clean is on its way
+    bool picking_folder_ = false;   // a folder picker is open (it runs its own message loop)
+    // Shared sites (both sections): the main window's shared.get snapshot,
+    // and the user's changes until the worker reports them done (the keys
+    // ServiceWorker::on_key / use_key give, counted).
+    SharedSites shared_;
+    SharedPage shared_page_;
+    std::map<std::string, int> shared_waiting_;
+    std::optional<bool> pending_shared_on_;
+    std::map<std::string, std::optional<std::string>> pending_shared_use_;  // field key -> value
+    bool copying_env_ = false;
     win::UniqueBrush input_brush_;
     win::UniqueBrush input_set_brush_;
 

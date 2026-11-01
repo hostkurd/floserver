@@ -80,14 +80,8 @@ private:
         SharedSwitch,
         SharedEnd,       // the address, or the Download button
         SharedOpen,      // Open folder
-        SharedGear,      // its settings page
+        SharedGear,      // its settings: Settings > Shared sites
         // The Shared sites settings page; `row` is the field's index.
-        WwwSwitch,
-        WwwChange,
-        WwwOpen,
-        WwwField,
-        WwwCopyEnv,
-        WwwClose,
     };
     enum class PanelAction : std::uint8_t { Browser, Folder, Terminal, Studio, Download };
     [[nodiscard]] static constexpr bool is_panel_part(Part part) {
@@ -235,24 +229,6 @@ private:
         RECT open{};
         RECT gear{};
     };
-    // The Shared sites settings page's pieces, from the last paint.
-    struct WwwGeometry {
-        RECT area{};
-        RECT title{};
-        RECT toggle{};
-        RECT hint{};
-        RECT folder_label{};
-        RECT folder_box{};
-        RECT change{};
-        RECT open{};
-        std::vector<std::pair<RECT, RECT>> fields;  // label, box; one per www_fields_ entry
-        RECT db_box{};
-        RECT db_title{};
-        RECT db_detail{};
-        RECT copy_env{};  // empty when there's no database
-        RECT footer{};
-        RECT close{};
-    };
     // Step 3 and the job not finished yet (also before its first answer).
     [[nodiscard]] bool wizard_running() const;
     // False for a template with nothing to choose (no Versions page).
@@ -315,7 +291,8 @@ private:
     [[nodiscard]] bool is_settled(const std::string& key) const;
     void settle(const std::vector<std::string>& keys);
     void show_notice(std::string text, bool error);
-    void put_on_clipboard(std::string& text);
+    // True when it's there.
+    bool put_on_clipboard(std::string& text);
 
     // --- the project panel (main_window_panel.cpp) ---
     [[nodiscard]] const ProjectRow* selected_row() const;
@@ -432,18 +409,8 @@ private:
     void open_shared_address();
     void on_shared_key(WPARAM key);
     void paint_shared_row(Canvas& c, HDC dc, bool text_pass) const;
-    [[nodiscard]] bool www_open() const { return www_open_; }
-    [[nodiscard]] WwwGeometry www_geometry(HDC dc) const;
-    [[nodiscard]] Hit www_hit_test(int x, int y) const;
-    [[nodiscard]] std::vector<Hit> www_focus_order() const;
-    [[nodiscard]] std::size_t www_field_value(const VersionField& field) const;
-    void open_www();
-    void close_www();
-    void www_change_folder();
-    void www_field_menu(std::size_t index);
-    void on_www_click(const Hit& hit);
-    void on_www_key(WPARAM key);
-    void paint_www(Canvas& c, HDC dc, bool text_pass) const;
+    // The row's gear: Settings, at its Shared sites section.
+    void open_settings_shared();
     static LRESULT CALLBACK name_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, UINT_PTR id, DWORD_PTR self);
     // Settings (D20): its own window, one at a time.
     void open_settings();
@@ -533,10 +500,6 @@ private:
     mutable SharedGeometry shared_geometry_;
     bool shared_focused_ = false;  // the keys are on the row (focus_ is then -1)
     int shared_part_ = 0;          // index into shared_focus_order()
-    bool www_open_ = false;
-    int www_focus_ = -1;           // index into www_focus_order(); -1: none shown
-    std::vector<VersionField> www_fields_;
-    mutable WwwGeometry www_geometry_;
 
     // The panel's tabs: the one the user chose (kept across projects) and
     // how far the shown one's content is scrolled.

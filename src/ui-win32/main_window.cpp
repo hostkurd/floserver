@@ -264,7 +264,6 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
                 const bool hand = hit.part == Part::Switch || hit.part == Part::Address || hit.part == Part::Download ||
                                   hit.part == Part::PanelAddress || hit.part == Part::PanelKeep ||
                                   hit.part == Part::SharedSwitch || hit.part == Part::SharedEnd ||
-                                  hit.part == Part::WwwSwitch ||
                                   (hit.part == Part::Banner && banner().clickable);
                 SetCursor(LoadCursorW(nullptr, hand ? IDC_HAND : IDC_ARROW));
                 return TRUE;
@@ -291,7 +290,7 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             return 0;
         }
         case WM_MOUSEWHEEL: {
-            if (wizard_open() || www_open()) {
+            if (wizard_open()) {
                 return 0;  // the list under the page stays put
             }
             // The panel's content scrolls under the mouse (also from a PHP
@@ -483,8 +482,10 @@ void MainWindow::on_snapshot() {
         change_error_ = s.change_error;
         SetTimer(hwnd_, kErrorTimer, kErrorShownMs, nullptr);
     }
+    // Copy .env lines from Settings > Shared sites comes here too: it's told after.
+    std::optional<bool> copied;
     if (!s.clipboard.empty()) {
-        put_on_clipboard(s.clipboard);
+        copied = put_on_clipboard(s.clipboard);
     }
     if (!s.added.empty()) {
         pending_added_ = s.added;
@@ -502,6 +503,9 @@ void MainWindow::on_snapshot() {
     snap_ = std::move(s);
     if (settings_) {
         settings_->on_snapshot(snap_);
+        if (copied) {
+            settings_->env_copied(*copied);
+        }
     }
     snap_.runtimes.reset();  // Settings' alone; not kept once it has it
     // Nor its other one-shot answers: a Settings opened next must not get
@@ -526,9 +530,6 @@ void MainWindow::on_snapshot() {
     // Shared sites: the row goes when the service stops answering shared.get.
     if (!snap_.shared.known) {
         shared_focused_ = false;
-        close_www();
-    } else if (www_open()) {
-        www_fields_ = shared_fields(snap_.shared, snap_.installed, lang_);
     }
     if (!focused.empty()) {
         if (const int again = visible_index(focused); again >= 0) {
@@ -599,6 +600,7 @@ void MainWindow::open_settings() {
     snap_.runtimes_error.clear();
     snap_.runtimes_refresh = false;
     snap_.settings_error.clear();
+    snap_.db.clear();
     settings_ = std::make_unique<SettingsWindow>(instance_, lang_, prefs_, *worker_, hwnd_, kSettingsClosedMessage,
                                                  kPrefsMessage);
     if (!settings_->create(settings_placement_)) {
@@ -720,9 +722,6 @@ void MainWindow::change_language(Lang lang) {
     }
     // The words made from the snapshot, in the new language.
     update_fields();
-    if (www_open()) {
-        www_fields_ = shared_fields(snap_.shared, snap_.installed, lang_);
-    }
     if (!change_error_.empty()) {
         SetTimer(hwnd_, kErrorTimer, kErrorShownMs, nullptr);
     }
@@ -738,6 +737,13 @@ void MainWindow::change_language(Lang lang) {
         if (settings_) {
             settings_->show_general();
         }
+    }
+}
+
+void MainWindow::open_settings_shared() {
+    open_settings();
+    if (settings_ && settings_->is_open()) {
+        settings_->show_shared();  // brought to the front if it was open already
     }
 }
 
@@ -988,7 +994,7 @@ void MainWindow::scroll_to(int target) {
 
 void MainWindow::place_scroll_bars() {
     // The list's bar only while the list is what's shown under the mouse.
-    const bool list_shown = !wizard_open() && !www_open();
+    const bool list_shown = !wizard_open();
     list_bar_.place(list_shown ? list_rect() : RECT{}, list_height(), scroll_, dpi_);
     panel_bar_.place(list_shown && panel_open() ? panel_geometry_.content : RECT{}, panel_content_h(), panel_scroll_,
                      dpi_);
@@ -1090,9 +1096,6 @@ MainWindow::Hit MainWindow::hit_test(int x, int y) const {
     }
     if (wizard_open()) {
         return contains(wizard_geometry_.area, x, y) ? wizard_hit_test(x, y) : Hit{};
-    }
-    if (www_open()) {
-        return contains(www_geometry_.area, x, y) ? www_hit_test(x, y) : Hit{};
     }
     if (panel_open() && contains(panel_geometry_.panel, x, y)) {
         return panel_hit_test(x, y);
@@ -1240,14 +1243,6 @@ void MainWindow::on_click(const Hit& clicked) {
             InvalidateRect(hwnd_, nullptr, FALSE);
             break;
         }
-        case Part::WwwSwitch:
-        case Part::WwwChange:
-        case Part::WwwOpen:
-        case Part::WwwField:
-        case Part::WwwCopyEnv:
-        case Part::WwwClose:
-            on_www_click(hit);
-            break;
         case Part::Settings:
             open_settings();
             break;
@@ -1264,10 +1259,6 @@ void MainWindow::on_key(WPARAM key) {
     }
     if (wizard_open()) {
         on_wizard_key(key);
-        return;
-    }
-    if (www_open()) {
-        on_www_key(key);
         return;
     }
     if (panel_open() && (panel_focus_ >= 0 || !panel_beside_list())) {
@@ -1529,11 +1520,12 @@ void MainWindow::show_notice(std::string message, bool error) {
 
 // The .env lines hold the database password: they're kept out of Windows'
 // clipboard history and cloud clipboard, and wiped from memory once copied.
-void MainWindow::put_on_clipboard(std::string& value) {
+bool MainWindow::put_on_clipboard(std::string& value) {
     const bool done = put_secret_on_clipboard(hwnd_, value);
     show_notice(done ? std::string(text(lang_, Str::EnvCopied))
                      : fill(lang_, Str::OpenFailed, {"clipboard"}),
                 !done);
+    return done;
 }
 
 void MainWindow::open_address(int visible_row) {
@@ -1653,9 +1645,7 @@ void MainWindow::on_paint() {
             geometry_ = row_geometry(mem.get());
             update_panel_geometry(mem.get());
             wizard_geometry_ = wizard_open() ? wizard_geometry(mem.get()) : WizardGeometry{};
-            const bool list_shown = !wizard_open() && !www_open();
-            shared_geometry_ = list_shown ? shared_geometry(mem.get()) : SharedGeometry{};
-            www_geometry_ = www_open() && !wizard_open() ? www_geometry(mem.get()) : WwwGeometry{};
+            shared_geometry_ = !wizard_open() ? shared_geometry(mem.get()) : SharedGeometry{};
             place_scroll_bars();
             {
                 Canvas canvas(mem.get(), width_, rtl_);
@@ -1668,8 +1658,6 @@ void MainWindow::on_paint() {
                     paint_banner(canvas, text_pass);
                     if (wizard_open()) {
                         paint_wizard(canvas, mem.get(), text_pass);
-                    } else if (www_open()) {
-                        paint_www(canvas, mem.get(), text_pass);
                     } else {
                         paint_list(canvas, mem.get(), text_pass);
                         paint_shared_row(canvas, mem.get(), text_pass);

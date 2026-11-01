@@ -454,3 +454,48 @@ TEST_CASE("templates work offline: the kept signed list, else the built-in ones"
         CHECK(error.find("internet") != std::string::npos);
     }
 }
+
+TEST_CASE("the leftover clean-up and installs hold each other off") {
+    World w;
+    w.publish(1);
+    // Waits until cancelled, so the install stays running.
+    struct Stuck final : HttpTransport {
+        std::shared_ptr<FakeTransport> inner;
+        HttpReply get(const std::string& url, const HttpLimits& limits, const HttpBody& body) override {
+            if (url.ends_with(".zip")) {
+                while (limits.cancel == nullptr || !limits.cancel->load()) {
+                    std::this_thread::sleep_for(milliseconds(2));
+                }
+                HttpReply r;
+                r.error = "cancelled";
+                return r;
+            }
+            return inner->get(url, limits, body);
+        }
+    };
+    auto stuck = std::make_shared<Stuck>();
+    stuck->inner = w.transport;
+    RuntimeService s(w.config(), stuck);
+    ServiceRefusal refusal;
+
+    // While a clean-up runs: installs and removals are refused in plain words.
+    REQUIRE(s.begin_cleanup());
+    CHECK_FALSE(s.begin_cleanup());  // one at a time
+    CHECK_FALSE(s.install("php", "8.5", refusal));
+    CHECK(refusal.code == "busy");
+    CHECK(refusal.message.find("leftover downloads") != std::string::npos);
+    CHECK_FALSE(s.remove("php", "8.5.12", refusal));
+    CHECK(refusal.code == "busy");
+    s.end_cleanup();
+
+    // While an install waits or runs: no clean-up.
+    const auto id = s.install("php", "8.5", refusal);
+    REQUIRE(id.has_value());
+    CHECK(s.busy());
+    CHECK_FALSE(s.begin_cleanup());
+    CHECK(s.cancel(*id));
+    (void)wait_for(s, *id);
+    CHECK_FALSE(s.busy());
+    REQUIRE(s.begin_cleanup());
+    s.end_cleanup();
+}

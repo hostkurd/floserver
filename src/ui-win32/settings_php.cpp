@@ -203,6 +203,9 @@ void SettingsWindow::open_section(Section section, const std::string& series) {
         make_apache_edits();
         load_apache();  // each time the section opens: one apache.get, nothing else
     }
+    if (section == Section::Folders) {
+        load_folders();  // each time the section opens: one folders.get, nothing else
+    }
     if (section == Section::Ports) {
         make_port_edits();
         load_ports();  // each time the section opens: one web.settings.get, nothing else
