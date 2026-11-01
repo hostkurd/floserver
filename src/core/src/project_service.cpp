@@ -187,6 +187,86 @@ std::optional<json> ProjectService::list(ServiceRefusal& refusal) const {
                 {"projects_dir", dir ? json(path_to_utf8(*dir)) : json(nullptr)}};
 }
 
+namespace {
+
+// The folder's text as compared: '/' separators, and on Windows any case.
+std::string folder_key(const fs::path& p) {
+    const std::u8string generic = p.lexically_normal().generic_u8string();
+    std::string text(generic.begin(), generic.end());
+    while (text.size() > 1 && text.back() == '/') {
+        text.pop_back();
+    }
+#ifdef _WIN32
+    for (char& c : text) {
+        if (c >= 'A' && c <= 'Z') {
+            c = static_cast<char>(c - 'A' + 'a');
+        }
+    }
+#endif
+    return text;
+}
+
+bool same_or_inside(const fs::path& child, const fs::path& parent) {
+    const std::string c = folder_key(child);
+    const std::string p = folder_key(parent);
+    return c == p || (c.size() > p.size() && c.starts_with(p) && (p.ends_with("/") || c[p.size()] == '/'));
+}
+
+json describe_projects_folder(const AppConfig& config) {
+    const auto fallback = default_projects_dir();
+    const auto dir = config.projects_dir ? config.projects_dir : fallback;
+    return {{"projects_dir", dir ? json(path_to_utf8(*dir)) : json(nullptr)},
+            {"default_projects_dir", fallback ? json(path_to_utf8(*fallback)) : json(nullptr)},
+            {"custom", config.projects_dir.has_value()}};
+}
+
+}  // namespace
+
+std::optional<json> ProjectService::projects_folder(ServiceRefusal& refusal) const {
+    const std::lock_guard lock(mutex_);
+    const auto config = load(refusal);
+    if (!config) {
+        return std::nullopt;
+    }
+    return describe_projects_folder(*config);
+}
+
+std::optional<json> ProjectService::set_projects_folder(const std::optional<fs::path>& dir, ServiceRefusal& refusal) {
+    std::optional<fs::path> chosen;
+    if (dir) {
+        if (!dir->is_absolute()) {
+            refusal = {"bad_params", "the projects folder must be a full path"};
+            return std::nullopt;
+        }
+        std::string error;
+        chosen = real_folder(*dir, error);
+        if (!chosen) {
+            refusal = {"bad_folder", error};
+            return std::nullopt;
+        }
+        std::string ignored;
+        const auto real_data = real_folder(data_dir_, ignored);  // its long names, as `chosen` has them
+        if (same_or_inside(*chosen, data_dir_) || (real_data && same_or_inside(*chosen, *real_data))) {
+            refusal = {"bad_folder", "the projects folder can't be inside FloServer's own data folder"};
+            return std::nullopt;
+        }
+        // The default's own path is kept as the default (it follows the user's folder).
+        if (const auto fallback = default_projects_dir(); fallback && folder_key(*fallback) == folder_key(*chosen)) {
+            chosen.reset();
+        }
+    }
+    const std::lock_guard lock(mutex_);
+    auto config = load(refusal);
+    if (!config) {
+        return std::nullopt;
+    }
+    config->projects_dir = chosen;
+    if (!save(*config, refusal)) {
+        return std::nullopt;
+    }
+    return describe_projects_folder(*config);
+}
+
 std::optional<json> ProjectService::add(const fs::path& dir, const std::string& name, ServiceRefusal& refusal) {
     const std::lock_guard lock(mutex_);
     auto config = load(refusal);

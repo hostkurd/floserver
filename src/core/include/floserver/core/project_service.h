@@ -125,6 +125,18 @@ public:
     [[nodiscard]] std::optional<nlohmann::json> project_php(const std::string& name, const nlohmann::json& extensions,
                                                             const nlohmann::json& ini, ServiceRefusal& refusal);
 
+    // Settings → Folders: where New project makes projects (config.json's
+    // "projects_dir"; the wizard gets it from list()):
+    //   {"projects_dir": "C:/Users/me/FloServer/projects" | null (no home folder),
+    //    "default_projects_dir": "..." | null, "custom": bool (set here, not the default)}
+    [[nodiscard]] std::optional<nlohmann::json> projects_folder(ServiceRefusal& refusal) const;
+    // Sets it to an existing folder on a drive (stored as real_folder()
+    // names it), or back to the default with nothing (or the default's own
+    // path). Projects already made stay where they are. Refused inside
+    // FloServer's data folder. The reply is projects_folder()'s.
+    [[nodiscard]] std::optional<nlohmann::json> set_projects_folder(const std::optional<std::filesystem::path>& dir,
+                                                                    ServiceRefusal& refusal);
+
     // config.json as it is now, for settings kept beside the projects
     // (Settings → Ports & HTTPS, web_settings.h).
     [[nodiscard]] std::optional<AppConfig> config(ServiceRefusal& refusal) const;

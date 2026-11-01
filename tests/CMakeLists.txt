@@ -11,6 +11,7 @@ add_executable(floserver_tests
     test_mariadb.cpp
     test_mariadb_settings.cpp
     test_database_service.cpp
+    test_data_folder.cpp
     test_ports.cpp
     test_project_config.cpp
     test_project_registry.cpp
@@ -30,6 +31,7 @@ add_executable(floserver_tests
     test_ui_model.cpp
     test_ui_database.cpp
     test_ui_general.cpp
+    test_ui_folders.cpp
     test_web_service.cpp
     test_web_settings.cpp
     test_tar.cpp

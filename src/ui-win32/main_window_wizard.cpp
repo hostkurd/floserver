@@ -73,7 +73,6 @@ void MainWindow::open_wizard() {
     if (wizard_running()) {
         return;  // a project is being made; its page stays
     }
-    close_www();  // one page at a time
     wizard_ = {};
     wizard_.open = true;
     if (!snap_.templates_loaded || !snap_.templates_error.empty() || snap_.templates.empty()) {

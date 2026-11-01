@@ -4,6 +4,8 @@
 #include "win_util.h"
 
 #include <commctrl.h>
+#include <shellapi.h>
+#include <shobjidl.h>
 
 #include <algorithm>
 #include <array>
@@ -88,6 +90,67 @@ void FieldEdit::set_password(bool on) {
         SendMessageW(hwnd_, EM_SETPASSWORDCHAR, on ? WPARAM{0x25CF} : WPARAM{0}, 0);  // ●
         InvalidateRect(hwnd_, nullptr, TRUE);
     }
+}
+
+namespace {
+
+// A path the service gave, as Windows wants it, when it's an existing folder.
+std::optional<std::wstring> folder_on_disk(const std::string& path) {
+    if (path.empty()) {
+        return std::nullopt;
+    }
+    std::wstring wide = win::widen(path);
+    std::replace(wide.begin(), wide.end(), L'/', L'\\');
+    const DWORD attributes = GetFileAttributesW(wide.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        return std::nullopt;
+    }
+    return wide;
+}
+
+}  // namespace
+
+std::optional<std::string> pick_folder(HWND owner, const std::string& title, const std::string& start) {
+    IFileOpenDialog* dialog = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog))) ||
+        dialog == nullptr) {
+        return std::nullopt;
+    }
+    FILEOPENDIALOGOPTIONS options = 0;
+    dialog->GetOptions(&options);
+    dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR);
+    const std::wstring wide_title = win::widen(title);
+    dialog->SetTitle(wide_title.c_str());
+    if (const auto folder = folder_on_disk(start)) {
+        IShellItem* at = nullptr;
+        if (SUCCEEDED(SHCreateItemFromParsingName(folder->c_str(), nullptr, IID_PPV_ARGS(&at))) && at != nullptr) {
+            dialog->SetFolder(at);
+            at->Release();
+        }
+    }
+    std::optional<std::string> path;
+    const HRESULT shown = dialog->Show(owner);
+    if (SUCCEEDED(shown)) {
+        IShellItem* item = nullptr;
+        if (SUCCEEDED(dialog->GetResult(&item)) && item != nullptr) {
+            PWSTR chosen = nullptr;
+            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &chosen)) && chosen != nullptr) {
+                path = win::narrow(chosen);
+                CoTaskMemFree(chosen);
+            }
+            item->Release();
+        }
+    } else if (shown == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
+        path = std::string();
+    }
+    dialog->Release();
+    return path;
+}
+
+bool explore_folder(HWND owner, const std::string& path) {
+    const auto folder = folder_on_disk(path);
+    return folder && reinterpret_cast<INT_PTR>(
+                         ShellExecuteW(owner, L"explore", folder->c_str(), nullptr, nullptr, SW_SHOWNORMAL)) > 32;
 }
 
 bool put_secret_on_clipboard(HWND owner, std::string& value) {

@@ -281,6 +281,14 @@ std::optional<std::int64_t> TemplateService::create(const CreateRequest& request
     return job->id;
 }
 
+bool TemplateService::busy() const {
+    const std::lock_guard lock(mutex_);
+    return std::any_of(jobs_.begin(), jobs_.end(), [](const auto& entry) {
+        const std::lock_guard job_lock(entry.second->mutex);
+        return entry.second->state == "running";
+    });
+}
+
 std::optional<json> TemplateService::job(std::int64_t id) const {
     std::shared_ptr<Job> j;
     {

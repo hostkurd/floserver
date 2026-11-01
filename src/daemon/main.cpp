@@ -9,6 +9,7 @@
 #include "floserver/core/build_info.h"
 #include "floserver/core/builtin.h"
 #include "floserver/core/certificates.h"
+#include "floserver/core/data_folder.h"
 #include "floserver/core/encoding.h"
 #include "floserver/core/http.h"
 #include "floserver/core/integration.h"
@@ -61,6 +62,8 @@ using Clock = std::chrono::steady_clock;
 // Same-user programs only can connect (the channel sees to that), but cap
 // them anyway so a stuck one can't pile up threads without end.
 constexpr int kMaxClients = 64;
+// Settings → Folders: the data folder's size is given up after this long.
+constexpr auto kFolderWalkTime = std::chrono::seconds(4);
 
 // Counts client threads so shutdown can wait for replies to be sent.
 class ActiveClients {
@@ -854,6 +857,67 @@ struct Service {
         return protocol::make_result(r.id, {{"cancelled", templates->cancel(*id)}});
     }
 
+    // Settings → Folders (data_folder.h). folders.get: where projects are
+    // made, the data folder and how much it holds (walked now, for this
+    // request only, and given up after a few seconds); folders.set
+    // {"projects_dir": "..." | null}; folders.clean {"what": "logs" | "leftovers"}.
+    // Every reply ends with what the clean-ups would free now:
+    //   {"logs_bytes", "leftovers_bytes", "installing": bool (an install or a
+    //    New project is running: its downloads and work folder are left alone)}
+    [[nodiscard]] std::string folders_request(const protocol::Request& r) const {
+        namespace core = floserver::core;
+        if (!projects || !data) {
+            return protocol::make_error(r.id, "no_data_folder",
+                                        "FloServer can't find a folder to keep its settings in (LOCALAPPDATA or HOME)");
+        }
+        core::ServiceRefusal refusal;
+        if (r.method == "folders.set") {
+            if (!r.params.is_object() || !r.params.contains("projects_dir") ||
+                !(r.params.at("projects_dir").is_string() || r.params.at("projects_dir").is_null())) {
+                return protocol::make_error(r.id, "bad_params", R"("projects_dir" is a folder, or null for the default)");
+            }
+            const json& value = r.params.at("projects_dir");
+            const std::optional<std::filesystem::path> dir =
+                value.is_string() ? std::optional(core::path_from_utf8(value.get<std::string>())) : std::nullopt;
+            const auto result = projects->set_projects_folder(dir, refusal);
+            return result ? protocol::make_result(r.id, *result) : protocol::make_error(r.id, refusal.code, refusal.message);
+        }
+        // One clean-up (or size walk) at a time.
+        const std::lock_guard lock(folders_mutex);
+        const bool runtimes_busy = runtimes && runtimes->busy();
+        const bool templates_busy = templates && templates->busy();
+        json out = json::object();
+        if (r.method == "folders.clean") {
+            const std::string what = string_param(r.params, "what");
+            core::CleanResult done;
+            if (what == "logs") {
+                done = core::empty_logs(*data, core::log_files(*data));
+            } else if (what == "leftovers") {
+                done = core::remove_leftovers(
+                    *data, core::leftovers(*data, runtimes_busy, templates_busy, Clock::now() + kFolderWalkTime));
+            } else {
+                return protocol::make_error(r.id, "bad_params", R"("what" is "logs" or "leftovers")");
+            }
+            out = {{"what", what}, {"freed", done.freed}, {"done", done.done}, {"skipped", done.skipped}};
+        } else {
+            auto folder = projects->projects_folder(refusal);
+            if (!folder) {
+                return protocol::make_error(r.id, refusal.code, refusal.message);
+            }
+            out = std::move(*folder);
+            out["data_dir"] = core::path_to_utf8(*data);
+            const core::DiskUsage usage = core::disk_usage(*data, Clock::now() + kFolderWalkTime);
+            out["data_bytes"] = usage.bytes;
+            out["data_complete"] = usage.complete;
+        }
+        out["logs_bytes"] = core::total_bytes(core::log_files(*data));
+        out["leftovers_bytes"] =
+            core::total_bytes(core::leftovers(*data, runtimes_busy, templates_busy, Clock::now() + kFolderWalkTime));
+        out["installing"] = runtimes_busy || templates_busy;
+        return protocol::make_result(r.id, out);
+    }
+    mutable std::mutex folders_mutex;
+
     [[nodiscard]] json status() const {
         const auto memory = floserver::core::memory_in_use();
         return {{"version", floserver::core::kVersion},
@@ -913,6 +977,9 @@ struct Service {
                        request->method == "database.final_ini" || request->method == "database.root" ||
                        request->method == "database.root_set") {
                 reply = database_settings_request(*request);
+            } else if (request->method == "folders.get" || request->method == "folders.set" ||
+                       request->method == "folders.clean") {
+                reply = folders_request(*request);
             } else if (request->method == "phpmyadmin.login") {
                 reply = phpmyadmin_request(*request);
             } else if (request->method == "templates.list" || request->method == "projects.create" ||

@@ -106,6 +106,43 @@ TEST_CASE("the real service starts, answers, refuses a second copy and stops") {
     CHECK(gone->error_code == "unknown_project");
     CHECK(std::filesystem::is_directory(shop));
 
+    // Settings → Folders over the channel: where projects are made (what
+    // projects.list hands the New project wizard), the data folder's size,
+    // and a clean-up.
+    const test_util::TempDir elsewhere;
+    const auto folders = client->call("folders.get");
+    REQUIRE(folders.has_value());
+    INFO(folders->error_message);
+    REQUIRE(folders->ok);
+    CHECK(folders->result["custom"] == false);
+    CHECK(folders->result["data_dir"] == path_to_utf8(data.path()));
+    CHECK(folders->result["data_bytes"].get<std::uint64_t>() > 0);  // config.json at least
+    CHECK(folders->result["data_complete"] == true);
+    const auto moved = client->call("folders.set", {{"projects_dir", path_to_utf8(elsewhere.path())}});
+    REQUIRE(moved.has_value());
+    INFO(moved->error_message);
+    REQUIRE(moved->ok);
+    CHECK(moved->result["custom"] == true);
+    const auto listed_again = client->call("projects.list");
+    REQUIRE(listed_again.has_value());
+    CHECK(path_from_utf8(listed_again->result["projects_dir"].get<std::string>()) == std::filesystem::canonical(elsewhere.path()));
+    const auto inside = client->call("folders.set", {{"projects_dir", path_to_utf8(data.path() / "runtimes")}});
+    REQUIRE(inside.has_value());
+    CHECK_FALSE(inside->ok);
+    const auto reset = client->call("folders.set", {{"projects_dir", nullptr}});
+    REQUIRE(reset.has_value());
+    CHECK(reset->result["custom"] == false);
+    test_util::write_file(data.path() / "downloads" / "php-8.5.1.zip.part", "half");
+    const auto cleaned = client->call("folders.clean", {{"what", "leftovers"}});
+    REQUIRE(cleaned.has_value());
+    REQUIRE(cleaned->ok);
+    CHECK(cleaned->result["freed"] == 4);
+    CHECK(cleaned->result["leftovers_bytes"] == 0);
+    CHECK_FALSE(std::filesystem::exists(data.path() / "downloads" / "php-8.5.1.zip.part"));
+    const auto bad_clean = client->call("folders.clean", {{"what", "everything"}});
+    REQUIRE(bad_clean.has_value());
+    CHECK(bad_clean->error_code == "bad_params");
+
     // The certificate authority: made on request, never trusted by the
     // service itself (that needs the user's confirmation), removed on request.
     const auto none = client->call("certs.status");

@@ -377,6 +377,11 @@ std::optional<json> RuntimeService::job(std::int64_t id) const {
     return describe(*it->second);
 }
 
+bool RuntimeService::busy() const {
+    const std::lock_guard lock(jobs_mutex_);
+    return std::any_of(jobs_.begin(), jobs_.end(), [](const auto& entry) { return !is_finished(entry.second->state); });
+}
+
 bool RuntimeService::cancel(std::int64_t id) {
     const std::lock_guard lock(jobs_mutex_);
     const auto it = jobs_.find(id);

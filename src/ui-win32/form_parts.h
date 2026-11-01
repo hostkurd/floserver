@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -73,6 +74,15 @@ private:
 // out of Windows' clipboard history and cloud clipboard; `value` is wiped
 // from memory. False when the clipboard couldn't be had.
 bool put_secret_on_clipboard(HWND owner, std::string& value);
+
+// Windows' folder picker titled `title`, opening in `start` when it's an
+// existing folder. The folder picked; empty when cancelled; nothing when the
+// picker couldn't be shown. It runs its own message loop.
+[[nodiscard]] std::optional<std::string> pick_folder(HWND owner, const std::string& title, const std::string& start);
+
+// Opens an existing folder in Explorer ("explore" opens folders only, never
+// runs a file). False when it isn't one or couldn't be opened.
+bool explore_folder(HWND owner, const std::string& path);
 
 enum class SaveChoice : std::uint8_t { Save, DontSave, Cancel };
 

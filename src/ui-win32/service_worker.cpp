@@ -238,6 +238,12 @@ void ServiceWorker::database_call(const std::string& method, const nlohmann::jso
         start_side_call(method, params, purpose);  // off the polling path: see SideBox
         return;
     }
+    // Settings > Folders: folders.get counts the data folder and
+    // folders.clean deletes files; seconds, maybe. Off the polling path too.
+    if (method == "folders.get" || method == "folders.clean") {
+        start_side_call(method, params, method);
+        return;
+    }
     push({Command::Kind::DatabaseCall, purpose, false, method, std::nullopt, {}, params});
 }
 

@@ -94,6 +94,10 @@ public:
     // state: queued, checking, downloading, installing, done, failed, cancelled.
     [[nodiscard]] std::optional<nlohmann::json> job(std::int64_t id) const;
 
+    // Whether an install is waiting or running (Settings → Folders leaves
+    // the downloads folder alone meanwhile).
+    [[nodiscard]] bool busy() const;
+
     // Asks a waiting or running job to stop. False for an unknown or finished job.
     bool cancel(std::int64_t id);
 

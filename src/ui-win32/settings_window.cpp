@@ -561,6 +561,13 @@ void SettingsWindow::on_snapshot(const Snapshot& snap) {
     if (!db_series_.empty()) {
         db_server_ = db_server_from_list(databases_, db_series_);
     }
+    // Shared sites, from the main window's poll: nothing is asked for them.
+    on_shared_answers(snap);
+    // And Folders' answers, or its folders.get once more on coming back.
+    on_folders_answers(snap);
+    if (!was_connected && connected_ && section_ == Section::Folders && !folders_ && !folders_loading_) {
+        load_folders();
+    }
     const bool close_php = on_php_answers(snap);
     const bool close_apache = on_apache_answers(snap);
     const bool close_now = on_db_answers(snap) || close_php || close_apache;
@@ -604,6 +611,14 @@ SettingsWindow::Geometry SettingsWindow::layout(HDC dc) const {
     const int x0 = main_left();
     const int x1 = std::max(x0 + px(200), width_ - px(24));
     int y = px(4) - scroll_;
+    if (section_ == Section::Folders) {
+        layout_folders(dc, g, x0, x1, y);
+        return g;
+    }
+    if (section_ == Section::Shared) {
+        layout_shared(dc, g, x0, x1, y);
+        return g;
+    }
     if (section_ == Section::General) {
         layout_general(dc, g, x0, x1, y);
         return g;
@@ -891,6 +906,12 @@ const RECT* SettingsWindow::rect_of(const Hit& hit) const {
         case Part::PortsOpenCert:
             return ports_rect_of(hit);
         default:
+            if (is_folders_part(hit.part)) {
+                return folders_rect_of(hit);
+            }
+            if (is_shared_part(hit.part)) {
+                return shared_rect_of(hit);
+            }
             if (is_general_part(hit.part)) {
                 return general_rect_of(hit);
             }
@@ -906,6 +927,14 @@ std::vector<SettingsWindow::Hit> SettingsWindow::focus_order() const {
     std::vector<Hit> order;
     for (std::size_t i = 0; i < kSections; ++i) {
         order.push_back({Part::Nav, static_cast<int>(i), -1});
+    }
+    if (section_ == Section::Folders) {
+        folders_focus_order(order);
+        return order;
+    }
+    if (section_ == Section::Shared) {
+        shared_focus_order(order);
+        return order;
     }
     if (section_ == Section::General) {
         general_focus_order(order);
@@ -1047,7 +1076,11 @@ void SettingsWindow::on_click(const Hit& hit) {
             on_ports_click(hit);
             break;
         default:
-            if (is_general_part(hit.part)) {
+            if (is_folders_part(hit.part)) {
+                on_folders_click(hit);
+            } else if (is_shared_part(hit.part)) {
+                on_shared_click(hit);
+            } else if (is_general_part(hit.part)) {
                 on_general_click(hit);
             } else if (is_apache_part(hit.part)) {
                 on_apache_click(hit);
@@ -1101,6 +1134,15 @@ void SettingsWindow::on_key(WPARAM key) {
             if (section_ == Section::General) {
                 load_general();  // the Run entry read again
                 return;
+            }
+            if (section_ == Section::Folders) {
+                if (!folders_loading_ && !folders_setting_ && cleaning_.empty() && connected_) {
+                    load_folders();  // counted again
+                }
+                return;
+            }
+            if (section_ == Section::Shared) {
+                return;  // the main window's poll brings them every 2 s
             }
             if (section_ == Section::Apache) {
                 if (apache_changes_.empty() && !apache_loading_ && !apache_saving_) {
@@ -1357,6 +1399,15 @@ void SettingsWindow::paint_shapes(Canvas& c) const {
             for (const auto& [dx, dy] : kTeeth) {
                 c.line(cx + dx * pxf(4.5F), cy + dy * pxf(4.5F), cx + dx * pxf(7), cy + dy * pxf(7), p.text, pxf(1.8F));
             }
+        } else if (i == 5) {
+            // Folders': a folder, its tab then its body.
+            stroke(1.5F, 3, 6, 3);
+            stroke(6, 3, 7.5F, 5);
+            c.round_outline({ix + px(1), iy + px(5), ix + px(15), iy + px(14)}, pxf(1.5F), p.text, pxf(1.3F));
+        } else if (i == 6) {
+            // Shared sites': two pages, one behind the other.
+            c.round_outline({ix + px(4), iy + px(1), ix + px(15), iy + px(11)}, pxf(1.5F), p.text, pxf(1.3F));
+            c.round_outline({ix + px(1), iy + px(5), ix + px(12), iy + px(15)}, pxf(1.5F), p.text, pxf(1.3F));
         } else if (i == 4) {
             // Apache's: a globe, for the web server.
             c.circle(static_cast<float>(ix) + pxf(8), static_cast<float>(iy) + pxf(8), pxf(6), p.text, pxf(1.3F));
@@ -1384,6 +1435,14 @@ void SettingsWindow::paint_shapes(Canvas& c) const {
         if (focused(hit)) {
             paint_ring(c, nav);
         }
+    }
+    if (section_ == Section::Folders) {
+        paint_folders_shapes(c);
+        return;
+    }
+    if (section_ == Section::Shared) {
+        paint_shared_shapes(c);
+        return;
     }
     if (section_ == Section::General) {
         paint_general_shapes(c);
@@ -1468,10 +1527,19 @@ void SettingsWindow::paint_text(Canvas& c) const {
     for (std::size_t i = 0; i < g.navs.size(); ++i) {
         const RECT& nav = g.navs[i];
         const bool open = static_cast<std::size_t>(section_) == i;
-        constexpr std::array<Str, kSections> kLabels = {Str::SettingsRuntimes, Str::SettingsPhp,    Str::SettingsPorts,
-                                                        Str::SettingsDatabase, Str::SettingsApache, Str::SettingsGeneral};
+        constexpr std::array<Str, kSections> kLabels = {
+            Str::SettingsRuntimes, Str::SettingsPhp,     Str::SettingsPorts, Str::SettingsDatabase,
+            Str::SettingsApache,   Str::SettingsFolders, Str::SharedSites,   Str::SettingsGeneral};
         c.text({nav.left + px(38), nav.top, nav.right - px(8), nav.bottom}, w(text(lang_, kLabels.at(i))),
                open ? fonts_.body_bold.get() : fonts_.body.get(), p.text, Align::Start, false);
+    }
+    if (section_ == Section::Folders) {
+        paint_folders_text(c);
+        return;
+    }
+    if (section_ == Section::Shared) {
+        paint_shared_text(c);
+        return;
     }
     if (section_ == Section::General) {
         paint_general_text(c);

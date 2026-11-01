@@ -77,6 +77,8 @@ public:
     //  "folder"?: "...", "error"?: "..."}
     [[nodiscard]] std::optional<nlohmann::json> job(std::int64_t id) const;
     bool cancel(std::int64_t id);
+    // Whether a project is being made (its work folder is in use).
+    [[nodiscard]] bool busy() const;
     // Cancels every job and waits for them.
     void stop();
 

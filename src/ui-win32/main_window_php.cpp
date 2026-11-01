@@ -382,7 +382,7 @@ FieldEdit* MainWindow::php_edit_of(std::size_t field) const {
 // the content's edge, one wholly out is hidden (they're real windows, drawn
 // over the panel otherwise).
 void MainWindow::place_project_php_edits() {
-    const bool shown = php_open_ && panel_open() && !wizard_open() && !www_open() && shown_tab() == PanelTab::Php;
+    const bool shown = php_open_ && panel_open() && !wizard_open() && shown_tab() == PanelTab::Php;
     if (shown) {
         HDC dc = GetDC(hwnd_);
         update_panel_geometry(dc);

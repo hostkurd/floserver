@@ -372,6 +372,36 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     ApacheOpenFailed,        // {0}: the reason
     ApacheConfOpened,
     ApacheFinalOpened,
+    // Settings > Folders.
+    SettingsFolders,
+    FoldersHint,
+    FoldersProjects,
+    FoldersProjectsNote,
+    FoldersUseDefault,
+    FoldersPickProjects,
+    FoldersWww,
+    FoldersWwwNote,          // {0}: "localhost/<folder>/"
+    FoldersData,
+    FoldersDataNote,
+    FoldersUses,             // {0}: "1.4 GB"
+    FoldersUsesAtLeast,      // {0}: "1.4 GB"
+    FoldersCounting,
+    FoldersCleanUp,
+    FoldersClearLogs,
+    FoldersClearLogsNote,
+    FoldersLeftovers,
+    FoldersLeftoversNote,
+    FoldersNeverNote,
+    FoldersFrees,            // {0}: "12 MB"
+    FoldersNothing,
+    FoldersWaitInstall,
+    FoldersFreed,            // {0}: "12 MB"
+    FoldersFreedSkipped,     // {0}: "12 MB", {1}: how many files were in use
+    FoldersCleaning,
+    FoldersReadFailed,       // {0}: the service's reason
+    FoldersChangeFailed,     // {0}: the service's reason
+    FoldersProjectsChanged,  // {0}: the folder
+    FoldersCleanFailed,      // {0}: the service's reason
     // Settings > General.
     SettingsGeneral,
     GeneralHint,
