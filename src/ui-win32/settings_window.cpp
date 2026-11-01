@@ -1330,8 +1330,8 @@ void SettingsWindow::paint_shapes(Canvas& c) const {
             c.circle(cx, cy, pxf(4.5F), p.text, pxf(1.3F));
             c.circle(cx, cy, pxf(1.6F), p.text, pxf(1.2F));
             constexpr std::array<std::pair<float, float>, 8> kTeeth = {
-                {{1, 0}, {0.7071F, 0.7071F}, {0, 1}, {-0.7071F, 0.7071F}, {-1, 0}, {-0.7071F, -0.7071F}, {0, -1},
-                 {0.7071F, -0.7071F}}};
+                {{1.0F, 0.0F}, {0.7071F, 0.7071F}, {0.0F, 1.0F}, {-0.7071F, 0.7071F}, {-1.0F, 0.0F},
+                 {-0.7071F, -0.7071F}, {0.0F, -1.0F}, {0.7071F, -0.7071F}}};
             for (const auto& [dx, dy] : kTeeth) {
                 c.line(cx + dx * pxf(4.5F), cy + dy * pxf(4.5F), cx + dx * pxf(7), cy + dy * pxf(7), p.text, pxf(1.8F));
             }
