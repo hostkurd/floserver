@@ -4,6 +4,7 @@
 #include "floserver/core/ipc.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/process.h"
+#include "floserver/core/project_registry.h"
 #include "floserver/core/service_client.h"
 #include "test_util.h"
 
@@ -125,7 +126,10 @@ TEST_CASE("the real service starts, answers, refuses a second copy and stops") {
     CHECK(moved->result["custom"] == true);
     const auto listed_again = client->call("projects.list");
     REQUIRE(listed_again.has_value());
-    CHECK(path_from_utf8(listed_again->result["projects_dir"].get<std::string>()) == std::filesystem::canonical(elsewhere.path()));
+    std::string real_error;
+    const auto real = real_folder(elsewhere.path(), real_error);  // long names, as the service keeps it
+    REQUIRE(real);
+    CHECK(path_from_utf8(listed_again->result["projects_dir"].get<std::string>()) == *real);
     const auto inside = client->call("folders.set", {{"projects_dir", path_to_utf8(data.path() / "runtimes")}});
     REQUIRE(inside.has_value());
     CHECK_FALSE(inside->ok);

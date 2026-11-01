@@ -204,8 +204,10 @@ TEST_CASE("the projects folder is kept in config.json, with the other keys") {
     // New project (the wizard) gets it from projects.list.
     const auto list = service.list(refusal);
     REQUIRE(list);
-    CHECK(path_from_utf8((*list)["projects_dir"].get<std::string>()) == fs::canonical(chosen.path()));
     std::string error;
+    const auto real = real_folder(chosen.path(), error);  // long names, as the service keeps it
+    REQUIRE(real);
+    CHECK(path_from_utf8((*list)["projects_dir"].get<std::string>()) == *real);
     const auto saved = load_app_config(app_config_file(data.path()), error);
     REQUIRE(saved);
     REQUIRE(saved->projects_dir);
