@@ -7,6 +7,7 @@
 
 #include <doctest/doctest.h>
 
+#include <atomic>
 #include <chrono>
 #include <thread>
 
@@ -153,6 +154,7 @@ TEST_CASE("a template job makes the folder, installs what's missing, adds the pr
 
     std::vector<std::string> installed;
     std::vector<std::string> added;
+    std::atomic<bool> hold{false};  // the job waits in its first install while set
     TemplateHooks hooks;
     hooks.find_template = [&](const std::string& id, std::string& error) -> std::optional<ProjectTemplate> {
         if (id == t->id) {
@@ -165,6 +167,9 @@ TEST_CASE("a template job makes the folder, installs what's missing, adds the pr
     hooks.install = [&](const std::string& name, const std::string& version, const std::atomic<bool>&,
                         const std::function<void(const std::string&)>& progress, std::string&) {
         progress("Downloading " + name);
+        while (hold) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
         installed.push_back(name + " " + version);
         fake_install(data, name, name == "php" ? "8.4.27" : version + ".13");
         return true;
@@ -223,6 +228,26 @@ TEST_CASE("a template job makes the folder, installs what's missing, adds the pr
             CHECK_FALSE(service.create({"php-app", "linked", sites, {}}, refusal));
             CHECK(refusal.code == "folder_exists");
         }
+    }
+    SUBCASE("the leftover clean-up and a new project hold each other off") {
+        // While a clean-up runs, no project is started (its work folder would be a leftover).
+        REQUIRE(service.begin_cleanup());
+        CHECK_FALSE(service.begin_cleanup());
+        CHECK_FALSE(service.create({"php-app", "shop", sites, {{"php", "8.4"}}}, refusal));
+        CHECK(refusal.code == "busy");
+        CHECK(refusal.message.find("leftover downloads") != std::string::npos);
+        service.end_cleanup();
+        // While one is being made, no clean-up.
+        hold = true;
+        const auto id = service.create({"php-app", "shop", sites, {{"php", "8.4"}}}, refusal);
+        REQUIRE(id);
+        CHECK(service.busy());
+        CHECK_FALSE(service.begin_cleanup());
+        hold = false;
+        CHECK(wait_for(service, *id)["state"] == "done");
+        CHECK_FALSE(service.busy());
+        REQUIRE(service.begin_cleanup());
+        service.end_cleanup();
     }
     SUBCASE("an unknown template fails the job") {
         const auto id = service.create({"nope", "shop", sites, {}}, refusal);

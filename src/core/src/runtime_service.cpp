@@ -329,6 +329,10 @@ std::optional<std::int64_t> RuntimeService::install(const std::string& name, con
         refusal = {"stopping", "FloServer is stopping"};
         return std::nullopt;
     }
+    if (cleaning_) {
+        refusal = {"busy", "FloServer is removing leftover downloads; try again in a moment"};
+        return std::nullopt;
+    }
     std::size_t waiting = 0;
     for (const auto& [id, job] : jobs_) {
         if (job->name == name && job->requested == version && !is_finished(job->state) && !job->cancel) {
@@ -379,7 +383,23 @@ std::optional<json> RuntimeService::job(std::int64_t id) const {
 
 bool RuntimeService::busy() const {
     const std::lock_guard lock(jobs_mutex_);
-    return std::any_of(jobs_.begin(), jobs_.end(), [](const auto& entry) { return !is_finished(entry.second->state); });
+    return removing_ > 0 ||
+           std::any_of(jobs_.begin(), jobs_.end(), [](const auto& entry) { return !is_finished(entry.second->state); });
+}
+
+bool RuntimeService::begin_cleanup() {
+    const std::lock_guard lock(jobs_mutex_);
+    if (cleaning_ || removing_ > 0 ||
+        std::any_of(jobs_.begin(), jobs_.end(), [](const auto& entry) { return !is_finished(entry.second->state); })) {
+        return false;
+    }
+    cleaning_ = true;
+    return true;
+}
+
+void RuntimeService::end_cleanup() {
+    const std::lock_guard lock(jobs_mutex_);
+    cleaning_ = false;
 }
 
 bool RuntimeService::cancel(std::int64_t id) {
@@ -399,13 +419,30 @@ bool RuntimeService::remove(const std::string& name, const std::string& version,
     }
     {
         const std::lock_guard lock(jobs_mutex_);
+        if (cleaning_) {
+            refusal = {"busy", "FloServer is removing leftover downloads; try again in a moment"};
+            return false;
+        }
         for (const auto& [id, job] : jobs_) {
             if (job->name == name && !is_finished(job->state)) {
                 refusal = {"busy", "an install of " + name + " is still running"};
                 return false;
             }
         }
+        ++removing_;  // its .removing- folder is no leftover meanwhile
     }
+    struct Done {
+        RuntimeService& service;
+        Done(const Done&) = delete;
+        Done& operator=(const Done&) = delete;
+        Done(Done&&) = delete;
+        Done& operator=(Done&&) = delete;
+        explicit Done(RuntimeService& s) : service(s) {}
+        ~Done() {
+            const std::lock_guard lock(service.jobs_mutex_);
+            --service.removing_;
+        }
+    } const done(*this);
     std::string error;
     if (!remove_runtime(runtimes_root(), name, version, error)) {
         refusal = {"not_removed", error};

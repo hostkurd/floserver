@@ -65,6 +65,35 @@ constexpr int kMaxClients = 64;
 // Settings → Folders: the data folder's size is given up after this long.
 constexpr auto kFolderWalkTime = std::chrono::seconds(4);
 
+// Settings → Folders' leftover clean-up: holds off installs, removals and
+// New project for as long as it lives, where none was running when it began
+// (runtimes / templates: false when one was, so its files are left alone).
+class CleanupGate {
+public:
+    CleanupGate(floserver::core::RuntimeService* r, floserver::core::TemplateService* t)
+        : r_(r), t_(t), runtimes(r != nullptr && r->begin_cleanup()), templates(t != nullptr && t->begin_cleanup()) {}
+    ~CleanupGate() {
+        if (runtimes) {
+            r_->end_cleanup();
+        }
+        if (templates) {
+            t_->end_cleanup();
+        }
+    }
+    CleanupGate(const CleanupGate&) = delete;
+    CleanupGate& operator=(const CleanupGate&) = delete;
+    CleanupGate(CleanupGate&&) = delete;
+    CleanupGate& operator=(CleanupGate&&) = delete;
+
+private:
+    floserver::core::RuntimeService* r_;
+    floserver::core::TemplateService* t_;
+
+public:
+    const bool runtimes;
+    const bool templates;
+};
+
 // Counts client threads so shutdown can wait for replies to be sent.
 class ActiveClients {
 public:
@@ -882,10 +911,9 @@ struct Service {
             const auto result = projects->set_projects_folder(dir, refusal);
             return result ? protocol::make_result(r.id, *result) : protocol::make_error(r.id, refusal.code, refusal.message);
         }
-        // One clean-up (or size walk) at a time.
+        // One clean-up (or size walk) at a time, all of it within one deadline.
         const std::lock_guard lock(folders_mutex);
-        const bool runtimes_busy = runtimes && runtimes->busy();
-        const bool templates_busy = templates && templates->busy();
+        const auto deadline = Clock::now() + kFolderWalkTime;
         json out = json::object();
         if (r.method == "folders.clean") {
             const std::string what = string_param(r.params, "what");
@@ -893,8 +921,12 @@ struct Service {
             if (what == "logs") {
                 done = core::empty_logs(*data, core::log_files(*data));
             } else if (what == "leftovers") {
-                done = core::remove_leftovers(
-                    *data, core::leftovers(*data, runtimes_busy, templates_busy, Clock::now() + kFolderWalkTime));
+                // Installs, removals and New project are held off while the
+                // leftovers are listed and deleted, and the clean-up leaves
+                // alone what one of them was already doing: checked and held
+                // under each service's own lock, so nothing starts in between.
+                const CleanupGate gate(runtimes.get(), templates.get());
+                done = core::remove_leftovers(*data, core::leftovers(*data, !gate.runtimes, !gate.templates, deadline));
             } else {
                 return protocol::make_error(r.id, "bad_params", R"("what" is "logs" or "leftovers")");
             }
@@ -906,13 +938,15 @@ struct Service {
             }
             out = std::move(*folder);
             out["data_dir"] = core::path_to_utf8(*data);
-            const core::DiskUsage usage = core::disk_usage(*data, Clock::now() + kFolderWalkTime);
+            const core::DiskUsage usage = core::disk_usage(*data, deadline);
             out["data_bytes"] = usage.bytes;
             out["data_complete"] = usage.complete;
         }
+        // Only counted here (nothing is deleted), so a plain look at who's busy will do.
+        const bool runtimes_busy = runtimes && runtimes->busy();
+        const bool templates_busy = templates && templates->busy();
         out["logs_bytes"] = core::total_bytes(core::log_files(*data));
-        out["leftovers_bytes"] =
-            core::total_bytes(core::leftovers(*data, runtimes_busy, templates_busy, Clock::now() + kFolderWalkTime));
+        out["leftovers_bytes"] = core::total_bytes(core::leftovers(*data, runtimes_busy, templates_busy, deadline));
         out["installing"] = runtimes_busy || templates_busy;
         return protocol::make_result(r.id, out);
     }

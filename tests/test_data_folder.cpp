@@ -11,6 +11,8 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <cstdlib>
+#include <string>
 
 using namespace floserver::core;
 namespace fs = std::filesystem;
@@ -89,6 +91,36 @@ TEST_CASE("the size walk and the clean-up never go through a link") {
     CHECK(done.skipped == 0);
     CHECK_FALSE(fs::exists(f.d / "runtimes" / "php" / ".staging-8.5.2-ab12"));
     CHECK_FALSE(fs::exists(fs::symlink_status(f.d / "templates" / "job-8")));
+    CHECK(test_util::read_file(outside.path() / "precious.txt") == "the user's");
+}
+#endif
+
+#ifdef _WIN32
+TEST_CASE("on Windows a junction or folder link in a work folder goes as a link, never followed") {
+    const FakeData f;
+    const TempDir outside;
+    write_file(outside.path() / "precious.txt", "the user's");
+    const fs::path job = f.d / "templates" / "job-7";
+    // A junction needs no rights: made with cmd's mklink.
+    const fs::path junction = job / "junction";
+    const std::wstring command = L"mklink /J \"" + junction.wstring() + L"\" \"" + outside.path().wstring() + L"\" >nul";
+    REQUIRE(_wsystem(command.c_str()) == 0);
+    REQUIRE(fs::is_regular_file(junction / "precious.txt"));
+    // A folder symlink needs Developer Mode or an administrator: tried, skipped when refused.
+    std::error_code ec;
+    fs::create_directory_symlink(outside.path(), job / "symlink", ec);
+    INFO("folder symlink made: " << !ec);
+
+    // Neither is walked into: the count and the work folder's size are as without them.
+    CHECK(disk_usage(f.d, later()).files == 22);
+    const auto items = leftovers(f.d, false, false, later());
+    const auto it = std::find_if(items.begin(), items.end(), [&](const CleanItem& i) { return i.path == job; });
+    REQUIRE(it != items.end());
+    CHECK(it->bytes == 13);
+
+    const CleanResult done = remove_leftovers(f.d, items);
+    CHECK(done.skipped == 0);
+    CHECK_FALSE(fs::exists(fs::symlink_status(job)));
     CHECK(test_util::read_file(outside.path() / "precious.txt") == "the user's");
 }
 #endif

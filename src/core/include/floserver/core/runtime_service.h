@@ -94,9 +94,14 @@ public:
     // state: queued, checking, downloading, installing, done, failed, cancelled.
     [[nodiscard]] std::optional<nlohmann::json> job(std::int64_t id) const;
 
-    // Whether an install is waiting or running (Settings → Folders leaves
-    // the downloads folder alone meanwhile).
+    // Whether an install is waiting or running, or a removal is running.
     [[nodiscard]] bool busy() const;
+    // Settings → Folders' clean-up of the downloads and install folders:
+    // false while busy(); else, until end_cleanup(), installs and removals
+    // are refused with a plain message. Checked under the jobs' lock, so
+    // nothing starts between the check and the clean-up.
+    [[nodiscard]] bool begin_cleanup();
+    void end_cleanup();
 
     // Asks a waiting or running job to stop. False for an unknown or finished job.
     bool cancel(std::int64_t id);
@@ -145,6 +150,8 @@ private:
     std::int64_t next_job_ = 1;
     bool stopping_ = false;
     bool worker_started_ = false;
+    bool cleaning_ = false;  // begin_cleanup() .. end_cleanup()
+    int removing_ = 0;       // remove() calls running
     std::thread worker_;
 };
 

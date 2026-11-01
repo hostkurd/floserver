@@ -232,6 +232,10 @@ std::optional<std::int64_t> TemplateService::create(const CreateRequest& request
         refusal = {"stopping", "FloServer is stopping"};
         return std::nullopt;
     }
+    if (cleaning_) {
+        refusal = {"busy", "FloServer is removing leftover downloads; try again in a moment"};
+        return std::nullopt;
+    }
     const std::string folder = path_to_utf8(dir);
     std::size_t running = 0;
     std::vector<std::int64_t> finished;
@@ -279,6 +283,24 @@ std::optional<std::int64_t> TemplateService::create(const CreateRequest& request
     }
     jobs_[job->id] = job;
     return job->id;
+}
+
+bool TemplateService::begin_cleanup() {
+    const std::lock_guard lock(mutex_);
+    const bool running = std::any_of(jobs_.begin(), jobs_.end(), [](const auto& entry) {
+        const std::lock_guard job_lock(entry.second->mutex);
+        return entry.second->state == "running";
+    });
+    if (running || cleaning_) {
+        return false;
+    }
+    cleaning_ = true;
+    return true;
+}
+
+void TemplateService::end_cleanup() {
+    const std::lock_guard lock(mutex_);
+    cleaning_ = false;
 }
 
 bool TemplateService::busy() const {
