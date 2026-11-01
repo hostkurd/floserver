@@ -311,18 +311,14 @@ struct Service {
                 }
             }
             // Every installed MariaDB has a server (asleep, or woken by
-            // phpMyAdmin): it lets go of the install's files first.
+            // phpMyAdmin): one running from this install lets go of its
+            // files first. The hold ends with `hold`, whatever happens.
             const std::string name = string_param(r.params, "name");
-            const std::string series =
-                name == "mariadb" && databases ? floserver::core::mariadb_series(string_param(r.params, "version"))
-                                               : std::string();
-            if (!series.empty()) {
-                databases->hold_series(series);
-            }
-            const bool removed = runtimes->remove(name, string_param(r.params, "version"), refusal);
-            if (!series.empty()) {
-                databases->release_series(series);
-            }
+            const std::string version = string_param(r.params, "version");
+            const floserver::core::DatabaseService::RemovalHold hold =
+                name == "mariadb" && databases ? databases->hold_for_removal(version)
+                                               : floserver::core::DatabaseService::RemovalHold();
+            const bool removed = runtimes->remove(name, version, refusal);
             return removed ? protocol::make_result(r.id, json::object())
                            : protocol::make_error(r.id, refusal.code, refusal.message);
         }

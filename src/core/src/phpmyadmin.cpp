@@ -460,7 +460,7 @@ std::optional<std::string> phpmyadmin_login(DatabaseService& databases, PhpMyAdm
     }
     SignonLogin login;
     if (!request.project.empty()) {
-        auto own = databases.project_login(request.project, refusal);
+        auto own = databases.project_login(request.project, refusal, true);  // asked for now: a failed start is tried again
         if (!own) {
             return std::nullopt;
         }

@@ -1128,7 +1128,8 @@ void DatabaseService::supervise() {
     }
 }
 
-std::optional<DatabaseLogin> DatabaseService::project_login(const std::string& project, ServiceRefusal& refusal) {
+std::optional<DatabaseLogin> DatabaseService::project_login(const std::string& project, ServiceRefusal& refusal,
+                                                            bool retry_failed) {
     std::string error;
     const auto app = load_app_config(app_config_file(config_.data_dir), error);
     const Project* p = app ? find_project(*app, project) : nullptr;
@@ -1168,6 +1169,9 @@ std::optional<DatabaseLogin> DatabaseService::project_login(const std::string& p
     // Counts as a connection: the server doesn't go to sleep meanwhile.
     server->connection_opened();
     const AtExit closed([&server] { server->connection_closed(); });
+    if (retry_failed) {
+        server->clear_failure();
+    }
     if (!server->ensure_running(error)) {
         refusal = {"database_failed", error};
         return std::nullopt;
@@ -1367,11 +1371,31 @@ std::optional<std::string> DatabaseService::root_password(const std::string& ser
     return password;
 }
 
-void DatabaseService::hold_series(const std::string& series) {
+DatabaseService::RemovalHold DatabaseService::hold_for_removal(const std::string& version) {
+    const std::string series = mariadb_series(version);
     std::vector<std::shared_ptr<Server>> going;
     {
         const std::lock_guard lock(mutex_);
-        ++held_[series];
+        // Runs from it: the series' server, or one still shutting down.
+        bool runs_from_it = false;
+        if (const auto it = servers_.find(series); it != servers_.end() && it->second->version() == version) {
+            runs_from_it = true;
+        }
+        for (const auto& w : retired_) {
+            if (const auto s = w.lock(); s && s->files().series == series && s->version() == version) {
+                runs_from_it = true;
+            }
+        }
+        // The series' last install: its server goes with it.
+        bool last = true;
+        for (const InstalledRuntime& r : list_installed(runtimes_dir(config_.data_dir))) {
+            if (r.name == "mariadb" && r.version != version && mariadb_series(r.version) == series) {
+                last = false;
+            }
+        }
+        if (!runs_from_it && !last) {
+            return {};  // an older patch release nothing runs from: the server stays up
+        }
         for (const auto& w : retired_) {
             if (const auto s = w.lock(); s && s->files().series == series) {
                 going.push_back(s);
@@ -1380,19 +1404,29 @@ void DatabaseService::hold_series(const std::string& series) {
         if (const auto it = servers_.find(series); it != servers_.end()) {
             going.push_back(it->second);
         }
+        ++held_[series];
+    }
+    // From here the hold ends with the guard, whatever happens.
+    RemovalHold hold(this, series);
+    {
+        const std::lock_guard lock(mutex_);
         reload_locked();  // retires it
     }
     for (const auto& s : going) {
         s->stop(true);  // waits for a stop under way too
     }
+    return hold;
 }
 
-void DatabaseService::release_series(const std::string& series) {
+void DatabaseService::release_series(const std::string& series) noexcept {
     const std::lock_guard lock(mutex_);
     if (const auto it = held_.find(series); it != held_.end() && --it->second <= 0) {
         held_.erase(it);
     }
-    reload_locked();
+    try {
+        reload_locked();
+    } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the supervisor reloads again within seconds
+    }
 }
 
 std::optional<DatabaseLogin> DatabaseService::root_login(const std::string& series, ServiceRefusal& refusal) {

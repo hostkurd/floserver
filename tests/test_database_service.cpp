@@ -290,11 +290,15 @@ TEST_CASE("a project's database runs on the real MariaDB, sleeps when idle and w
 
         // Removed: the server goes, and a connection doesn't bring it back.
         const auto pid3 = server_status(db)["pid"].get<std::uint32_t>();
-        db.hold_series("10.11");  // as runtimes.remove does: shut down first
-        CHECK(::kill(static_cast<pid_t>(pid3), 0) != 0);
-        CHECK(db.status()["servers"].empty());
-        fs::remove_all(m);
-        db.release_series("10.11");
+        {
+            // As runtimes.remove does: the series' last install, so its server shuts down first.
+            const auto hold = db.hold_for_removal("10.11.14");
+            CHECK(hold.held());
+            CHECK(::kill(static_cast<pid_t>(pid3), 0) != 0);
+            CHECK(db.status()["servers"].empty());
+            CHECK(db.reload()["servers"].empty());  // held: not made again meanwhile
+            fs::remove_all(m);
+        }
         CHECK(db.reload()["servers"].empty());
         CHECK(query(port, "my_shop", login->password, "SELECT 1").starts_with("ERROR"));
         CHECK_FALSE(db.project_login("my-shop", refusal));
@@ -511,8 +515,8 @@ TEST_CASE("phpMyAdmin in one click on the real MariaDB: a series never started, 
     const test_util::TempDir tmp;
     const fs::path data = tmp.path() / "data";
     fake_runtime(data, "php", "8.3.6", "nts");
-    // Two series; nothing uses either, and neither is kept running.
-    for (const char* version : {"10.11.14", "11.4.2"}) {
+    // Two series (10.11 with an older patch too); nothing uses either, and neither is kept running.
+    for (const char* version : {"10.11.13", "10.11.14", "11.4.2"}) {
         fake_runtime(data, "mariadb", version, "");
         const fs::path m = runtimes_dir(data) / "mariadb" / version;
         fs::create_directories(m / "bin");
@@ -616,6 +620,27 @@ TEST_CASE("phpMyAdmin in one click on the real MariaDB: a series never started, 
     CHECK(token.at("port") == port);
     CHECK(token.at("server") == 1);
     CHECK(query(port, "shop", token.at("password").get<std::string>(), "USE shop; SELECT 1") == "1");
+
+    // Removing an older patch release nothing runs from (10.11.13 while the
+    // server runs 10.11.14) holds nothing: the live server stays up.
+    REQUIRE(db.series_status("10.11").at("server").at("state") == "running");
+    const auto live_pid = db.series_status("10.11").at("server").at("pid").get<std::uint32_t>();
+    {
+        const auto hold = db.hold_for_removal("10.11.13");
+        CHECK_FALSE(hold.held());
+        CHECK(db.series_status("10.11").at("server").at("pid").get<std::uint32_t>() == live_pid);
+    }
+    CHECK(::kill(static_cast<pid_t>(live_pid), 0) == 0);
+    CHECK(query(port, "root", *root, "SELECT 1") == "1");
+    // The install it runs from: it shuts down first, and comes back (asleep) once the hold ends.
+    {
+        const auto hold = db.hold_for_removal("10.11.14");
+        CHECK(hold.held());
+        CHECK(::kill(static_cast<pid_t>(live_pid), 0) != 0);
+        CHECK(db.series_status("10.11").at("server").is_null());
+    }
+    CHECK(db.reload().at("servers").size() == 2);
+    CHECK(db.series_status("10.11").at("server").at("port") == port);
 
     // Nothing to start: a plain reason that says what to download where.
     ask.project.clear();

@@ -33,6 +33,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace floserver::core {
@@ -72,7 +73,10 @@ public:
 
     // The login for a project's database, made the first time (the server
     // starts if it sleeps). The project must ask for a database; it may be off.
-    [[nodiscard]] std::optional<DatabaseLogin> project_login(const std::string& project, ServiceRefusal& refusal);
+    // `retry_failed`: asked for by the user (phpMyAdmin), so a start that
+    // failed is tried again now rather than its error repeated for 30 s.
+    [[nodiscard]] std::optional<DatabaseLogin> project_login(const std::string& project, ServiceRefusal& refusal,
+                                                             bool retry_failed = false);
 
     // Shared sites' login (D19, user "www"), made the first time. Shared
     // sites must be on and have a database.
@@ -97,11 +101,34 @@ public:
     // sleeps or never ran: its first start makes root's password. It then
     // sleeps when idle like any other, unless it's kept running.
     [[nodiscard]] std::optional<DatabaseLogin> root_login(const std::string& series, ServiceRefusal& refusal);
-    // Before one of the series' installs is removed: its server shuts down
-    // (this waits for it, so no file is in use) and isn't made again until
-    // release_series().
-    void hold_series(const std::string& series);
-    void release_series(const std::string& series);
+    // Before the MariaDB install `version` ("11.4.2") is removed: when a
+    // server of its series runs from it (or is still shutting down from
+    // it), or it's the series' last install, that server shuts down (this
+    // waits, so no file is in use) and none is made for the series until
+    // the hold ends. An older patch release nothing runs from holds nothing:
+    // the series' server stays up. The hold ends with the returned guard.
+    class RemovalHold {
+    public:
+        RemovalHold() = default;
+        RemovalHold(DatabaseService* service, std::string series)
+            : service_(service), series_(std::move(series)) {}
+        RemovalHold(const RemovalHold&) = delete;
+        RemovalHold& operator=(const RemovalHold&) = delete;
+        RemovalHold(RemovalHold&& other) noexcept
+            : service_(std::exchange(other.service_, nullptr)), series_(std::move(other.series_)) {}
+        RemovalHold& operator=(RemovalHold&&) = delete;
+        ~RemovalHold() {
+            if (service_ != nullptr) {
+                service_->release_series(series_);
+            }
+        }
+        [[nodiscard]] bool held() const { return service_ != nullptr; }
+
+    private:
+        DatabaseService* service_ = nullptr;
+        std::string series_;
+    };
+    [[nodiscard]] RemovalHold hold_for_removal(const std::string& version);
     // root's password, from the secure store.
     [[nodiscard]] std::optional<std::string> root_password(const std::string& series, ServiceRefusal& refusal) const;
     // A new password for root (root_password_problem() says which are
@@ -118,6 +145,7 @@ public:
 
 private:
     void supervise();
+    void release_series(const std::string& series) noexcept;
     void reload_locked();
     [[nodiscard]] std::shared_ptr<Server> server_of(const std::string& series);
     // Runs `work` on a thread of its own, joined at stop().
