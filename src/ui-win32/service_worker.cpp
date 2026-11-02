@@ -462,11 +462,18 @@ void ServiceWorker::run(const std::stop_token& stop) {
         if (!client) {
             client = connect();
             // Job ids belong to the service that gave them; a new one starts again at 1.
+            // A dropped call reconnects to the same service too, though, so the
+            // first-run page's jobs are asked about again (jobs.get, its name
+            // checked): only a service that doesn't know one makes it failed.
             if (client && !jobs.empty()) {
-                for (const Job& j : jobs) {
-                    forget(j, std::string(text(lang_, Str::ConnectionLost)));
+                std::vector<Job> kept;
+                for (Job& j : jobs) {
+                    std::erase_if(j.projects, [](const std::string& p) { return !is_first_run_key(p); });
+                    if (!j.projects.empty()) {
+                        kept.push_back(std::move(j));
+                    }
                 }
-                jobs.clear();
+                jobs = std::move(kept);
                 need_installed = true;
             }
             // A new service doesn't know the project being made.
@@ -957,9 +964,10 @@ void ServiceWorker::run(const std::stop_token& stop) {
                     running.insert(running.end(), jobs.begin() + static_cast<std::ptrdiff_t>(k), jobs.end());
                     break;
                 }
-                if (!got->ok || !got->result.is_object()) {
-                    need_installed = true;  // forgotten by a restarted service: ask what's there
-                    forget(j, got->ok ? std::string("the service's answer was unreadable") : got->error_message);
+                // Forgotten by a restarted service (or a new job there with the same id).
+                if (!got->ok || !got->result.is_object() || string_field(got->result, "name") != j.name) {
+                    need_installed = true;  // ask what's there
+                    forget(j, got->ok ? std::string("the service no longer knows this download") : got->error_message);
                     continue;
                 }
                 const std::string state = string_field(got->result, "state");

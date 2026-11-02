@@ -216,6 +216,8 @@ public:
     // then web.settings.get once the CA is trusted.
     static constexpr const char* kFirstRunCa = "first-run-ca";
     static constexpr const char* kFirstRunReload = "first-run-reload";
+    // web.settings.get, for the CA's state after the downloads were skipped.
+    static constexpr const char* kFirstRunCaStatus = "first-run-ca-status";
 
     [[nodiscard]] static std::string on_key(const std::string& project) { return "on\n" + project; }
     [[nodiscard]] static std::string keep_key(const std::string& project) { return "keep\n" + project; }

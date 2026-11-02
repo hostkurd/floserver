@@ -69,7 +69,8 @@ void SettingsWindow::load_ports() {
 void SettingsWindow::on_ports_answers(const Snapshot& snap) {
     const auto service_words = [this](const std::string& s) { return rtl_ ? isolate_ltr(s) : s; };
     for (const Snapshot::WebSettingsAnswer& answer : snap.web_settings) {
-        if (answer.what == ServiceWorker::kFirstRunCa || answer.what == ServiceWorker::kFirstRunReload) {
+        if (answer.what == ServiceWorker::kFirstRunCa || answer.what == ServiceWorker::kFirstRunReload ||
+            answer.what == ServiceWorker::kFirstRunCaStatus) {
             continue;  // the first-run page's (main window)
         }
         const bool change = answer.what != "get";

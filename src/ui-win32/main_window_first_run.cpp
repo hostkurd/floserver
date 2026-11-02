@@ -166,7 +166,7 @@ void MainWindow::on_first_run_answers(Snapshot& s) {
     // runtimes.list: the offers on step 2.
     if (first_run_.list == FirstRunState::List::Loading && (s.runtimes || !s.runtimes_error.empty()) &&
         !(first_run_.refreshing && !s.runtimes_refresh)) {  // waiting for the fresh one
-        const FirstRunListAnswer answer = first_run_list_answer(s.runtimes, s.runtimes_error, s.runtimes_refresh, lang_);
+        const FirstRunListAnswer answer = first_run_list_answer(s.runtimes, s.runtimes_error, s.runtimes_refresh);
         switch (answer.kind) {
             case FirstRunListAnswer::Kind::Offers:
                 first_run_.offers = answer.offers;
@@ -197,10 +197,10 @@ void MainWindow::on_first_run_answers(Snapshot& s) {
         PortsSettings ca;
         if (!answer.error.empty() || !answer.reply) {
             first_run_.trust = FirstRunTrust::Failed;
-            first_run_.trust_error = answer.error.empty() ? std::string(text(lang_, Str::PortsCertUnreadable)) : answer.error;
+            first_run_.trust_error = answer.error;  // empty: worded as unreadable when shown
         } else if (!apply_ca_reply(ca, *answer.reply)) {
             first_run_.trust = FirstRunTrust::Failed;
-            first_run_.trust_error = std::string(text(lang_, Str::PortsCertUnreadable));
+            first_run_.trust_error.clear();  // worded as unreadable when shown
         } else if (ca.ca == CaState::Trusted) {
             first_run_.trust = FirstRunTrust::Trusted;  // nothing to ask
         } else if (!first_run_.open) {
@@ -209,6 +209,18 @@ void MainWindow::on_first_run_answers(Snapshot& s) {
             first_run_.ca_der = ca.ca_der;
             first_run_.trust = FirstRunTrust::Asking;
             PostMessageW(hwnd_, kFirstRunTrustMessage, 0, 0);
+        }
+    }
+
+    // web.settings.get's CA, asked on reaching step 3 without downloads (skipped).
+    for (const Snapshot::WebSettingsAnswer& answer : s.web_settings) {
+        if (answer.what != ServiceWorker::kFirstRunCaStatus || first_run_.trust != FirstRunTrust::NotAsked) {
+            continue;
+        }
+        if (answer.error.empty() && answer.reply) {
+            if (const auto settings = ports_settings_from_reply(*answer.reply); settings && settings->ca == CaState::Trusted) {
+                first_run_.trust = FirstRunTrust::Trusted;
+            }
         }
     }
 
@@ -253,13 +265,17 @@ void MainWindow::first_run_start_downloads() {
 }
 
 void MainWindow::first_run_trust_now() {
-    if (first_run_.trust != FirstRunTrust::Asking || asking_ || quitting_) {
+    if (first_run_.trust != FirstRunTrust::Asking || quitting_) {
+        return;
+    }
+    if (asking_) {
+        // A question or the folder picker is open: asked once it's answered (first_run_after_ask).
         return;
     }
     const auto der = core::from_base64(first_run_.ca_der);
     if (!der) {
         first_run_.trust = FirstRunTrust::Failed;
-        first_run_.trust_error = std::string(text(lang_, Str::PortsCertUnreadable));
+        first_run_.trust_error.clear();  // worded as unreadable when shown
         InvalidateRect(hwnd_, nullptr, FALSE);
         return;
     }
@@ -290,6 +306,12 @@ void MainWindow::first_run_trust_now() {
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
+void MainWindow::first_run_after_ask() {
+    if (first_run_.trust == FirstRunTrust::Asking && hwnd_ != nullptr) {
+        PostMessageW(hwnd_, kFirstRunTrustMessage, 0, 0);
+    }
+}
+
 std::string MainWindow::first_run_folder() const {
     if (!first_run_.folder_picked.empty()) {
         return first_run_.folder_picked;  // its folders.set is on its way
@@ -315,6 +337,7 @@ void MainWindow::first_run_change_folder() {
     const auto picked = pick_folder(hwnd_, std::string(text(lang_, Str::FoldersPickProjects)), start);
     picking_folder_ = false;
     asking_ = false;
+    first_run_after_ask();
     if (quit_after_ask_) {
         quit_after_ask_ = false;
         quit();
@@ -346,7 +369,8 @@ void MainWindow::on_first_run_click(const Hit& hit) {
     }
     switch (hit.part) {
         case Part::FrLang:
-            if (hit.row >= 0 && static_cast<std::size_t>(hit.row) < kLangChoices.size() &&
+            // Not while Windows' question or a picker is open: the window can't be made again then.
+            if (!asking_ && hit.row >= 0 && static_cast<std::size_t>(hit.row) < kLangChoices.size() &&
                 kLangChoices.at(static_cast<std::size_t>(hit.row)) != prefs_.lang) {
                 // As Settings → General does it: saved, and both windows made
                 // again once this click is over.
@@ -413,6 +437,11 @@ void MainWindow::on_first_run_click(const Hit& hit) {
                         first_run_.step = FirstRunStep::Ready;  // they go on in the background
                         first_run_.scroll = 0;
                         first_run_.focus = -1;
+                        // Skipped: the CA wasn't looked at; trusted already (an earlier install) says so.
+                        if (first_run_.trust == FirstRunTrust::NotAsked && !first_run_.ca_checked && worker_) {
+                            first_run_.ca_checked = true;
+                            worker_->web_settings(ServiceWorker::kFirstRunCaStatus);
+                        }
                     }
                     break;
                 case FirstRunStep::Ready:
@@ -637,7 +666,7 @@ MainWindow::FirstRunGeometry MainWindow::first_run_geometry(HDC dc, int scroll) 
                     break;
                 }
                 case FirstRunState::List::Failed: {
-                    const int h = text_height(dc, w(first_run_.list_error), fonts_.button.get(), span, rtl_);
+                    const int h = text_height(dc, w(first_run_list_error(first_run_.list_error, lang_)), fonts_.button.get(), span, rtl_);
                     g.message = {x0, y, x1, y + h};
                     y += h + px(12);
                     const int bw = Canvas::measure(dc, w(text(lang_, Str::FirstRunTryAgain)), fonts_.button.get(), rtl_) + px(32);
@@ -1187,7 +1216,7 @@ void MainWindow::paint_first_run(Canvas& c, HDC dc, bool text_pass) const {
                     }
                 }
             } else if (first_run_.list == FirstRunState::List::Failed) {
-                c.paragraph(g.message, w(first_run_.list_error), fonts_.button.get(), p.problem.text);
+                c.paragraph(g.message, w(first_run_list_error(first_run_.list_error, lang_)), fonts_.button.get(), p.problem.text);
                 c.text(g.retry, w(text(lang_, Str::FirstRunTryAgain)), fonts_.button.get(), p.text, Align::Center, false);
             } else {
                 c.text(g.message, w(text(lang_, Str::FirstRunLoading)), fonts_.button.get(), p.text_subtle, Align::Start,

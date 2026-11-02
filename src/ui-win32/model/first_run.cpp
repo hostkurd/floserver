@@ -178,12 +178,11 @@ std::uint64_t first_run_total(const std::vector<FirstRunOffer>& offers, const st
     return total;
 }
 
-FirstRunListAnswer first_run_list_answer(const std::optional<json>& reply, const std::string& error, bool refreshed,
-                                         Lang lang) {
+FirstRunListAnswer first_run_list_answer(const std::optional<json>& reply, const std::string& error, bool refreshed) {
     FirstRunListAnswer out;
     const auto failed = [&](const std::string& why) {
         out.kind = FirstRunListAnswer::Kind::Failed;
-        out.error = fill(lang, Str::FirstRunListFailed, {why});
+        out.error = why;
     };
     if (!reply || !reply->is_object()) {
         failed(error.empty() ? std::string("no answer") : error);
@@ -201,12 +200,18 @@ FirstRunListAnswer first_run_list_answer(const std::optional<json>& reply, const
     }
     out.offers = first_run_offers(*reply);
     if (out.offers.empty()) {
-        out.kind = FirstRunListAnswer::Kind::Failed;
-        out.error = std::string(text(lang, Str::FirstRunNoRuntimes));
+        out.kind = FirstRunListAnswer::Kind::Failed;  // `error` stays empty: nothing for this computer
         return out;
     }
     out.kind = FirstRunListAnswer::Kind::Offers;
     return out;
+}
+
+std::string first_run_list_error(const std::string& error, Lang lang) {
+    if (error.empty()) {
+        return std::string(text(lang, Str::FirstRunNoRuntimes));
+    }
+    return fill(lang, Str::FirstRunListFailed, {error});
 }
 
 bool is_first_run_key(std::string_view key) { return key == kFirstRunKey; }
@@ -303,7 +308,8 @@ std::string first_run_https_line(FirstRunTrust trust, const std::string& error, 
         case FirstRunTrust::Declined:
             return std::string(text(lang, Str::FirstRunTrustNo));
         case FirstRunTrust::Failed:
-            return fill(lang, Str::FirstRunTrustFailed, {error});
+            return fill(lang, Str::FirstRunTrustFailed,
+                        {error.empty() ? text(lang, Str::PortsCertUnreadable) : std::string_view(error)});
         case FirstRunTrust::NotAsked:
             break;
     }

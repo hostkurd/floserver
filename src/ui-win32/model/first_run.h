@@ -65,7 +65,9 @@ struct FirstRunOffer {
 
 // What a runtimes.list answer means for step 2: the offers, ask again with a
 // fresh list (none on this computer yet; asked once), or why it can't be had
-// (a whole sentence, in `lang`).
+// (`error`: the service's or connection's words; empty when the list has
+// nothing for this computer). Worded at paint time (first_run_list_error),
+// so a new language rewords it.
 struct FirstRunListAnswer {
     enum class Kind : std::uint8_t { Offers, Refresh, Failed } kind = Kind::Failed;
     std::vector<FirstRunOffer> offers;
@@ -74,7 +76,9 @@ struct FirstRunListAnswer {
 // `reply`: the answer, or nothing with the connection's or service's `error`.
 // `refreshed`: it's the answer to a fresh fetch.
 [[nodiscard]] FirstRunListAnswer first_run_list_answer(const std::optional<nlohmann::json>& reply,
-                                                       const std::string& error, bool refreshed, Lang lang);
+                                                       const std::string& error, bool refreshed);
+// The sentence step 2 shows for a Failed answer's `error`.
+[[nodiscard]] std::string first_run_list_error(const std::string& error, Lang lang);
 
 // The worker's key for the page's installs; project names can't have '_'.
 inline constexpr std::string_view kFirstRunKey = "_firstrun";
@@ -128,7 +132,8 @@ enum class FirstRunTrust : std::uint8_t {
     Failed,
 };
 
-// Step 3's HTTPS line. `error`: why it failed (the service's or Windows' words).
+// Step 3's HTTPS line. `error`: why it failed (the service's or Windows'
+// words; empty: the certificate couldn't be read).
 [[nodiscard]] std::string first_run_https_line(FirstRunTrust trust, const std::string& error, Lang lang);
 
 }  // namespace floserver::ui

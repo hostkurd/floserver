@@ -150,6 +150,12 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
                 ShowWindow(hwnd_, SW_HIDE);
             }
             return 0;
+        case WM_ENDSESSION:
+            // Windows is signing out or shutting down: the first-run page is done, as when it's closed.
+            if (wparam != FALSE) {
+                finish_first_run();
+            }
+            return 0;
         case WM_ERASEBKGND:
             return 1;
         case WM_PAINT:
@@ -590,6 +596,8 @@ void MainWindow::quit() {
     if (quitting_ || !worker_) {
         return;
     }
+    // Quitting with the first-run page open leaves it for good, as closing does.
+    finish_first_run();
     // A save question is open (Settings' or the panel's): its code is still
     // running under the dialog, so nothing it uses may go now. Quit follows
     // once it's answered.

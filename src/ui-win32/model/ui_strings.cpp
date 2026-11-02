@@ -874,7 +874,7 @@ constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
           "بەڕێوەبردنی بنکەدراوەکان لە وێبگەڕدا"},
     Entry{Str::FirstRunWhatApache, "only for projects that need .htaccess",
           "فقط للمشاريع التي تحتاج " FLO_LRI ".htaccess" FLO_PDI,
-          "تەنها بۆ ئەو پڕۆژانەی " FLO_LRI ".htaccess" FLO_PDI " یان پێویستە"},
+          "تەنها بۆ ئەو پڕۆژانەی پێویستیان بە " FLO_LRI ".htaccess" FLO_PDI " هەیە"},
     Entry{Str::FirstRunWhatNginx, "always included; it serves every project", "مضمَّن دائمًا؛ يخدم كل المشاريع",
           "هەمیشە لەگەڵدایە؛ خزمەتی هەموو پڕۆژەکان دەکات"},
     Entry{Str::FirstRunCertNote,
@@ -969,8 +969,8 @@ constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
           "پڕۆژەیەک کە پێشتر هەتە. " FLO_LRI "FloServer" FLO_PDI " فایلی " FLO_LRI "floserver.json" FLO_PDI
           " ـەکەی دەخوێنێتەوە، یان وەشانی بۆ هەڵدەبژێرێت."},
     Entry{Str::FirstRunNextScreen, "Settings, Shared sites and the tray icon are on the next screen.",
-          "الإعدادات والمواقع المشتركة وأيقونة شريط المهام في الشاشة التالية.",
-          "ڕێکخستنەکان و ماڵپەڕە هاوبەشەکان و ئایکۆنی تاسکبار لە شاشەی دواتردان."},
+          "الإعدادات والمواقع المشتركة وأيقونة منطقة الإعلام في الشاشة التالية.",
+          "ڕێکخستنەکان و ماڵپەڕە هاوبەشەکان و ئایکۆنەکەی تەنیشت کاتژمێرەکە لە شاشەی دواتردان."},
     Entry{Str::FirstRunGo, "Go to FloServer", "انتقل إلى " FLO_LRI "FloServer" FLO_PDI,
           "بچۆ بۆ " FLO_LRI "FloServer" FLO_PDI},
 }};

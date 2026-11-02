@@ -261,6 +261,7 @@ private:
         FirstRunTrust trust = FirstRunTrust::NotAsked;
         std::string trust_error;
         std::string ca_der;  // base64, from certs.ensure_ca
+        bool ca_checked = false;  // web.settings.get asked for the CA on step 3 (skipped downloads)
         // Step 3: the projects folder chosen with Change… (folders.set).
         std::string folder;
         std::string folder_ask;  // the folders.set on its way (its purpose)
@@ -478,6 +479,8 @@ private:
     void first_run_start_downloads();
     // Windows' own question, after certs.ensure_ca's answer (kFirstRunTrustMessage).
     void first_run_trust_now();
+    // A question or picker (asking_) was just answered: Windows' trust question, if it waited, now.
+    void first_run_after_ask();
     void first_run_change_folder();
     [[nodiscard]] std::string first_run_folder() const;
     [[nodiscard]] std::vector<FirstRunRow> first_run_rows_now() const;

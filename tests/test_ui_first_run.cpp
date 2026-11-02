@@ -119,29 +119,30 @@ TEST_CASE("first run: the ticks, what's installed and the total") {
 }
 
 TEST_CASE("first run: the list's answers") {
-    const auto offers = first_run_list_answer(kReply, {}, false, Lang::En);
+    const auto offers = first_run_list_answer(kReply, {}, false);
     CHECK(offers.kind == FirstRunListAnswer::Kind::Offers);
     CHECK(offers.offers.size() == 7);
 
     // None on this computer yet: fetched once, then the fetch's reason is shown.
     const json none = json::parse(R"({"list": null, "list_error": "there's no runtime list on this computer yet"})");
-    CHECK(first_run_list_answer(none, {}, false, Lang::En).kind == FirstRunListAnswer::Kind::Refresh);
+    CHECK(first_run_list_answer(none, {}, false).kind == FirstRunListAnswer::Kind::Refresh);
     const json offline = json::parse(R"({"list": null, "list_error": "couldn't reach the mirror"})");
-    const auto failed = first_run_list_answer(offline, {}, true, Lang::En);
+    const auto failed = first_run_list_answer(offline, {}, true);
     CHECK(failed.kind == FirstRunListAnswer::Kind::Failed);
-    CHECK(failed.error == "Couldn't get the list of runtimes: couldn't reach the mirror");
+    CHECK(failed.error == "couldn't reach the mirror");
+    CHECK(first_run_list_error(failed.error, Lang::En) == "Couldn't get the list of runtimes: couldn't reach the mirror");
 
-    const auto lost = first_run_list_answer(std::nullopt, "FloServer stopped answering", false, Lang::En);
+    const auto lost = first_run_list_answer(std::nullopt, "FloServer stopped answering", false);
     CHECK(lost.kind == FirstRunListAnswer::Kind::Failed);
-    CHECK(lost.error == "Couldn't get the list of runtimes: FloServer stopped answering");
-    // In Arabic the service's English words keep their direction.
-    const auto lost_ar = first_run_list_answer(std::nullopt, "gone", false, Lang::Ar);
-    CHECK(lost_ar.error.find("\xE2\x80\xAAgone\xE2\x80\xAC") != std::string::npos);
+    CHECK(first_run_list_error(lost.error, Lang::En) == "Couldn't get the list of runtimes: FloServer stopped answering");
+    // Worded when shown, so a new language rewords it; the service's English keeps its direction.
+    CHECK(first_run_list_error("gone", Lang::Ar).find("\xE2\x80\xAAgone\xE2\x80\xAC") != std::string::npos);
 
     const json empty = json::parse(R"({"list": {"sequence": 1}, "available": []})");
-    const auto nothing = first_run_list_answer(empty, {}, false, Lang::En);
+    const auto nothing = first_run_list_answer(empty, {}, false);
     CHECK(nothing.kind == FirstRunListAnswer::Kind::Failed);
-    CHECK(nothing.error == "The list has nothing for this computer.");
+    CHECK(nothing.error.empty());
+    CHECK(first_run_list_error(nothing.error, Lang::En) == "The list has nothing for this computer.");
 }
 
 TEST_CASE("first run: the rows while they download") {
@@ -199,6 +200,8 @@ TEST_CASE("first run: the summary's words") {
     CHECK(first_run_https_line(FirstRunTrust::Failed, "access denied", Lang::En) ==
           "The certificate wasn't added: access denied. Try again in Settings → Ports & HTTPS.");
     CHECK(first_run_https_line(FirstRunTrust::Asking, {}, Lang::En).starts_with("Windows is asking"));
+    CHECK(first_run_https_line(FirstRunTrust::Failed, {}, Lang::En).starts_with("The certificate wasn't added: "));
+    CHECK(first_run_https_line(FirstRunTrust::Failed, {}, Lang::En) != first_run_https_line(FirstRunTrust::Failed, {}, Lang::Ar));
 }
 
 TEST_CASE("first run: the worker's key") {
