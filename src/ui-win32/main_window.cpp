@@ -556,14 +556,18 @@ void MainWindow::on_snapshot() {
     // Removed from the window: its panel closes now, and the list is asked
     // for again (the row goes with the next answer).
     for (const auto& [project, dropped] : removed) {
+        removed_.insert(project);
         if (selected_ == project) {
             (void)leave_php_part(false);
             close_panel();
         }
         show_notice(fill(lang_, dropped ? Str::RemoveDoneDatabase : Str::RemoveDone, {project}), false);
     }
-    if (!removed.empty() && worker_) {
-        worker_->refresh();
+    if (!removed.empty()) {
+        update_visible();
+        if (worker_) {
+            worker_->refresh();
+        }
     }
     on_project_php_answers();
     sync_project_php();
@@ -1034,9 +1038,13 @@ void MainWindow::layout() {
 
 void MainWindow::update_visible() {
     visible_.clear();
+    // Removed from the window: hidden at once, forgotten once the list agrees.
+    std::erase_if(removed_, [this](const std::string& name) {
+        return std::none_of(snap_.rows.begin(), snap_.rows.end(), [&](const ProjectRow& r) { return r.name == name; });
+    });
     if (shows_rows()) {
         for (std::size_t i = 0; i < snap_.rows.size(); ++i) {
-            if (row_matches(snap_.rows[i], query_)) {
+            if (row_matches(snap_.rows[i], query_) && !removed_.contains(snap_.rows[i].name)) {
                 visible_.push_back(i);
             }
         }
@@ -1522,11 +1530,22 @@ void MainWindow::paint_search_cue(HWND edit) const {
 }
 
 void MainWindow::toggle(int visible_row) {
-    if (visible_row < 0 || visible_row >= static_cast<int>(visible_.size()) || snap_.link != Link::Connected ||
-        !worker_) {
+    if (visible_row >= 0 && visible_row < static_cast<int>(visible_.size())) {
+        toggle_project(snap_.rows[visible_[static_cast<std::size_t>(visible_row)]].name);
+    }
+}
+
+bool MainWindow::leaving(const std::string& project) const {
+    return removing_.contains(project) || removed_.contains(project);
+}
+
+void MainWindow::toggle_project(const std::string& project) {
+    const auto found = std::find_if(snap_.rows.begin(), snap_.rows.end(),
+                                    [&](const ProjectRow& r) { return r.name == project; });
+    if (found == snap_.rows.end() || snap_.link != Link::Connected || !worker_ || leaving(project)) {
         return;
     }
-    const ProjectRow& row = snap_.rows[visible_[static_cast<std::size_t>(visible_row)]];
+    const ProjectRow& row = *found;
     const bool value = !switch_value(row);
     pending_[row.name] = value;
     ++outstanding_[ServiceWorker::on_key(row.name)];

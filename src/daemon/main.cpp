@@ -440,6 +440,7 @@ struct Service {
             // service, never by the request); a failed drop keeps the project,
             // so the user can try again.
             bool drop = false;
+            bool dropped = false;
             if (r.params.is_object() && r.params.contains("drop_database")) {
                 if (!r.params["drop_database"].is_boolean()) {
                     return protocol::make_error(r.id, "bad_params", "drop_database is true or false");
@@ -454,12 +455,18 @@ struct Service {
                     return protocol::make_error(r.id, "no_data_folder",
                                                 "FloServer can't find a folder to keep its settings in (LOCALAPPDATA or HOME)");
                 }
-                if (!databases->drop_project_database(name, refusal)) {
-                    return protocol::make_error(r.id, refusal.code, refusal.message);
-                }
+            }
+            // No login makes its database again between the drop and the removal.
+            const core::DatabaseService::ProjectHold hold =
+                drop ? databases->hold_project(name) : core::DatabaseService::ProjectHold();
+            if (drop && !databases->drop_project_database(name, refusal, dropped)) {
+                return protocol::make_error(r.id, refusal.code, refusal.message);
             }
             if (projects->remove(name, refusal)) {
                 result = json::object();
+                if (drop) {
+                    (*result)["database_dropped"] = dropped;
+                }
                 // Its request log goes too, so a new project with the name starts empty.
                 if (data) {
                     std::error_code ec;

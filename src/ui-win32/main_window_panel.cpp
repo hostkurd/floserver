@@ -1006,7 +1006,7 @@ void MainWindow::toggle_keep_running() { toggle_keep_running_for(selected_); }
 void MainWindow::toggle_keep_running_for(const std::string& project) {
     const auto found = std::find_if(snap_.rows.begin(), snap_.rows.end(),
                                     [&](const ProjectRow& r) { return r.name == project; });
-    if (found == snap_.rows.end() || !worker_ || snap_.link != Link::Connected) {
+    if (found == snap_.rows.end() || !worker_ || snap_.link != Link::Connected || leaving(project)) {
         return;
     }
     const ProjectRow* row = &*found;

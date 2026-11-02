@@ -134,6 +134,7 @@ TEST_CASE("the real service starts, answers, refuses a second copy and stops") {
                                           {{"name", "db-shop"}, {"drop_database", true}, {"database", "mysql"}});
         REQUIRE(dropped.has_value());
         CHECK_MESSAGE(dropped->ok, dropped->error_message);
+        CHECK(dropped->result["database_dropped"] == false);  // none to drop: not said to be deleted
         const auto plain = client->call("projects.remove", {{"name", "root"}, {"drop_database", false}});
         REQUIRE(plain.has_value());
         CHECK_MESSAGE(plain->ok, plain->error_message);

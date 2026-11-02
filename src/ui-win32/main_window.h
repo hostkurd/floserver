@@ -23,6 +23,7 @@
 #include <map>
 #include <optional>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -360,6 +361,9 @@ private:
     [[nodiscard]] bool shows_rows() const;
     [[nodiscard]] bool switch_value(const ProjectRow& row) const;
     void toggle(int visible_row);
+    void toggle_project(const std::string& project);
+    // Being removed, or removed and still in the last list: nothing may change it.
+    [[nodiscard]] bool leaving(const std::string& project) const;
     void start_downloads(int visible_row);
     void start_downloads_for(const std::string& project);
     [[nodiscard]] std::string panel_button_text(PanelAction action) const;
@@ -606,6 +610,7 @@ private:
     std::string change_error_;
     bool pma_busy_ = false;  // the panel's phpmyadmin.login is on its way
     std::map<std::string, bool> removing_;  // projects.remove on its way, per project: with its database
+    std::set<std::string> removed_;         // removed; hidden until the list no longer has them
     Notice notice_;  // a short message in the banner ("copied")
 
     WizardState wizard_;

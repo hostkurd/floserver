@@ -597,7 +597,9 @@ int remove_cmd(const std::vector<std::string>& args) {
     if (!reply || !reply->ok) {
         return print_refusal(reply);
     }
-    std::cout << name << " is no longer a FloServer project" << (drop ? ", and its database is deleted" : "")
+    const bool dropped = drop && reply->result.is_object() && reply->result.value("database_dropped", false);
+    std::cout << name << " is no longer a FloServer project"
+              << (dropped ? ", and its database is deleted" : drop ? " (it had no database to delete)" : "")
               << ". Its files are untouched.\n";
     return 0;
 }

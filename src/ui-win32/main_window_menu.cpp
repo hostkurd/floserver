@@ -179,7 +179,7 @@ void MainWindow::show_project_menu(const std::string& project, POINT at) {
     // Copies: snapshots keep arriving while the menu is open.
     const ProjectRow row = *found;
     const ProjectMenuState state{switch_value(row), keep_value(row), snap_.link == Link::Connected,
-                                 removing_.contains(project)};
+                                 leaving(project)};
     const std::vector<MenuItem> items = project_menu(row, state);
     std::vector<std::wstring> labels;
     const win::UniqueMenu menu = make_menu(items, lang_, labels);
@@ -244,7 +244,7 @@ void MainWindow::run_project_command(const std::string& project, MenuCommand com
             }
             break;
         case MenuCommand::Toggle:
-            toggle(visible_index(project));
+            toggle_project(project);  // by name: the search may hide it meanwhile
             break;
         case MenuCommand::KeepRunning:
             toggle_keep_running_for(project);
@@ -270,7 +270,7 @@ void MainWindow::copy_address(const std::string& address) {
 }
 
 void MainWindow::ask_remove(const std::string& project) {
-    if (!worker_ || snap_.link != Link::Connected || removing_.contains(project) || asking_ || quitting_) {
+    if (!worker_ || snap_.link != Link::Connected || leaving(project) || asking_ || quitting_) {
         return;
     }
     const auto found = std::find_if(snap_.rows.begin(), snap_.rows.end(),
@@ -294,7 +294,7 @@ void MainWindow::ask_remove(const std::string& project) {
         quit();
         return;
     }
-    if (!remove || !worker_ || snap_.link != Link::Connected || removing_.contains(project)) {
+    if (!remove || !worker_ || snap_.link != Link::Connected || leaving(project)) {
         return;
     }
     removing_[project] = drop;
@@ -312,11 +312,9 @@ std::vector<std::pair<std::string, bool>> MainWindow::on_remove_answers(std::vec
             continue;
         }
         const std::string project = it->purpose.substr(kRemovePurpose.size());
-        const auto asked = removing_.find(project);
-        const bool drop = asked != removing_.end() && asked->second;
-        if (asked != removing_.end()) {
-            removing_.erase(asked);
-        }
+        removing_.erase(project);
+        // Said deleted only when the service dropped one it made.
+        const bool drop = it->reply && it->reply->is_object() && it->reply->value("database_dropped", false);
         if (!it->error.empty() || !it->reply) {
             // Nothing was removed: the user can try again (on_snapshot shows it).
             change_error_ = fill(lang_, Str::RemoveFailed, {project, it->error.empty() ? "no answer" : it->error});

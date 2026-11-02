@@ -123,6 +123,10 @@ ServiceRefusal not_installed(const std::string& version) {
 
 // Installed, but its server isn't there yet: its old one is still shutting
 // down (a newer patch release, a new port), or no port is free.
+ServiceRefusal removing(const std::string& project) {
+    return {"removing", project + " is being removed from FloServer"};
+}
+
 ServiceRefusal no_server_yet(const std::string& series) {
     return {"database_off", "MariaDB " + series + " can't take connections yet (its port is busy); try again in a few seconds"};
 }
@@ -1142,6 +1146,10 @@ std::optional<DatabaseLogin> DatabaseService::project_login(const std::string& p
         refusal = {"no_database", project + " has no database in its floserver.json (add one with: flo use mariadb 11.4)"};
         return std::nullopt;
     }
+    if (project_held(project)) {
+        refusal = removing(project);
+        return std::nullopt;
+    }
     DatabaseLogin login;
     login.database = project_database_name(project);
     login.user = login.database;
@@ -1178,6 +1186,12 @@ std::optional<DatabaseLogin> DatabaseService::project_login(const std::string& p
     }
     // One at a time per server: the saved password and the live one match.
     const std::lock_guard lock(server->login_mutex());
+    // Asked again under the lock: a drop that began meanwhile has the hold
+    // first, so its database isn't made again behind it.
+    if (project_held(project)) {
+        refusal = removing(project);
+        return std::nullopt;
+    }
     login.port = server->port();
     const std::string secret = "mariadb-" + server->files().series + "/" + login.database;
     auto password = secrets_.read(secret);
@@ -1206,7 +1220,26 @@ std::optional<std::string> project_sharing_database(const AppConfig& app, const 
     return std::nullopt;
 }
 
-bool DatabaseService::drop_project_database(const std::string& project, ServiceRefusal& refusal) {
+DatabaseService::ProjectHold DatabaseService::hold_project(const std::string& project) {
+    const std::lock_guard lock(mutex_);
+    ++held_projects_[project];
+    return {this, project};
+}
+
+void DatabaseService::release_project(const std::string& project) noexcept {
+    const std::lock_guard lock(mutex_);
+    if (const auto it = held_projects_.find(project); it != held_projects_.end() && --it->second <= 0) {
+        held_projects_.erase(it);
+    }
+}
+
+bool DatabaseService::project_held(const std::string& project) const {
+    const std::lock_guard lock(mutex_);
+    return held_projects_.contains(project);
+}
+
+bool DatabaseService::drop_project_database(const std::string& project, ServiceRefusal& refusal, bool& dropped) {
+    dropped = false;
     std::string error;
     const auto app = load_app_config(app_config_file(config_.data_dir), error);
     if (!app) {
@@ -1253,11 +1286,31 @@ bool DatabaseService::drop_project_database(const std::string& project, ServiceR
             series.insert(mariadb_series(r->version));
         }
     }
+    // Series already done, for a refusal part-way: trying again finishes the rest.
+    std::vector<std::string> done;
+    const auto failed = [&](const std::string& s, ServiceRefusal why) {
+        if (!done.empty()) {
+            std::string list;
+            for (const std::string& d : done) {
+                list.append(list.empty() ? "" : ", ").append("MariaDB ").append(d);
+            }
+            why.message = std::string("the database ")
+                              .append(database)
+                              .append(" is already deleted on ")
+                              .append(list)
+                              .append("; on MariaDB ")
+                              .append(s)
+                              .append(": ")
+                              .append(why.message)
+                              .append(". Try again to finish.");
+        }
+        refusal = std::move(why);
+        return false;
+    };
     for (const std::string& s : series) {
         const std::shared_ptr<Server> server = server_of(s);
         if (!server) {
-            refusal = no_server_yet(s);
-            return false;
+            return failed(s, no_server_yet(s));
         }
         // As a login: counted as a connection, so it doesn't sleep meanwhile;
         // asked for by the user, so a failed start is tried again now.
@@ -1265,20 +1318,21 @@ bool DatabaseService::drop_project_database(const std::string& project, ServiceR
         const AtExit closed([&server] { server->connection_closed(); });
         server->clear_failure();
         if (!server->ensure_running(error)) {
-            refusal = {"database_failed", error};
-            return false;
+            return failed(s, {"database_failed", error});
         }
         const std::lock_guard lock(server->login_mutex());
+        const bool made = secrets_.read(secret_of(s)).has_value();  // FloServer made one there
         if (!server->run_sql(drop_project_database_sql(database, user), error)) {
-            refusal = {"database_failed", std::string("the database ").append(database).append(" couldn't be deleted: ").append(error)};
-            return false;
+            return failed(s, {"database_failed",
+                              std::string("the database ").append(database).append(" couldn't be deleted: ").append(error)});
         }
+        dropped = dropped || made;
         if (!secrets_.remove(secret_of(s))) {
-            refusal = {"secret_failed", std::string("the database ")
-                                            .append(database)
-                                            .append(" is deleted, but its password can't be removed from the secure store")};
-            return false;
+            return failed(s, {"secret_failed", std::string("the database ")
+                                                   .append(database)
+                                                   .append(" is deleted, but its password can't be removed from the secure store")});
         }
+        done.push_back(s);
     }
     return true;
 }
