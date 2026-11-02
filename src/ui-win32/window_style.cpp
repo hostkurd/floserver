@@ -104,6 +104,7 @@ void make_ui_fonts(UiFonts& fonts, UINT dpi, Lang lang) {
         return win::UniqueFont(CreateFontIndirectW(&lf));
     };
     fonts.title = make(20, true);
+    fonts.hero = make(24, true);
     fonts.panel_title = make(18, true);
     fonts.body = make(14, false);
     fonts.body_bold = make(14, true);

@@ -121,6 +121,7 @@ bool MainWindow::leave_php_part(bool ask, const PanelAct& then) {
         asking_ = true;
         const SaveChoice choice = ask_to_save(hwnd_, lang_, fill(lang_, Str::ProjectPhpAskSave, {selected_}));
         asking_ = false;
+        first_run_after_ask();
         if (quit_after_ask_) {
             quit_after_ask_ = false;
             quit();  // asked while the question was open

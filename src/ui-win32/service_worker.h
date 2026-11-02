@@ -8,6 +8,7 @@
 // project's log. The UI thread never waits on the pipe: the worker keeps the
 // latest snapshot and posts a message to the window when it changes.
 
+#include "model/first_run.h"
 #include "model/runtimes_page.h"
 #include "model/ui_strings.h"
 #include "model/view_model.h"
@@ -64,6 +65,9 @@ struct Snapshot {
     std::map<std::string, std::string> downloads;
     // Every install the worker follows, for Settings' rows (D20).
     std::vector<RuntimeJob> runtime_jobs;
+    // The first-run page's installs (kFirstRunKey) that ended without being
+    // installed, by runtime name; handed over once.
+    std::vector<std::pair<std::string, FirstRunEnd>> first_run_ends;
     std::string projects_dir;  // projects.list's, or empty
     SharedSites shared;        // Shared sites (D19): shared.get's answer
     // New project (D9): the templates, once asked for.
@@ -101,7 +105,8 @@ struct Snapshot {
     std::vector<PhpAnswer> php;
     // Settings > Ports & HTTPS: answers in the order they came. `what` is
     // what was asked: "get", "reload" (web.reload, then get), "set" or "ca"
-    // (certs.ensure_ca).
+    // (certs.ensure_ca); the first-run page's are kFirstRunCa and
+    // kFirstRunReload, which Settings leaves alone.
     struct WebSettingsAnswer {
         std::string what;
         std::optional<nlohmann::json> reply;
@@ -207,6 +212,12 @@ public:
     static constexpr const char* kSharedKey = "_shared";
     // Settings' answers in Snapshot::php; project names can't have '_'.
     static constexpr const char* kPhpSettings = "_settings";
+    // The first-run page's web_settings(): certs.ensure_ca, and web.reload
+    // then web.settings.get once the CA is trusted.
+    static constexpr const char* kFirstRunCa = "first-run-ca";
+    static constexpr const char* kFirstRunReload = "first-run-reload";
+    // web.settings.get, for the CA's state after the downloads were skipped.
+    static constexpr const char* kFirstRunCaStatus = "first-run-ca-status";
 
     [[nodiscard]] static std::string on_key(const std::string& project) { return "on\n" + project; }
     [[nodiscard]] static std::string keep_key(const std::string& project) { return "keep\n" + project; }

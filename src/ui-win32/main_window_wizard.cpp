@@ -32,9 +32,11 @@ constexpr UINT_PTR kNameSubclass = 2;
 
 std::wstring w(std::string_view s) { return win::widen(s); }
 
+}  // namespace
+
 // Documents\FloServer: where new projects go when the service has no
 // projects folder of its own yet.
-std::string default_parent() {
+std::string MainWindow::default_projects_parent() {
     PWSTR documents = nullptr;
     std::string out;
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Documents, 0, nullptr, &documents)) && documents != nullptr) {
@@ -43,8 +45,6 @@ std::string default_parent() {
     CoTaskMemFree(documents);
     return out;
 }
-
-}  // namespace
 
 bool MainWindow::wizard_open() const { return wizard_.open; }
 
@@ -160,7 +160,7 @@ void MainWindow::wizard_next() {
             wizard_.studio = card->studio;
             wizard_.step = 1;
             if (wizard_.parent.empty()) {
-                wizard_.parent = !snap_.projects_dir.empty() ? snap_.projects_dir : default_parent();
+                wizard_.parent = !snap_.projects_dir.empty() ? snap_.projects_dir : default_projects_parent();
             }
             SetWindowTextW(name_edit_, w(free_project_name(card->id, snap_.rows)).c_str());
             ShowWindow(name_edit_, SW_SHOW);

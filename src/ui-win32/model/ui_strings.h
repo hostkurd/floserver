@@ -453,6 +453,60 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     LicencesRuntimes,
     LicencesNoRuntimes,
     LicencesNotRead,
+    // The first-run page (approved 2 Nov). Arabic and Kurdish need a native read.
+    FirstRunStepLanguage,
+    FirstRunStepRuntimes,
+    FirstRunStepReady,
+    FirstRunWelcome,
+    FirstRunIntro,
+    FirstRunLanguageNow,     // {0}: the language "Same as Windows" gives now, in its own script
+    FirstRunSorani,
+    FirstRunLanguageNote,
+    FirstRunPrivacy,
+    FirstRunRuntimesTitle,
+    FirstRunRuntimesIntro,
+    FirstRunWhatPhp,
+    FirstRunWhatMariadb,
+    FirstRunWhatNode,
+    FirstRunWhatComposer,
+    FirstRunWhatPython,
+    FirstRunWhatPma,
+    FirstRunWhatApache,
+    FirstRunWhatNginx,
+    FirstRunCertNote,
+    FirstRunTotal,           // {0}: "212 MB"
+    FirstRunDownload,
+    FirstRunLoading,
+    FirstRunListFailed,      // {0}: the reason
+    FirstRunNoRuntimes,
+    FirstRunTryAgain,
+    FirstRunSkip,
+    FirstRunDownloadingTitle,
+    FirstRunDownloadedTitle,
+    FirstRunDownloadingIntro,  // {0} ready of {1}
+    FirstRunRowReady,
+    FirstRunRowWaiting,
+    FirstRunRowFailed,       // {0}: the reason, from the service
+    FirstRunRowCancelled,
+    FirstRunTrustAsking,
+    FirstRunTrustAskingNote,
+    FirstRunTrustNo,
+    FirstRunTrustFailed,     // {0}: the reason
+    FirstRunTrusted,
+    FirstRunReadyTitle,
+    FirstRunHttps,
+    FirstRunStillDownloading,  // {0} ready of {1}
+    FirstRunDidntDownload,   // {0}: "Python 3.13.9, Apache 2.4.65"
+    FirstRunNothingYet,
+    FirstRunNotTrusted,
+    FirstRunFolderTitle,
+    FirstRunChange,
+    FirstRunCreate,
+    FirstRunCreateNote,
+    FirstRunAddFolder,
+    FirstRunAddFolderNote,
+    FirstRunNextScreen,
+    FirstRunGo,
     Count_,
 };
 
