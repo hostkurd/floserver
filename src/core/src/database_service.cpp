@@ -1196,6 +1196,93 @@ std::optional<DatabaseLogin> DatabaseService::project_login(const std::string& p
     return login;
 }
 
+std::optional<std::string> project_sharing_database(const AppConfig& app, const std::string& project) {
+    const std::string database = project_database_name(project);
+    for (const Project& other : app.projects) {
+        if (other.name != project && project_database_name(other.name) == database) {
+            return other.name;
+        }
+    }
+    return std::nullopt;
+}
+
+bool DatabaseService::drop_project_database(const std::string& project, ServiceRefusal& refusal) {
+    std::string error;
+    const auto app = load_app_config(app_config_file(config_.data_dir), error);
+    if (!app) {
+        refusal = {"config_unreadable", "FloServer's settings can't be used: " + error};
+        return false;
+    }
+    const Project* p = find_project(*app, project);
+    if (p == nullptr) {
+        refusal = {"unknown_project", "there's no project called " + project};
+        return false;
+    }
+    // The names are the service's own, as project_login() makes them.
+    const std::string database = project_database_name(project);
+    const std::string& user = database;
+    if (reserved_database_name(database)) {
+        refusal = {"reserved_name", "\"" + database + "\" is one of MariaDB's or shared sites' names, so FloServer never "
+                                    "made it for " + project + " and won't delete it; remove the project without its database"};
+        return false;
+    }
+    if (const auto other = project_sharing_database(*app, project)) {
+        refusal = {"database_shared",
+                   "the database " + database + " is also " + *other + "'s; remove the project without its database"};
+        return false;
+    }
+    // Where it was made: each installed series that keeps its password, and
+    // the one its floserver.json names now.
+    const auto secret_of = [&database](const std::string& s) {
+        return std::string("mariadb-").append(s).append("/").append(database);
+    };
+    const auto installed = list_installed(runtimes_dir(config_.data_dir));
+    std::set<std::string> series;
+    for (const InstalledRuntime& r : installed) {
+        if (r.name != "mariadb") {
+            continue;
+        }
+        const std::string s = mariadb_series(r.version);
+        if (!s.empty() && secrets_.read(secret_of(s))) {
+            series.insert(s);
+        }
+    }
+    if (const ConfigResult cfg = read_project_config_file(*p);
+        cfg.config && cfg.config->database && cfg.config->database->family == "mariadb") {
+        if (const InstalledRuntime* r = best_mariadb(installed, cfg.config->database->version)) {
+            series.insert(mariadb_series(r->version));
+        }
+    }
+    for (const std::string& s : series) {
+        const std::shared_ptr<Server> server = server_of(s);
+        if (!server) {
+            refusal = no_server_yet(s);
+            return false;
+        }
+        // As a login: counted as a connection, so it doesn't sleep meanwhile;
+        // asked for by the user, so a failed start is tried again now.
+        server->connection_opened();
+        const AtExit closed([&server] { server->connection_closed(); });
+        server->clear_failure();
+        if (!server->ensure_running(error)) {
+            refusal = {"database_failed", error};
+            return false;
+        }
+        const std::lock_guard lock(server->login_mutex());
+        if (!server->run_sql(drop_project_database_sql(database, user), error)) {
+            refusal = {"database_failed", std::string("the database ").append(database).append(" couldn't be deleted: ").append(error)};
+            return false;
+        }
+        if (!secrets_.remove(secret_of(s))) {
+            refusal = {"secret_failed", std::string("the database ")
+                                            .append(database)
+                                            .append(" is deleted, but its password can't be removed from the secure store")};
+            return false;
+        }
+    }
+    return true;
+}
+
 std::optional<DatabaseLogin> DatabaseService::shared_login(ServiceRefusal& refusal) {
     std::string error;
     const auto app = load_app_config(app_config_file(config_.data_dir), error);

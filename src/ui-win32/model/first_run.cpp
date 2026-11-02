@@ -269,9 +269,9 @@ FirstRunProgress first_run_progress(const std::vector<FirstRunRow>& rows) {
     return p;
 }
 
-std::string first_run_runtimes_line(const std::vector<FirstRunRow>& rows, Lang lang) {
+std::string first_run_runtimes_line(const std::vector<FirstRunRow>& rows, Lang lang, bool without) {
     if (rows.empty()) {
-        return std::string(text(lang, Str::FirstRunNothingYet));
+        return std::string(text(lang, without ? Str::FirstRunNothingChosen : Str::FirstRunNothingYet));
     }
     const bool rtl = is_rtl(lang);
     std::vector<std::string> ready;
@@ -315,5 +315,38 @@ std::string first_run_https_line(FirstRunTrust trust, const std::string& error, 
     }
     return std::string(text(lang, Str::FirstRunNotTrusted));
 }
+
+
+FirstRunFooter first_run_footer(FirstRunStep step, FirstRunList list, bool started) {
+    FirstRunFooter f;
+    switch (step) {
+        case FirstRunStep::Language:
+            f.next = Str::WizardNext;
+            f.words = Str::FirstRunPrivacy;
+            break;
+        case FirstRunStep::Runtimes:
+            f.back = true;
+            if (started) {
+                f.next = Str::WizardNext;  // they go on in the background
+            } else if (list == FirstRunList::Failed) {
+                f.next = Str::FirstRunSkip;  // it already goes on without downloading
+            } else {
+                f.without = true;
+                if (list == FirstRunList::Ready) {
+                    f.next = Str::FirstRunDownload;
+                    f.words = Str::FirstRunTotal;
+                }
+            }
+            break;
+        case FirstRunStep::Ready:
+            f.next = Str::FirstRunGo;
+            f.next_primary = false;
+            f.words = Str::FirstRunNextScreen;
+            break;
+    }
+    return f;
+}
+
+bool first_run_check_ca(FirstRunTrust trust, bool checked) { return trust == FirstRunTrust::NotAsked && !checked; }
 
 }  // namespace floserver::ui

@@ -19,7 +19,13 @@
 //   jobs.cancel      {"id": 3} -> {"cancelled": bool}
 //   projects.list    {} -> project_service.h, ProjectService::list()
 //   projects.add     {"path": "C:/sites/shop", "name"?: "shop"} -> the project
-//   projects.remove  {"name": "shop"} -> {}   (the folder is never touched)
+//   projects.remove  {"name": "shop", "drop_database"?: bool} -> {}   (the folder is never touched)
+//                    drop_database: first the project's own MariaDB database and
+//                    user (named by the service: "my-shop" -> my_shop, never by
+//                    the request) are dropped and their password deleted from the
+//                    secure store; reserved or shared names are refused, and a
+//                    failed drop keeps the project. Nothing to drop when that
+//                    MariaDB isn't installed.
 //   projects.set     {"name": "shop", "on"?: bool, "keep_running"?: bool} -> the project
 //   certs.status     {} -> {"ca": null or {"common_name", "fingerprint", "not_after",
 //                                          "path", "der" (base64), "trusted": "yes"|"no"|"unsupported",

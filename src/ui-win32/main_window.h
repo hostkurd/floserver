@@ -9,6 +9,7 @@
 #include "form_parts.h"
 #include "model/first_run.h"
 #include "model/php_page.h"
+#include "model/project_menu.h"
 #include "model/ui_strings.h"
 #include "scroll_bar.h"
 #include "service_worker.h"
@@ -61,6 +62,7 @@ private:
         PanelCopyEnv,
         PanelPhpMyAdmin,  // Open in phpMyAdmin (the project's own login)
         PanelKeep,
+        PanelRemove,   // Remove from FloServer…
         // The panel's PHP tab (D20); `row` is the field's index.
         PanelPhpSettings,
         PanelPhpChange,
@@ -92,12 +94,15 @@ private:
         FrAdd,
         FrBack,
         FrNext,
+        FrSkipSetup,  // every step's Skip setup
+        FrWithout,    // step 2's Continue without downloading
     };
     enum class PanelAction : std::uint8_t { Browser, Folder, Terminal, Studio, Download };
     [[nodiscard]] static constexpr bool is_panel_part(Part part) {
         return part == Part::PanelClose || part == Part::PanelAddress || part == Part::PanelTab ||
                part == Part::PanelButton || part == Part::PanelField || part == Part::PanelCopyEnv ||
-               part == Part::PanelPhpMyAdmin || part == Part::PanelKeep || is_php_part(part);
+               part == Part::PanelPhpMyAdmin || part == Part::PanelKeep || part == Part::PanelRemove ||
+               is_php_part(part);
     }
     [[nodiscard]] static constexpr bool is_php_part(Part part) {
         return part == Part::PanelPhpSettings || part == Part::PanelPhpChange || part == Part::PanelPhpField ||
@@ -159,6 +164,7 @@ private:
         RECT keep_title{};
         RECT keep_detail{};
         RECT keep_switch{};
+        RECT remove{};  // Remove from FloServer…, at the General tab's end
         RECT log_label{};
         RECT log_box{};
     };
@@ -248,7 +254,8 @@ private:
         FirstRunStep step = FirstRunStep::Language;
         Lang system_lang = Lang::En;  // what "Same as Windows" gives
         // Step 2: runtimes.list's answer, asked when the step is first shown.
-        enum class List : std::uint8_t { Idle, Loading, Ready, Failed } list = List::Idle;
+        using List = FirstRunList;
+        List list = List::Idle;
         bool refreshing = false;  // a fresh list was asked for
         std::string list_error;
         std::vector<FirstRunOffer> offers;
@@ -262,6 +269,7 @@ private:
         std::string trust_error;
         std::string ca_der;  // base64, from certs.ensure_ca
         bool ca_checked = false;  // web.settings.get asked for the CA on step 3 (skipped downloads)
+        bool without = false;     // "Continue without downloading" was chosen
         // Step 3: the projects folder chosen with Change… (folders.set).
         std::string folder;
         std::string folder_ask;  // the folders.set on its way (its purpose)
@@ -292,7 +300,9 @@ private:
         RECT add{};
         RECT footer{};
         RECT footer_text{};
+        RECT skip{};     // Skip setup, at the reading start
         RECT back{};
+        RECT without{};  // Continue without downloading
         RECT next{};
         Str next_label = Str::WizardNext;
         bool next_primary = true;
@@ -356,6 +366,20 @@ private:
     // What a row shows at its end (see RowGeometry::End).
     [[nodiscard]] RowGeometry::End row_end(const ProjectRow& row, std::string& end_text) const;
     void open_address(int visible_row);
+
+    // --- a row's right-click menu and removing a project (main_window_menu.cpp) ---
+    // WM_CONTEXTMENU: a right-click on a row (selected first), or the menu
+    // key or Shift+F10 at the row (or panel) the keys are on.
+    void on_context_menu(LPARAM lparam);
+    void show_project_menu(const std::string& project, POINT at);
+    void show_shared_menu(POINT at);
+    void run_project_command(const std::string& project, MenuCommand command);
+    // Asks first (a task dialog, with the database box when it has one),
+    // then projects.remove; its answer comes in on_remove_answers().
+    void ask_remove(const std::string& project);
+    // projects.remove's answers, taken out of `answers`; the projects removed.
+    [[nodiscard]] std::vector<std::pair<std::string, bool>> on_remove_answers(std::vector<Snapshot::DbAnswer>& answers);
+    void copy_address(const std::string& address);
     [[nodiscard]] bool is_settled(const std::string& key) const;
     void settle(const std::vector<std::string>& keys);
     void show_notice(std::string text, bool error);
@@ -401,6 +425,7 @@ private:
     void run_panel_action(PanelAction action);
     void show_field_menu(std::size_t index);
     void toggle_keep_running();
+    void toggle_keep_running_for(const std::string& project);
     void open_folder(const std::string& path);
     void add_existing_folder();
     void open_terminal(const std::string& path);
@@ -477,6 +502,8 @@ private:
     // The snapshot's answers for the page (the list, the CA, folders.set, how installs ended).
     void on_first_run_answers(Snapshot& s);
     void first_run_start_downloads();
+    // On to step 3 without (more) downloads; the CA's state is asked once.
+    void first_run_to_ready();
     // Windows' own question, after certs.ensure_ca's answer (kFirstRunTrustMessage).
     void first_run_trust_now();
     // A question or picker (asking_) was just answered: Windows' trust question, if it waited, now.
@@ -578,6 +605,7 @@ private:
     std::map<std::string, bool> installing_;    // Download clicked; the worker hasn't reported yet
     std::string change_error_;
     bool pma_busy_ = false;  // the panel's phpmyadmin.login is on its way
+    std::map<std::string, bool> removing_;  // projects.remove on its way, per project: with its database
     Notice notice_;  // a short message in the banner ("copied")
 
     WizardState wizard_;

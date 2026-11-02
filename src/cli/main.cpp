@@ -58,7 +58,7 @@ void print_help(std::ostream& out) {
         << "  uninstall <name> <version> Remove an installed runtime: flo uninstall php 8.5.12\n"
         << "  projects [--json]          List your projects and what each one needs\n"
         << "  add [folder] [--name <n>] [--json]  Add a folder as a project (this folder if none)\n"
-        << "  remove <name>              Forget a project (its files are kept)\n"
+        << "  remove <name> [--drop-database] [--yes]  Forget a project (its files are kept); also delete its database\n"
         << "  use <php|node|python|mariadb> <v> Set a version in this project's floserver.json\n"
         << "  use php <none|newest|auto>  ...no PHP, always the newest PHP, or PHP when there are .php files\n"
         << "  php <series>               PHP settings for a series (8.5): extensions and php.ini values\n"
@@ -554,19 +554,51 @@ int add(const std::vector<std::string>& args, const std::vector<fs::path>& paths
 }
 
 int remove_cmd(const std::vector<std::string>& args) {
-    if (args.size() != 2) {
-        std::cerr << "Usage: flo remove <name>   (see your projects with: flo projects)\n";
+    std::string name;
+    bool drop = false;
+    bool yes = false;
+    bool bad = false;
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        if (args[i] == "--drop-database") {
+            drop = true;
+        } else if (args[i] == "--yes" || args[i] == "-y") {
+            yes = true;
+        } else if (name.empty() && !args[i].starts_with("-")) {
+            name = args[i];
+        } else {
+            bad = true;
+        }
+    }
+    if (name.empty() || bad) {
+        std::cerr << "Usage: flo remove <name> [--drop-database] [--yes]   (see your projects with: flo projects)\n";
         return 2;
     }
-    auto client = connect_or_start(std::chrono::seconds(15));
+    if (drop && !yes) {
+        // The service names the database itself; this is what it will be.
+        std::cout << "Remove " << name << " from FloServer and delete its database "
+                  << floserver::core::project_database_name(name)
+                  << " and its user? This can't be undone. Its folder stays where it is. [y/N] " << std::flush;
+        std::string answer;
+        if (!std::getline(std::cin, answer) || (answer != "y" && answer != "Y" && answer != "yes")) {
+            std::cout << "Nothing was removed.\n";
+            return 1;
+        }
+    }
+    // Dropping may start MariaDB first (its first start sets it up).
+    auto client = connect_or_start(drop ? std::chrono::seconds(200) : std::chrono::seconds(15));
     if (!client) {
         return 1;
     }
-    const auto reply = client->call("projects.remove", {{"name", args[1]}});
+    nlohmann::json params = {{"name", name}};
+    if (drop) {
+        params["drop_database"] = true;
+    }
+    const auto reply = client->call("projects.remove", params);
     if (!reply || !reply->ok) {
         return print_refusal(reply);
     }
-    std::cout << args[1] << " is no longer a FloServer project. Its files are untouched.\n";
+    std::cout << name << " is no longer a FloServer project" << (drop ? ", and its database is deleted" : "")
+              << ". Its files are untouched.\n";
     return 0;
 }
 

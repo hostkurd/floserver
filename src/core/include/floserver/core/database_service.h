@@ -18,6 +18,7 @@
 #include "floserver/core/child_process.h"
 #include "floserver/core/mariadb.h"
 #include "floserver/core/ports.h"
+#include "floserver/core/project_registry.h"
 #include "floserver/core/runtime_service.h"  // ServiceRefusal
 #include "floserver/core/secret_store.h"
 
@@ -48,6 +49,11 @@ struct DatabaseServiceConfig {
 
 inline constexpr Port kFirstInternalDatabasePort = 33100;
 
+// Another registered project whose database has the same name as
+// `project`'s (project_database_name()), or nothing. Names can't have '_',
+// so it shouldn't happen; a drop checks anyway.
+[[nodiscard]] std::optional<std::string> project_sharing_database(const AppConfig& app, const std::string& project);
+
 class DatabaseService {
 public:
     // `secrets` is copied: servers may outlive a reference.
@@ -77,6 +83,16 @@ public:
     // failed is tried again now rather than its error repeated for 30 s.
     [[nodiscard]] std::optional<DatabaseLogin> project_login(const std::string& project, ServiceRefusal& refusal,
                                                              bool retry_failed = false);
+
+    // projects.remove's "drop_database" (approved 2 Nov), before the project
+    // leaves config.json: its own database and user (project_database_name(),
+    // never a name from the client) are dropped on each installed series that
+    // has them (its password is kept there) or that its floserver.json names,
+    // the server started if it sleeps; then the password is deleted from the
+    // secure store. A series that isn't installed has nothing to drop. False
+    // (with `refusal`) when the name is reserved, another registered project's
+    // database has the same name, or a drop failed: the project then stays.
+    bool drop_project_database(const std::string& project, ServiceRefusal& refusal);
 
     // Shared sites' login (D19, user "www"), made the first time. Shared
     // sites must be on and have a database.

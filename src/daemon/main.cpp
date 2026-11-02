@@ -436,6 +436,28 @@ struct Service {
             }
             result = projects->add(dir, name, refusal);
         } else if (r.method == "projects.remove") {
+            // "drop_database": its own database and user go first (named by the
+            // service, never by the request); a failed drop keeps the project,
+            // so the user can try again.
+            bool drop = false;
+            if (r.params.is_object() && r.params.contains("drop_database")) {
+                if (!r.params["drop_database"].is_boolean()) {
+                    return protocol::make_error(r.id, "bad_params", "drop_database is true or false");
+                }
+                drop = r.params["drop_database"].get<bool>();
+            }
+            if (drop) {
+                if (!projects->folder(name, refusal)) {
+                    return protocol::make_error(r.id, refusal.code, refusal.message);
+                }
+                if (!databases) {
+                    return protocol::make_error(r.id, "no_data_folder",
+                                                "FloServer can't find a folder to keep its settings in (LOCALAPPDATA or HOME)");
+                }
+                if (!databases->drop_project_database(name, refusal)) {
+                    return protocol::make_error(r.id, refusal.code, refusal.message);
+                }
+            }
             if (projects->remove(name, refusal)) {
                 result = json::object();
                 // Its request log goes too, so a new project with the name starts empty.

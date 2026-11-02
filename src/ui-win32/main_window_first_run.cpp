@@ -149,7 +149,7 @@ void MainWindow::first_run_ask_list() {
     if (!worker_ || snap_.link != Link::Connected) {
         return;  // asked once it's there (on_snapshot)
     }
-    first_run_.list = FirstRunState::List::Loading;
+    first_run_.list = FirstRunList::Loading;
     first_run_.refreshing = false;
     first_run_.list_error.clear();
     worker_->list_runtimes(false);  // the list in hand or kept on disk: no network
@@ -164,14 +164,14 @@ void MainWindow::on_first_run_answers(Snapshot& s) {
     }
 
     // runtimes.list: the offers on step 2.
-    if (first_run_.list == FirstRunState::List::Loading && (s.runtimes || !s.runtimes_error.empty()) &&
+    if (first_run_.list == FirstRunList::Loading && (s.runtimes || !s.runtimes_error.empty()) &&
         !(first_run_.refreshing && !s.runtimes_refresh)) {  // waiting for the fresh one
         const FirstRunListAnswer answer = first_run_list_answer(s.runtimes, s.runtimes_error, s.runtimes_refresh);
         switch (answer.kind) {
             case FirstRunListAnswer::Kind::Offers:
                 first_run_.offers = answer.offers;
                 first_run_.ticks = first_run_default_ticks(first_run_.offers);
-                first_run_.list = FirstRunState::List::Ready;
+                first_run_.list = FirstRunList::Ready;
                 first_run_.refreshing = false;
                 break;
             case FirstRunListAnswer::Kind::Refresh:
@@ -182,7 +182,7 @@ void MainWindow::on_first_run_answers(Snapshot& s) {
                 }
                 break;
             case FirstRunListAnswer::Kind::Failed:
-                first_run_.list = FirstRunState::List::Failed;
+                first_run_.list = FirstRunList::Failed;
                 first_run_.list_error = answer.error;
                 first_run_.refreshing = false;
                 break;
@@ -260,6 +260,18 @@ void MainWindow::first_run_start_downloads() {
         first_run_.trust = FirstRunTrust::Checking;
         first_run_.trust_error.clear();
         worker_->web_settings(ServiceWorker::kFirstRunCa);
+    }
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void MainWindow::first_run_to_ready() {
+    first_run_.step = FirstRunStep::Ready;
+    first_run_.scroll = 0;
+    first_run_.focus = -1;
+    // Without downloads the CA wasn't looked at: trusted already (an earlier install) says so.
+    if (first_run_check_ca(first_run_.trust, first_run_.ca_checked) && worker_) {
+        first_run_.ca_checked = true;
+        worker_->web_settings(ServiceWorker::kFirstRunCaStatus);
     }
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
@@ -396,7 +408,7 @@ void MainWindow::on_first_run_click(const Hit& hit) {
         }
         case Part::FrRetry:
             if (worker_ && snap_.link == Link::Connected) {
-                first_run_.list = FirstRunState::List::Loading;
+                first_run_.list = FirstRunList::Loading;
                 first_run_.list_error.clear();
                 first_run_.refreshing = true;
                 worker_->list_runtimes(true);
@@ -413,6 +425,17 @@ void MainWindow::on_first_run_click(const Hit& hit) {
             finish_first_run();
             add_existing_folder();
             return;
+        case Part::FrSkipSetup:
+            // What closing the page does: marked done, the list shown.
+            finish_first_run();
+            return;
+        case Part::FrWithout:
+            // Nothing downloaded (not even nginx), Windows not asked about the certificate.
+            if (first_run_.step == FirstRunStep::Runtimes && !first_run_.started) {
+                first_run_.without = true;
+                first_run_to_ready();
+            }
+            break;
         case Part::FrBack:
             if (first_run_.step == FirstRunStep::Runtimes) {
                 first_run_.step = FirstRunStep::Language;
@@ -426,22 +449,15 @@ void MainWindow::on_first_run_click(const Hit& hit) {
                     first_run_.step = FirstRunStep::Runtimes;
                     first_run_.scroll = 0;
                     first_run_.focus = -1;
-                    if (first_run_.list == FirstRunState::List::Idle) {
+                    if (first_run_.list == FirstRunList::Idle) {
                         first_run_ask_list();
                     }
                     break;
                 case FirstRunStep::Runtimes:
-                    if (!first_run_.started && first_run_.list == FirstRunState::List::Ready) {
+                    if (!first_run_.started && first_run_.list == FirstRunList::Ready) {
                         first_run_start_downloads();  // the downloads, still on step 2
-                    } else if (first_run_.started || first_run_.list == FirstRunState::List::Failed) {
-                        first_run_.step = FirstRunStep::Ready;  // they go on in the background
-                        first_run_.scroll = 0;
-                        first_run_.focus = -1;
-                        // Skipped: the CA wasn't looked at; trusted already (an earlier install) says so.
-                        if (first_run_.trust == FirstRunTrust::NotAsked && !first_run_.ca_checked && worker_) {
-                            first_run_.ca_checked = true;
-                            worker_->web_settings(ServiceWorker::kFirstRunCaStatus);
-                        }
+                    } else if (first_run_.started || first_run_.list == FirstRunList::Failed) {
+                        first_run_to_ready();  // downloads go on in the background
                     }
                     break;
                 case FirstRunStep::Ready:
@@ -528,56 +544,57 @@ MainWindow::FirstRunGeometry MainWindow::first_run_geometry(HDC dc, int scroll) 
     const RECT banner = banner_rect();
     const int top = banner.bottom > 0 ? banner.bottom + px(12) : px(20);
     g.steps = {x0, top, x1, top + px(20)};
-    g.footer = {0, std::max<int>(g.steps.bottom, height_ - px(kFooterHeight)), width_, height_};
-    const int gap = first_run_.step == FirstRunStep::Language ? px(20) : px(14);
-    g.content = {0, std::min(g.steps.bottom + gap, g.footer.top), width_, g.footer.top};
 
-    // The footer: its buttons from the end, the words before them.
+    // The footer (approved 2 Nov): Skip setup at the reading start, the
+    // words after it, Back, Continue without downloading and the step's own
+    // button at the end. When they don't fit on one line (a narrow window,
+    // Arabic or Kurdish), the end's two go on a line above.
+    const FirstRunFooter f = first_run_footer(first_run_.step, first_run_.list, first_run_.started);
+    g.next_label = f.next.value_or(Str::WizardNext);
+    g.next_primary = f.next_primary;
     const auto button_w = [&](Str label, bool bold) {
         return Canvas::measure(dc, w(text(lang_, label)), (bold ? fonts_.button_bold : fonts_.button).get(), rtl_) + px(32);
     };
-    const int fmid = (g.footer.top + g.footer.bottom) / 2;
-    const auto footer_button = [&](Str label, bool bold, int right) {
-        return RECT{right - button_w(label, bold), fmid - px(kButtonH) / 2, right, fmid + px(kButtonH) / 2};
+    const int gap = px(8);
+    const int skip_w = button_w(Str::FirstRunSkipSetup, false);
+    const int back_w = f.back ? button_w(Str::WizardBack, false) : 0;
+    const int without_w = f.without ? button_w(Str::FirstRunWithout, false) : 0;
+    const int next_w = f.next ? button_w(*f.next, f.next_primary) : 0;
+    const int end_w = next_w + (without_w > 0 ? without_w + gap : 0) + (back_w > 0 ? back_w + gap : 0);
+    const bool two_lines = skip_w + px(16) + end_w > span;
+    const int footer_h = two_lines ? px(kFooterHeight) + px(kButtonH) + px(8) : px(kFooterHeight);
+    g.footer = {0, std::max<int>(g.steps.bottom, height_ - footer_h), width_, height_};
+    const int gap_y = first_run_.step == FirstRunStep::Language ? px(20) : px(14);
+    g.content = {0, std::min(g.steps.bottom + gap_y, g.footer.top), width_, g.footer.top};
+    const int line_h = two_lines ? height_of(g.footer) / 2 : height_of(g.footer);
+    const int upper_mid = g.footer.top + (two_lines ? line_h / 2 + px(4) : line_h / 2);
+    const int lower_mid = two_lines ? g.footer.bottom - line_h / 2 - px(4) : upper_mid;
+    const auto at = [&](int left, int width, int mid) {
+        return RECT{left, mid - px(kButtonH) / 2, left + width, mid + px(kButtonH) / 2};
     };
-    bool back = false;
-    bool next = true;
-    Str footer_words = Str::Count_;
-    switch (first_run_.step) {
-        case FirstRunStep::Language:
-            g.next_label = Str::WizardNext;
-            footer_words = Str::FirstRunPrivacy;
-            break;
-        case FirstRunStep::Runtimes:
-            back = true;
-            if (first_run_.started) {
-                g.next_label = Str::WizardNext;
-            } else if (first_run_.list == FirstRunState::List::Ready) {
-                g.next_label = Str::FirstRunDownload;
-                footer_words = Str::FirstRunTotal;
-            } else if (first_run_.list == FirstRunState::List::Failed) {
-                g.next_label = Str::FirstRunSkip;
-            } else {
-                next = false;  // the list is on its way
-            }
-            break;
-        case FirstRunStep::Ready:
-            g.next_label = Str::FirstRunGo;
-            g.next_primary = false;
-            footer_words = Str::FirstRunNextScreen;
-            break;
-    }
     int right = x1;
-    if (next) {
-        g.next = footer_button(g.next_label, g.next_primary, right);
-        right = g.next.left - px(8);
+    if (next_w > 0) {
+        g.next = at(right - next_w, next_w, upper_mid);
+        right = g.next.left - gap;
     }
-    if (back) {
-        g.back = footer_button(Str::WizardBack, false, right);
-        right = g.back.left - px(8);
+    if (without_w > 0) {
+        g.without = at(right - without_w, without_w, upper_mid);
+        right = g.without.left - gap;
     }
-    if (footer_words != Str::Count_) {
-        g.footer_text = {x0, g.footer.top, std::max(x0, right - px(8)), g.footer.bottom};
+    if (two_lines) {
+        right = x1;  // Back starts the lower line's end
+    }
+    if (back_w > 0) {
+        g.back = at(right - back_w, back_w, lower_mid);
+        right = g.back.left - gap;
+    }
+    g.skip = at(x0, std::min(skip_w, std::max(0, right - x0)), lower_mid);
+    const int words_left = g.skip.right + px(16);
+    const int words_right = right - gap;
+    if (f.words && words_right - words_left >= px(60)) {
+        const int words_top = two_lines ? lower_mid - line_h / 2 : g.footer.top;
+        const int words_bottom = two_lines ? lower_mid + line_h / 2 : g.footer.bottom;
+        g.footer_text = {words_left, words_top, words_right, words_bottom};
     }
 
     int y = g.content.top - scroll;
@@ -652,7 +669,7 @@ MainWindow::FirstRunGeometry MainWindow::first_run_geometry(HDC dc, int scroll) 
             intro(std::string(text(lang_, Str::FirstRunRuntimesIntro)), span);
             y += px(14);
             switch (first_run_.list) {
-                case FirstRunState::List::Ready: {
+                case FirstRunList::Ready: {
                     g.card = {x0, y, x1, y + static_cast<int>(first_run_.offers.size()) * px(kItemH)};
                     for (std::size_t i = 0; i < first_run_.offers.size(); ++i) {
                         const int ry = y + static_cast<int>(i) * px(kItemH);
@@ -665,7 +682,7 @@ MainWindow::FirstRunGeometry MainWindow::first_run_geometry(HDC dc, int scroll) 
                     y += h;
                     break;
                 }
-                case FirstRunState::List::Failed: {
+                case FirstRunList::Failed: {
                     const int h = text_height(dc, w(first_run_list_error(first_run_.list_error, lang_)), fonts_.button.get(), span, rtl_);
                     g.message = {x0, y, x1, y + h};
                     y += h + px(12);
@@ -674,8 +691,8 @@ MainWindow::FirstRunGeometry MainWindow::first_run_geometry(HDC dc, int scroll) 
                     y += px(kButtonH);
                     break;
                 }
-                case FirstRunState::List::Idle:
-                case FirstRunState::List::Loading:
+                case FirstRunList::Idle:
+                case FirstRunList::Loading:
                     g.message = {x0, y, x1, y + px(20)};
                     y += px(20);
                     break;
@@ -688,7 +705,7 @@ MainWindow::FirstRunGeometry MainWindow::first_run_geometry(HDC dc, int scroll) 
             const int lw = Canvas::measure(dc, w(text(lang_, Str::FirstRunChange)), fonts_.button.get(), rtl_) + px(4);
             const int tx = x0 + px(16 + 16 + 12);
             const std::vector<FirstRunRow> rows = first_run_rows_now();
-            const std::string details[] = {first_run_runtimes_line(rows, lang_),
+            const std::string details[] = {first_run_runtimes_line(rows, lang_, first_run_.without),
                                            first_run_https_line(first_run_.trust, first_run_.trust_error, lang_)};
             const int card_top = y;
             for (int i = 0; i < 3; ++i) {
@@ -730,6 +747,12 @@ MainWindow::FirstRunGeometry MainWindow::first_run_geometry(HDC dc, int scroll) 
 
 MainWindow::Hit MainWindow::first_run_hit_test(int x, int y) const {
     const FirstRunGeometry& g = first_run_geometry_;
+    if (contains(g.skip, x, y)) {
+        return {Part::FrSkipSetup, -1, {}};
+    }
+    if (contains(g.without, x, y)) {
+        return {Part::FrWithout, -1, {}};
+    }
     if (contains(g.back, x, y)) {
         return {Part::FrBack, -1, {}};
     }
@@ -787,7 +810,7 @@ std::vector<MainWindow::Hit> MainWindow::first_run_focus_order() const {
                         out.push_back({Part::FrCancel, static_cast<int>(i), {}});
                     }
                 }
-            } else if (first_run_.list == FirstRunState::List::Ready) {
+            } else if (first_run_.list == FirstRunList::Ready) {
                 for (std::size_t i = 0; i < first_run_.offers.size() && i < g.rows.size(); ++i) {
                     if (!first_run_.offers[i].always) {
                         out.push_back({Part::FrTick, static_cast<int>(i), {}});
@@ -803,8 +826,15 @@ std::vector<MainWindow::Hit> MainWindow::first_run_focus_order() const {
             out.push_back({Part::FrAdd, -1, {}});
             break;
     }
+    // The footer in reading order.
+    if (!is_empty(g.skip)) {
+        out.push_back({Part::FrSkipSetup, -1, {}});
+    }
     if (!is_empty(g.back)) {
         out.push_back({Part::FrBack, -1, {}});
+    }
+    if (!is_empty(g.without)) {
+        out.push_back({Part::FrWithout, -1, {}});
     }
     if (!is_empty(g.next)) {
         out.push_back({Part::FrNext, -1, {}});
@@ -831,6 +861,10 @@ RECT MainWindow::first_run_rect_of(const Hit& hit) const {
             return g.create;
         case Part::FrAdd:
             return g.add;
+        case Part::FrSkipSetup:
+            return g.skip;
+        case Part::FrWithout:
+            return g.without;
         case Part::FrBack:
             return g.back;
         case Part::FrNext:
@@ -1087,8 +1121,14 @@ void MainWindow::paint_first_run(Canvas& c, HDC dc, bool text_pass) const {
         }
         first_run_bar_.paint(c, p);
         c.unclip();
+        if (!is_empty(g.skip)) {
+            paint_button(c, g.skip, hovered(Part::FrSkipSetup, -1), focused({Part::FrSkipSetup, -1, {}}));
+        }
         if (!is_empty(g.back)) {
             paint_button(c, g.back, hovered(Part::FrBack, -1), focused({Part::FrBack, -1, {}}));
+        }
+        if (!is_empty(g.without)) {
+            paint_button(c, g.without, hovered(Part::FrWithout, -1), focused({Part::FrWithout, -1, {}}));
         }
         if (!is_empty(g.next)) {
             if (g.next_primary) {
@@ -1201,7 +1241,7 @@ void MainWindow::paint_first_run(Canvas& c, HDC dc, bool text_pass) const {
                                false);
                     }
                 }
-            } else if (first_run_.list == FirstRunState::List::Ready) {
+            } else if (first_run_.list == FirstRunList::Ready) {
                 for (std::size_t i = 0; i < g.rows.size() && i < first_run_.offers.size(); ++i) {
                     const RECT& r = g.rows[i];
                     const FirstRunOffer& o = first_run_.offers[i];
@@ -1215,7 +1255,7 @@ void MainWindow::paint_first_run(Canvas& c, HDC dc, bool text_pass) const {
                         c.text(size, w(size_text(o.size)), fonts_.caption.get(), p.text_subtle, Align::End, true);
                     }
                 }
-            } else if (first_run_.list == FirstRunState::List::Failed) {
+            } else if (first_run_.list == FirstRunList::Failed) {
                 c.paragraph(g.message, w(first_run_list_error(first_run_.list_error, lang_)), fonts_.button.get(), p.problem.text);
                 c.text(g.retry, w(text(lang_, Str::FirstRunTryAgain)), fonts_.button.get(), p.text, Align::Center, false);
             } else {
@@ -1238,7 +1278,7 @@ void MainWindow::paint_first_run(Canvas& c, HDC dc, bool text_pass) const {
             break;
         case FirstRunStep::Ready: {
             const Str titles[] = {Str::SettingsRuntimes, Str::FirstRunHttps, Str::FirstRunFolderTitle};
-            const std::string details[] = {first_run_runtimes_line(rows, lang_),
+            const std::string details[] = {first_run_runtimes_line(rows, lang_, first_run_.without),
                                            first_run_https_line(first_run_.trust, first_run_.trust_error, lang_)};
             for (std::size_t i = 0; i < g.rows.size() && i < g.details.size() && i < 3; ++i) {
                 const RECT& r = g.rows[i];
@@ -1291,8 +1331,14 @@ void MainWindow::paint_first_run(Canvas& c, HDC dc, bool text_pass) const {
                         p.text_subtle);
         }
     }
+    if (!is_empty(g.skip)) {
+        c.text(g.skip, w(text(lang_, Str::FirstRunSkipSetup)), fonts_.button.get(), p.text, Align::Center, false);
+    }
     if (!is_empty(g.back)) {
         c.text(g.back, w(text(lang_, Str::WizardBack)), fonts_.button.get(), p.text, Align::Center, false);
+    }
+    if (!is_empty(g.without)) {
+        c.text(g.without, w(text(lang_, Str::FirstRunWithout)), fonts_.button.get(), p.text, Align::Center, false);
     }
     if (!is_empty(g.next)) {
         c.text(g.next, w(text(lang_, g.next_label)), (g.next_primary ? fonts_.button_bold : fonts_.button).get(),

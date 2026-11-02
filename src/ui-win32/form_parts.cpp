@@ -322,4 +322,46 @@ SaveChoice ask_to_save(HWND owner, Lang lang, const std::string& question) {
     return pressed == IDNO ? SaveChoice::DontSave : SaveChoice::Cancel;
 }
 
+
+bool ask_remove_project(HWND owner, Lang lang, const RemoveQuestion& question, bool& drop) {
+    constexpr int kRemove = 100;
+    const std::wstring window_title = win::widen(question.window_title);
+    const std::wstring title = win::widen(question.title);
+    const std::wstring content = win::widen(question.text);
+    const std::wstring remove = win::widen(question.remove);
+    const std::wstring cancel = win::widen(question.cancel);
+    const std::wstring box = win::widen(question.drop);
+    // Both buttons in the window's language (Windows' own Cancel is in Windows').
+    const std::array<TASKDIALOG_BUTTON, 2> buttons{{{kRemove, remove.c_str()}, {IDCANCEL, cancel.c_str()}}};
+    TASKDIALOGCONFIG config{};
+    config.cbSize = sizeof config;
+    config.hwndParent = owner;
+    config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW |
+                     (is_rtl(lang) ? TDF_RTL_LAYOUT : 0);
+    config.pszWindowTitle = window_title.c_str();
+    config.pszMainInstruction = title.c_str();
+    config.pszContent = content.c_str();
+    config.cButtons = static_cast<UINT>(buttons.size());
+    config.pButtons = buttons.data();
+    config.nDefaultButton = IDCANCEL;
+    if (!box.empty()) {
+        config.pszVerificationText = box.c_str();  // unticked: no TDF_VERIFICATION_FLAG_CHECKED
+    }
+    int pressed = IDCANCEL;
+    BOOL ticked = FALSE;
+    if (FAILED(TaskDialogIndirect(&config, &pressed, nullptr, &ticked))) {
+        // Without common controls 6 (it's in the manifest): the plain box,
+        // Cancel first, and the database is kept.
+        const std::wstring both = title + L"\n\n" + content;
+        pressed = MessageBoxW(owner, both.c_str(), window_title.c_str(),
+                              MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2 |
+                                  (is_rtl(lang) ? MB_RTLREADING | MB_RIGHT : 0U)) == IDOK
+                      ? kRemove
+                      : IDCANCEL;
+        ticked = FALSE;
+    }
+    drop = pressed == kRemove && !box.empty() && ticked != FALSE;
+    return pressed == kRemove;
+}
+
 }  // namespace floserver::ui

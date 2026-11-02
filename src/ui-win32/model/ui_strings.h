@@ -507,6 +507,26 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     FirstRunAddFolderNote,
     FirstRunNextScreen,
     FirstRunGo,
+    FirstRunSkipSetup,
+    FirstRunWithout,
+    FirstRunNothingChosen,
+    // A project row's right-click menu, and removing a project (approved 2 Nov).
+    MenuOpenTerminal,
+    MenuCopyAddress,
+    MenuTurnOn,
+    MenuTurnOff,
+    MenuProjectSettings,
+    MenuSettings,
+    AddressCopied,
+    RemoveProject,
+    RemoveTitle,         // {0}: the project
+    RemoveText,
+    RemoveConfirm,
+    RemoveDropDatabase,  // {0}: its database, "my_shop"
+    Removing,
+    RemoveDone,          // {0}: the project
+    RemoveDoneDatabase,  // {0}: the project
+    RemoveFailed,        // {0}: the project, {1}: the service's reason
     Count_,
 };
 
