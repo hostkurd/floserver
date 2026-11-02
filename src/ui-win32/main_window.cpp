@@ -26,7 +26,6 @@ constexpr UINT kSnapshotMessage = WM_APP + 2;
 constexpr UINT kTrayMessage = WM_APP + 3;
 constexpr UINT kSettingsClosedMessage = WM_APP + 4;
 // WM_APP + 5 and + 6 are the panel's (main_window.h).
-constexpr UINT kPrefsMessage = WM_APP + 7;  // Settings > General: a preference changed
 constexpr UINT_PTR kErrorTimer = 1;
 constexpr UINT kErrorShownMs = 8000;
 constexpr UINT_PTR kNoticeTimer = 2;
@@ -131,6 +130,8 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             if (quitting_) {
                 DestroyWindow(hwnd_);
             } else {
+                // Closing the first-run page's window at any step leaves it for good.
+                finish_first_run();
                 // Settings belongs to this window; it would otherwise stay
                 // on screen with no taskbar button.
                 if (prefs_.close == CloseAction::Quit) {
@@ -244,10 +245,11 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
         case WM_CANCELMODE:
             list_bar_.cancel(hwnd_);
             panel_bar_.cancel(hwnd_);
+            first_run_bar_.cancel(hwnd_);
             break;
         case WM_MOUSELEAVE:
             tracking_mouse_ = false;
-            if (list_bar_.leave() || panel_bar_.leave()) {
+            if (list_bar_.leave() || panel_bar_.leave() || first_run_bar_.leave()) {
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
             if (hover_.part != Part::None) {
@@ -262,6 +264,7 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
                 ScreenToClient(hwnd_, &pt);
                 const Hit hit = hit_test(pt.x, pt.y);
                 const bool hand = hit.part == Part::Switch || hit.part == Part::Address || hit.part == Part::Download ||
+                                  hit.part == Part::FrChange ||
                                   hit.part == Part::PanelAddress || hit.part == Part::PanelKeep ||
                                   hit.part == Part::SharedSwitch || hit.part == Part::SharedEnd ||
                                   (hit.part == Part::Banner && banner().clickable);
@@ -290,6 +293,10 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             return 0;
         }
         case WM_MOUSEWHEEL: {
+            if (first_run_open()) {
+                first_run_scroll_to(first_run_.scroll - GET_WHEEL_DELTA_WPARAM(wparam) * px(48) / WHEEL_DELTA);
+                return 0;
+            }
             if (wizard_open()) {
                 return 0;  // the list under the page stays put
             }
@@ -316,7 +323,7 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         case WM_TIMER:
-            if (list_bar_.tick(hwnd_, wparam) || panel_bar_.tick(hwnd_, wparam)) {
+            if (list_bar_.tick(hwnd_, wparam) || panel_bar_.tick(hwnd_, wparam) || first_run_bar_.tick(hwnd_, wparam)) {
                 return 0;
             }
             if (wparam == kErrorTimer || wparam == kNoticeTimer) {
@@ -352,6 +359,9 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             return 0;
         case kPrefsMessage:
             on_pref_change(wparam, lparam);
+            return 0;
+        case kFirstRunTrustMessage:
+            first_run_trust_now();
             return 0;
         case kSettingsClosedMessage:
             if (wparam == 1) {
@@ -413,6 +423,7 @@ void MainWindow::on_create() {
     } else {
         worker_ = std::make_unique<ServiceWorker>(hwnd_, kSnapshotMessage, lang_);
     }
+    decide_first_run();  // FLOSERVER_FIRST_RUN=1: at once; else once the service has answered
 }
 
 void MainWindow::on_destroy() {
@@ -420,6 +431,7 @@ void MainWindow::on_destroy() {
     KillTimer(hwnd_, kNoticeTimer);
     list_bar_.cancel(hwnd_);
     panel_bar_.cancel(hwnd_);
+    first_run_bar_.cancel(hwnd_);
     if (tray_added_) {
         NOTIFYICONDATAW nid{};
         nid.cbSize = sizeof nid;
@@ -491,6 +503,7 @@ void MainWindow::on_snapshot() {
         pending_added_ = s.added;
     }
     open_phpmyadmin_links(s.db);
+    on_first_run_answers(s);
     const bool quit_done = s.quit_done;
     const std::string quit_error = s.quit_error;
     // A project made from a template that hands over to FloCMS Studio (D9, D14).
@@ -548,6 +561,12 @@ void MainWindow::on_snapshot() {
             select(pending_added_);
             pending_added_.clear();
         }
+    }
+    // The first-run page: shown once the service has said what's there;
+    // its list asked for once the service is there.
+    decide_first_run();
+    if (first_run_open() && first_run_.step == FirstRunStep::Runtimes && first_run_.list == FirstRunState::List::Idle) {
+        first_run_ask_list();
     }
     if (just_made && worker_ && wizard_.studio) {
         worker_->open_in_studio(snap_.create.project, true);
@@ -662,6 +681,7 @@ void MainWindow::on_pref_change(WPARAM change, LPARAM value) {
     if (settings_) {
         settings_->set_prefs(prefs_, error, kept_as);
     }
+    InvalidateRect(hwnd_, nullptr, FALSE);  // the first-run page's language choice
 }
 
 void MainWindow::change_language(Lang lang) {
@@ -844,6 +864,10 @@ RECT MainWindow::banner_rect() const {
     if (banner().text.empty()) {
         return {};
     }
+    if (first_run_open()) {
+        // Over the page, which has no top bar.
+        return {px(kPad), px(8), width_ - px(kPad), px(8) + px(kBannerH)};
+    }
     return {px(kPad), px(kTopBarH), width_ - px(kPad), px(kTopBarH) + px(kBannerH)};
 }
 
@@ -939,6 +963,10 @@ void MainWindow::layout() {
     if (search_ == nullptr || !fonts_.button) {
         return;
     }
+    // The first-run page has no top bar: its search box goes too.
+    if ((IsWindowVisible(search_) != FALSE) == first_run_open()) {
+        ShowWindow(search_, first_run_open() ? SW_HIDE : SW_SHOWNA);
+    }
     const RECT box = search_box();
     const int icon_area = px(10 + 14 + 8);
     const int h = px(20);
@@ -963,7 +991,7 @@ void MainWindow::layout() {
         ti.cbSize = sizeof ti;
         ti.hwnd = hwnd_;
         ti.uId = id;
-        ti.rect = rect;
+        ti.rect = first_run_open() ? RECT{} : rect;
         SendMessageW(tooltip_, TTM_NEWTOOLRECTW, 0, reinterpret_cast<LPARAM>(&ti));
     }
 }
@@ -995,10 +1023,12 @@ void MainWindow::scroll_to(int target) {
 
 void MainWindow::place_scroll_bars() {
     // The list's bar only while the list is what's shown under the mouse.
-    const bool list_shown = !wizard_open();
+    const bool list_shown = !wizard_open() && !first_run_open();
     list_bar_.place(list_shown ? list_rect() : RECT{}, list_height(), scroll_, dpi_);
     panel_bar_.place(list_shown && panel_open() ? panel_geometry_.content : RECT{}, panel_content_h(), panel_scroll_,
                      dpi_);
+    first_run_bar_.place(first_run_open() ? first_run_geometry_.content : RECT{}, first_run_geometry_.content_h,
+                         first_run_.scroll, dpi_);
 }
 
 bool MainWindow::scroll_bar_mouse(UINT msg, int x, int y) {
@@ -1007,12 +1037,14 @@ bool MainWindow::scroll_bar_mouse(UINT msg, int x, int y) {
     const bool in_panel = panel_open() && contains(panel_geometry_.panel, x, y);
     switch (msg) {
         case WM_LBUTTONDOWN:
-            return panel_bar_.press(hwnd_, x, y) || (!in_panel && list_bar_.press(hwnd_, x, y));
+            return first_run_bar_.press(hwnd_, x, y) || panel_bar_.press(hwnd_, x, y) ||
+                   (!in_panel && list_bar_.press(hwnd_, x, y));
         case WM_LBUTTONUP:
-            return panel_bar_.release(hwnd_) || list_bar_.release(hwnd_);
+            return first_run_bar_.release(hwnd_) || panel_bar_.release(hwnd_) || list_bar_.release(hwnd_);
         case WM_MOUSEMOVE: {
-            const bool held = list_bar_.active() || panel_bar_.active();
-            bool changed = panel_bar_.move(hwnd_, x, y);
+            const bool held = list_bar_.active() || panel_bar_.active() || first_run_bar_.active();
+            bool changed = first_run_bar_.move(hwnd_, x, y);
+            changed = panel_bar_.move(hwnd_, x, y) || changed;
             if (!panel_bar_.active()) {
                 changed = list_bar_.move(hwnd_, in_panel ? -1 : x, in_panel ? -1 : y) || changed;
             }
@@ -1083,6 +1115,16 @@ bool MainWindow::switch_value(const ProjectRow& row) const {
 }
 
 MainWindow::Hit MainWindow::hit_test(int x, int y) const {
+    if (first_run_open()) {
+        // The page is all there is: no top bar, list or panel under it.
+        if (first_run_bar_.over(x, y)) {
+            return {};
+        }
+        if (contains(banner_rect(), x, y)) {
+            return {Part::Banner, -1, {}};
+        }
+        return first_run_hit_test(x, y);
+    }
     if (panel_bar_.over(x, y) || (list_bar_.over(x, y) && !(panel_open() && contains(panel_geometry_.panel, x, y)))) {
         return {};  // a scroll bar's
     }
@@ -1247,6 +1289,18 @@ void MainWindow::on_click(const Hit& clicked) {
         case Part::Settings:
             open_settings();
             break;
+        case Part::FrLang:
+        case Part::FrTick:
+        case Part::FrCancel:
+        case Part::FrRetry:
+        case Part::FrChange:
+        case Part::FrCreate:
+        case Part::FrAdd:
+        case Part::FrBack:
+        case Part::FrNext:
+            show_focus_ = false;
+            on_first_run_click(hit);
+            break;
         case Part::None:
             break;
     }
@@ -1256,6 +1310,10 @@ void MainWindow::on_key(WPARAM key) {
     // Ctrl+, opens Settings from anywhere in the window.
     if (key == VK_OEM_COMMA && (GetKeyState(VK_CONTROL) & 0x8000) != 0) {
         open_settings();
+        return;
+    }
+    if (first_run_open()) {
+        on_first_run_key(key);
         return;
     }
     if (wizard_open()) {
@@ -1646,7 +1704,17 @@ void MainWindow::on_paint() {
             geometry_ = row_geometry(mem.get());
             update_panel_geometry(mem.get());
             wizard_geometry_ = wizard_open() ? wizard_geometry(mem.get()) : WizardGeometry{};
-            shared_geometry_ = !wizard_open() ? shared_geometry(mem.get()) : SharedGeometry{};
+            shared_geometry_ = !wizard_open() && !first_run_open() ? shared_geometry(mem.get()) : SharedGeometry{};
+            first_run_geometry_ = FirstRunGeometry{};
+            if (first_run_open()) {
+                first_run_geometry_ = first_run_geometry(mem.get(), first_run_.scroll);
+                // Kept inside the content when it got shorter (or the window taller).
+                const int most = std::max(0, first_run_geometry_.content_h - height_of(first_run_geometry_.content));
+                if (first_run_.scroll > most) {
+                    first_run_.scroll = most;
+                    first_run_geometry_ = first_run_geometry(mem.get(), first_run_.scroll);
+                }
+            }
             place_scroll_bars();
             {
                 Canvas canvas(mem.get(), width_, rtl_);
@@ -1654,6 +1722,11 @@ void MainWindow::on_paint() {
                 for (const bool text_pass : {false, true}) {
                     if (text_pass) {
                         canvas.begin_text();
+                    }
+                    if (first_run_open()) {
+                        paint_first_run(canvas, mem.get(), text_pass);
+                        paint_banner(canvas, text_pass);
+                        continue;
                     }
                     paint_top_bar(canvas, mem.get(), text_pass);
                     paint_banner(canvas, text_pass);

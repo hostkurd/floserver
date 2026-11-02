@@ -340,6 +340,7 @@ Snapshot ServiceWorker::take() {
     latest_.settings_error.clear();
     latest_.php.clear();
     latest_.web_settings.clear();
+    latest_.first_run_ends.clear();
     latest_.custom_ini.clear();
     latest_.custom_ini_error.clear();
     latest_.custom_ini_final = false;
@@ -372,6 +373,15 @@ void ServiceWorker::run(const std::stop_token& stop) {
         std::int64_t id = 0;
         std::set<std::string> projects;
         std::string label;  // "PHP 8.2"
+        std::string name;   // "php"
+    };
+    // A job the service no longer knows (it restarted): the first-run
+    // page's row says so rather than waiting for ever.
+    std::vector<std::pair<std::string, FirstRunEnd>> forgotten;
+    const auto forget = [&forgotten](const Job& j, const std::string& why) {
+        if (std::any_of(j.projects.begin(), j.projects.end(), [](const std::string& p) { return is_first_run_key(p); })) {
+            forgotten.emplace_back(j.name, FirstRunEnd{"failed", why});
+        }
     };
     std::vector<Job> jobs;
     std::int64_t create_job = 0;  // the project being made, followed until it ends
@@ -453,6 +463,9 @@ void ServiceWorker::run(const std::stop_token& stop) {
             client = connect();
             // Job ids belong to the service that gave them; a new one starts again at 1.
             if (client && !jobs.empty()) {
+                for (const Job& j : jobs) {
+                    forget(j, std::string(text(lang_, Str::ConnectionLost)));
+                }
                 jobs.clear();
                 need_installed = true;
             }
@@ -480,6 +493,7 @@ void ServiceWorker::run(const std::stop_token& stop) {
         std::vector<Snapshot::PhpAnswer> php_answers;
         std::vector<Snapshot::WebSettingsAnswer> web_answers;
         std::vector<Snapshot::DbAnswer> db_answers;
+        std::vector<std::pair<std::string, FirstRunEnd>> first_run_ends = std::exchange(forgotten, {});
         std::string custom_ini;
         std::string custom_ini_error;
         bool custom_ini_final = false;
@@ -641,27 +655,42 @@ void ServiceWorker::run(const std::stop_token& stop) {
                 case Command::Kind::Install: {
                     settled.push_back(install_key(c.project));
                     std::string& install_error = is_settings_key(c.project) ? settings_error : change_error;
-                    for (const Download& d : c.downloads) {
+                    // The first-run page shows each refusal on its own row.
+                    const bool first_run = is_first_run_key(c.project);
+                    const auto refused = [&](const Download& d, const std::string& label, const std::string& why) {
+                        if (first_run) {
+                            first_run_ends.emplace_back(d.name, FirstRunEnd{"failed", why});
+                        } else {
+                            install_error = fill(lang_, Str::DownloadFailed, {label, why});
+                        }
+                    };
+                    for (std::size_t k = 0; k < c.downloads.size(); ++k) {
+                        const Download& d = c.downloads[k];
                         const std::string label = runtime_label(d.name) + (d.version.empty() ? "" : " " + d.version);
                         nlohmann::json params = {{"name", d.name}};
                         if (!d.version.empty()) {
                             params["version"] = d.version;
                         }
                         std::optional<core::protocol::Reply> started;
-                        if (!client) {
-                            install_error = fill(lang_, Str::DownloadFailed, {label, lost});
-                            break;
+                        if (client) {
+                            started = client->call("runtimes.install", params);
+                            if (!started) {
+                                client.reset();
+                            }
                         }
-                        started = client->call("runtimes.install", params);
                         if (!started) {
-                            client.reset();
-                            install_error = fill(lang_, Str::DownloadFailed, {label, lost});
+                            // Not sent: the connection is gone (the rest too, on the page).
+                            for (std::size_t r = k; r < c.downloads.size() && (first_run || r == k); ++r) {
+                                const Download& left = c.downloads[r];
+                                refused(left, runtime_label(left.name) + (left.version.empty() ? "" : " " + left.version),
+                                        lost);
+                            }
                             break;
                         }
                         if (!started->ok || !started->result.contains("job") ||
                             !started->result["job"].is_number_integer()) {
                             const std::string why = started->ok ? std::string("no job") : started->error_message;
-                            install_error = fill(lang_, Str::DownloadFailed, {label, why});
+                            refused(d, label, why);
                             continue;
                         }
                         const auto id = started->result["job"].get<std::int64_t>();
@@ -669,7 +698,7 @@ void ServiceWorker::run(const std::stop_token& stop) {
                         if (same != jobs.end()) {
                             same->projects.insert(c.project);
                         } else {
-                            jobs.push_back({id, {c.project}, label});
+                            jobs.push_back({id, {c.project}, label, d.name});
                         }
                     }
                     break;
@@ -813,14 +842,14 @@ void ServiceWorker::run(const std::stop_token& stop) {
                     break;
                 case Command::Kind::WebSettings: {
                     Snapshot::WebSettingsAnswer answer{c.key, std::nullopt, {}};
-                    if (client && c.key == "reload") {
+                    if (client && (c.key == "reload" || c.key == kFirstRunReload)) {
                         // The CA was trusted or removed here: sites switch now.
                         if (const auto reloaded = client->call("web.reload", nlohmann::json::object()); !reloaded) {
                             client.reset();
                         }
                     }
                     const char* method = c.key == "set" ? "web.settings.set"
-                                         : c.key == "ca" ? "certs.ensure_ca"
+                                         : c.key == "ca" || c.key == kFirstRunCa ? "certs.ensure_ca"
                                                          : "web.settings.get";
                     if (!client) {
                         answer.error = lost;
@@ -930,18 +959,32 @@ void ServiceWorker::run(const std::stop_token& stop) {
                 }
                 if (!got->ok || !got->result.is_object()) {
                     need_installed = true;  // forgotten by a restarted service: ask what's there
+                    forget(j, got->ok ? std::string("the service's answer was unreadable") : got->error_message);
                     continue;
                 }
                 const std::string state = string_field(got->result, "state");
                 if (state == "done") {
                     any_done = true;
                     need_installed = true;
-                } else if (state == "failed") {
-                    // Settings' own installs say so in Settings; the rest in the main window.
-                    const bool settings_only = std::all_of(j.projects.begin(), j.projects.end(), is_settings_key);
-                    (settings_only ? settings_error : change_error) =
-                        fill(lang_, Str::DownloadFailed, {j.label, string_field(got->result, "message")});
-                } else if (state != "cancelled") {
+                } else if (state == "failed" || state == "cancelled") {
+                    // The first-run page shows how its own ended on their rows.
+                    const bool first_run = std::any_of(j.projects.begin(), j.projects.end(),
+                                                       [](const std::string& p) { return is_first_run_key(p); });
+                    if (first_run) {
+                        first_run_ends.emplace_back(string_field(got->result, "name"),
+                                                    FirstRunEnd{state, string_field(got->result, "message")});
+                    }
+                    const bool others = !std::all_of(j.projects.begin(), j.projects.end(),
+                                                     [](const std::string& p) { return is_first_run_key(p); });
+                    if (state == "failed" && others) {
+                        // Settings' own installs say so in Settings; the rest in the main window.
+                        const bool settings_only = std::all_of(j.projects.begin(), j.projects.end(), [](const std::string& p) {
+                            return is_settings_key(p) || is_first_run_key(p);
+                        });
+                        (settings_only ? settings_error : change_error) =
+                            fill(lang_, Str::DownloadFailed, {j.label, string_field(got->result, "message")});
+                    }
+                } else {
                     if (auto job = runtime_job(got->result)) {
                         runtime_jobs.push_back(std::move(*job));
                     }
@@ -1064,6 +1107,9 @@ void ServiceWorker::run(const std::stop_token& stop) {
         }
         for (auto& answer : db_answers) {
             latest_.db.push_back(std::move(answer));
+        }
+        for (auto& end : first_run_ends) {
+            latest_.first_run_ends.push_back(std::move(end));
         }
         if (!custom_ini.empty() || !custom_ini_error.empty()) {
             latest_.custom_ini = std::move(custom_ini);

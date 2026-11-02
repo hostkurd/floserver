@@ -23,6 +23,7 @@ void apply_title_bar(HWND hwnd, bool dark);
 
 struct UiFonts {
     win::UniqueFont title;
+    win::UniqueFont hero;  // the first-run page's titles, 24 px
     win::UniqueFont panel_title;
     win::UniqueFont mono;
     win::UniqueFont body;

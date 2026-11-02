@@ -40,6 +40,8 @@ struct WindowPrefs {
     // What starting with Windows opens: the tray only (true) or the window.
     // Kept here too so the choice survives turning the Run entry off and on.
     bool start_in_tray = true;
+    // The first-run page was finished, skipped or closed: it doesn't show again.
+    bool first_run_done = false;
     bool operator==(const WindowPrefs&) const = default;
 };
 

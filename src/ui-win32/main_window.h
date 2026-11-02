@@ -7,6 +7,7 @@
 
 #include "canvas.h"
 #include "form_parts.h"
+#include "model/first_run.h"
 #include "model/php_page.h"
 #include "model/ui_strings.h"
 #include "scroll_bar.h"
@@ -81,7 +82,16 @@ private:
         SharedEnd,       // the address, or the Download button
         SharedOpen,      // Open folder
         SharedGear,      // its settings: Settings > Shared sites
-        // The Shared sites settings page; `row` is the field's index.
+        // The first-run page; `row` is the language's, runtime's or download's index.
+        FrLang,
+        FrTick,
+        FrCancel,
+        FrRetry,
+        FrChange,
+        FrCreate,
+        FrAdd,
+        FrBack,
+        FrNext,
     };
     enum class PanelAction : std::uint8_t { Browser, Folder, Terminal, Studio, Download };
     [[nodiscard]] static constexpr bool is_panel_part(Part part) {
@@ -228,6 +238,63 @@ private:
         std::string end_text;
         RECT open{};
         RECT gear{};
+    };
+    // The first-run page (approved 2 Nov): what's chosen and how far it got.
+    // It belongs to this object, not the window, so it's kept when the
+    // window is made again in another language.
+    struct FirstRunState {
+        bool decided = false;  // shown or not: asked once
+        bool open = false;
+        FirstRunStep step = FirstRunStep::Language;
+        Lang system_lang = Lang::En;  // what "Same as Windows" gives
+        // Step 2: runtimes.list's answer, asked when the step is first shown.
+        enum class List : std::uint8_t { Idle, Loading, Ready, Failed } list = List::Idle;
+        bool refreshing = false;  // a fresh list was asked for
+        std::string list_error;
+        std::vector<FirstRunOffer> offers;
+        std::vector<bool> ticks;
+        // "Download and continue": what was asked for, and how the ones
+        // that weren't installed ended.
+        bool started = false;
+        std::vector<Download> wanted;
+        std::map<std::string, FirstRunEnd> ends;
+        FirstRunTrust trust = FirstRunTrust::NotAsked;
+        std::string trust_error;
+        std::string ca_der;  // base64, from certs.ensure_ca
+        // Step 3: the projects folder chosen with Change… (folders.set).
+        std::string folder;
+        std::string folder_ask;  // the folders.set on its way (its purpose)
+        std::string folder_picked;
+        int scroll = 0;
+        int focus = -1;  // index into first_run_focus_order(); -1: none
+    };
+    // Its pieces, from the last paint.
+    struct FirstRunGeometry {
+        RECT area{};
+        RECT steps{};
+        RECT content{};  // the part that scrolls, between the steps and the footer
+        int content_h = 0;
+        RECT title{};
+        RECT intro{};
+        RECT legend{};
+        RECT card{};
+        std::vector<RECT> rows;
+        std::vector<RECT> cancels;   // a download row's Cancel; empty when it has none
+        std::vector<RECT> details;   // step 3: each row's second line
+        RECT note{};
+        RECT info{};       // the certificate's box
+        RECT info_note{};  // the line under it
+        RECT message{};    // loading, or why the list couldn't be had
+        RECT retry{};
+        RECT change{};
+        RECT create{};
+        RECT add{};
+        RECT footer{};
+        RECT footer_text{};
+        RECT back{};
+        RECT next{};
+        Str next_label = Str::WizardNext;
+        bool next_primary = true;
     };
     // Step 3 and the job not finished yet (also before its first answer).
     [[nodiscard]] bool wizard_running() const;
@@ -397,6 +464,34 @@ private:
     void on_wizard_key(WPARAM key);
     void paint_wizard(Canvas& c, HDC dc, bool text_pass) const;
 
+    // --- the first-run page (main_window_first_run.cpp) ---
+    [[nodiscard]] bool first_run_open() const { return first_run_.open; }
+    // Shown when it's wanted (first_run_wanted), once the service has
+    // answered; FLOSERVER_FIRST_RUN=1 shows it at once.
+    void decide_first_run();
+    void open_first_run();
+    // Done: finished, skipped or the window closed. Marked in window.json.
+    void finish_first_run();
+    void first_run_ask_list();
+    // The snapshot's answers for the page (the list, the CA, folders.set, how installs ended).
+    void on_first_run_answers(Snapshot& s);
+    void first_run_start_downloads();
+    // Windows' own question, after certs.ensure_ca's answer (kFirstRunTrustMessage).
+    void first_run_trust_now();
+    void first_run_change_folder();
+    [[nodiscard]] std::string first_run_folder() const;
+    [[nodiscard]] std::vector<FirstRunRow> first_run_rows_now() const;
+    [[nodiscard]] FirstRunGeometry first_run_geometry(HDC dc, int scroll) const;
+    [[nodiscard]] Hit first_run_hit_test(int x, int y) const;
+    [[nodiscard]] std::vector<Hit> first_run_focus_order() const;
+    [[nodiscard]] RECT first_run_rect_of(const Hit& hit) const;
+    void first_run_scroll_to(int target);
+    void on_first_run_click(const Hit& hit);
+    void on_first_run_key(WPARAM key);
+    void paint_first_run(Canvas& c, HDC dc, bool text_pass) const;
+    // Documents\FloServer: where new projects go when the service has no projects folder yet.
+    [[nodiscard]] static std::string default_projects_parent();
+
     // --- Shared sites (main_window_shared.cpp) ---
     [[nodiscard]] bool shows_shared() const;  // the row is there: shared.get has answered
     [[nodiscard]] bool shared_switch_value() const;
@@ -484,6 +579,8 @@ private:
 
     WizardState wizard_;
     mutable WizardGeometry wizard_geometry_;
+    FirstRunState first_run_;
+    mutable FirstRunGeometry first_run_geometry_;
     HWND name_edit_ = nullptr;  // the New project name box
 
     std::string selected_;  // the project whose panel is open
@@ -545,8 +642,14 @@ private:
     // last layout before each mouse message and paint.
     static constexpr UINT_PTR kListScrollTimer = 3;
     static constexpr UINT_PTR kPanelScrollTimer = 4;
+    static constexpr UINT_PTR kFirstRunScrollTimer = 5;
+    // Posted after certs.ensure_ca's answer: Windows' question is asked outside on_snapshot.
+    static constexpr UINT kFirstRunTrustMessage = WM_APP + 8;
+    // Settings > General (or the first-run page): a preference changed; wparam PrefChange, lparam the index.
+    static constexpr UINT kPrefsMessage = WM_APP + 7;
     ScrollBar list_bar_{kListScrollTimer, [this](int offset) { scroll_to(offset); }};
     ScrollBar panel_bar_{kPanelScrollTimer, [this](int offset) { panel_scroll_to(offset); }};
+    ScrollBar first_run_bar_{kFirstRunScrollTimer, [this](int offset) { first_run_scroll_to(offset); }};
     Hit hover_;
     Hit pressed_;
     int focus_ = -1;  // keyboard focus in the list

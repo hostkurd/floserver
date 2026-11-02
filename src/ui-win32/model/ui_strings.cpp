@@ -824,6 +824,155 @@ constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
     Entry{Str::LicencesNotRead, "Not read yet: open Licences again in a moment.",
           "لم تُقرأ بعد: افتح التراخيص مرة أخرى بعد لحظة.",
           "هێشتا نەخوێندراونەتەوە: دوای کەمێک مۆڵەتەکان دووبارە بکەرەوە."},
+    // The first-run page (approved 2 Nov). Arabic and Kurdish need a native read.
+    Entry{Str::FirstRunStepLanguage, "Language", "اللغة", "زمان"},
+    Entry{Str::FirstRunStepRuntimes, "Runtimes", "بيئات التشغيل", "ژینگەکانی کارپێکردن"},
+    Entry{Str::FirstRunStepReady, "Ready", "جاهز", "ئامادەیە"},
+    Entry{Str::FirstRunWelcome, "Welcome to FloServer", "مرحبًا بك في " FLO_LRI "FloServer" FLO_PDI,
+          "بەخێربێیت بۆ " FLO_LRI "FloServer" FLO_PDI},
+    Entry{Str::FirstRunIntro,
+          "PHP, Node.js, Python and MariaDB projects on this computer, each with its own versions and an https "
+          "address. First, pick the language for FloServer.",
+          "مشاريع " FLO_LRI "PHP" FLO_PDI " و" FLO_LRI "Node.js" FLO_PDI " و" FLO_LRI "Python" FLO_PDI " و" FLO_LRI
+          "MariaDB" FLO_PDI " على هذا الكمبيوتر، لكلٍّ منها إصداراته وعنوان " FLO_LRI "https" FLO_PDI
+          " خاص به. أولًا، اختر لغة " FLO_LRI "FloServer" FLO_PDI ".",
+          "پڕۆژەکانی " FLO_LRI "PHP" FLO_PDI " و " FLO_LRI "Node.js" FLO_PDI " و " FLO_LRI "Python" FLO_PDI " و " FLO_LRI
+          "MariaDB" FLO_PDI " لەسەر ئەم کۆمپیوتەرە، هەریەکەیان بە وەشانەکانی خۆی و ناونیشانێکی " FLO_LRI "https" FLO_PDI
+          ". سەرەتا زمانی " FLO_LRI "FloServer" FLO_PDI " هەڵبژێرە."},
+    Entry{Str::FirstRunLanguageNow, "{0} now", "{0} الآن", "ئێستا {0}"},
+    Entry{Str::FirstRunSorani, "Sorani", "السورانية", "سۆرانی"},
+    Entry{Str::FirstRunLanguageNote,
+          "The page changes at once. Later: Settings → General, with the theme and Start with Windows.",
+          "تتغيّر الصفحة فورًا. لاحقًا: الإعدادات ← عام، مع المظهر والبدء مع " FLO_LRI "Windows" FLO_PDI ".",
+          "پەڕەکە یەکسەر دەگۆڕێت. دواتر: ڕێکخستنەکان ← گشتی، لەگەڵ ڕووکار و دەستپێکردن لەگەڵ " FLO_LRI "Windows" FLO_PDI
+          "."},
+    Entry{Str::FirstRunPrivacy,
+          "No account and nothing sent about you. Every download is checked against FloServer's signed list.",
+          "لا حساب ولا يُرسل شيء عنك. كل تنزيل يُتحقق منه مقابل قائمة " FLO_LRI "FloServer" FLO_PDI " الموقّعة.",
+          "هیچ هەژمارێک نییە و هیچ شتێک دەربارەی تۆ نانێردرێت. هەموو داگرتنێک بە لیستە واژووکراوەکەی " FLO_LRI
+          "FloServer" FLO_PDI " دەپشکنرێت."},
+    Entry{Str::FirstRunRuntimesTitle, "What should FloServer download now?",
+          "ماذا ينزّل " FLO_LRI "FloServer" FLO_PDI " الآن؟", FLO_LRI "FloServer" FLO_PDI " ئێستا چی دابگرێت؟"},
+    Entry{Str::FirstRunRuntimesIntro,
+          "Each file is checked before it's used. Other versions, and removing these, are in Settings → Runtimes. A "
+          "project that needs something missing offers to download it.",
+          "يُتحقق من كل ملف قبل استخدامه. الإصدارات الأخرى وإزالة هذه في الإعدادات ← بيئات التشغيل. المشروع الذي "
+          "يحتاج شيئًا غير موجود يعرض تنزيله.",
+          "هەموو فایلێک پێش بەکارهێنان دەپشکنرێت. وەشانەکانی تر و سڕینەوەی ئەمانە لە ڕێکخستنەکان ← ژینگەکانی کارپێکردن "
+          "دان. پڕۆژەیەک کە شتێکی نەبووی پێویست بێت، داگرتنی پێشنیار دەکات."},
+    Entry{Str::FirstRunWhatPhp, "newest", "الأحدث", "نوێترین"},
+    Entry{Str::FirstRunWhatMariadb, "long-term support; a database and user per project",
+          "دعم طويل الأمد؛ قاعدة بيانات ومستخدم لكل مشروع", "پشتگیریی درێژخایەن؛ بنکەدراوە و بەکارهێنەرێک بۆ هەر پڕۆژەیەک"},
+    Entry{Str::FirstRunWhatNode, "long-term support", "دعم طويل الأمد", "پشتگیریی درێژخایەن"},
+    Entry{Str::FirstRunWhatComposer, "PHP packages", "حزم " FLO_LRI "PHP" FLO_PDI, "پاکێجەکانی " FLO_LRI "PHP" FLO_PDI},
+    Entry{Str::FirstRunWhatPython, "with pip and venv; for FastAPI, Django and Flask",
+          "مع " FLO_LRI "pip" FLO_PDI " و" FLO_LRI "venv" FLO_PDI "؛ لـ " FLO_LRI "FastAPI" FLO_PDI " و" FLO_LRI "Django"
+          FLO_PDI " و" FLO_LRI "Flask" FLO_PDI,
+          "لەگەڵ " FLO_LRI "pip" FLO_PDI " و " FLO_LRI "venv" FLO_PDI "؛ بۆ " FLO_LRI "FastAPI" FLO_PDI " و " FLO_LRI
+          "Django" FLO_PDI " و " FLO_LRI "Flask" FLO_PDI},
+    Entry{Str::FirstRunWhatPma, "look after databases in the browser", "إدارة قواعد البيانات في المتصفح",
+          "بەڕێوەبردنی بنکەدراوەکان لە وێبگەڕدا"},
+    Entry{Str::FirstRunWhatApache, "only for projects that need .htaccess",
+          "فقط للمشاريع التي تحتاج " FLO_LRI ".htaccess" FLO_PDI,
+          "تەنها بۆ ئەو پڕۆژانەی " FLO_LRI ".htaccess" FLO_PDI " یان پێویستە"},
+    Entry{Str::FirstRunWhatNginx, "always included; it serves every project", "مضمَّن دائمًا؛ يخدم كل المشاريع",
+          "هەمیشە لەگەڵدایە؛ خزمەتی هەموو پڕۆژەکان دەکات"},
+    Entry{Str::FirstRunCertNote,
+          "While the files download, Windows asks once whether to trust FloServer's certificate, so projects open on "
+          "https without warnings. It only works for .localhost addresses, and needs no administrator rights.",
+          "أثناء تنزيل الملفات، يسأل " FLO_LRI "Windows" FLO_PDI " مرة واحدة إن كان يثق بشهادة " FLO_LRI "FloServer"
+          FLO_PDI "، لتُفتح المشاريع على " FLO_LRI "https" FLO_PDI " دون تحذيرات. تعمل فقط مع عناوين " FLO_LRI
+          ".localhost" FLO_PDI "، ولا تحتاج صلاحيات المسؤول.",
+          "لە کاتی داگرتنی فایلەکاندا، " FLO_LRI "Windows" FLO_PDI " یەک جار دەپرسێت ئایا متمانە بە بڕوانامەی " FLO_LRI
+          "FloServer" FLO_PDI " بکات، بۆ ئەوەی پڕۆژەکان بێ ئاگادارکردنەوە بە " FLO_LRI "https" FLO_PDI
+          " بکرێنەوە. تەنها بۆ ناونیشانەکانی " FLO_LRI ".localhost" FLO_PDI " کار دەکات و مافی بەڕێوەبەری ناوێت."},
+    Entry{Str::FirstRunTotal, "{0} to download · kept in your user folder", "{0} للتنزيل · تُحفظ في مجلد المستخدم",
+          "{0} بۆ داگرتن · لە بوخچەی بەکارهێنەرەکەت هەڵدەگیرێت"},
+    Entry{Str::FirstRunDownload, "Download and continue", "تنزيل ومتابعة", "داگرتن و بەردەوامبوون"},
+    Entry{Str::FirstRunLoading, "Getting the list of runtimes…", "جارٍ جلب قائمة بيئات التشغيل…",
+          "لیستی ژینگەکانی کارپێکردن وەردەگیرێت…"},
+    Entry{Str::FirstRunListFailed, "Couldn't get the list of runtimes: {0}", "تعذّر جلب قائمة بيئات التشغيل: {0}",
+          "لیستی ژینگەکانی کارپێکردن وەرنەگیرا: {0}"},
+    Entry{Str::FirstRunNoRuntimes, "The list has nothing for this computer.", "لا تحوي القائمة شيئًا لهذا الكمبيوتر.",
+          "لیستەکە هیچی بۆ ئەم کۆمپیوتەرە تێدا نییە."},
+    Entry{Str::FirstRunTryAgain, "Try again", "أعد المحاولة", "دووبارە هەوڵ بدەرەوە"},
+    Entry{Str::FirstRunSkip, "Skip for now", "تخطَّ الآن", "ئێستا بیپەڕێنە"},
+    Entry{Str::FirstRunDownloadingTitle, "Downloading…", "جارٍ التنزيل…", "دادەگیرێت…"},
+    Entry{Str::FirstRunDownloadedTitle, "Downloads finished", "انتهت التنزيلات", "داگرتنەکان تەواو بوون"},
+    Entry{Str::FirstRunDownloadingIntro,
+          "{0} of {1} ready. You can go on to the next step; the downloads keep going, also if you close the window.",
+          "{0} من {1} جاهز. يمكنك المتابعة إلى الخطوة التالية؛ تستمر التنزيلات حتى لو أغلقت النافذة.",
+          "{0} لە {1} ئامادەیە. دەتوانیت بچیتە هەنگاوی دواتر؛ داگرتنەکان بەردەوام دەبن، تەنانەت ئەگەر پەنجەرەکە "
+          "دابخەیت."},
+    Entry{Str::FirstRunRowReady, "Ready", "جاهز", "ئامادەیە"},
+    Entry{Str::FirstRunRowWaiting, "Waiting", "في الانتظار", "چاوەڕێ دەکات"},
+    Entry{Str::FirstRunRowFailed, "Failed: {0}", "فشل: {0}", "سەرکەوتوو نەبوو: {0}"},
+    Entry{Str::FirstRunRowCancelled, "Cancelled", "أُلغي", "هەڵوەشێنرایەوە"},
+    Entry{Str::FirstRunTrustAsking,
+          "Windows is asking whether to trust FloServer's certificate. Choose Yes for https without warnings.",
+          "يسأل " FLO_LRI "Windows" FLO_PDI " إن كان يثق بشهادة " FLO_LRI "FloServer" FLO_PDI ". اختر نعم لـ " FLO_LRI
+          "https" FLO_PDI " دون تحذيرات.",
+          FLO_LRI "Windows" FLO_PDI " دەپرسێت ئایا متمانە بە بڕوانامەی " FLO_LRI "FloServer" FLO_PDI
+          " بکات. بەڵێ هەڵبژێرە بۆ " FLO_LRI "https" FLO_PDI " بێ ئاگادارکردنەوە."},
+    Entry{Str::FirstRunTrustAskingNote,
+          "If you choose No, projects open on http and nothing else changes. Trust again any time in Settings → Ports "
+          "& HTTPS.",
+          "إن اخترت لا، تُفتح المشاريع على " FLO_LRI "http" FLO_PDI " ولا يتغيّر شيء آخر. يمكنك الثقة بها لاحقًا في "
+          "الإعدادات ← المنافذ و" FLO_LRI "HTTPS" FLO_PDI ".",
+          "ئەگەر نەخێر هەڵبژێریت، پڕۆژەکان بە " FLO_LRI "http" FLO_PDI
+          " دەکرێنەوە و هیچی تر ناگۆڕێت. هەر کاتێک لە ڕێکخستنەکان ← پۆرتەکان و " FLO_LRI "HTTPS" FLO_PDI
+          " دەتوانیت دووبارە متمانەی پێ بکەیت."},
+    Entry{Str::FirstRunTrustNo,
+          "You chose No: projects open on http. Trust again any time in Settings → Ports & HTTPS.",
+          "اخترت لا: تُفتح المشاريع على " FLO_LRI "http" FLO_PDI ". يمكنك الثقة بها لاحقًا في الإعدادات ← المنافذ و"
+          FLO_LRI "HTTPS" FLO_PDI ".",
+          "نەخێرت هەڵبژارد: پڕۆژەکان بە " FLO_LRI "http" FLO_PDI " دەکرێنەوە. هەر کاتێک لە ڕێکخستنەکان ← پۆرتەکان و "
+          FLO_LRI "HTTPS" FLO_PDI " دەتوانیت دووبارە متمانەی پێ بکەیت."},
+    Entry{Str::FirstRunTrustFailed, "The certificate wasn't added: {0}. Try again in Settings → Ports & HTTPS.",
+          "لم تُضف الشهادة: {0}. أعد المحاولة في الإعدادات ← المنافذ و" FLO_LRI "HTTPS" FLO_PDI ".",
+          "بڕوانامەکە زیاد نەکرا: {0}. لە ڕێکخستنەکان ← پۆرتەکان و " FLO_LRI "HTTPS" FLO_PDI " دووبارە هەوڵ بدەرەوە."},
+    Entry{Str::FirstRunTrusted, "Windows trusts FloServer's certificate. Projects open at https://name.localhost.",
+          "يثق " FLO_LRI "Windows" FLO_PDI " بشهادة " FLO_LRI "FloServer" FLO_PDI ". تُفتح المشاريع على " FLO_LRI
+          "https://name.localhost" FLO_PDI ".",
+          FLO_LRI "Windows" FLO_PDI " متمانە بە بڕوانامەی " FLO_LRI "FloServer" FLO_PDI " دەکات. پڕۆژەکان لە " FLO_LRI
+          "https://name.localhost" FLO_PDI " دەکرێنەوە."},
+    Entry{Str::FirstRunReadyTitle, "FloServer is ready", FLO_LRI "FloServer" FLO_PDI " جاهز",
+          FLO_LRI "FloServer" FLO_PDI " ئامادەیە"},
+    Entry{Str::FirstRunHttps, "HTTPS", FLO_LRI "HTTPS" FLO_PDI, FLO_LRI "HTTPS" FLO_PDI},
+    Entry{Str::FirstRunStillDownloading, "still downloading: {0} of {1} ready", "ما زال التنزيل جاريًا: {0} من {1} جاهز",
+          "هێشتا دادەگیرێت: {0} لە {1} ئامادەیە"},
+    Entry{Str::FirstRunDidntDownload, "{0} didn't download; try again in Settings → Runtimes",
+          "لم يُنزَّل {0}؛ أعد المحاولة في الإعدادات ← بيئات التشغيل",
+          "{0} دانەگیرا؛ لە ڕێکخستنەکان ← ژینگەکانی کارپێکردن دووبارە هەوڵ بدەرەوە"},
+    Entry{Str::FirstRunNothingYet, "Nothing downloaded yet. Settings → Runtimes has every version.",
+          "لم يُنزَّل شيء بعد. كل الإصدارات في الإعدادات ← بيئات التشغيل.",
+          "هێشتا هیچ دانەگیراوە. هەموو وەشانەکان لە ڕێکخستنەکان ← ژینگەکانی کارپێکردن دان."},
+    Entry{Str::FirstRunNotTrusted, "Not trusted: projects open on http. Trust it any time in Settings → Ports & HTTPS.",
+          "غير موثوقة: تُفتح المشاريع على " FLO_LRI "http" FLO_PDI ". يمكنك الثقة بها في أي وقت من الإعدادات ← المنافذ و"
+          FLO_LRI "HTTPS" FLO_PDI ".",
+          "متمانەی پێ نەکراوە: پڕۆژەکان بە " FLO_LRI "http" FLO_PDI " دەکرێنەوە. هەر کاتێک لە ڕێکخستنەکان ← پۆرتەکان و "
+          FLO_LRI "HTTPS" FLO_PDI " متمانەی پێ بکە."},
+    Entry{Str::FirstRunFolderTitle, "New projects go in", "تُنشأ المشاريع الجديدة في", "پڕۆژە نوێیەکان دەچنە"},
+    Entry{Str::FirstRunChange, "Change…", "تغيير…", "گۆڕین…"},
+    Entry{Str::FirstRunCreate, "Create your first project", "أنشئ مشروعك الأول", "یەکەم پڕۆژەکەت دروست بکە"},
+    Entry{Str::FirstRunCreateNote,
+          "Start from a template: PHP app, FloCMS, WordPress, Node app, Python app and more.",
+          "ابدأ من قالب: تطبيق " FLO_LRI "PHP" FLO_PDI " و" FLO_LRI "FloCMS" FLO_PDI " و" FLO_LRI "WordPress" FLO_PDI
+          " وتطبيق " FLO_LRI "Node" FLO_PDI " وتطبيق " FLO_LRI "Python" FLO_PDI " والمزيد.",
+          "لە قاڵبێکەوە دەست پێ بکە: بەرنامەی " FLO_LRI "PHP" FLO_PDI " و " FLO_LRI "FloCMS" FLO_PDI " و " FLO_LRI
+          "WordPress" FLO_PDI " و بەرنامەی " FLO_LRI "Node" FLO_PDI " و بەرنامەی " FLO_LRI "Python" FLO_PDI " و زیاتر."},
+    Entry{Str::FirstRunAddFolder, "Add an existing folder", "أضف مجلدًا موجودًا", "بوخچەیەکی هەبوو زیاد بکە"},
+    Entry{Str::FirstRunAddFolderNote,
+          "A project you already have. FloServer reads its floserver.json, or picks versions for it.",
+          "مشروع لديك من قبل. يقرأ " FLO_LRI "FloServer" FLO_PDI " ملف " FLO_LRI "floserver.json" FLO_PDI
+          " الخاص به، أو يختار له الإصدارات.",
+          "پڕۆژەیەک کە پێشتر هەتە. " FLO_LRI "FloServer" FLO_PDI " فایلی " FLO_LRI "floserver.json" FLO_PDI
+          " ـەکەی دەخوێنێتەوە، یان وەشانی بۆ هەڵدەبژێرێت."},
+    Entry{Str::FirstRunNextScreen, "Settings, Shared sites and the tray icon are on the next screen.",
+          "الإعدادات والمواقع المشتركة وأيقونة شريط المهام في الشاشة التالية.",
+          "ڕێکخستنەکان و ماڵپەڕە هاوبەشەکان و ئایکۆنی تاسکبار لە شاشەی دواتردان."},
+    Entry{Str::FirstRunGo, "Go to FloServer", "انتقل إلى " FLO_LRI "FloServer" FLO_PDI,
+          "بچۆ بۆ " FLO_LRI "FloServer" FLO_PDI},
 }};
 
 #undef FLO_LRI

@@ -11,7 +11,8 @@ add_library(floserver_ui_model STATIC
     model/scrollbar.cpp
     model/apache_page.cpp
     model/general_page.cpp
-    model/folders_page.cpp)
+    model/folders_page.cpp
+    model/first_run.cpp)
 target_include_directories(floserver_ui_model PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # Core for paths.h's file helpers (window.json is read and written here, testably).
 target_link_libraries(floserver_ui_model PUBLIC floserver_third_party PRIVATE floserver_core)
@@ -30,6 +31,7 @@ add_executable(floserver_ui WIN32
     main_window_php.cpp
     main_window_shared.cpp
     main_window_wizard.cpp
+    main_window_first_run.cpp
     canvas.cpp
     service_worker.cpp
     settings_window.cpp

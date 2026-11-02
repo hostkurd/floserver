@@ -75,6 +75,9 @@ WindowPrefs parse_window_prefs(std::string_view text) {
     if (doc.contains("start_in_tray") && doc["start_in_tray"].is_boolean()) {
         prefs.start_in_tray = doc["start_in_tray"].get<bool>();
     }
+    if (doc.contains("first_run_done") && doc["first_run_done"].is_boolean()) {
+        prefs.first_run_done = doc["first_run_done"].get<bool>();
+    }
     return prefs;
 }
 
@@ -110,6 +113,11 @@ std::string window_prefs_json(const WindowPrefs& prefs, const json& existing) {
     doc["theme"] = theme();
     doc["close"] = prefs.close == CloseAction::Quit ? "quit" : "tray";
     doc["start_in_tray"] = prefs.start_in_tray;
+    if (prefs.first_run_done) {
+        doc["first_run_done"] = true;
+    } else {
+        doc.erase("first_run_done");
+    }
     // A key from a hand edit may hold text that isn't UTF-8: never throw on the way out.
     return doc.dump(2, ' ', false, json::error_handler_t::replace) + "\n";
 }
