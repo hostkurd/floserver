@@ -425,6 +425,13 @@ MainWindow::PanelGeometry MainWindow::panel_geometry(HDC dc) const {
         g.keep_title = {x0, y, g.keep_switch.left - px(12), y + px(18)};
         g.keep_detail = {x0, y + px(18), g.keep_switch.left - px(12), y + px(36)};
         y += px(36) + px(kPanelGap);
+
+        // Remove from FloServer…, last (approved 2 Nov); "Removing…" while it's on its way.
+        const int rw = std::max(Canvas::measure(dc, w(text(lang_, Str::RemoveProject)), fonts_.button.get(), rtl_),
+                                Canvas::measure(dc, w(text(lang_, Str::Removing)), fonts_.button.get(), rtl_)) +
+                       px(24);
+        g.remove = {x0, y, std::min(x1, x0 + rw), y + px(kButtonH)};
+        y = g.remove.bottom + px(kPanelGap);
     } else if (tab == PanelTab::Database) {
         g.db_box = {x0, y, x1, y + px(56)};
         const int mid = y + px(28);
@@ -511,6 +518,8 @@ RECT MainWindow::panel_rect_of(const Hit& hit) const {
             return g.pma;
         case Part::PanelKeep:
             return {g.keep_title.left, g.keep_title.top, g.keep_switch.right, g.keep_detail.bottom};
+        case Part::PanelRemove:
+            return g.remove;
         case Part::PanelPhpSettings:
             return p.open_settings;
         case Part::PanelPhpChange:
@@ -587,6 +596,9 @@ MainWindow::Hit MainWindow::panel_hit_test(int x, int y) const {
     if (contains(g.keep_switch, x, y)) {
         return hit(Part::PanelKeep, -1);
     }
+    if (contains(g.remove, x, y)) {
+        return hit(Part::PanelRemove, -1);
+    }
     return {};
 }
 
@@ -620,6 +632,9 @@ std::vector<MainWindow::Hit> MainWindow::panel_focus_order() const {
     }
     if (g.keep_switch.right > g.keep_switch.left) {
         order.push_back({Part::PanelKeep, -1, g.project});
+    }
+    if (g.remove.right > g.remove.left) {
+        order.push_back({Part::PanelRemove, -1, g.project});
     }
     order.push_back({Part::PanelClose, -1, g.project});
     return order;
@@ -676,6 +691,9 @@ void MainWindow::on_panel_click(const Hit& hit) {
             break;
         case Part::PanelKeep:
             toggle_keep_running();
+            break;
+        case Part::PanelRemove:
+            ask_remove(selected_);
             break;
         default:
             break;
@@ -983,11 +1001,15 @@ void MainWindow::show_field_menu(std::size_t index) {
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
-void MainWindow::toggle_keep_running() {
-    const ProjectRow* row = selected_row();
-    if (row == nullptr || !worker_ || snap_.link != Link::Connected) {
+void MainWindow::toggle_keep_running() { toggle_keep_running_for(selected_); }
+
+void MainWindow::toggle_keep_running_for(const std::string& project) {
+    const auto found = std::find_if(snap_.rows.begin(), snap_.rows.end(),
+                                    [&](const ProjectRow& r) { return r.name == project; });
+    if (found == snap_.rows.end() || !worker_ || snap_.link != Link::Connected || leaving(project)) {
         return;
     }
+    const ProjectRow* row = &*found;
     const bool value = !keep_value(*row);
     pending_keep_[row->name] = value;
     ++outstanding_[ServiceWorker::keep_key(row->name)];
@@ -1122,6 +1144,10 @@ void MainWindow::paint_panel(Canvas& c, HDC dc, bool text_pass) const {
                 c.round_outline(ring, static_cast<float>(height_of(ring)) / 2.0F, p.focus, pxf(2));
             }
         }
+        if (g.remove.right > g.remove.left) {
+            const bool can = snap_.link == Link::Connected && !removing_.contains(row->name);
+            paint_button(c, g.remove, hovered(Part::PanelRemove, -1) && can, focused(Part::PanelRemove, -1));
+        }
         if (height_of(g.log_box) > 0) {
             c.round_rect(g.log_box, pxf(6), p.log);
         }
@@ -1211,6 +1237,13 @@ void MainWindow::paint_panel(Canvas& c, HDC dc, bool text_pass) const {
                       : fill(lang_, Str::KeepRunningOff,
                              {std::to_string(snap_.footer.idle_minutes != 0 ? snap_.footer.idle_minutes : 10)})),
                fonts_.caption.get(), p.text_subtle, Align::Start, false);
+    }
+
+    if (g.remove.right > g.remove.left) {
+        const bool busy = removing_.contains(row->name);
+        const bool can = snap_.link == Link::Connected && !busy;
+        c.text(g.remove, w(text(lang_, busy ? Str::Removing : Str::RemoveProject)), fonts_.button.get(),
+               can ? p.problem.text : p.button_disabled_text, Align::Center, false);
     }
 
     if (height_of(g.log_box) > px(kLogLineH)) {

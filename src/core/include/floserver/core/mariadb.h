@@ -94,6 +94,12 @@ struct MariaDbExtras;  // mariadb_settings.h
 [[nodiscard]] std::string project_database_sql(const std::string& database, const std::string& user,
                                                const std::string& password);
 
+// projects.remove's "drop_database" (approved 2 Nov): the project's
+// database and its user, gone for good. The user is dropped on the hosts
+// project_database_sql() makes it on (localhost, 127.0.0.1), and on ::1
+// too in case one was made by hand there. Safe to run again.
+[[nodiscard]] std::string drop_project_database_sql(const std::string& database, const std::string& user);
+
 // Shared sites' login (D19): user "www", its database "www", and it may make
 // and use any database whose name starts with "www_" (shared_database_sql).
 // No project's database can have those names (reserved_database_name).

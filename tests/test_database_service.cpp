@@ -306,6 +306,70 @@ TEST_CASE("a project's database runs on the real MariaDB, sleeps when idle and w
         CHECK(refusal.message.find("Settings → Runtimes") != std::string::npos);
     }
 
+    SUBCASE("removing a project with its database (projects.remove's drop_database)") {
+        ServiceRefusal refusal;
+        const auto login = db.project_login("my-shop", refusal);
+        REQUIRE_MESSAGE(login, refusal.message);
+        REQUIRE(query(port, "my_shop", login->password, "USE my_shop; CREATE TABLE t (x INT); SHOW TABLES") == "t");
+        const auto root = secrets.read("mariadb-10.11/root");
+        REQUIRE(root);
+        CHECK(query(port, "root", *root, "SELECT COUNT(*) FROM mysql.user WHERE User = 'my_shop'") == "2");
+
+        bool dropped = true;
+        // Reserved names are never dropped ("root" would be MariaDB's own).
+        CHECK_FALSE(db.drop_project_database("root", refusal, dropped));
+        CHECK(refusal.code == "reserved_name");
+        CHECK_FALSE(dropped);
+        CHECK_FALSE(db.drop_project_database("nobody", refusal, dropped));
+        CHECK(refusal.code == "unknown_project");
+        // Nor one another registered project's database also has (names
+        // can't have '_', so only an AppConfig made here has one).
+        AppConfig twins = app;
+        twins.projects.push_back(app.projects[1]);
+        twins.projects.back().name = "my_shop";
+        CHECK(project_sharing_database(twins, "my-shop") == std::optional<std::string>("my_shop"));
+        CHECK(project_sharing_database(twins, "my_shop") == std::optional<std::string>("my-shop"));
+        CHECK_FALSE(project_sharing_database(app, "my-shop"));
+
+        // A drop that fails keeps everything, so it can be tried again.
+        REQUIRE(secrets.save("mariadb-10.11/root", "wrong", error));
+        CHECK_FALSE(db.drop_project_database("my-shop", refusal, dropped));
+        CHECK(refusal.code == "database_failed");
+        CHECK_FALSE(dropped);
+        CHECK(refusal.message.find("wrong") == std::string::npos);
+        REQUIRE(secrets.save("mariadb-10.11/root", *root, error));
+        CHECK(query(port, "my_shop", login->password, "USE my_shop; SHOW TABLES") == "t");
+        CHECK(secrets.read("mariadb-10.11/my_shop"));
+
+        // Asleep: started for the drop, as a login is. While the project is
+        // held (projects.remove: the drop, then the removal) no login makes
+        // its database again, not even one already on its way.
+        CHECK(eventually([&] { return server_status(db)["state"] == "sleeping"; }, 20s));
+        {
+            const auto hold = db.hold_project("my-shop");
+            REQUIRE_MESSAGE(db.drop_project_database("my-shop", refusal, dropped), refusal.message);
+            CHECK(dropped);
+            CHECK_FALSE(db.project_login("my-shop", refusal));
+            CHECK(refusal.code == "removing");
+            CHECK(query(port, "root", *root, "SHOW DATABASES LIKE 'my\\_shop'").empty());
+            CHECK_FALSE(secrets.read("mariadb-10.11/my_shop"));
+        }
+        CHECK(query(port, "root", *root, "SHOW DATABASES LIKE 'my\\\\_shop'").empty());
+        CHECK(query(port, "root", *root, "SELECT COUNT(*) FROM mysql.user WHERE User = 'my_shop'") == "0");
+        CHECK(query(port, "my_shop", login->password, "SELECT 1").starts_with("ERROR"));
+        CHECK_FALSE(secrets.read("mariadb-10.11/my_shop"));
+        // Nothing else went.
+        CHECK(query(port, "root", *root, "SELECT 1") == "1");
+        // Again: nothing left to drop, and that's fine (and said).
+        CHECK(db.drop_project_database("my-shop", refusal, dropped));
+        CHECK_FALSE(dropped);
+        CHECK_FALSE(secrets.read("mariadb-10.11/my_shop"));
+        // Once the hold is gone a login works again (here the project is still registered).
+        const auto again = db.project_login("my-shop", refusal);
+        REQUIRE_MESSAGE(again, refusal.message);
+        CHECK(again->password != login->password);
+    }
+
     SUBCASE("a lost root password is replaced") {
         ServiceRefusal refusal;
         const auto login = db.project_login("my-shop", refusal);

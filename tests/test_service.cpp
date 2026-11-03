@@ -107,6 +107,43 @@ TEST_CASE("the real service starts, answers, refuses a second copy and stops") {
     CHECK(gone->error_code == "unknown_project");
     CHECK(std::filesystem::is_directory(shop));
 
+    // Removed with its database (approved 2 Nov): the names are the
+    // service's own, a reserved one is refused (the project stays), and
+    // with no MariaDB installed there's nothing to drop.
+    {
+        const std::filesystem::path db_shop = data.path() / "db-shop";
+        test_util::write_file(db_shop / "floserver.json", R"({"php": "8.5", "database": "mariadb-11.4"})");
+        const std::filesystem::path root = data.path() / "root";
+        test_util::write_file(root / "floserver.json", R"({"php": "8.5", "database": "mariadb-11.4"})");
+        for (const auto& dir : {db_shop, root}) {
+            const auto add = client->call("projects.add", {{"path", path_to_utf8(dir)}});
+            REQUIRE(add.has_value());
+            REQUIRE_MESSAGE(add->ok, add->error_message);
+        }
+        const auto bad = client->call("projects.remove", {{"name", "db-shop"}, {"drop_database", "yes"}});
+        REQUIRE(bad.has_value());
+        CHECK(bad->error_code == "bad_params");
+        const auto reserved = client->call("projects.remove", {{"name", "root"}, {"drop_database", true}});
+        REQUIRE(reserved.has_value());
+        CHECK(reserved->error_code == "reserved_name");
+        const auto nobody = client->call("projects.remove", {{"name", "nobody"}, {"drop_database", true}});
+        REQUIRE(nobody.has_value());
+        CHECK(nobody->error_code == "unknown_project");
+        // A database name in the request is never used.
+        const auto dropped = client->call("projects.remove",
+                                          {{"name", "db-shop"}, {"drop_database", true}, {"database", "mysql"}});
+        REQUIRE(dropped.has_value());
+        CHECK_MESSAGE(dropped->ok, dropped->error_message);
+        CHECK(dropped->result["database_dropped"] == false);  // none to drop: not said to be deleted
+        const auto plain = client->call("projects.remove", {{"name", "root"}, {"drop_database", false}});
+        REQUIRE(plain.has_value());
+        CHECK_MESSAGE(plain->ok, plain->error_message);
+        const auto left = client->call("projects.list");
+        REQUIRE(left.has_value());
+        CHECK(left->result["projects"].empty());
+        CHECK(std::filesystem::is_regular_file(db_shop / "floserver.json"));
+    }
+
     // Settings → Folders over the channel: where projects are made (what
     // projects.list hands the New project wizard), the data folder's size,
     // and a clean-up.

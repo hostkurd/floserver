@@ -318,6 +318,10 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             return 0;
         }
         case WM_KEYDOWN:
+            // The menu key: Windows makes it a WM_CONTEXTMENU (as Shift+F10).
+            if (wparam == VK_APPS) {
+                break;
+            }
             // A held Space would queue a command per repeat.
             if (wparam == VK_SPACE && (static_cast<std::uintptr_t>(lparam) & (1U << 30U)) != 0) {
                 return 0;
@@ -328,6 +332,13 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
         case WM_KILLFOCUS:
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
+        case WM_CONTEXTMENU:
+            // A row's menu (a right-click, the menu key, Shift+F10); a box's own goes to the box.
+            if (win::int_to_ptr<HWND>(wparam) == hwnd_) {
+                on_context_menu(lparam);
+                return 0;
+            }
+            break;
         case WM_TIMER:
             if (list_bar_.tick(hwnd_, wparam) || panel_bar_.tick(hwnd_, wparam) || first_run_bar_.tick(hwnd_, wparam)) {
                 return 0;
@@ -509,6 +520,11 @@ void MainWindow::on_snapshot() {
         pending_added_ = s.added;
     }
     open_phpmyadmin_links(s.db);
+    const std::string error_before = change_error_;
+    const std::vector<std::pair<std::string, bool>> removed = on_remove_answers(s.db);
+    if (change_error_ != error_before && !change_error_.empty()) {
+        SetTimer(hwnd_, kErrorTimer, kErrorShownMs, nullptr);
+    }
     on_first_run_answers(s);
     const bool quit_done = s.quit_done;
     const std::string quit_error = s.quit_error;
@@ -536,6 +552,22 @@ void MainWindow::on_snapshot() {
     if (!selected_.empty() && shows_rows() && selected_row() == nullptr) {
         (void)leave_php_part(false);
         close_panel();
+    }
+    // Removed from the window: its panel closes now, and the list is asked
+    // for again (the row goes with the next answer).
+    for (const auto& [project, dropped] : removed) {
+        removed_.insert(project);
+        if (selected_ == project) {
+            (void)leave_php_part(false);
+            close_panel();
+        }
+        show_notice(fill(lang_, dropped ? Str::RemoveDoneDatabase : Str::RemoveDone, {project}), false);
+    }
+    if (!removed.empty()) {
+        update_visible();
+        if (worker_) {
+            worker_->refresh();
+        }
     }
     on_project_php_answers();
     sync_project_php();
@@ -571,7 +603,7 @@ void MainWindow::on_snapshot() {
     // The first-run page: shown once the service has said what's there;
     // its list asked for once the service is there.
     decide_first_run();
-    if (first_run_open() && first_run_.step == FirstRunStep::Runtimes && first_run_.list == FirstRunState::List::Idle) {
+    if (first_run_open() && first_run_.step == FirstRunStep::Runtimes && first_run_.list == FirstRunList::Idle) {
         first_run_ask_list();
     }
     if (just_made && worker_ && wizard_.studio) {
@@ -1006,9 +1038,13 @@ void MainWindow::layout() {
 
 void MainWindow::update_visible() {
     visible_.clear();
+    // Removed from the window: hidden at once, forgotten once the list agrees.
+    std::erase_if(removed_, [this](const std::string& name) {
+        return std::none_of(snap_.rows.begin(), snap_.rows.end(), [&](const ProjectRow& r) { return r.name == name; });
+    });
     if (shows_rows()) {
         for (std::size_t i = 0; i < snap_.rows.size(); ++i) {
-            if (row_matches(snap_.rows[i], query_)) {
+            if (row_matches(snap_.rows[i], query_) && !removed_.contains(snap_.rows[i].name)) {
                 visible_.push_back(i);
             }
         }
@@ -1249,6 +1285,7 @@ void MainWindow::on_click(const Hit& clicked) {
         case Part::PanelCopyEnv:
         case Part::PanelPhpMyAdmin:
         case Part::PanelKeep:
+        case Part::PanelRemove:
             on_panel_click(hit);
             break;
         case Part::PanelPhpSettings:
@@ -1306,6 +1343,8 @@ void MainWindow::on_click(const Hit& clicked) {
         case Part::FrAdd:
         case Part::FrBack:
         case Part::FrNext:
+        case Part::FrSkipSetup:
+        case Part::FrWithout:
             show_focus_ = false;
             on_first_run_click(hit);
             break;
@@ -1491,11 +1530,22 @@ void MainWindow::paint_search_cue(HWND edit) const {
 }
 
 void MainWindow::toggle(int visible_row) {
-    if (visible_row < 0 || visible_row >= static_cast<int>(visible_.size()) || snap_.link != Link::Connected ||
-        !worker_) {
+    if (visible_row >= 0 && visible_row < static_cast<int>(visible_.size())) {
+        toggle_project(snap_.rows[visible_[static_cast<std::size_t>(visible_row)]].name);
+    }
+}
+
+bool MainWindow::leaving(const std::string& project) const {
+    return removing_.contains(project) || removed_.contains(project);
+}
+
+void MainWindow::toggle_project(const std::string& project) {
+    const auto found = std::find_if(snap_.rows.begin(), snap_.rows.end(),
+                                    [&](const ProjectRow& r) { return r.name == project; });
+    if (found == snap_.rows.end() || snap_.link != Link::Connected || !worker_ || leaving(project)) {
         return;
     }
-    const ProjectRow& row = snap_.rows[visible_[static_cast<std::size_t>(visible_row)]];
+    const ProjectRow& row = *found;
     const bool value = !switch_value(row);
     pending_[row.name] = value;
     ++outstanding_[ServiceWorker::on_key(row.name)];

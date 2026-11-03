@@ -265,6 +265,14 @@ std::string project_database_sql(const std::string& database, const std::string&
     return sql + "FLUSH PRIVILEGES;\n";
 }
 
+std::string drop_project_database_sql(const std::string& database, const std::string& user) {
+    std::string sql = "DROP DATABASE IF EXISTS " + sql_identifier(database) + ";\n";
+    for (const char* host : {"localhost", "127.0.0.1", "::1"}) {
+        sql.append("DROP USER IF EXISTS ").append(sql_string(user)).append("@'").append(host).append("';\n");
+    }
+    return sql + "FLUSH PRIVILEGES;\n";
+}
+
 std::string shared_database_sql(const std::string& password) {
     const std::string user(kSharedDatabaseUser);
     const std::string pw = sql_string(password);

@@ -204,6 +204,60 @@ TEST_CASE("first run: the summary's words") {
     CHECK(first_run_https_line(FirstRunTrust::Failed, {}, Lang::En) != first_run_https_line(FirstRunTrust::Failed, {}, Lang::Ar));
 }
 
+TEST_CASE("first run: Skip setup and Continue without downloading (approved 2 Nov)") {
+    // Skip setup on every step, however far the list or the downloads got.
+    for (const FirstRunStep step : {FirstRunStep::Language, FirstRunStep::Runtimes, FirstRunStep::Ready}) {
+        for (const FirstRunList list : {FirstRunList::Idle, FirstRunList::Loading, FirstRunList::Ready, FirstRunList::Failed}) {
+            for (const bool started : {false, true}) {
+                CHECK(first_run_footer(step, list, started).skip_setup);
+            }
+        }
+    }
+    const FirstRunFooter language = first_run_footer(FirstRunStep::Language, FirstRunList::Idle, false);
+    CHECK_FALSE(language.back);
+    CHECK_FALSE(language.without);
+    CHECK(language.next == Str::WizardNext);
+    CHECK(language.words == Str::FirstRunPrivacy);
+
+    // Beside "Download and continue" while the list is there...
+    const FirstRunFooter offers = first_run_footer(FirstRunStep::Runtimes, FirstRunList::Ready, false);
+    CHECK(offers.back);
+    CHECK(offers.without);
+    CHECK(offers.next == Str::FirstRunDownload);
+    CHECK(offers.next_primary);
+    CHECK(offers.words == Str::FirstRunTotal);
+    // ...and while it's on its way (Download comes with it).
+    const FirstRunFooter loading = first_run_footer(FirstRunStep::Runtimes, FirstRunList::Loading, false);
+    CHECK(loading.without);
+    CHECK_FALSE(loading.next);
+    // Not once the downloads started, nor when the list failed ("Skip for now" does it).
+    const FirstRunFooter started = first_run_footer(FirstRunStep::Runtimes, FirstRunList::Ready, true);
+    CHECK_FALSE(started.without);
+    CHECK(started.next == Str::WizardNext);
+    const FirstRunFooter failed = first_run_footer(FirstRunStep::Runtimes, FirstRunList::Failed, false);
+    CHECK_FALSE(failed.without);
+    CHECK(failed.next == Str::FirstRunSkip);
+
+    const FirstRunFooter ready = first_run_footer(FirstRunStep::Ready, FirstRunList::Ready, true);
+    CHECK_FALSE(ready.back);
+    CHECK_FALSE(ready.without);
+    CHECK(ready.next == Str::FirstRunGo);
+    CHECK_FALSE(ready.next_primary);
+
+    // Step 3 after Continue without downloading: nothing asked for, and the CA's state asked once.
+    CHECK(first_run_runtimes_line({}, Lang::En, true) == "Nothing downloaded yet; a project offers what it needs.");
+    CHECK(first_run_runtimes_line({}, Lang::Ar, true) != first_run_runtimes_line({}, Lang::Ar, false));
+    CHECK(first_run_https_line(FirstRunTrust::NotAsked, {}, Lang::En) ==
+          "Not trusted: projects open on http. Trust it any time in Settings → Ports & HTTPS.");
+    CHECK(first_run_check_ca(FirstRunTrust::NotAsked, false));
+    CHECK_FALSE(first_run_check_ca(FirstRunTrust::NotAsked, true));
+    CHECK_FALSE(first_run_check_ca(FirstRunTrust::Trusted, false));
+    CHECK_FALSE(first_run_check_ca(FirstRunTrust::Asking, false));
+    // Downloads asked for still say what happened to them.
+    const std::vector<FirstRunRow> rows = first_run_rows({{"nginx", "1.30.6"}}, {{"nginx", {"1.30.6"}}}, {}, {}, Lang::En);
+    CHECK(first_run_runtimes_line(rows, Lang::En, true) == "nginx 1.30.6");
+}
+
 TEST_CASE("first run: the worker's key") {
     CHECK(is_first_run_key(kFirstRunKey));
     CHECK_FALSE(is_first_run_key("firstrun"));

@@ -18,6 +18,7 @@
 #include "floserver/core/child_process.h"
 #include "floserver/core/mariadb.h"
 #include "floserver/core/ports.h"
+#include "floserver/core/project_registry.h"
 #include "floserver/core/runtime_service.h"  // ServiceRefusal
 #include "floserver/core/secret_store.h"
 
@@ -48,6 +49,11 @@ struct DatabaseServiceConfig {
 
 inline constexpr Port kFirstInternalDatabasePort = 33100;
 
+// Another registered project whose database has the same name as
+// `project`'s (project_database_name()), or nothing. Names can't have '_',
+// so it shouldn't happen; a drop checks anyway.
+[[nodiscard]] std::optional<std::string> project_sharing_database(const AppConfig& app, const std::string& project);
+
 class DatabaseService {
 public:
     // `secrets` is copied: servers may outlive a reference.
@@ -77,6 +83,44 @@ public:
     // failed is tried again now rather than its error repeated for 30 s.
     [[nodiscard]] std::optional<DatabaseLogin> project_login(const std::string& project, ServiceRefusal& refusal,
                                                              bool retry_failed = false);
+
+    // projects.remove's "drop_database" (approved 2 Nov), before the project
+    // leaves config.json: its own database and user (project_database_name(),
+    // never a name from the client) are dropped on each installed series that
+    // has them (its password is kept there) or that its floserver.json names,
+    // the server started if it sleeps; then the password is deleted from the
+    // secure store. A series that isn't installed has nothing to drop. False
+    // (with `refusal`) when the name is reserved, another registered project's
+    // database has the same name, or a drop failed: the project then stays
+    // (the refusal says which series were already done; trying again is
+    // safe). `dropped`: a database FloServer made (its password kept) was dropped.
+    // Call it while the project is held (hold_project): no login can make
+    // the database again until the project is gone from config.json.
+    bool drop_project_database(const std::string& project, ServiceRefusal& refusal, bool& dropped);
+
+    // While the returned guard lives, project_login() refuses `project`
+    // ("removing"): projects.remove holds it across the drop and the removal.
+    class ProjectHold {
+    public:
+        ProjectHold() = default;
+        ProjectHold(DatabaseService* service, std::string project)
+            : service_(service), project_(std::move(project)) {}
+        ProjectHold(const ProjectHold&) = delete;
+        ProjectHold& operator=(const ProjectHold&) = delete;
+        ProjectHold(ProjectHold&& other) noexcept
+            : service_(std::exchange(other.service_, nullptr)), project_(std::move(other.project_)) {}
+        ProjectHold& operator=(ProjectHold&&) = delete;
+        ~ProjectHold() {
+            if (service_ != nullptr) {
+                service_->release_project(project_);
+            }
+        }
+
+    private:
+        DatabaseService* service_ = nullptr;
+        std::string project_;
+    };
+    [[nodiscard]] ProjectHold hold_project(const std::string& project);
 
     // Shared sites' login (D19, user "www"), made the first time. Shared
     // sites must be on and have a database.
@@ -146,6 +190,8 @@ public:
 private:
     void supervise();
     void release_series(const std::string& series) noexcept;
+    void release_project(const std::string& project) noexcept;
+    [[nodiscard]] bool project_held(const std::string& project) const;
     void reload_locked();
     [[nodiscard]] std::shared_ptr<Server> server_of(const std::string& series);
     // Runs `work` on a thread of its own, joined at stop().
@@ -162,6 +208,7 @@ private:
     std::map<std::string, std::shared_ptr<Server>> servers_;  // by series
     std::vector<std::weak_ptr<Server>> retired_;              // may still hold their port
     std::map<std::string, int> held_;                         // series being removed: no server
+    std::map<std::string, int> held_projects_;                // projects being removed: no login
     std::atomic<bool> stopping_{false};
     bool stopped_ = false;
     std::thread thread_;

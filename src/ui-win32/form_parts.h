@@ -4,6 +4,7 @@
 // one-line edit box inside a field the window draws, and the "Save your
 // changes?" question.
 
+#include "model/project_menu.h"
 #include "model/theme.h"
 #include "model/ui_strings.h"
 
@@ -88,5 +89,12 @@ enum class SaveChoice : std::uint8_t { Save, DontSave, Cancel };
 
 // "Save your changes to PHP 8.5?" with Save, Don't save and Cancel.
 [[nodiscard]] SaveChoice ask_to_save(HWND owner, Lang lang, const std::string& question);
+
+// The question before a project is removed from FloServer (approved 2 Nov):
+// a task dialog in the window's language (laid out right to left in Arabic
+// and Kurdish) with Remove and Cancel (the default) and, when the project
+// has a database, an unticked box to delete it too. True for Remove;
+// `drop` is the box.
+[[nodiscard]] bool ask_remove_project(HWND owner, Lang lang, const RemoveQuestion& question, bool& drop);
 
 }  // namespace floserver::ui

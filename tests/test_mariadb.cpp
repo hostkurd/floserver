@@ -66,6 +66,15 @@ TEST_CASE("SQL is quoted and a project's database is its own") {
     CHECK(sql.find("GRANT ALL PRIVILEGES ON `my\\_shop`.* TO 'my_shop'@'localhost';") != std::string::npos);
     CHECK(sql.find("GRANT ALL PRIVILEGES ON `my\\_shop`.* TO 'my_shop'@'127.0.0.1';") != std::string::npos);
     CHECK(sql.find("*.*") == std::string::npos);  // never every database
+    // projects.remove's drop: the database, and the user on every host it's made on.
+    const std::string drop = drop_project_database_sql("my_shop", "my_shop");
+    CHECK(drop.find("DROP DATABASE IF EXISTS `my_shop`;") != std::string::npos);
+    for (const char* host : {"localhost", "127.0.0.1", "::1"}) {
+        CHECK(drop.find("DROP USER IF EXISTS 'my_shop'@'" + std::string(host) + "';") != std::string::npos);
+    }
+    CHECK(drop.find('%') == std::string::npos);
+    CHECK(drop_project_database_sql("a`b", "a'b").find("`a``b`") != std::string::npos);
+    CHECK(drop_project_database_sql("a`b", "a'b").find("'a''b'@") != std::string::npos);
     const std::string root = root_password_sql("Pw23");
     CHECK(root.find("ALTER USER IF EXISTS 'root'@'localhost' IDENTIFIED BY 'Pw23';") != std::string::npos);
     CHECK(root.find("User = ''") != std::string::npos);  // no anonymous logins

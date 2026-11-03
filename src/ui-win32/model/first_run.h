@@ -118,8 +118,30 @@ struct FirstRunProgress {
 [[nodiscard]] FirstRunProgress first_run_progress(const std::vector<FirstRunRow>& rows);
 
 // Step 3's Runtimes line: what's ready, "still downloading: 3 of 5 ready"
-// while they run, and what didn't download; or that nothing was.
-[[nodiscard]] std::string first_run_runtimes_line(const std::vector<FirstRunRow>& rows, Lang lang);
+// while they run, and what didn't download; or that nothing was. With
+// nothing asked for, `without`: "Continue without downloading" was chosen
+// (a project offers what it needs); else the list couldn't be had.
+[[nodiscard]] std::string first_run_runtimes_line(const std::vector<FirstRunRow>& rows, Lang lang,
+                                                  bool without = false);
+
+// Step 2's runtimes.list, as the page has it.
+enum class FirstRunList : std::uint8_t { Idle, Loading, Ready, Failed };
+
+// The footer's buttons on a step (approved 2 Nov). Skip setup, at the
+// reading start, is on every step: it does what closing the page does.
+struct FirstRunFooter {
+    bool skip_setup = true;
+    bool back = false;
+    // "Continue without downloading", beside "Download and continue": to
+    // step 3, nothing downloaded, Windows not asked about the certificate.
+    bool without = false;
+    std::optional<Str> next;  // its words; nothing while the list is on its way
+    bool next_primary = true;
+    std::optional<Str> words;  // before the buttons
+};
+// `started`: "Download and continue" was chosen.
+[[nodiscard]] FirstRunFooter first_run_footer(FirstRunStep step, FirstRunList list, bool started);
+
 
 // Asking Windows to trust FloServer's certificate, as Settings → Ports &
 // HTTPS does.
@@ -135,5 +157,9 @@ enum class FirstRunTrust : std::uint8_t {
 // Step 3's HTTPS line. `error`: why it failed (the service's or Windows'
 // words; empty: the certificate couldn't be read).
 [[nodiscard]] std::string first_run_https_line(FirstRunTrust trust, const std::string& error, Lang lang);
+
+// Reaching step 3 without downloads: the CA's state is asked once (so a CA
+// trusted earlier says so), when Windows wasn't asked already.
+[[nodiscard]] bool first_run_check_ca(FirstRunTrust trust, bool checked);
 
 }  // namespace floserver::ui
