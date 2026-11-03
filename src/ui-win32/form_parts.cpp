@@ -147,6 +147,40 @@ std::optional<std::string> pick_folder(HWND owner, const std::string& title, con
     return path;
 }
 
+std::optional<std::string> pick_program(HWND owner, const std::string& title, const std::string& filter) {
+    IFileOpenDialog* dialog = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog))) ||
+        dialog == nullptr) {
+        return std::nullopt;
+    }
+    FILEOPENDIALOGOPTIONS options = 0;
+    dialog->GetOptions(&options);
+    // The program itself, not a shortcut to it (a .lnk would be started as a file).
+    dialog->SetOptions(options | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST | FOS_NODEREFERENCELINKS | FOS_NOCHANGEDIR);
+    const std::wstring wide_title = win::widen(title);
+    dialog->SetTitle(wide_title.c_str());
+    const std::wstring name = win::widen(filter) + L" (*.exe)";
+    const COMDLG_FILTERSPEC types[] = {{name.c_str(), L"*.exe"}};
+    dialog->SetFileTypes(1, types);
+    std::optional<std::string> path;
+    const HRESULT shown = dialog->Show(owner);
+    if (SUCCEEDED(shown)) {
+        IShellItem* item = nullptr;
+        if (SUCCEEDED(dialog->GetResult(&item)) && item != nullptr) {
+            PWSTR chosen = nullptr;
+            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &chosen)) && chosen != nullptr) {
+                path = win::narrow(chosen);
+                CoTaskMemFree(chosen);
+            }
+            item->Release();
+        }
+    } else if (shown == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
+        path = std::string();
+    }
+    dialog->Release();
+    return path;
+}
+
 bool explore_folder(HWND owner, const std::string& path) {
     const auto folder = folder_on_disk(path);
     return folder && reinterpret_cast<INT_PTR>(

@@ -7,6 +7,7 @@
 
 #include "canvas.h"
 #include "form_parts.h"
+#include "model/code_editor.h"
 #include "model/first_run.h"
 #include "model/php_page.h"
 #include "model/project_menu.h"
@@ -20,6 +21,7 @@
 #include <windows.h>
 #include <shellapi.h>
 
+#include <array>
 #include <map>
 #include <optional>
 #include <memory>
@@ -98,7 +100,14 @@ private:
         FrSkipSetup,  // every step's Skip setup
         FrWithout,    // step 2's Continue without downloading
     };
-    enum class PanelAction : std::uint8_t { Browser, Folder, Terminal, Studio, Download };
+    enum class PanelAction : std::uint8_t { Browser, Folder, Terminal, Editor, Studio, Download };
+    // The square icon buttons after Open in browser (approved 3 Nov), in their order.
+    static constexpr std::array<PanelAction, 4> kIconActions = {PanelAction::Folder, PanelAction::Terminal,
+                                                                PanelAction::Editor, PanelAction::Studio};
+    [[nodiscard]] static constexpr bool is_icon_action(PanelAction a) {
+        return a == PanelAction::Folder || a == PanelAction::Terminal || a == PanelAction::Editor ||
+               a == PanelAction::Studio;
+    }
     [[nodiscard]] static constexpr bool is_panel_part(Part part) {
         return part == Part::PanelClose || part == Part::PanelAddress || part == Part::PanelTab ||
                part == Part::PanelButton || part == Part::PanelField || part == Part::PanelCopyEnv ||
@@ -436,6 +445,26 @@ private:
     void paint_panel(Canvas& c, HDC dc, bool text_pass) const;
     void paint_switch(Canvas& c, const RECT& r, bool on, bool hover) const;
     void paint_button(Canvas& c, const RECT& r, bool hover, bool focused) const;
+    // A square open button's stroke icon (folder, >_, </>, Studio's layers), 16 px, centred in `r`.
+    void paint_open_icon(Canvas& c, const RECT& r, PanelAction action, Rgb color) const;
+    // An icon button's tooltip, which is also its accessible name: "Open
+    // folder", "Open in VS Code", "Choose a code editor…".
+    [[nodiscard]] std::string panel_button_tip(PanelAction action) const;
+    // The tooltips follow the icon buttons (after each paint's geometry).
+    void place_panel_tips();
+    // FloCMS Studio with the project's folder (the window has it: no
+    // request to the service). Quietly: nothing said when Studio isn't installed.
+    void open_studio(const std::string& path, bool quietly);
+    // The code editor with the project's folder; Settings → General's
+    // Code editor when there's none.
+    void open_editor(const std::string& path);
+    void open_settings_editor();
+    // The code editor projects open in, looked for once a window session
+    // (Settings > General's choice changing, or Settings closing, asks again).
+    [[nodiscard]] const std::optional<EditorTarget>& editor() const;
+    void forget_editor();
+    // A mouse button went down: the keyboard focus frames hide (Windows' rule).
+    void mouse_used();
     // 16 px, centred in `r`: Windows' Settings glyph in the text pass, or
     // drawn by hand in the shapes pass when the icon font isn't there.
     void paint_gear(Canvas& c, const RECT& r, Rgb color, bool text_pass) const;
@@ -689,8 +718,16 @@ private:
     Hit hover_;
     Hit pressed_;
     int focus_ = -1;  // keyboard focus in the list
+    // Focus frames show only after the keyboard was used (Tab, the arrows,
+    // the menu key, Alt); any mouse click hides them again, as Windows does.
     bool show_focus_ = false;
     bool tracking_mouse_ = false;
+    // The code editor (editor()): found once, kept for the window session.
+    mutable bool editor_known_ = false;
+    mutable std::optional<EditorTarget> editor_;
+    // The icon buttons' tooltips, by kIconActions' order: their words and where they are.
+    std::array<std::wstring, kIconActions.size()> panel_tips_;
+    std::array<RECT, kIconActions.size()> panel_tip_rects_{};
 };
 
 }  // namespace floserver::ui

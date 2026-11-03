@@ -341,7 +341,23 @@ LRESULT SettingsWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
             return 0;
+        case WM_RBUTTONDOWN:
+        case WM_MBUTTONDOWN:
+            mouse_used();
+            break;
+        case WM_UPDATEUISTATE:
+            // Windows' own word on the focus cues (as in FloServer's window).
+            if ((HIWORD(wparam) & UISF_HIDEFOCUS) != 0 && LOWORD(wparam) != UIS_INITIALIZE) {
+                const bool show = LOWORD(wparam) == UIS_CLEAR;
+                if (show != show_focus_) {
+                    show_focus_ = show;
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                }
+            }
+            break;
         case WM_LBUTTONDOWN:
+            // Any click, on a control or not: the focus frame hides until a key is used (Windows' rule).
+            mouse_used();
             if (scroll_bar_.press(hwnd_, GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam))) {
                 return 0;  // the bar's: the keyboard focus stays where it is
             }
@@ -395,6 +411,13 @@ LRESULT SettingsWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             break;
     }
     return DefWindowProcW(hwnd_, msg, wparam, lparam);
+}
+
+void SettingsWindow::mouse_used() {
+    if (show_focus_) {
+        show_focus_ = false;
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
 }
 
 // --- lifetime -------------------------------------------------------------

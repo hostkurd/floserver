@@ -15,7 +15,10 @@ bool is_method_name(const std::string& s) {
 }  // namespace
 
 std::string make_request(std::int64_t id, std::string_view method, const json& params) {
-    return json{{"v", kVersion}, {"id", id}, {"method", method}, {"params", params}}.dump(-1, ' ', false, json::error_handler_t::replace);
+    // No params (a null json: what `{}` makes when it's passed for one) are
+    // an empty object; the service refuses anything else that isn't one.
+    return json{{"v", kVersion}, {"id", id}, {"method", method}, {"params", params.is_null() ? json::object() : params}}
+        .dump(-1, ' ', false, json::error_handler_t::replace);
 }
 
 std::string make_result(std::int64_t id, const json& result) {

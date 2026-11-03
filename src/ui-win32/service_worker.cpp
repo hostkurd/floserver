@@ -122,9 +122,6 @@ void ServiceWorker::use(const std::string& project, const std::string& key, cons
 void ServiceWorker::copy_env(const std::string& project) {
     push({Command::Kind::CopyEnv, project, false, {}, std::nullopt, {}, {}});
 }
-void ServiceWorker::open_in_studio(const std::string& project, bool quietly) {
-    push({Command::Kind::OpenStudio, project, quietly, {}, std::nullopt, {}, {}});
-}
 void ServiceWorker::add_folder(const std::string& path) {
     push({Command::Kind::AddFolder, path, false, {}, std::nullopt, {}, {}});
 }
@@ -602,27 +599,6 @@ void ServiceWorker::run(const std::stop_token& stop) {
                         reply->result = nlohmann::json();
                     }
                     break;
-                case Command::Kind::OpenStudio: {
-                    std::optional<core::protocol::Reply> list;
-                    std::string error;
-                    const auto program = core::find_studio();
-                    if (!program) {
-                        if (!c.flag) {
-                            change_error = fill(lang_, Str::OpenFailed, {"FloCMS Studio"});
-                        }
-                    } else if (send(c.project, "projects.list", {}, list)) {
-                        for (const auto& p : list->result.value("projects", nlohmann::json::array())) {
-                            if (p.value("name", std::string()) == c.project) {
-                                const auto dir = core::path_from_utf8(p.value("path", std::string()));
-                                if (!core::open_in_studio(*program, dir, error)) {
-                                    change_error = fill(lang_, Str::OpenFailed, {"FloCMS Studio"}) + ": " +
-                                                   (is_rtl(lang_) ? isolate_ltr(error) : error);
-                                }
-                            }
-                        }
-                    }
-                    break;
-                }
                 case Command::Kind::AddFolder: {
                     // The folder's own name for the message; the path for the service.
                     std::string shown = core::path_to_utf8(core::path_from_utf8(c.project).filename());

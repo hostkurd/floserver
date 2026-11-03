@@ -98,6 +98,16 @@ TEST_CASE("the real service starts, answers, refuses a second copy and stops") {
     REQUIRE(listed.has_value());
     REQUIRE(listed->ok);
     REQUIRE(listed->result["projects"].size() == 1);
+    // Empty braces are a null json, not an object: the window's Open in
+    // Studio asked projects.list that way and was refused as a bad request
+    // (answered with id 0, so the call read it as no answer: "FloServer
+    // stopped answering", 3 Nov). Still a request, and the next one too.
+    const auto braces = client->call("projects.list", {});
+    REQUIRE(braces.has_value());
+    CHECK(braces->ok);
+    const auto after = client->call("status");
+    REQUIRE(after.has_value());
+    CHECK(after->ok);
     CHECK(std::filesystem::is_regular_file(data.path() / "config.json"));
     const auto removed = client->call("projects.remove", {{"name", "my-shop"}});
     REQUIRE(removed.has_value());

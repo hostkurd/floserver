@@ -527,6 +527,20 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     RemoveDone,          // {0}: the project
     RemoveDoneDatabase,  // {0}: the project
     RemoveFailed,        // {0}: the project, {1}: the service's reason
+    // The panel's open buttons and the code editor (approved 3 Nov).
+    OpenInEditor,           // {0}: the editor, "VS Code"
+    ChooseEditor,
+    OpenProgramFailed,      // {0}: the program, "FloCMS Studio"; {1}: why
+    ProgramMissing,         // the {1} above: the program is gone
+    GeneralEditor,
+    GeneralEditorAuto,
+    GeneralEditorAutoNote,
+    GeneralEditorUses,      // {0}: the editor Automatic opens now
+    GeneralEditorNoneFound,
+    GeneralEditorChoose,
+    GeneralEditorNotFound,
+    GeneralEditorPick,      // the file picker's title
+    GeneralEditorPrograms,  // the file picker's filter
     Count_,
 };
 

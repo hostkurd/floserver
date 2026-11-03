@@ -46,6 +46,7 @@
 #include "canvas.h"
 #include "form_parts.h"
 #include "model/apache_page.h"
+#include "model/code_editor.h"
 #include "model/database_page.h"
 #include "model/general_page.h"
 #include "model/folders_page.h"
@@ -76,7 +77,8 @@ namespace floserver::ui {
 // What Settings > General asks FloServer's window to change: the wparam of
 // its `prefs_message`; the lparam is the choice's index (kLangChoices,
 // kThemeChoices, CloseAction, or 1 for "start in the tray").
-enum class PrefChange : std::uint8_t { Language, Theme, Close, StartInTray };
+// CodeEditor: the choice is read from prefs() (a program's path doesn't fit an lparam).
+enum class PrefChange : std::uint8_t { Language, Theme, Close, StartInTray, CodeEditor };
 
 class SettingsWindow {
 public:
@@ -120,6 +122,10 @@ public:
     void quit_when_asked() { quit_after_ask_ = true; }
     // Opens the General section (after the windows were made again in another language).
     void show_general();
+    // Opens General at its Code editor choice (the panel's editor button with none found).
+    void show_general_editor();
+    // The preferences as General shows them.
+    [[nodiscard]] const WindowPrefs& prefs() const { return prefs_; }
     // The owner's preferences after a change (or a failed save: `error`).
     void set_prefs(const WindowPrefs& prefs, const std::string& error, const std::string& kept_as = {});
     // The theme changed (Settings > General, or Windows'): drawn again.
@@ -220,6 +226,7 @@ private:
         GeneralStart,      // the Start with Windows switch
         GeneralStartMode,  // row 0: open the window, 1: start in the tray
         GeneralClose,      // row 0: keep running in the tray, 1: quit
+        GeneralEditor,     // row: editor_rows()' index
         GeneralUpdates,
         GeneralLicences,
     };
@@ -412,6 +419,9 @@ private:
         RECT close_card{};
         RECT close_title{};
         std::array<ChoiceGeometry, 2> closes{};  // keep running in the tray, quit
+        RECT editor_card{};
+        RECT editor_title{};
+        std::vector<ChoiceGeometry> editors;  // one per editor_rows()
         RECT about_card{};
         RECT about_title{};
         RECT version{};
@@ -668,6 +678,8 @@ private:
     void general_focus_order(std::vector<Hit>& order) const;
     void on_general_click(const Hit& hit);
     void post_pref(PrefChange change, std::size_t value);
+    // A mouse button went down: the focus frame hides until a key is used.
+    void mouse_used();
     void set_start(bool on, bool tray);
     [[nodiscard]] bool shown_start_tray() const;
     [[nodiscard]] bool run_elsewhere() const;
@@ -675,6 +687,16 @@ private:
     void paint_general_shapes(Canvas& c) const;
     void paint_general_text(Canvas& c) const;
     void paint_radio(Canvas& c, const ChoiceGeometry& choice, bool on, const Hit& hit) const;
+    // The Code editor choices: Automatic, each editor found (and a chosen
+    // one that's gone), Choose program…; each with what it says under it.
+    struct EditorRow {
+        EditorChoice choice;
+        std::string label;
+        std::string note;
+        bool program = false;  // Choose program…: opens the file picker
+    };
+    [[nodiscard]] std::vector<EditorRow> editor_rows() const;
+    void choose_editor_program();
     [[nodiscard]] static bool is_general_part(Part part) { return part >= Part::GeneralLang; }
 
     HINSTANCE instance_;
@@ -779,6 +801,8 @@ private:
     // as written since), and this FloServer.exe's path.
     std::optional<RunEntry> run_entry_;
     std::string own_exe_;
+    // The code editors on this PC, looked for as General opens.
+    std::vector<FoundEditor> editors_found_;
     // Settings > Folders: folders.get's answer, and what's on its way.
     std::optional<FoldersInfo> folders_;
     bool folders_loading_ = false;

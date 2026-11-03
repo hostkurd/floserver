@@ -81,6 +81,11 @@ bool put_secret_on_clipboard(HWND owner, std::string& value);
 // picker couldn't be shown. It runs its own message loop.
 [[nodiscard]] std::optional<std::string> pick_folder(HWND owner, const std::string& title, const std::string& start);
 
+// Windows' file picker for a program (.exe), titled `title`, `filter` naming
+// the .exe files ("Programs"). The program picked; empty when cancelled;
+// nothing when the picker couldn't be shown. It runs its own message loop.
+[[nodiscard]] std::optional<std::string> pick_program(HWND owner, const std::string& title, const std::string& filter);
+
 // Opens an existing folder in Explorer ("explore" opens folders only, never
 // runs a file). False when it isn't one or couldn't be opened.
 bool explore_folder(HWND owner, const std::string& path);

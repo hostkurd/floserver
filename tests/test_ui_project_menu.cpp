@@ -50,8 +50,8 @@ std::vector<MenuCommand> commands(const std::vector<MenuItem>& menu) {
 TEST_CASE("project menu: the items, in the approved order") {
     const auto menu = project_menu(served(), {true, false, true, false});
     using enum MenuCommand;
-    CHECK(commands(menu) == std::vector<MenuCommand>{OpenBrowser, OpenFolder, OpenTerminal, CopyAddress, None, Toggle,
-                                                     KeepRunning, None, Settings, None, Remove});
+    CHECK(commands(menu) == std::vector<MenuCommand>{OpenBrowser, OpenFolder, OpenTerminal, OpenEditor, CopyAddress,
+                                                     None, Toggle, KeepRunning, None, Settings, None, Remove});
     for (const MenuItem& i : menu) {
         CAPTURE(static_cast<int>(i.command));
         CHECK(i.enabled);
@@ -64,6 +64,25 @@ TEST_CASE("project menu: the items, in the approved order") {
     CHECK(item(menu, KeepRunning).label == Str::KeepRunning);
     CHECK(text(Lang::En, item(menu, Remove).label) == "Remove from FloServer…");
     CHECK(text(Lang::En, item(menu, Settings).label) == "Project settings…");
+}
+
+TEST_CASE("project menu: the code editor's item, after Open terminal") {
+    const ProjectMenuState state{true, false, true, false};
+    auto menu = project_menu(served(), state, "VS Code");
+    const MenuItem& open = item(menu, MenuCommand::OpenEditor);
+    CHECK(open.enabled);
+    CHECK(menu_item_text(open, Lang::En, "VS Code") == "Open in VS Code");
+    // The editor's Latin name keeps its direction in Arabic and Kurdish.
+    CHECK(menu_item_text(open, Lang::Ar, "VS Code") == "فتح في " + kLri + "VS Code" + kPdi);
+    CHECK(menu_item_text(open, Lang::Ku, "VS Code") == "کردنەوە لە " + kLri + "VS Code" + kPdi);
+    CHECK(menu_item_text(item(menu, MenuCommand::OpenTerminal), Lang::En, "VS Code") == "Open terminal");
+    // None found: the item asks for one, even without a folder.
+    menu = project_menu(served(), state);
+    CHECK(menu_item_text(item(menu, MenuCommand::OpenEditor), Lang::En, {}) == "Choose a code editor…");
+    ProjectRow row = served();
+    row.path.clear();
+    CHECK(item(project_menu(row, state), MenuCommand::OpenEditor).enabled);
+    CHECK_FALSE(item(project_menu(row, state, "Cursor"), MenuCommand::OpenEditor).enabled);
 }
 
 TEST_CASE("project menu: Turn on or off and Keep running follow the switches") {

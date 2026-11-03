@@ -278,7 +278,23 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
                 return TRUE;
             }
             break;
+        case WM_RBUTTONDOWN:
+        case WM_MBUTTONDOWN:
+            mouse_used();
+            break;  // a right-click's menu comes with WM_CONTEXTMENU
+        case WM_UPDATEUISTATE:
+            // Windows' own word on the focus cues, for those it sends (the
+            // keys and clicks handled here set show_focus_ themselves).
+            if ((HIWORD(wparam) & UISF_HIDEFOCUS) != 0 && LOWORD(wparam) != UIS_INITIALIZE) {
+                const bool show = LOWORD(wparam) == UIS_CLEAR;
+                if (show != show_focus_) {
+                    show_focus_ = show;
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                }
+            }
+            break;
         case WM_LBUTTONDOWN:
+            mouse_used();
             if (scroll_bar_mouse(msg, GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam))) {
                 return 0;  // a scroll bar's: the keyboard focus stays where it is
             }
@@ -385,6 +401,9 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
                 quit();  // asked while Settings' save question was open; it's answered now
                 return 0;
             }
+            // An editor installed or removed while General was open is seen
+            // the next time the window needs one.
+            forget_editor();
             // The Settings window is gone: nothing of it stays but where it was.
             if (settings_ && !settings_->is_open()) {
                 settings_placement_ = settings_->placement();
@@ -427,6 +446,18 @@ void MainWindow::on_create() {
         ti.hwnd = hwnd_;
         ti.uId = id;
         ti.lpszText = tip->data();
+        SendMessageW(tooltip_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
+    }
+    // The panel's icon buttons: placed and worded by place_panel_tips().
+    panel_tips_ = {};
+    panel_tip_rects_ = {};
+    for (std::size_t i = 0; i < kIconActions.size(); ++i) {
+        TOOLINFOW ti{};
+        ti.cbSize = sizeof ti;
+        ti.uFlags = TTF_SUBCLASS | (rtl_ ? TTF_RTLREADING : 0U);
+        ti.hwnd = hwnd_;
+        ti.uId = kTipPanelFirst + i;
+        ti.lpszText = panel_tips_[i].data();
         SendMessageW(tooltip_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
     }
 
@@ -606,8 +637,13 @@ void MainWindow::on_snapshot() {
     if (first_run_open() && first_run_.step == FirstRunStep::Runtimes && first_run_.list == FirstRunList::Idle) {
         first_run_ask_list();
     }
-    if (just_made && worker_ && wizard_.studio) {
-        worker_->open_in_studio(snap_.create.project, true);
+    if (just_made && wizard_.studio) {
+        // The new project's folder, from the list that came with the answer.
+        const auto made = std::find_if(snap_.rows.begin(), snap_.rows.end(),
+                                       [&](const ProjectRow& r) { return r.name == snap_.create.project; });
+        if (made != snap_.rows.end()) {
+            open_studio(made->path, true);
+        }
     }
     layout();
     update_tray_tip();
@@ -688,6 +724,12 @@ void MainWindow::on_pref_change(WPARAM change, LPARAM value) {
             break;
         case PrefChange::StartInTray:
             prefs_.start_in_tray = index == 1;
+            break;
+        case PrefChange::CodeEditor:
+            if (settings_) {
+                prefs_.code_editor = settings_->prefs().code_editor;
+            }
+            forget_editor();  // looked for again with the new choice
             break;
     }
     if (prefs_ == before) {
@@ -1761,6 +1803,7 @@ void MainWindow::on_paint() {
             const win::Selected selected(mem.get(), bitmap.get());
             geometry_ = row_geometry(mem.get());
             update_panel_geometry(mem.get());
+            place_panel_tips();
             wizard_geometry_ = wizard_open() ? wizard_geometry(mem.get()) : WizardGeometry{};
             shared_geometry_ = !wizard_open() && !first_run_open() ? shared_geometry(mem.get()) : SharedGeometry{};
             first_run_geometry_ = FirstRunGeometry{};

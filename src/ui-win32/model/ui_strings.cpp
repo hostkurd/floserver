@@ -1005,6 +1005,26 @@ constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
           "أُزيل {0} من " FLO_LRI "FloServer" FLO_PDI " وحُذفت قاعدة بياناته.",
           "{0} لە " FLO_LRI "FloServer" FLO_PDI " لابرا و داتابەیسەکەی سڕایەوە."},
     Entry{Str::RemoveFailed, "Couldn't remove {0}: {1}", "تعذّرت إزالة {0}: {1}", "نەتوانرا {0} لاببرێت: {1}"},
+    // The panel's open buttons and the code editor (approved 3 Nov). Arabic and Kurdish need a native read.
+    Entry{Str::OpenInEditor, "Open in {0}", "فتح في {0}", "کردنەوە لە {0}"},
+    Entry{Str::ChooseEditor, "Choose a code editor…", "اختر محرر شيفرة…", "ئێدیتەرێکی کۆد هەڵبژێرە…"},
+    Entry{Str::OpenProgramFailed, "Couldn't open {0}: {1}", "تعذّر فتح {0}: {1}", "نەتوانرا {0} بکرێتەوە: {1}"},
+    Entry{Str::ProgramMissing, "it isn't there any more", "لم يعد موجودًا", "ئیتر لێرە نییە"},
+    Entry{Str::GeneralEditor, "Code editor", "محرر الشيفرة", "ئێدیتەری کۆد"},
+    Entry{Str::GeneralEditorAuto, "Automatic", "تلقائي", "خۆکار"},
+    Entry{Str::GeneralEditorAutoNote,
+          "VS Code when it's installed, else the first found of Cursor, VSCodium, Sublime Text and PhpStorm.",
+          FLO_LRI "VS Code" FLO_PDI " إن كان مثبّتًا، وإلا فأول ما يُعثر عليه من " FLO_LRI "Cursor" FLO_PDI " و" FLO_LRI
+          "VSCodium" FLO_PDI " و" FLO_LRI "Sublime Text" FLO_PDI " و" FLO_LRI "PhpStorm" FLO_PDI ".",
+          FLO_LRI "VS Code" FLO_PDI " ئەگەر دامەزرابێت، ئەگەرنا یەکەمیان کە بدۆزرێتەوە لە " FLO_LRI "Cursor" FLO_PDI
+          " و " FLO_LRI "VSCodium" FLO_PDI " و " FLO_LRI "Sublime Text" FLO_PDI " و " FLO_LRI "PhpStorm" FLO_PDI "."},
+    Entry{Str::GeneralEditorUses, "Opens in {0} now.", "يفتح الآن في {0}.", "ئێستا لە {0} دەکرێتەوە."},
+    Entry{Str::GeneralEditorNoneFound, "No code editor was found on this PC.",
+          "لم يُعثر على أي محرر شيفرة في هذا الحاسوب.", "هیچ ئێدیتەرێکی کۆد لەم کۆمپیوتەرەدا نەدۆزرایەوە."},
+    Entry{Str::GeneralEditorChoose, "Choose program…", "اختر برنامجًا…", "بەرنامەیەک هەڵبژێرە…"},
+    Entry{Str::GeneralEditorNotFound, "Not found on this PC", "غير موجود في هذا الحاسوب", "لەم کۆمپیوتەرەدا نییە"},
+    Entry{Str::GeneralEditorPick, "Choose a code editor", "اختر محرر شيفرة", "ئێدیتەرێکی کۆد هەڵبژێرە"},
+    Entry{Str::GeneralEditorPrograms, "Programs", "البرامج", "بەرنامەکان"},
 }};
 
 #undef FLO_LRI

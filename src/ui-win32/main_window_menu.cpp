@@ -32,7 +32,9 @@ constexpr std::string_view kRemovePurpose = "remove\n";
 UINT menu_id(MenuCommand command) { return static_cast<UINT>(command) + 1U; }
 
 // The menu as Windows shows it; `labels` keeps the words alive meanwhile.
-win::UniqueMenu make_menu(const std::vector<MenuItem>& items, Lang lang, std::vector<std::wstring>& labels) {
+// `editor` is the code editor's name for its item.
+win::UniqueMenu make_menu(const std::vector<MenuItem>& items, Lang lang, std::vector<std::wstring>& labels,
+                          std::string_view editor = {}) {
     win::UniqueMenu menu(CreatePopupMenu());
     if (!menu) {
         return menu;
@@ -43,7 +45,15 @@ win::UniqueMenu make_menu(const std::vector<MenuItem>& items, Lang lang, std::ve
             AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
             continue;
         }
-        labels.push_back(w(text(lang, item.label)));
+        // A program's own name may hold '&': shown as it is, not as a shortcut key.
+        std::wstring label;
+        for (const wchar_t ch : w(menu_item_text(item, lang, editor))) {
+            label += ch;
+            if (ch == L'&') {
+                label += L'&';
+            }
+        }
+        labels.push_back(std::move(label));
         UINT flags = MF_STRING;
         flags |= item.enabled ? 0U : UINT{MF_GRAYED};
         flags |= item.checked ? UINT{MF_CHECKED} : 0U;
@@ -126,10 +136,11 @@ void MainWindow::on_context_menu(LPARAM lparam) {
                 if (row < 0) {
                     return;
                 }
+                // Selected, without a focus frame: it was the mouse (Windows' rule).
                 focus_ = row;
                 shared_focused_ = false;
                 panel_focus_ = -1;
-                show_focus_ = true;
+                show_focus_ = false;
                 InvalidateRect(hwnd_, nullptr, FALSE);
                 UpdateWindow(hwnd_);
                 show_project_menu(hit.project, {sx, sy});
@@ -180,9 +191,11 @@ void MainWindow::show_project_menu(const std::string& project, POINT at) {
     const ProjectRow row = *found;
     const ProjectMenuState state{switch_value(row), keep_value(row), snap_.link == Link::Connected,
                                  leaving(project)};
-    const std::vector<MenuItem> items = project_menu(row, state);
+    const auto& target = editor();
+    const std::string editor_name = target ? target->name : std::string();
+    const std::vector<MenuItem> items = project_menu(row, state, editor_name);
     std::vector<std::wstring> labels;
-    const win::UniqueMenu menu = make_menu(items, lang_, labels);
+    const win::UniqueMenu menu = make_menu(items, lang_, labels, editor_name);
     if (!menu) {
         return;
     }
@@ -237,6 +250,9 @@ void MainWindow::run_project_command(const std::string& project, MenuCommand com
             break;
         case MenuCommand::OpenTerminal:
             open_terminal(row.path);
+            break;
+        case MenuCommand::OpenEditor:
+            open_editor(row.path);
             break;
         case MenuCommand::CopyAddress:
             if (is_openable_address(row.address)) {

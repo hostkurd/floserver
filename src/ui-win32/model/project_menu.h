@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace floserver::ui {
@@ -20,6 +21,7 @@ enum class MenuCommand : std::uint8_t {
     OpenBrowser,
     OpenFolder,
     OpenTerminal,
+    OpenEditor,   // Open in VS Code (the code editor), or Choose a code editor… when there's none
     CopyAddress,
     Toggle,       // Turn on / Turn off
     KeepRunning,
@@ -42,12 +44,18 @@ struct ProjectMenuState {
     bool removing = false;   // its projects.remove is on its way
 };
 
-// Open in browser · Open folder · Open terminal · Copy address | Turn on (or
-// off) · Keep running | Project settings… | Remove from FloServer…
+// Open in browser · Open folder · Open terminal · Open in <editor> · Copy
+// address | Turn on (or off) · Keep running | Project settings… | Remove from
+// FloServer…
 // The address items are greyed out when there's nothing to open (off, a
 // problem, needs a download); the changes while the service isn't there or
-// the project is being removed.
-[[nodiscard]] std::vector<MenuItem> project_menu(const ProjectRow& row, const ProjectMenuState& state);
+// the project is being removed. `editor` is the code editor's name ("VS
+// Code"); empty when there's none: the item is Choose a code editor… then.
+[[nodiscard]] std::vector<MenuItem> project_menu(const ProjectRow& row, const ProjectMenuState& state,
+                                                 std::string_view editor = {});
+
+// An item's words: "Open in VS Code" with the editor's name filled in.
+[[nodiscard]] std::string menu_item_text(const MenuItem& item, Lang lang, std::string_view editor);
 
 // The pinned Shared sites row: only what it already does. Open in browser ·
 // Open folder | Settings… (no Remove).

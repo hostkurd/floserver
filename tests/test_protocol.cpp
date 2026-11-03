@@ -13,6 +13,11 @@ TEST_CASE("requests round-trip") {
     CHECK(r->method == "status");
     CHECK(r->params == json{{"a", 1}});
     CHECK(parse_request(R"({"v":1,"id":2,"method":"quit"})", code)->params == json::object());
+    // No params (a null json, as `{}` makes one) go as an empty object, never as null.
+    const auto none = parse_request(make_request(3, "projects.list", json()), code);
+    REQUIRE(none.has_value());
+    CHECK(none->id == 3);
+    CHECK(none->params == json::object());
 }
 
 TEST_CASE("bad requests say why") {

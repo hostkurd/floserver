@@ -29,6 +29,14 @@ namespace floserver::core {
 [[nodiscard]] bool spawn_detached(const std::filesystem::path& program,
                                   const std::vector<std::string>& args, std::string& error);
 
+// Starts a program the user sees (a code editor, FloCMS Studio) with `args`,
+// never through a shell: its own windows, and a console of its own if it's a
+// console program (spawn_detached's "no window" would hide one for good).
+// It runs in `folder` (the program's own folder when empty) and, when the
+// caller's job allows it, outside the caller's job, so it outlives the caller.
+[[nodiscard]] bool start_program(const std::filesystem::path& program, const std::vector<std::string>& args,
+                                 const std::filesystem::path& folder, std::string& error);
+
 // Runs `program` without a window and waits up to `limit` for it to finish.
 // Its exit code, or nothing (with `error`) if it couldn't start or ran too
 // long; then it's killed (it may be stuck, holding files open) and

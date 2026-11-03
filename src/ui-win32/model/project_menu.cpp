@@ -10,7 +10,7 @@ bool is_mariadb(const std::string& database) { return database.starts_with("mari
 
 }  // namespace
 
-std::vector<MenuItem> project_menu(const ProjectRow& row, const ProjectMenuState& state) {
+std::vector<MenuItem> project_menu(const ProjectRow& row, const ProjectMenuState& state, std::string_view editor) {
     // Only a served project's own local address is ever opened or copied.
     const bool address = is_openable_address(row.address) && row.state != RowState::Problem &&
                          row.state != RowState::NeedsDownload;
@@ -20,6 +20,9 @@ std::vector<MenuItem> project_menu(const ProjectRow& row, const ProjectMenuState
         {MenuCommand::OpenBrowser, Str::OpenInBrowser, address, false},
         {MenuCommand::OpenFolder, Str::SharedOpenFolder, folder, false},
         {MenuCommand::OpenTerminal, Str::MenuOpenTerminal, folder, false},
+        // Choosing an editor needs no folder.
+        {MenuCommand::OpenEditor, editor.empty() ? Str::ChooseEditor : Str::OpenInEditor, folder || editor.empty(),
+         false},
         {MenuCommand::CopyAddress, Str::MenuCopyAddress, address, false},
         {},
         {MenuCommand::Toggle, state.on ? Str::MenuTurnOff : Str::MenuTurnOn, change, false},
@@ -40,6 +43,13 @@ std::vector<MenuItem> shared_menu(const SharedSites& shared) {
         {},
         {MenuCommand::Settings, Str::MenuSettings, true, false},
     };
+}
+
+std::string menu_item_text(const MenuItem& item, Lang lang, std::string_view editor) {
+    if (item.label == Str::OpenInEditor) {
+        return fill(lang, item.label, {editor});
+    }
+    return std::string(text(lang, item.label));
 }
 
 bool row_has_database(const ProjectRow& row) { return is_mariadb(row.database) || is_mariadb(row.wants.database); }

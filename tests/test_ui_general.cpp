@@ -35,13 +35,13 @@ TEST_CASE("window preferences: defaults, round trip, and what isn't understood")
         for (const ThemeChoice theme : kThemeChoices) {
             for (const CloseAction close : {CloseAction::Tray, CloseAction::Quit}) {
                 for (const bool tray : {true, false}) {
-                    const WindowPrefs prefs{lang, theme, close, tray};
+                    const WindowPrefs prefs{lang, theme, close, tray, false, {}};
                     CHECK(parse_window_prefs(window_prefs_json(prefs)) == prefs);
                 }
             }
         }
     }
-    const json written = json::parse(window_prefs_json({LangChoice::Ku, ThemeChoice::Dark, CloseAction::Quit, false}));
+    const json written = json::parse(window_prefs_json({LangChoice::Ku, ThemeChoice::Dark, CloseAction::Quit, false, false, {}}));
     CHECK(written["language"] == "ku");
     CHECK(written["theme"] == "dark");
     CHECK(written["close"] == "quit");
