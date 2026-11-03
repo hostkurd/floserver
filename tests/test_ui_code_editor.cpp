@@ -52,7 +52,15 @@ TEST_CASE("code editor: kept in window.json beside the other preferences") {
     CHECK(parse_window_prefs(existing.dump()).code_editor == EditorChoice{});
     const json written = json::parse(window_prefs_json(WindowPrefs{}, existing));
     CHECK(written["future"]["x"] == 1);
-    CHECK(written["code_editor"] == "auto");
+    CHECK(written["code_editor"] == "helix");  // kept while the choice isn't changed (another preference was)
+    WindowPrefs changed;
+    changed.code_editor = {EditorChoice::Kind::Known, EditorId::VsCode, {}};
+    CHECK(json::parse(window_prefs_json(changed, existing))["code_editor"] == "vscode");
+    // Equal choices written differently are left as they are too.
+    const json custom = {{"code_editor", {{"path", "C:/x/zed.exe"}, {"args", "--new"}}}};
+    WindowPrefs program;
+    program.code_editor = {EditorChoice::Kind::Program, EditorId::VsCode, "C:/x/zed.exe"};
+    CHECK(json::parse(window_prefs_json(program, custom))["code_editor"]["args"] == "--new");
 }
 
 TEST_CASE("code editor: where each one is looked for, per user first") {
@@ -135,6 +143,13 @@ TEST_CASE("code editor: what Automatic and a choice open") {
     CHECK(t->name == "notepad++");
     CHECK_FALSE(pick_editor({EditorChoice::Kind::Program, EditorId::VsCode, {}}, several).has_value());
 
+    // Never a batch file (cmd.exe would run it), whatever it's called.
+    CHECK_FALSE(pick_editor({EditorChoice::Kind::Program, EditorId::VsCode, R"(C:\Tools\code.cmd)"}, none).has_value());
+    CHECK_FALSE(pick_editor({EditorChoice::Kind::Program, EditorId::VsCode, R"(C:\Tools\run.bat)"}, none).has_value());
+    CHECK(is_program_file(R"(C:\Tools\Zed.EXE)"));
+    CHECK_FALSE(is_program_file(R"(C:\Tools\.exe)"));
+    CHECK_FALSE(is_program_file("editor.exe.lnk"));
+    CHECK_FALSE(is_program_file(""));
     CHECK(program_display_name("D:/Apps/Zed/zed.exe") == "zed");
     CHECK(program_display_name("vim") == "vim");
     // The folder is one argument, spaces and all: no command line is put together from text.

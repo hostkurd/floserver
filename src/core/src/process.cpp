@@ -11,6 +11,7 @@
 #include <fstream>
 #include <sstream>
 #include <system_error>
+#include <cwctype>
 #include <thread>
 
 #ifdef _WIN32
@@ -187,6 +188,15 @@ bool spawn_detached(const fs::path& program, const std::vector<std::string>& arg
 
 bool start_program(const fs::path& program, const std::vector<std::string>& args, const fs::path& folder,
                    std::string& error) {
+    // A .bat or .cmd would be run by cmd.exe: a shell, with its own reading of the arguments.
+    std::wstring extension = program.extension().wstring();
+    for (wchar_t& ch : extension) {
+        ch = static_cast<wchar_t>(std::towlower(ch));
+    }
+    if (extension != L".exe") {
+        error = "only a program (.exe) can be started";
+        return false;
+    }
     std::wstring command = win::quote(program.wstring());
     for (const std::string& a : args) {
         command += L" " + win::quote(win::widen(a));
@@ -199,7 +209,7 @@ bool start_program(const fs::path& program, const std::vector<std::string>& args
     // console one chosen as the editor (Vim, say) needs its console shown.
     const auto create = [&](DWORD flags) {
         return CreateProcessW(program.c_str(), command.data(), nullptr, nullptr, FALSE,
-                              CREATE_NEW_PROCESS_GROUP | CREATE_DEFAULT_ERROR_MODE | flags, nullptr,
+                              CREATE_DEFAULT_ERROR_MODE | flags, nullptr,
                               dir.empty() ? nullptr : dir.c_str(), &startup, &info) != 0;
     };
     if (!create(CREATE_BREAKAWAY_FROM_JOB) && !create(0)) {

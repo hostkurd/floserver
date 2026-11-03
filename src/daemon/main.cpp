@@ -1064,7 +1064,8 @@ struct Service {
             std::string reply;
             bool quit = false;
             if (!request) {
-                reply = protocol::make_error(0, error_code, "the request couldn't be read");
+                // Answered with its own id when it has one: the client sees a refusal, not silence.
+                reply = protocol::make_error(protocol::request_id(*text), error_code, "the request couldn't be read");
             } else if (request->method == "status") {
                 reply = protocol::make_result(request->id, status());
             } else if (request->method == "runtimes.list" || request->method == "runtimes.install" ||

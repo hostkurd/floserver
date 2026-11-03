@@ -20,6 +20,12 @@ TEST_CASE("requests round-trip") {
     CHECK(none->params == json::object());
 }
 
+TEST_CASE("a refusal can name the request it refuses") {
+    CHECK(request_id(R"({"v":1,"id":9,"method":"x","params":[]})") == 9);
+    CHECK(request_id(R"({"v":1,"id":"9","method":"x"})") == 0);
+    CHECK(request_id("nope") == 0);
+}
+
 TEST_CASE("bad requests say why") {
     std::string code;
     CHECK_FALSE(parse_request("nope", code));

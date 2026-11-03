@@ -1045,6 +1045,9 @@ void MainWindow::layout() {
     if (search_ == nullptr || !fonts_.button) {
         return;
     }
+    if (panel_open()) {
+        ensure_editor();  // once a session, here rather than while painting
+    }
     // The first-run page has no top bar: its search box goes too.
     if ((IsWindowVisible(search_) != FALSE) == first_run_open()) {
         ShowWindow(search_, first_run_open() ? SW_HIDE : SW_SHOWNA);

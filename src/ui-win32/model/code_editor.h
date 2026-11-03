@@ -84,9 +84,12 @@ struct EditorTarget {
 };
 // The choice made with what's found (each editor once, in kEditors' order).
 // Nothing when there's no editor to open: Automatic with none found, a
-// chosen editor that isn't installed (any more), or no program chosen.
+// chosen editor that isn't installed (any more), or no program (.exe) chosen.
 // A chosen program is taken as it is (the window checks it's still there).
 [[nodiscard]] std::optional<EditorTarget> pick_editor(const EditorChoice& choice, const std::vector<FoundEditor>& found);
+// A program that can be chosen and started: an .exe (any case), never a
+// .bat or .cmd, which Windows would run through cmd.exe.
+[[nodiscard]] bool is_program_file(std::string_view path);
 // A chosen program's name: its file name without ".exe" ("notepad++").
 [[nodiscard]] std::string program_display_name(const std::filesystem::path& program);
 

@@ -1025,6 +1025,11 @@ constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
     Entry{Str::GeneralEditorNotFound, "Not found on this PC", "غير موجود في هذا الحاسوب", "لەم کۆمپیوتەرەدا نییە"},
     Entry{Str::GeneralEditorPick, "Choose a code editor", "اختر محرر شيفرة", "ئێدیتەرێکی کۆد هەڵبژێرە"},
     Entry{Str::GeneralEditorPrograms, "Programs", "البرامج", "بەرنامەکان"},
+    Entry{Str::GeneralEditorNotProgram, "Choose a program (.exe): a .bat or .cmd file can't be used.",
+          "اختر برنامجًا (" FLO_LRI ".exe" FLO_PDI "): لا يمكن استخدام ملف " FLO_LRI ".bat" FLO_PDI " أو "
+          FLO_LRI ".cmd" FLO_PDI ".",
+          "بەرنامەیەک هەڵبژێرە (" FLO_LRI ".exe" FLO_PDI "): فایلی " FLO_LRI ".bat" FLO_PDI " یان " FLO_LRI
+          ".cmd" FLO_PDI " بەکارنایەت."},
 }};
 
 #undef FLO_LRI

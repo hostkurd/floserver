@@ -191,6 +191,7 @@ void MainWindow::show_project_menu(const std::string& project, POINT at) {
     const ProjectRow row = *found;
     const ProjectMenuState state{switch_value(row), keep_value(row), snap_.link == Link::Connected,
                                  leaving(project)};
+    ensure_editor();
     const auto& target = editor();
     const std::string editor_name = target ? target->name : std::string();
     const std::vector<MenuItem> items = project_menu(row, state, editor_name);

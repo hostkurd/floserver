@@ -108,6 +108,15 @@ TEST_CASE("the real service starts, answers, refuses a second copy and stops") {
     const auto after = client->call("status");
     REQUIRE(after.has_value());
     CHECK(after->ok);
+    // Params that aren't an object are refused, as an error for that request:
+    // the connection stays and the next request is answered.
+    const auto refused = client->call("projects.list", nlohmann::json::array());
+    REQUIRE(refused.has_value());
+    CHECK_FALSE(refused->ok);
+    CHECK(refused->error_code == "bad_request");
+    const auto still = client->call("status");
+    REQUIRE(still.has_value());
+    CHECK(still->ok);
     CHECK(std::filesystem::is_regular_file(data.path() / "config.json"));
     const auto removed = client->call("projects.remove", {{"name", "my-shop"}});
     REQUIRE(removed.has_value());

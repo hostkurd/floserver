@@ -697,6 +697,8 @@ private:
     };
     [[nodiscard]] std::vector<EditorRow> editor_rows() const;
     void choose_editor_program();
+    // Whether a chosen program is still there, looked at when it changes or General opens.
+    void check_editor_program();
     [[nodiscard]] static bool is_general_part(Part part) { return part >= Part::GeneralLang; }
 
     HINSTANCE instance_;
@@ -803,6 +805,7 @@ private:
     std::string own_exe_;
     // The code editors on this PC, looked for as General opens.
     std::vector<FoundEditor> editors_found_;
+    bool editor_program_missing_ = false;
     // Settings > Folders: folders.get's answer, and what's on its way.
     std::optional<FoldersInfo> folders_;
     bool folders_loading_ = false;

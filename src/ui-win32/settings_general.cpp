@@ -157,6 +157,7 @@ void SettingsWindow::show_general_editor() {
 
 void SettingsWindow::load_general() {
     editors_found_ = detect_editors();  // files and the registry; nothing is run
+    check_editor_program();
     own_exe_ = own_exe_path();
     std::string error;
     run_entry_ = read_run_entry(error);
@@ -277,6 +278,7 @@ void SettingsWindow::on_general_click(const Hit& hit) {
                 choose_editor_program();  // also to change the one chosen before
             } else if (rows[row].choice != prefs_.code_editor) {
                 prefs_.code_editor = rows[row].choice;
+                check_editor_program();
                 post_pref(PrefChange::CodeEditor, row);
             }
             break;
@@ -326,12 +328,18 @@ std::vector<SettingsWindow::EditorRow> SettingsWindow::editor_rows() const {
     std::string where;
     if (!program.path.empty()) {
         where = rtl_ ? isolate_ltr(program.path) : program.path;
-        if (!resolve_editor(program, {})) {
+        if (editor_program_missing_) {
             where = std::string(text(lang_, Str::GeneralEditorNotFound)) + ": " + where;
         }
     }
     rows.push_back({std::move(program), std::string(text(lang_, Str::GeneralEditorChoose)), std::move(where), true});
     return rows;
+}
+
+void SettingsWindow::check_editor_program() {
+    // Once here, not at each paint: a program on a share that's offline can take a while to answer.
+    const EditorChoice& chosen = prefs_.code_editor;
+    editor_program_missing_ = chosen.kind == EditorChoice::Kind::Program && !resolve_editor(chosen, {});
 }
 
 void SettingsWindow::choose_editor_program() {
@@ -342,11 +350,17 @@ void SettingsWindow::choose_editor_program() {
     if (!picked || picked->empty()) {
         return;  // cancelled (or no picker): the choice stays
     }
+    if (!is_program_file(*picked)) {
+        // A .bat or .cmd typed in the box: it would run through cmd.exe.
+        show_message(std::string(text(lang_, Str::GeneralEditorNotProgram)), true);
+        return;
+    }
     const EditorChoice choice{EditorChoice::Kind::Program, EditorId::VsCode, *picked};
     if (choice != prefs_.code_editor) {
         prefs_.code_editor = choice;
         post_pref(PrefChange::CodeEditor, 0);
     }
+    check_editor_program();
     relayout();
     InvalidateRect(hwnd_, nullptr, FALSE);
 }

@@ -304,6 +304,10 @@ std::string MainWindow::panel_button_text(PanelAction action) const {
     return action == PanelAction::Browser ? std::string(text(lang_, Str::OpenInBrowser)) : std::string();
 }
 
+bool MainWindow::panel_action_enabled(PanelAction action) const {
+    return action != PanelAction::Browser || snap_.link == Link::Connected;
+}
+
 std::string MainWindow::panel_button_tip(PanelAction action) const {
     switch (action) {
         case PanelAction::Folder:
@@ -643,7 +647,9 @@ std::vector<MainWindow::Hit> MainWindow::panel_focus_order() const {
         add_php_focus_order(order);
     }
     for (std::size_t i = 0; i < g.buttons.size(); ++i) {
-        order.push_back({Part::PanelButton, static_cast<int>(i), g.project});
+        if (panel_action_enabled(g.buttons[i].second)) {  // a greyed-out button isn't a stop
+            order.push_back({Part::PanelButton, static_cast<int>(i), g.project});
+        }
     }
     for (std::size_t i = 0; i < g.fields.size(); ++i) {
         order.push_back({Part::PanelField, static_cast<int>(i), g.project});
@@ -823,7 +829,7 @@ void MainWindow::run_panel_action(PanelAction action) {
     if (row == nullptr) {
         return;
     }
-    if (action != PanelAction::Download && snap_.link != Link::Connected) {
+    if (!panel_action_enabled(action)) {
         return;  // greyed out
     }
     switch (action) {
@@ -877,20 +883,22 @@ void MainWindow::open_studio(const std::string& path, bool quietly) {
     }
 }
 
-const std::optional<EditorTarget>& MainWindow::editor() const {
+void MainWindow::ensure_editor() {
     if (!editor_known_) {
         // Looked for once (files and the registry, nothing is run), then kept.
         editor_ = resolve_editor(prefs_.code_editor, detect_editors());
         editor_known_ = true;
     }
-    return editor_;
 }
 
 void MainWindow::forget_editor() {
     editor_known_ = false;
     editor_.reset();
+    if (panel_open()) {
+        ensure_editor();  // its tooltip shows the editor's name
+    }
     if (hwnd_ != nullptr) {
-        InvalidateRect(hwnd_, nullptr, FALSE);  // the tooltip's words are found again at the next paint
+        InvalidateRect(hwnd_, nullptr, FALSE);
     }
 }
 
@@ -902,6 +910,7 @@ void MainWindow::open_settings_editor() {
 }
 
 void MainWindow::open_editor(const std::string& path) {
+    ensure_editor();
     const auto& target = editor();
     if (!target) {
         open_settings_editor();  // none found, or the chosen one is gone: the choice is made there
@@ -1314,13 +1323,12 @@ void MainWindow::paint_panel(Canvas& c, HDC dc, bool text_pass) const {
         if (shown == PanelTab::Php) {
             paint_php_panel(c, false);
         }
-        // The open buttons need the service's list to be current: greyed
-        // out while it isn't there (Download keeps its own rules).
-        const bool connected = snap_.link == Link::Connected;
+        // Open in browser needs the service serving it: greyed out while
+        // it isn't there. Folder, Terminal, the editor and Studio don't.
         for (std::size_t i = 0; i < g.buttons.size(); ++i) {
             const int index = static_cast<int>(i);
             const auto& [r, action] = g.buttons[i];
-            const bool can = connected || action == PanelAction::Download;
+            const bool can = panel_action_enabled(action);
             if (can) {
                 paint_button(c, r, hovered(Part::PanelButton, index), focused(Part::PanelButton, index));
             } else {
@@ -1399,7 +1407,7 @@ void MainWindow::paint_panel(Canvas& c, HDC dc, bool text_pass) const {
     }
     for (const auto& [rect, action] : g.buttons) {
         if (!is_icon_action(action)) {
-            const bool can = snap_.link == Link::Connected || action == PanelAction::Download;
+            const bool can = panel_action_enabled(action);
             c.text(rect, w(panel_button_text(action)), fonts_.button.get(), can ? p.text : p.button_disabled_text,
                    Align::Center, false);
         }

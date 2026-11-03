@@ -34,6 +34,7 @@ namespace floserver::core {
 // console program (spawn_detached's "no window" would hide one for good).
 // It runs in `folder` (the program's own folder when empty) and, when the
 // caller's job allows it, outside the caller's job, so it outlives the caller.
+// On Windows only an .exe is started (a .bat or .cmd would go through cmd.exe).
 [[nodiscard]] bool start_program(const std::filesystem::path& program, const std::vector<std::string>& args,
                                  const std::filesystem::path& folder, std::string& error);
 

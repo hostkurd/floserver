@@ -450,6 +450,8 @@ private:
     // An icon button's tooltip, which is also its accessible name: "Open
     // folder", "Open in VS Code", "Choose a code editor…".
     [[nodiscard]] std::string panel_button_tip(PanelAction action) const;
+    // Open in browser only while the service is there; the others always.
+    [[nodiscard]] bool panel_action_enabled(PanelAction action) const;
     // The tooltips follow the icon buttons (after each paint's geometry).
     void place_panel_tips();
     // FloCMS Studio with the project's folder (the window has it: no
@@ -459,9 +461,12 @@ private:
     // Code editor when there's none.
     void open_editor(const std::string& path);
     void open_settings_editor();
-    // The code editor projects open in, looked for once a window session
-    // (Settings > General's choice changing, or Settings closing, asks again).
-    [[nodiscard]] const std::optional<EditorTarget>& editor() const;
+    // The code editor projects open in, as last looked for (painting only
+    // reads it). ensure_editor() looks once a window session, never while
+    // painting: when the panel is laid out, before the row menu, on a click.
+    // forget_editor() (General's choice changed, Settings closed) asks again.
+    [[nodiscard]] const std::optional<EditorTarget>& editor() const { return editor_; }
+    void ensure_editor();
     void forget_editor();
     // A mouse button went down: the keyboard focus frames hide (Windows' rule).
     void mouse_used();
@@ -723,8 +728,8 @@ private:
     bool show_focus_ = false;
     bool tracking_mouse_ = false;
     // The code editor (editor()): found once, kept for the window session.
-    mutable bool editor_known_ = false;
-    mutable std::optional<EditorTarget> editor_;
+    bool editor_known_ = false;
+    std::optional<EditorTarget> editor_;
     // The icon buttons' tooltips, by kIconActions' order: their words and where they are.
     std::array<std::wstring, kIconActions.size()> panel_tips_;
     std::array<RECT, kIconActions.size()> panel_tip_rects_{};

@@ -57,6 +57,14 @@ std::optional<Request> parse_request(std::string_view text, std::string& error_c
     return r;
 }
 
+std::int64_t request_id(std::string_view text) {
+    const json doc = json::parse(text, nullptr, /*allow_exceptions=*/false);
+    if (doc.is_object() && doc.contains("id") && doc["id"].is_number_integer()) {
+        return doc["id"].get<std::int64_t>();
+    }
+    return 0;
+}
+
 std::optional<Reply> parse_reply(std::string_view text) {
     const json doc = json::parse(text, nullptr, /*allow_exceptions=*/false);
     if (!doc.is_object() || !doc.contains("v") || doc["v"] != kVersion || !doc.contains("id") ||

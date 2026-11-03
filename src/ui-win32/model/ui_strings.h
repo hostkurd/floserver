@@ -541,6 +541,7 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     GeneralEditorNotFound,
     GeneralEditorPick,      // the file picker's title
     GeneralEditorPrograms,  // the file picker's filter
+    GeneralEditorNotProgram,
     Count_,
 };
 

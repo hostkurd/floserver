@@ -254,11 +254,22 @@ std::optional<EditorTarget> pick_editor(const EditorChoice& choice, const std::v
         case EditorChoice::Kind::Program:
             break;
     }
-    if (choice.path.empty()) {
-        return std::nullopt;
+    if (!is_program_file(choice.path)) {
+        return std::nullopt;  // nothing chosen, or not a program that can be started without a shell
     }
     const fs::path program = core::path_from_utf8(choice.path);
     return EditorTarget{program_display_name(program), program};
+}
+
+bool is_program_file(std::string_view path) {
+    if (path.size() <= 4) {
+        return false;
+    }
+    std::string tail(path.substr(path.size() - 4));
+    std::transform(tail.begin(), tail.end(), tail.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    const char before = path[path.size() - 5];
+    return tail == ".exe" && before != '/' && before != '\\';
 }
 
 std::string program_display_name(const fs::path& program) {
