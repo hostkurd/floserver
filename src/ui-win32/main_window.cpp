@@ -26,10 +26,8 @@ constexpr UINT kSnapshotMessage = WM_APP + 2;
 constexpr UINT kTrayMessage = WM_APP + 3;
 constexpr UINT kSettingsClosedMessage = WM_APP + 4;
 // WM_APP + 5 and + 6 are the panel's (main_window.h).
-constexpr UINT_PTR kErrorTimer = 1;
-constexpr UINT kErrorShownMs = 8000;
-constexpr UINT_PTR kNoticeTimer = 2;
-constexpr UINT kNoticeShownMs = 4000;
+// Only while an information toast is shown, and not while the mouse is over it.
+constexpr UINT_PTR kToastTimer = 2;
 constexpr UINT kTrayId = 1;
 constexpr UINT_PTR kSearchSubclass = 1;
 constexpr UINT_PTR kTipNewProject = 1;
@@ -255,6 +253,7 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             break;
         case WM_MOUSELEAVE:
             tracking_mouse_ = false;
+            toast_event(ToastEvent::MouseLeave);
             if (list_bar_.leave() || panel_bar_.leave() || first_run_bar_.leave()) {
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
@@ -273,7 +272,7 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
                                   hit.part == Part::FrChange ||
                                   hit.part == Part::PanelAddress || hit.part == Part::PanelKeep ||
                                   hit.part == Part::SharedSwitch || hit.part == Part::SharedEnd ||
-                                  (hit.part == Part::Banner && banner().clickable);
+                                  (hit.part == Part::Banner && status_line().clickable);
                 SetCursor(LoadCursorW(nullptr, hand ? IDC_HAND : IDC_ARROW));
                 return TRUE;
             }
@@ -359,11 +358,9 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             if (list_bar_.tick(hwnd_, wparam) || panel_bar_.tick(hwnd_, wparam) || first_run_bar_.tick(hwnd_, wparam)) {
                 return 0;
             }
-            if (wparam == kErrorTimer || wparam == kNoticeTimer) {
-                KillTimer(hwnd_, wparam);
-                (wparam == kErrorTimer ? change_error_ : notice_.text).clear();
-                layout();
-                InvalidateRect(hwnd_, nullptr, FALSE);
+            if (wparam == kToastTimer) {
+                KillTimer(hwnd_, kToastTimer);
+                toast_event(ToastEvent::TimeUp);
             }
             return 0;
         case kSnapshotMessage:
@@ -479,8 +476,7 @@ void MainWindow::on_create() {
 }
 
 void MainWindow::on_destroy() {
-    KillTimer(hwnd_, kErrorTimer);
-    KillTimer(hwnd_, kNoticeTimer);
+    KillTimer(hwnd_, kToastTimer);
     list_bar_.cancel(hwnd_);
     panel_bar_.cancel(hwnd_);
     first_run_bar_.cancel(hwnd_);
@@ -525,8 +521,7 @@ void MainWindow::open_phpmyadmin_links(std::vector<Snapshot::DbAnswer>& answers)
         }
         if (panel) {
             if (!ours) {
-                change_error_ = fill(lang_, Str::PmaOpenFailed, {it->error});
-                SetTimer(hwnd_, kErrorTimer, kErrorShownMs, nullptr);
+                show_notice(fill(lang_, Str::PmaOpenFailed, {it->error}), true);
             }
             it = answers.erase(it);
         } else {
@@ -543,8 +538,7 @@ void MainWindow::on_snapshot() {
     // A switch or picker shows the user's choice until its last command has finished.
     settle(s.settled);
     if (!s.change_error.empty()) {
-        change_error_ = s.change_error;
-        SetTimer(hwnd_, kErrorTimer, kErrorShownMs, nullptr);
+        show_notice(s.change_error, true);
     }
     // Copy .env lines from Settings > Shared sites comes here too: it's told after.
     std::optional<bool> copied;
@@ -555,11 +549,7 @@ void MainWindow::on_snapshot() {
         pending_added_ = s.added;
     }
     open_phpmyadmin_links(s.db);
-    const std::string error_before = change_error_;
     const std::vector<Removed> removed = on_remove_answers(s.db);
-    if (change_error_ != error_before && !change_error_.empty()) {
-        SetTimer(hwnd_, kErrorTimer, kErrorShownMs, nullptr);
-    }
     on_first_run_answers(s);
     const bool quit_done = s.quit_done;
     const std::string quit_error = s.quit_error;
@@ -839,12 +829,8 @@ void MainWindow::change_language(Lang lang) {
     }
     // The words made from the snapshot, in the new language.
     update_fields();
-    if (!change_error_.empty()) {
-        SetTimer(hwnd_, kErrorTimer, kErrorShownMs, nullptr);
-    }
-    if (!notice_.text.empty()) {
-        SetTimer(hwnd_, kNoticeTimer, kNoticeShownMs, nullptr);
-    }
+    toast_.hovered = false;  // a new window: the mouse isn't over it yet
+    sync_toast_timer();
     layout();
     scroll_to(list_scroll);
     panel_scroll_to(panel_scroll);
@@ -957,14 +943,12 @@ RECT MainWindow::search_box() const {
 }
 
 RECT MainWindow::banner_rect() const {
-    if (banner().text.empty()) {
+    // Only the first-run page, which has no status line, shows the service's
+    // state at its top; elsewhere it's in the status line and nothing moves.
+    if (!first_run_open() || status_line().text.empty()) {
         return {};
     }
-    if (first_run_open()) {
-        // Over the page, which has no top bar.
-        return {px(kPad), px(8), width_ - px(kPad), px(8) + px(kBannerH)};
-    }
-    return {px(kPad), px(kTopBarH), width_ - px(kPad), px(kTopBarH) + px(kBannerH)};
+    return {px(kPad), px(8), width_ - px(kPad), px(8) + px(kBannerH)};
 }
 
 RECT MainWindow::card_rect() const {
@@ -1182,13 +1166,7 @@ bool MainWindow::shows_rows() const {
            (snap_.link == Link::Connected || snap_.link == Link::Lost || snap_.link == Link::Stopping);
 }
 
-MainWindow::BannerText MainWindow::banner() const {
-    if (!change_error_.empty()) {
-        return {change_error_, true, false};
-    }
-    if (!notice_.text.empty()) {
-        return {notice_.text, notice_.error, false};
-    }
+MainWindow::BannerText MainWindow::status_line() const {
     switch (snap_.link) {
         case Link::Connecting:
             return {std::string(text(lang_, Str::Connecting)), false, false};
@@ -1219,6 +1197,12 @@ bool MainWindow::switch_value(const ProjectRow& row) const {
 
 MainWindow::Hit MainWindow::hit_test(int x, int y) const {
     if (first_run_open()) {
+        if (contains(toast_geometry_.close, x, y)) {
+            return {Part::ToastClose, -1, {}};
+        }
+        if (contains(toast_geometry_.card, x, y)) {
+            return {Part::Toast, -1, {}};
+        }
         // The page is all there is: no top bar, list or panel under it.
         if (first_run_bar_.over(x, y)) {
             return {};
@@ -1227,6 +1211,15 @@ MainWindow::Hit MainWindow::hit_test(int x, int y) const {
             return {Part::Banner, -1, {}};
         }
         return first_run_hit_test(x, y);
+    }
+    if (contains(toast_geometry_.close, x, y)) {
+        return {Part::ToastClose, -1, {}};
+    }
+    if (contains(toast_geometry_.card, x, y)) {
+        return {Part::Toast, -1, {}};
+    }
+    if (!status_line().text.empty() && contains(footer_rect(), x, y)) {
+        return {Part::Banner, -1, {}};
     }
     if (panel_bar_.over(x, y) || (list_bar_.over(x, y) && !(panel_open() && contains(panel_geometry_.panel, x, y)))) {
         return {};  // a scroll bar's
@@ -1285,6 +1278,11 @@ void MainWindow::on_mouse_move(int x, int y) {
     if (!(hit == hover_)) {
         hover_ = hit;
         InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+    // Information stays while it's being read; its time starts again on the way out.
+    const bool over_toast = hit.part == Part::Toast || hit.part == Part::ToastClose;
+    if (over_toast != toast_.hovered) {
+        toast_event(over_toast ? ToastEvent::MouseEnter : ToastEvent::MouseLeave);
     }
 }
 
@@ -1355,8 +1353,13 @@ void MainWindow::on_click(const Hit& clicked) {
         case Part::PanelPhpSave:
             on_php_panel_click(hit);
             break;
+        case Part::ToastClose:
+            toast_event(ToastEvent::Close);
+            break;
+        case Part::Toast:
+            break;  // a click on the words: they stay
         case Part::Banner:
-            if (banner().clickable && worker_) {
+            if (status_line().clickable && worker_) {
                 worker_->start_service();
             }
             break;
@@ -1413,6 +1416,11 @@ void MainWindow::on_click(const Hit& clicked) {
 }
 
 void MainWindow::on_key(WPARAM key) {
+    // Esc closes a message first (its close mark can't be reached with Tab).
+    if (key == VK_ESCAPE && !toast_.text.empty()) {
+        toast_event(ToastEvent::Close);
+        return;
+    }
     // Ctrl+, opens Settings from anywhere in the window.
     if (key == VK_OEM_COMMA && (GetKeyState(VK_CONTROL) & 0x8000) != 0) {
         open_settings();
@@ -1492,7 +1500,7 @@ void MainWindow::on_key(WPARAM key) {
             return;
         case VK_F5:
             // Also the keyboard's way to start a stopped service (the banner).
-            if (worker_ && banner().clickable) {
+            if (worker_ && status_line().clickable) {
                 worker_->start_service();
             } else if (worker_) {
                 worker_->refresh();
@@ -1608,7 +1616,7 @@ void MainWindow::toggle_project(const std::string& project) {
     const bool value = !switch_value(row);
     pending_[row.name] = value;
     ++outstanding_[ServiceWorker::on_key(row.name)];
-    change_error_.clear();
+    dismiss_error();
     worker_->set_on(row.name, value);
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
@@ -1657,7 +1665,7 @@ void MainWindow::start_downloads_for(const std::string& project) {
     }
     installing_[row.name] = true;
     ++outstanding_[ServiceWorker::install_key(row.name)];
-    change_error_.clear();
+    dismiss_error();
     worker_->install(row.name, downloads);
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
@@ -1688,10 +1696,43 @@ void MainWindow::settle(const std::vector<std::string>& keys) {
 }
 
 void MainWindow::show_notice(std::string message, bool error) {
-    notice_ = {std::move(message), error};
-    SetTimer(hwnd_, kNoticeTimer, kNoticeShownMs, nullptr);
-    layout();
+    toast_ = toast_with(toast_, std::move(message), error ? ToastKind::Error : ToastKind::Info);
+    sync_toast_timer();
     InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void MainWindow::dismiss_error() {
+    if (toast_.kind == ToastKind::Error) {
+        toast_event(ToastEvent::Close);
+    }
+}
+
+void MainWindow::toast_event(ToastEvent event) {
+    const Toast before = toast_;
+    toast_ = toast_after(toast_, event);
+    if (!(toast_ == before)) {
+        sync_toast_timer();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+}
+
+void MainWindow::sync_toast_timer() {
+    if (hwnd_ == nullptr) {
+        return;
+    }
+    // One timer, only while information is shown and not being read; set again, it starts over.
+    if (toast_timer_runs(toast_)) {
+        SetTimer(hwnd_, kToastTimer, static_cast<UINT>(kToastInfoTime.count()), nullptr);
+    } else {
+        KillTimer(hwnd_, kToastTimer);
+    }
+}
+
+int MainWindow::toast_bottom() const {
+    if (first_run_open() && height_of(first_run_geometry_.content) > 0) {
+        return first_run_geometry_.content.bottom - px(kGap);
+    }
+    return footer_rect().top - px(kGap);
 }
 
 // The .env lines hold the database password: they're kept out of Windows'
@@ -1745,7 +1786,7 @@ void MainWindow::update_tray_tip() {
     if (shows_rows() && snap_.link == Link::Connected) {
         tip += w(snap_.footer.counts);
     } else {
-        tip += w(banner().text);
+        tip += w(status_line().text);
     }
     if (tip == tray_tip_) {
         return;
@@ -1834,6 +1875,7 @@ void MainWindow::on_paint() {
                 }
             }
             place_scroll_bars();
+            toast_geometry_ = toast_geometry(mem.get(), toast_, fonts_.button.get(), width_, toast_bottom(), dpi_, rtl_);
             {
                 Canvas canvas(mem.get(), width_, rtl_);
                 canvas.fill({0, 0, width_, height_}, palette(dark_).window);
@@ -1844,6 +1886,8 @@ void MainWindow::on_paint() {
                     if (first_run_open()) {
                         paint_first_run(canvas, mem.get(), text_pass);
                         paint_banner(canvas, text_pass);
+                        paint_toast(canvas, toast_geometry_, toast_, fonts_.button.get(), dark_, dpi_,
+                                    hover_.part == Part::ToastClose, text_pass);
                         continue;
                     }
                     paint_top_bar(canvas, mem.get(), text_pass);
@@ -1856,6 +1900,9 @@ void MainWindow::on_paint() {
                         paint_panel(canvas, mem.get(), text_pass);
                     }
                     paint_footer(canvas, mem.get(), text_pass);
+                    // Over everything, nothing moved for it.
+                    paint_toast(canvas, toast_geometry_, toast_, fonts_.button.get(), dark_, dpi_,
+                                hover_.part == Part::ToastClose, text_pass);
                 }
             }
             // The bitmap is already laid out right to left; copy it as it is.
@@ -1918,8 +1965,8 @@ void MainWindow::paint_gear(Canvas& c, const RECT& r, Rgb color, bool text_pass)
 }
 
 void MainWindow::paint_banner(Canvas& c, bool text_pass) const {
-    const BannerText b = banner();
-    if (b.text.empty()) {
+    const BannerText b = status_line();
+    if (b.text.empty() || height_of(banner_rect()) <= 0) {
         return;
     }
     const Palette& p = palette(dark_);
@@ -2035,15 +2082,25 @@ void MainWindow::paint_list(Canvas& c, HDC /*dc*/, bool text_pass) const {
 void MainWindow::paint_footer(Canvas& c, HDC dc, bool text_pass) const {
     const Palette& p = palette(dark_);
     const RECT f = footer_rect();
-    const bool live = shows_rows() && snap_.link == Link::Connected;
+    // The service's state (stopped, stopped answering, connecting...) takes
+    // the line until it's connected and well; red while it's a problem.
+    const BannerText status = status_line();
+    const bool live = shows_rows() && snap_.link == Link::Connected && status.text.empty();
     const int mid = (f.top + f.bottom) / 2;
     if (!text_pass) {
         c.fill(f, p.footer);
         c.fill({f.left, f.top, f.right, f.top + std::max(1, px(1))}, p.footer_border);
-        if (live) {
-            c.ellipse(static_cast<float>(px(kPad)) + pxf(4), static_cast<float>(mid), pxf(4),
-                      snap_.footer.any_running ? p.footer_dot : p.text_subtle);
+        if (live || !status.text.empty()) {
+            const Rgb dot = !status.text.empty() ? (status.error ? p.problem.text : p.text_subtle)
+                                                 : (snap_.footer.any_running ? p.footer_dot : p.text_subtle);
+            c.ellipse(static_cast<float>(px(kPad)) + pxf(4), static_cast<float>(mid), pxf(4), dot);
         }
+        return;
+    }
+    if (!status.text.empty()) {
+        const RECT line{px(kPad) + px(8) + px(6), f.top, f.right - px(kPad), f.bottom};
+        c.text(line, w(status.text), status.error ? fonts_.button_bold.get() : fonts_.caption.get(),
+               status.error ? p.problem.text : p.text_subtle, Align::Start, false);
         return;
     }
     if (!live) {

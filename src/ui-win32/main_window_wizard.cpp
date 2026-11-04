@@ -210,7 +210,7 @@ void MainWindow::wizard_next() {
             }
             snap_.create = {};
             wizard_.step = 3;
-            change_error_.clear();
+            dismiss_error();
             worker_->create_project(wizard_.template_id, wizard_.name, wizard_.parent, versions);
             break;
         }

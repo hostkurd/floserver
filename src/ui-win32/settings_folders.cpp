@@ -184,7 +184,7 @@ void SettingsWindow::change_projects_folder() {
         return;
     }
     folders_setting_ = true;
-    message_.clear();
+    clear_toast();
     folders_set_ask_ = folders_purpose("folders.set");
     worker_.database_call("folders.set", {{"projects_dir", *picked}}, folders_set_ask_);
     relayout();
@@ -200,7 +200,7 @@ void SettingsWindow::clean_up(const std::string& what) {
         return;
     }
     cleaning_ = what;
-    message_.clear();
+    clear_toast();
     cleaning_ask_ = folders_purpose("folders.clean");
     // The service lists what to remove again itself: nothing named here is deleted.
     worker_.database_call("folders.clean", {{"what", what}}, cleaning_ask_);
@@ -237,11 +237,6 @@ void SettingsWindow::layout_folders(HDC dc, Geometry& g, int x0, int x1, int y) 
     g.title = {x0, y, x1, y + px(28)};
     g.hint = {x0, g.title.bottom, x1, g.title.bottom + hint_h};
     y = static_cast<int>(g.hint.bottom) + px(kGap);
-    if (!message_.empty()) {
-        const int mh = std::max(px(32), text_height(dc, w(message_), fonts_.button.get(), x1 - x0 - px(24), rtl_) + px(14));
-        g.message = {x0, y, x1, y + mh};
-        y += mh + px(kGap);
-    }
     if (!folders_) {
         fg.note = {x0, y, x1, y + px(24)};
         g.content_h = fg.note.bottom + scroll_ + px(8);
@@ -386,7 +381,7 @@ void SettingsWindow::on_folders_click(const Hit& hit) {
         case Part::FoldersProjectsDefault:
             if (connected_ && !folders_setting_ && folders_->custom) {
                 folders_setting_ = true;
-                message_.clear();
+                clear_toast();
                 folders_set_ask_ = folders_purpose("folders.set");
                 worker_.database_call("folders.set", {{"projects_dir", nullptr}}, folders_set_ask_);
                 relayout();
@@ -430,9 +425,6 @@ void SettingsWindow::paint_folders_shapes(Canvas& c) const {
     const FoldersGeometry& fg = geometry_.folders;
     const float border = std::max(1.0F, pxf(1.0F));
     c.clip({main_left() - px(4), 0, width_, height_});
-    if (!is_empty(geometry_.message)) {
-        c.round_rect(geometry_.message, pxf(4), message_error_ ? p.banner_error.fill : p.banner_info.fill);
-    }
     if (folders_) {
         const bool can_change = connected_ && !picking_folder_;
         const auto button = [&](Part part, const RECT& r, bool enabled) {
@@ -471,11 +463,6 @@ void SettingsWindow::paint_folders_text(Canvas& c) const {
     c.clip_text({main_left() - px(4), 0, width_, height_});
     c.text(geometry_.title, w(text(lang_, Str::SettingsFolders)), fonts_.title.get(), p.text, Align::Start, false);
     c.paragraph(geometry_.hint, w(text(lang_, Str::FoldersHint)), fonts_.caption.get(), p.text_subtle);
-    if (!is_empty(geometry_.message)) {
-        RECT inner = geometry_.message;
-        InflateRect(&inner, -px(12), -px(7));
-        c.paragraph(inner, w(message_), fonts_.button.get(), message_error_ ? p.banner_error.text : p.banner_info.text);
-    }
     if (!folders_) {
         if (!is_empty(fg.note)) {
             c.text(fg.note, w(text(lang_, Str::SettingsLoading)), fonts_.button.get(), p.text_subtle, Align::Start, false);

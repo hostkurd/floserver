@@ -44,7 +44,7 @@ void MainWindow::toggle_shared() {
     const std::string key = ServiceWorker::on_key(shared_key());
     pending_[shared_key()] = value;
     ++outstanding_[key];
-    change_error_.clear();
+    dismiss_error();
     worker_->set_shared({{"on", value}}, key);
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
@@ -59,7 +59,7 @@ void MainWindow::start_shared_downloads() {
     }
     installing_[shared_key()] = true;
     ++outstanding_[ServiceWorker::install_key(shared_key())];
-    change_error_.clear();
+    dismiss_error();
     worker_->install(shared_key(), downloads);
     InvalidateRect(hwnd_, nullptr, FALSE);
 }

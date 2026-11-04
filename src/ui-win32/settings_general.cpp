@@ -198,7 +198,7 @@ void SettingsWindow::set_start(bool on, bool tray) {
     } else {
         run_entry_.reset();
     }
-    message_.clear();
+    clear_toast();
     relayout();
 }
 
@@ -376,11 +376,6 @@ void SettingsWindow::layout_general(HDC dc, Geometry& g, int x0, int x1, int y) 
     g.title = {x0, y, x1, y + px(28)};
     g.hint = {x0, g.title.bottom, x1, g.title.bottom + hint_h};
     y = static_cast<int>(g.hint.bottom) + px(kGap);
-    if (!message_.empty()) {
-        const int mh = std::max(px(32), height(message_, fonts_.button.get(), x1 - x0 - px(24)) + px(14));
-        g.message = {x0, y, x1, y + mh};
-        y += mh + px(kGap);
-    }
     const int cx0 = x0 + px(kCardPad);
     const int cx1 = x1 - px(kCardPad);
     const int radio_x = cx0 + px(kRadio) + px(10);
@@ -557,9 +552,6 @@ void SettingsWindow::paint_general_shapes(Canvas& c) const {
     const float border = std::max(1.0F, pxf(1.0F));
     const RECT column{main_left() - px(4), 0, width_, height_};
     c.clip(column);
-    if (!is_empty(g.message)) {
-        c.round_rect(g.message, pxf(4), message_error_ ? p.banner_error.fill : p.banner_info.fill);
-    }
     for (const RECT* card :
          {&gg.lang_card, &gg.theme_card, &gg.start_card, &gg.close_card, &gg.editor_card, &gg.about_card}) {
         c.round_rect(*card, pxf(8), p.card, p.card_border, border);
@@ -623,11 +615,6 @@ void SettingsWindow::paint_general_text(Canvas& c) const {
     c.clip_text(column);
     c.text(g.title, w(text(lang_, Str::SettingsGeneral)), fonts_.title.get(), p.text, Align::Start, false);
     c.paragraph(g.hint, w(text(lang_, Str::GeneralHint)), fonts_.caption.get(), p.text_subtle);
-    if (!is_empty(g.message)) {
-        RECT inner = g.message;
-        InflateRect(&inner, -px(12), -px(7));
-        c.paragraph(inner, w(message_), fonts_.button.get(), message_error_ ? p.banner_error.text : p.banner_info.text);
-    }
     const auto title = [&](const RECT& r, Str key) {
         c.text(r, w(text(lang_, key)), fonts_.body_bold.get(), p.text, Align::Start, false);
     };

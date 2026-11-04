@@ -53,8 +53,10 @@
 #include "model/php_page.h"
 #include "model/ports_page.h"
 #include "model/runtimes_page.h"
+#include "model/toast.h"
 #include "model/ui_strings.h"
 #include "scroll_bar.h"
+#include "toast_view.h"
 #include "service_worker.h"
 #include "win_util.h"
 #include "window_style.h"
@@ -151,6 +153,8 @@ private:
                   "Section and kSettingsSidebar list the sections in the same order");
     enum class Part : std::uint8_t {
         None,
+        Toast,       // a message's card, over the page
+        ToastClose,
         Nav,     // row: the section
         Check,
         Picker,
@@ -479,7 +483,6 @@ private:
         RECT title{};
         RECT hint{};
         RECT check{};
-        RECT message{};
         RECT note{};  // "Loading…" before the first answer
         std::vector<GroupGeometry> groups;
         PhpGeometry php;
@@ -680,6 +683,10 @@ private:
     void post_pref(PrefChange change, std::size_t value);
     // A mouse button went down: the focus frame hides until a key is used.
     void mouse_used();
+    // The toast: closed (a new action, a section left), or what happened to it.
+    void clear_toast();
+    void toast_event(ToastEvent event);
+    void sync_toast_timer();
     void set_start(bool on, bool tray);
     [[nodiscard]] bool shown_start_tray() const;
     [[nodiscard]] bool run_elsewhere() const;
@@ -738,8 +745,8 @@ private:
     std::set<std::string> starting_;   // ServiceWorker::install_key(settings_install_key(...))
     std::set<std::string> removing_;   // ServiceWorker::remove_key(...)
     std::map<std::string, std::optional<std::string>> pending_default_;  // runtime -> series
-    std::string message_;
-    bool message_error_ = false;
+    Toast toast_;  // the message shown (model/toast.h)
+    ToastGeometry toast_geometry_;
 
     Section section_ = Section::General;  // opening Settings plainly opens General
     // Settings > PHP: the series shown, its php.get answer, and the changes

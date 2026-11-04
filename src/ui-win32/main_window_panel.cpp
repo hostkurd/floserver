@@ -700,14 +700,14 @@ void MainWindow::on_panel_click(const Hit& hit) {
             break;
         case Part::PanelCopyEnv:
             if (worker_ && snap_.link == Link::Connected) {
-                change_error_.clear();
+                dismiss_error();
                 worker_->copy_env(selected_);
             }
             break;
         case Part::PanelPhpMyAdmin:
             // One request; on_snapshot() opens the link it answers with.
             if (worker_ && snap_.link == Link::Connected && !pma_busy_ && phpmyadmin_installed(snap_.installed)) {
-                change_error_.clear();
+                dismiss_error();
                 pma_busy_ = true;
                 worker_->database_call("phpmyadmin.login",
                                        {{"project", selected_}, {"lang", std::string(lang_code(lang_))}}, "panel");
@@ -1162,7 +1162,7 @@ void MainWindow::add_existing_folder() {
     if (failed) {
         show_notice(fill(lang_, Str::OpenFailed, {"folder picker"}), true);
     } else if (!path.empty() && worker_) {
-        change_error_.clear();
+        dismiss_error();
         worker_->add_folder(path);
     }
 }
@@ -1210,7 +1210,7 @@ void MainWindow::show_field_menu(std::size_t index) {
     const std::string key = ServiceWorker::use_key(project, field.key);
     pending_use_[key] = field.choices[picked].value;
     ++outstanding_[key];
-    change_error_.clear();
+    dismiss_error();
     worker_->use(project, field.key, field.choices[picked].value);
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
@@ -1227,7 +1227,7 @@ void MainWindow::toggle_keep_running_for(const std::string& project) {
     const bool value = !keep_value(*row);
     pending_keep_[row->name] = value;
     ++outstanding_[ServiceWorker::keep_key(row->name)];
-    change_error_.clear();
+    dismiss_error();
     worker_->set_keep_running(row->name, value);
     InvalidateRect(hwnd_, nullptr, FALSE);
 }

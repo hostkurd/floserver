@@ -11,9 +11,11 @@
 #include "model/first_run.h"
 #include "model/php_page.h"
 #include "model/project_menu.h"
+#include "model/toast.h"
 #include "model/ui_strings.h"
 #include "recycle_bin.h"
 #include "scroll_bar.h"
+#include "toast_view.h"
 #include "service_worker.h"
 #include "settings_window.h"
 #include "win_util.h"
@@ -55,7 +57,9 @@ private:
         Address,
         NewProject,
         Settings,
-        Banner,
+        Banner,      // the service's state: the clickable status line (Start FloServer)
+        Toast,       // a message's card, over the content
+        ToastClose,
         Download,  // a row's Download button
         // The project panel; `row` is the item's index where there are several.
         PanelClose,
@@ -321,10 +325,6 @@ private:
     // False for a template with nothing to choose (no Versions page).
     [[nodiscard]] bool wizard_has_versions() const;
     using Fonts = UiFonts;
-    struct Notice {
-        std::string text;
-        bool error = false;
-    };
     struct BannerText {
         std::string text;
         bool error = false;
@@ -365,7 +365,10 @@ private:
     void ensure_visible(int row);
     [[nodiscard]] int list_height() const;
     [[nodiscard]] Hit hit_test(int x, int y) const;
-    [[nodiscard]] BannerText banner() const;
+    // The service's state, for the status line at the bottom (the first-run
+    // page: over it): connecting, stopped (clickable), stopped answering...
+    // Empty while it's connected and well.
+    [[nodiscard]] BannerText status_line() const;
     [[nodiscard]] bool shows_rows() const;
     [[nodiscard]] bool switch_value(const ProjectRow& row) const;
     void toggle(int visible_row);
@@ -407,7 +410,14 @@ private:
     void copy_address(const std::string& address);
     [[nodiscard]] bool is_settled(const std::string& key) const;
     void settle(const std::vector<std::string>& keys);
+    // A toast (model/toast.h): information goes by itself, an error stays until closed.
     void show_notice(std::string text, bool error);
+    // An error shown from before goes as the user tries again.
+    void dismiss_error();
+    void toast_event(ToastEvent event);
+    void sync_toast_timer();
+    // The toast's bottom edge: above the footer (the first-run page's buttons).
+    [[nodiscard]] int toast_bottom() const;
     // True when it's there.
     bool put_on_clipboard(std::string& text);
 
@@ -653,7 +663,6 @@ private:
     std::map<std::string, std::optional<std::string>> pending_use_;  // ServiceWorker::use_key -> value
     std::map<std::string, int> outstanding_;    // commands not yet finished, per ServiceWorker key
     std::map<std::string, bool> installing_;    // Download clicked; the worker hasn't reported yet
-    std::string change_error_;
     bool pma_busy_ = false;  // the panel's phpmyadmin.login is on its way
     struct Removing {
         bool drop = false;   // with its database
@@ -663,7 +672,8 @@ private:
     std::map<std::string, Removing> removing_;  // projects.remove on its way, per project
     RecycleBin recycle_bin_;
     std::set<std::string> removed_;         // removed; hidden until the list no longer has them
-    Notice notice_;  // a short message in the banner ("copied")
+    Toast toast_;  // the message shown (model/toast.h)
+    ToastGeometry toast_geometry_;
 
     WizardState wizard_;
     mutable WizardGeometry wizard_geometry_;

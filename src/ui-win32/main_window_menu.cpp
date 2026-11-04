@@ -324,7 +324,7 @@ void MainWindow::ask_remove(const std::string& project) {
         return;
     }
     removing_[project] = Removing{drop, trash && offer_folder, row.path};
-    change_error_.clear();
+    dismiss_error();
     worker_->database_call("projects.remove", {{"name", project}, {"drop_database", drop}},
                            std::string(kRemovePurpose) + project);
     InvalidateRect(hwnd_, nullptr, FALSE);
@@ -345,7 +345,7 @@ std::vector<MainWindow::Removed> MainWindow::on_remove_answers(std::vector<Snaps
         const bool drop = it->reply && it->reply->is_object() && it->reply->value("database_dropped", false);
         if (!it->error.empty() || !it->reply) {
             // Nothing was removed: the user can try again (on_snapshot shows it).
-            change_error_ = fill(lang_, Str::RemoveFailed, {project, it->error.empty() ? "no answer" : it->error});
+            show_notice(fill(lang_, Str::RemoveFailed, {project, it->error.empty() ? "no answer" : it->error}), true);
         } else {
             Removed done{project, drop, false, {}, false};
             if (job.trash) {

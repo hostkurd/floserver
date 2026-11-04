@@ -268,7 +268,7 @@ bool SettingsWindow::save_db() {
     }
     db_saving_ = true;
     set_db_read_only(true);
-    message_.clear();
+    clear_toast();
     worker_.database_call("database.set", database_set_params(db_series_, db_changes_));
     relayout();
     InvalidateRect(hwnd_, nullptr, FALSE);
@@ -299,7 +299,7 @@ void SettingsWindow::set_root_password() {
     } else {
         password_error_.clear();
         root_busy_ = true;
-        message_.clear();
+        clear_toast();
         worker_.database_call("database.root_set", {{"series", db_series_}, {"password", password}});
         wipe(password);
         db_edits_.back()->set_text({});
@@ -421,11 +421,6 @@ void SettingsWindow::layout_db(HDC dc, Geometry& g, int x0, int x1, int y) const
     }
     y = std::max(g.hint.bottom, dg.version.bottom) + px(kGap);
 
-    if (!message_.empty()) {
-        const int mh = std::max(px(32), text_height(dc, w(message_), fonts_.button.get(), x1 - x0 - px(24), rtl_) + px(14));
-        g.message = {x0, y, x1, y + mh};
-        y += mh + px(kGap);
-    }
     if ((!has_installed_ && !has_reply_) || (!db_ && db_loading_)) {
         dg.note = {x0, y, x1, y + px(24)};
         g.content_h = dg.note.bottom + scroll_ + px(8);
@@ -751,7 +746,7 @@ void SettingsWindow::db_focus_order(std::vector<Hit>& order) const {
 void SettingsWindow::on_db_click(const Hit& hit) {
     const DbActions actions = db_actions(db_server_);
     const auto server = [this](const char* action, const char* state) {
-        message_.clear();
+        clear_toast();
         db_server_.state = state;  // until the next snapshot says how it went
         worker_.database_call("database.server", {{"series", db_series_}, {"action", action}});
         relayout();
@@ -794,7 +789,7 @@ void SettingsWindow::on_db_click(const Hit& hit) {
         case Part::DbFinalIni:
         case Part::DbEditIni:
             if (connected_ && !db_series_.empty()) {
-                message_.clear();
+                clear_toast();
                 worker_.database_call(hit.part == Part::DbFinalIni ? "database.final_ini" : "database.custom_ini",
                                       {{"series", db_series_}});
                 relayout();
@@ -830,7 +825,7 @@ void SettingsWindow::on_db_click(const Hit& hit) {
             // One request; the window opens the link it answers with.
             if (db_ && connected_ && !pma_busy_ && phpmyadmin_installed(installed_)) {
                 pma_busy_ = true;
-                message_.clear();
+                clear_toast();
                 worker_.database_call("phpmyadmin.login", {{"series", db_series_}, {"lang", std::string(lang_code(lang_))}},
                                       "settings");
                 relayout();
@@ -906,9 +901,6 @@ void SettingsWindow::paint_db_shapes(Canvas& c) const {
         const float vy = static_cast<float>(dg.version.top + dg.version.bottom) / 2.0F;
         c.line(vx - pxf(4), vy - pxf(2), vx, vy + pxf(2), p.text_subtle, pxf(1.3F));
         c.line(vx, vy + pxf(2), vx + pxf(4), vy - pxf(2), p.text_subtle, pxf(1.3F));
-    }
-    if (!is_empty(g.message)) {
-        c.round_rect(g.message, pxf(4), message_error_ ? p.banner_error.fill : p.banner_info.fill);
     }
     if (!is_empty(dg.runtimes)) {
         const Hit hit{Part::DbRuntimes, -1, -1};
@@ -1022,11 +1014,6 @@ void SettingsWindow::paint_db_text(Canvas& c) const {
         box.left += px(8);
         box.right -= px(26);
         c.text(box, w(label), fonts_.button.get(), p.text, Align::Start, true);
-    }
-    if (!is_empty(g.message)) {
-        RECT inner = g.message;
-        InflateRect(&inner, -px(12), -px(7));
-        c.paragraph(inner, w(message_), fonts_.button.get(), message_error_ ? p.banner_error.text : p.banner_info.text);
     }
     if (!is_empty(dg.note)) {
         if (is_empty(dg.runtimes)) {

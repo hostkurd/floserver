@@ -114,7 +114,7 @@ bool SettingsWindow::save_apache() {
         return false;
     }
     apache_saving_ = true;
-    message_.clear();
+    clear_toast();
     worker_.database_call("apache.set", apache_set_params(apache_changes_));
     relayout();
     InvalidateRect(hwnd_, nullptr, FALSE);
@@ -268,11 +268,6 @@ void SettingsWindow::layout_apache(HDC dc, Geometry& g, int x0, int x1, int y) c
     }
     y = std::max(g.hint.bottom, ag.version.bottom) + px(kGap);
 
-    if (!message_.empty()) {
-        const int mh = std::max(px(32), text_height(dc, w(message_), fonts_.button.get(), x1 - x0 - px(24), rtl_) + px(14));
-        g.message = {x0, y, x1, y + mh};
-        y += mh + px(kGap);
-    }
     if (!apache_) {
         ag.note = {x0, y, x1, y + px(24)};
         g.content_h = ag.note.bottom + scroll_ + px(8);
@@ -494,7 +489,7 @@ void SettingsWindow::on_apache_click(const Hit& hit) {
         case Part::ApacheEditConf:
         case Part::ApacheFinalConf:
             if (connected_) {
-                message_.clear();
+                clear_toast();
                 // Made with a header when it isn't there; its path comes back to open.
                 worker_.database_call(hit.part == Part::ApacheEditConf ? "apache.custom_conf" : "apache.final_conf",
                                       json::object());
@@ -571,9 +566,6 @@ void SettingsWindow::paint_apache_shapes(Canvas& c) const {
         if (is_focused(hit)) {
             paint_ring(c, ag.version);
         }
-    }
-    if (!is_empty(geometry_.message)) {
-        c.round_rect(geometry_.message, pxf(4), message_error_ ? p.banner_error.fill : p.banner_info.fill);
     }
     if (!is_empty(ag.runtimes)) {
         const Hit hit{Part::ApacheRuntimes, -1, -1};
@@ -668,11 +660,6 @@ void SettingsWindow::paint_apache_text(Canvas& c) const {
         box.right -= px(26);
         c.text(box, w(apache_choice_label(*apache_, apache_shown_choice(*apache_, apache_changes_), lang_)),
                fonts_.button.get(), p.text, Align::Start, false);
-    }
-    if (!is_empty(geometry_.message)) {
-        RECT inner = geometry_.message;
-        InflateRect(&inner, -px(12), -px(7));
-        c.paragraph(inner, w(message_), fonts_.button.get(), message_error_ ? p.banner_error.text : p.banner_info.text);
     }
     if (!is_empty(ag.note)) {
         if (is_empty(ag.runtimes)) {

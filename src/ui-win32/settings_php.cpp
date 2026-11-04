@@ -173,7 +173,7 @@ void SettingsWindow::open_section(Section section, const std::string& series) {
     scroll_ = 0;
     focus_ = static_cast<int>(section);  // its own entry in the sidebar
     hover_ = {};
-    message_.clear();
+    clear_toast();
     if (section == Section::Php) {
         make_php_edits();
         std::string pick = series;
@@ -325,7 +325,7 @@ bool SettingsWindow::save_php() {
     }
     php_saving_ = true;
     set_php_read_only(true);  // what's typed now would be lost when the answer comes
-    message_.clear();
+    clear_toast();
     worker_.php_set(php_set_params(php_series_, php_changes_));
     relayout();
     InvalidateRect(hwnd_, nullptr, FALSE);
@@ -613,11 +613,6 @@ void SettingsWindow::layout_php(HDC dc, Geometry& g, int x0, int x1, int y) cons
     }
     y = std::max(g.hint.bottom, pg.version.bottom) + px(kGap);
 
-    if (!message_.empty()) {
-        const int mh = std::max(px(32), text_height(dc, w(message_), fonts_.button.get(), x1 - x0 - px(24), rtl_) + px(14));
-        g.message = {x0, y, x1, y + mh};
-        y += mh + px(kGap);
-    }
 
     if ((!has_installed_ && !has_reply_) || (!php_ && php_loading_)) {
         pg.note = {x0, y, x1, y + px(24)};
@@ -933,7 +928,7 @@ void SettingsWindow::on_php_click(const Hit& hit) {
         case Part::PhpEditIni:
         case Part::PhpFinalIni:
             if (connected_ && !php_series_.empty()) {
-                message_.clear();
+                clear_toast();
                 worker_.php_custom_ini(php_series_, hit.part == Part::PhpFinalIni);
                 relayout();
             }
@@ -1061,9 +1056,6 @@ void SettingsWindow::paint_php_shapes(Canvas& c) const {
         field_box(pg.version, false, hover_ == hit, false, hit);
         chevron(pg.version);
     }
-    if (!is_empty(g.message)) {
-        c.round_rect(g.message, pxf(4), message_error_ ? p.banner_error.fill : p.banner_info.fill);
-    }
     if (!is_empty(pg.runtimes)) {
         const Hit hit{Part::PhpRuntimes, -1, -1};
         paint_button(c, pg.runtimes, hover_ == hit, is_focused(hit), connected_);
@@ -1165,11 +1157,6 @@ void SettingsWindow::paint_php_text(Canvas& c) const {
         box.left += px(8);
         box.right -= px(26);
         c.text(box, w(label), fonts_.button.get(), p.text, Align::Start, true);
-    }
-    if (!is_empty(g.message)) {
-        RECT inner = g.message;
-        InflateRect(&inner, -px(12), -px(7));
-        c.paragraph(inner, w(message_), fonts_.button.get(), message_error_ ? p.banner_error.text : p.banner_info.text);
     }
     if (!is_empty(pg.note)) {
         if (is_empty(pg.runtimes)) {
