@@ -70,7 +70,10 @@ win::UniqueMenu make_menu(const std::vector<MenuItem>& items, Lang lang, std::ve
             const DWORD ink = GetSysColor(item.enabled ? COLOR_MENUTEXT : COLOR_GRAYTEXT);
             const Rgb color = (static_cast<Rgb>(GetRValue(ink)) << 16U) | (static_cast<Rgb>(GetGValue(ink)) << 8U) |
                               static_cast<Rgb>(GetBValue(ink));
-            win::UniqueBitmap icon(make_glyph_bitmap(*glyph, GetSystemMetricsForDpi(SM_CXSMICON, dpi), color));
+            // A right-to-left menu (TPM_LAYOUTRTL) mirrors its bitmaps: drawn
+            // mirrored, they show the right way round, as in the panel.
+            win::UniqueBitmap icon(
+                make_glyph_bitmap(*glyph, GetSystemMetricsForDpi(SM_CXSMICON, dpi), color, is_rtl(lang)));
             if (icon) {
                 MENUITEMINFOW info{};
                 info.cbSize = sizeof info;

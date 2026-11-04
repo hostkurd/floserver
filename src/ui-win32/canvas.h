@@ -92,7 +92,8 @@ private:
 
 // A stroke icon as a 32-bit premultiplied-alpha DIB section `size` pixels
 // square, for a menu item's bitmap (MIIM_BITMAP). The caller deletes it.
-[[nodiscard]] HBITMAP make_glyph_bitmap(Glyph g, int size, Rgb color);
+// `mirrored`: drawn flipped, for a right-to-left menu, which flips it back.
+[[nodiscard]] HBITMAP make_glyph_bitmap(Glyph g, int size, Rgb color, bool mirrored);
 
 // The FloServer mark (the mockup's title-bar logo) as an icon `size` pixels square.
 [[nodiscard]] HICON make_app_icon(int size);

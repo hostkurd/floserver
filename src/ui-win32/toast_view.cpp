@@ -4,6 +4,7 @@
 #include "win_util.h"
 
 #include <algorithm>
+#include <cstring>
 #include <string>
 
 namespace floserver::ui {
@@ -89,6 +90,9 @@ ToastPopup::~ToastPopup() {
         SetWindowLongPtrW(hwnd_, GWLP_USERDATA, 0);
         DestroyWindow(hwnd_);
     }
+    if (font_ != nullptr) {
+        DeleteObject(font_);
+    }
 }
 
 void ToastPopup::attach(HWND owner, UINT message) {
@@ -97,6 +101,10 @@ void ToastPopup::attach(HWND owner, UINT message) {
         DestroyWindow(hwnd_);  // it belonged to the window that's gone
         hwnd_ = nullptr;
     }
+    size_ = {};  // the next popup gets its own corners
+    region_dpi_ = 0;
+    tracking_ = false;
+    close_hover_ = false;
     owner_ = owner;
     message_ = message;
 }
@@ -138,12 +146,25 @@ void ToastPopup::show(const Toast& toast, const ToastGeometry& g, HFONT font, bo
     for (RECT* r : {&local_.card, &local_.text, &local_.close}) {
         OffsetRect(r, -g.card.left, -g.card.top);
     }
-    font_ = font;
+    // A font of its own, made like the window's: the window's may be made
+    // again (a new DPI, theme or language) while this one still paints.
+    LOGFONTW wanted{};
+    if (font != nullptr && GetObjectW(font, sizeof wanted, &wanted) != 0 &&
+        (font_ == nullptr || std::memcmp(&wanted, &font_spec_, sizeof wanted) != 0)) {
+        if (HFONT made = CreateFontIndirectW(&wanted); made != nullptr) {
+            if (font_ != nullptr) {
+                DeleteObject(font_);
+            }
+            font_ = made;
+            font_spec_ = wanted;
+        }
+    }
     dark_ = dark;
     dpi_ = dpi;
     rtl_ = rtl;
-    if (w != size_.cx || h != size_.cy) {
+    if (w != size_.cx || h != size_.cy || dpi != region_dpi_) {
         size_ = {w, h};
+        region_dpi_ = dpi;
         const int round = px(16, dpi);
         SetWindowRgn(hwnd_, CreateRoundRectRgn(0, 0, w + 1, h + 1, round, round), TRUE);
     }
@@ -152,10 +173,19 @@ void ToastPopup::show(const Toast& toast, const ToastGeometry& g, HFONT font, bo
 }
 
 void ToastPopup::hide() {
-    if (hwnd_ != nullptr && IsWindowVisible(hwnd_) != FALSE) {
+    // Hidden now, also when the window is minimised (Windows hid it then,
+    // and would show it again on restore): see WM_SHOWWINDOW.
+    if (hwnd_ != nullptr) {
         ShowWindow(hwnd_, SW_HIDE);
     }
     toast_ = {};
+    close_hover_ = false;
+    // The mouse can't be over a hidden card: the window's information toast
+    // must not wait for a leave that never comes.
+    if (tracking_ && owner_ != nullptr) {
+        PostMessageW(owner_, message_, kToastMouseLeft, 0);
+    }
+    tracking_ = false;
 }
 
 void ToastPopup::follow() {
@@ -222,6 +252,12 @@ LRESULT ToastPopup::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
     switch (msg) {
         case WM_MOUSEACTIVATE:
             return MA_NOACTIVATE;  // a click never takes the keys from the window
+        case WM_SHOWWINDOW:
+            // The window restored: shown again only while there's a toast to show.
+            if (wparam != FALSE && lparam == SW_PARENTOPENING && toast_.text.empty()) {
+                return 0;
+            }
+            break;
         case WM_ERASEBKGND:
             return 1;
         case WM_PAINT:

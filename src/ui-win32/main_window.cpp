@@ -1425,6 +1425,13 @@ void MainWindow::on_click(const Hit& clicked) {
 }
 
 void MainWindow::on_key(WPARAM key) {
+    // The keys move from the focused row: a right-click's selection ends, so
+    // the selected row and the focus frame never disagree.
+    if (!highlighted_.empty() && (key == VK_UP || key == VK_DOWN || key == VK_HOME || key == VK_END ||
+                                  key == VK_PRIOR || key == VK_NEXT || key == VK_TAB || key == VK_ESCAPE)) {
+        highlighted_.clear();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
     // Esc closes an error first (its close mark can't be reached with Tab);
     // information goes by itself and leaves Esc to the page.
     if (key == VK_ESCAPE && !toast_.text.empty() && toast_.kind == ToastKind::Error) {
@@ -1722,6 +1729,9 @@ void MainWindow::toast_event(ToastEvent event) {
     toast_ = toast_after(toast_, event);
     if (!(toast_ == before)) {
         sync_toast_timer();
+        if (toast_.text.empty()) {
+            toast_popup_.hide();  // at once, minimised or not: no flash on restore
+        }
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
 }

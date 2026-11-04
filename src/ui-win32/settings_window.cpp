@@ -638,6 +638,9 @@ void SettingsWindow::toast_event(ToastEvent event) {
     toast_ = toast_after(toast_, event);
     if (!(toast_ == before)) {
         sync_toast_timer();
+        if (toast_.text.empty()) {
+            toast_popup_.hide();
+        }
         if (hwnd_ != nullptr) {
             InvalidateRect(hwnd_, nullptr, FALSE);
         }

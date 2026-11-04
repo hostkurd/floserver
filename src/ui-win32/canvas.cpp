@@ -257,7 +257,7 @@ int Canvas::measure(HDC dc, std::wstring_view s, HFONT font, bool rtl_reading) {
     return r.right - r.left;
 }
 
-HBITMAP make_glyph_bitmap(Glyph glyph, int size, Rgb color) {
+HBITMAP make_glyph_bitmap(Glyph glyph, int size, Rgb color, bool mirrored) {
     if (size <= 0) {
         return nullptr;
     }
@@ -270,11 +270,12 @@ HBITMAP make_glyph_bitmap(Glyph glyph, int size, Rgb color) {
         Gdiplus::Pen pen(gp(color), std::max(1.0F, 1.3F * s));
         pen.SetStartCap(Gdiplus::LineCapRound);
         pen.SetEndCap(Gdiplus::LineCapRound);
+        const auto x = [&](float v) { return (mirrored ? 16.0F - v : v) * s; };
         for (const GlyphShape& shape : glyph_shapes(glyph)) {
             if (shape.kind == GlyphShape::Kind::Line) {
-                g.DrawLine(&pen, shape.x1 * s, shape.y1 * s, shape.x2 * s, shape.y2 * s);
+                g.DrawLine(&pen, x(shape.x1), shape.y1 * s, x(shape.x2), shape.y2 * s);
             } else {
-                g.DrawEllipse(&pen, (shape.x1 - shape.x2) * s, (shape.y1 - shape.y2) * s, 2 * shape.x2 * s,
+                g.DrawEllipse(&pen, x(shape.x1) - shape.x2 * s, (shape.y1 - shape.y2) * s, 2 * shape.x2 * s,
                               2 * shape.y2 * s);
             }
         }

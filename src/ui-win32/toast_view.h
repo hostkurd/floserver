@@ -64,7 +64,9 @@ private:
     Toast toast_;
     ToastGeometry local_;  // the card at (0, 0)
     RECT card_{};          // where it is in the owner's client area (logical)
-    HFONT font_ = nullptr;
+    HFONT font_ = nullptr;  // its own copy of the window's font
+    LOGFONTW font_spec_{};
+    UINT region_dpi_ = 0;
     bool dark_ = false;
     UINT dpi_ = 96;
     bool rtl_ = false;
