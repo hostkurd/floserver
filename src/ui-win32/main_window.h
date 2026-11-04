@@ -393,6 +393,8 @@ private:
     // when its folder may go there), then projects.remove; its answer comes
     // in on_remove_answers(). The folder goes only once the project is removed.
     void ask_remove(const std::string& project);
+    // The question itself, once ask_remove()'s check has said whether `folder` may be offered.
+    void ask_remove_now(const std::string& project, const std::string& folder, FolderOffer offer);
     struct Removed {
         std::string project;
         bool dropped = false;   // its database was deleted
@@ -416,6 +418,7 @@ private:
     void dismiss_error();
     void toast_event(ToastEvent event);
     void sync_toast_timer();
+    void sync_toast_hover();
     // The toast's bottom edge: above the footer (the first-run page's buttons).
     [[nodiscard]] int toast_bottom() const;
     // True when it's there.
@@ -671,6 +674,8 @@ private:
     };
     std::map<std::string, Removing> removing_;  // projects.remove on its way, per project
     RecycleBin recycle_bin_;
+    std::string remove_checking_;     // the project whose remove question waits for its folder's check
+    bool quit_after_folder_ = false;  // Quit waits for a folder's move (Windows' question needs its owner)
     std::set<std::string> removed_;         // removed; hidden until the list no longer has them
     Toast toast_;  // the message shown (model/toast.h)
     ToastGeometry toast_geometry_;

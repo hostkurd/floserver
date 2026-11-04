@@ -28,8 +28,11 @@ struct FolderGuard {
     // Desktop, Documents, Downloads, the projects folder, the Shared sites
     // (www) folder.
     std::vector<std::string> kept;
-    // Never moved, nor anything inside: FloServer's data folder.
+    // Never moved, nor anything inside or holding one: FloServer's data folder.
     std::vector<std::string> kept_with_contents;
+    // The same for Windows' own: Windows, Program Files (and x86, and their
+    // Common Files), ProgramData, AppData (Roaming, Local, LocalLow).
+    std::vector<std::string> system_trees;
     // The other projects' folders: not this one, nor inside, nor holding one.
     std::vector<std::string> other_projects;
 };
@@ -40,6 +43,7 @@ enum class FolderRefusal : std::uint8_t {
     DriveRoot,     // "C:\" or "\\server\share"
     KeptFolder,    // one of FolderGuard::kept, or holds one
     DataFolder,    // FloServer's own files
+    SystemFolder,  // Windows' own (system_trees), or a Recycle Bin's ($Recycle.Bin)
     OtherProject,  // is, holds or is inside another project's folder
     Link,          // the folder is a junction or a link (the window says so)
 };

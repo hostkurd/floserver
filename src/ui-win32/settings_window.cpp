@@ -1176,8 +1176,8 @@ void SettingsWindow::on_key(WPARAM key) {
             }
             return;
         case VK_ESCAPE:
-            // A message first; then Settings itself.
-            if (!toast_.text.empty()) {
+            // An error first; then Settings itself (information goes by itself).
+            if (!toast_.text.empty() && toast_.kind == ToastKind::Error) {
                 toast_event(ToastEvent::Close);
                 return;
             }
@@ -1373,6 +1373,21 @@ void SettingsWindow::on_paint() {
             {
                 toast_geometry_ =
                     toast_geometry(mem.get(), toast_, fonts_.button.get(), width_, height_ - px(16), dpi_, rtl_);
+                // The card appeared under the mouse, or moved from under it.
+                POINT at{};
+                const bool over = !toast_.text.empty() && GetCursorPos(&at) != FALSE &&
+                                  ScreenToClient(hwnd_, &at) != FALSE && contains(toast_geometry_.card, at.x, at.y);
+                if (over && !tracking_mouse_) {
+                    TRACKMOUSEEVENT tme{};
+                    tme.cbSize = sizeof tme;
+                    tme.dwFlags = TME_LEAVE;
+                    tme.hwndTrack = hwnd_;
+                    tracking_mouse_ = TrackMouseEvent(&tme) != FALSE;
+                }
+                if (over != toast_.hovered) {
+                    toast_ = toast_after(toast_, over ? ToastEvent::MouseEnter : ToastEvent::MouseLeave);
+                    sync_toast_timer();
+                }
                 Canvas canvas(mem.get(), width_, rtl_);
                 canvas.fill({0, 0, width_, height_}, palette(dark_).window);
                 paint_shapes(canvas);

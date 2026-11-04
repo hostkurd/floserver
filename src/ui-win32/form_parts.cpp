@@ -368,6 +368,7 @@ constexpr int kBodyText = 102;
 constexpr int kDropBox = 103;
 constexpr int kTrashBox = 104;
 constexpr int kFolderText = 105;
+constexpr int kNoteText = 106;
 
 // A dialog template built in memory (DLGTEMPLATE, then its items), WORD by WORD.
 class DialogTemplate {
@@ -432,6 +433,7 @@ struct RemoveDialog {
     std::wstring drop;
     std::wstring trash;
     std::wstring folder;
+    std::wstring note;
     bool dropped = false;
     bool trashed = false;
     HFONT bold = nullptr;
@@ -449,6 +451,7 @@ INT_PTR CALLBACK remove_dialog_proc(HWND dialog, UINT msg, WPARAM wparam, LPARAM
             SetDlgItemTextW(dialog, kDropBox, d->drop.c_str());
             SetDlgItemTextW(dialog, kTrashBox, d->trash.c_str());
             SetDlgItemTextW(dialog, kFolderText, d->folder.c_str());
+            SetDlgItemTextW(dialog, kNoteText, d->note.c_str());
             SetDlgItemTextW(dialog, kRemoveButton, d->remove.c_str());
             SetDlgItemTextW(dialog, IDCANCEL, d->cancel.c_str());
             // The question in bold, a little larger, as a task dialog's main line.
@@ -501,6 +504,7 @@ bool ask_remove_project(HWND owner, Lang lang, const RemoveQuestion& question, b
     d.drop = win::widen(question.drop);
     d.trash = win::widen(question.trash);
     d.folder = win::widen(question.folder);
+    d.note = win::widen(question.trash_note);
     // In dialog units: the question, what happens to the folder, the boxes
     // (each only when it applies, both unticked), then Remove and Cancel.
     constexpr short kWidth = 280;
@@ -526,6 +530,10 @@ bool ask_remove_project(HWND owner, Lang lang, const RemoveQuestion& question, b
         items.emplace_back(SS_LEFT | SS_NOPREFIX | SS_EDITCONTROL, kMargin + 12, y, kInner - 12, 26, kFolderText,
                            0x0082);
         y += 30;
+    } else if (!d.note.empty()) {
+        // Why the folder isn't offered (its drive has no Recycle Bin).
+        items.emplace_back(SS_LEFT | SS_NOPREFIX, kMargin, y, kInner, 18, kNoteText, 0x0082);
+        y += 22;
     }
     y += 6;
     constexpr short kButtonW = 60;

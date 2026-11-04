@@ -166,6 +166,11 @@ TEST_CASE("remove outcome: what's said about the database and the folder") {
     CHECK_FALSE(cancelled.error);
     CHECK(cancelled.text == "my-shop is removed from FloServer. Its folder stayed where it was.");
     CHECK_FALSE(remove_outcome("my-shop", false, FolderOutcome::NotAsked, {}, Lang::Ar).text.empty());
+    // Never "in the Recycle Bin" without Windows saying so.
+    CHECK(remove_outcome("my-shop", true, FolderOutcome::Deleted, {}, Lang::En).text ==
+          "my-shop is removed from FloServer, and its folder is deleted (Windows couldn't put it in the Recycle Bin).");
+    CHECK(remove_outcome("my-shop", false, FolderOutcome::Gone, {}, Lang::En).text ==
+          "my-shop is removed from FloServer, and its folder is gone from where it was.");
 }
 
 TEST_CASE("remove question: its words, and the database box only with a database") {
@@ -180,10 +185,16 @@ TEST_CASE("remove question: its words, and the database box only with a database
     CHECK(q.trash.empty());  // the folder only when it's offered
     CHECK(q.folder.empty());
     CHECK_FALSE(row_has_database(row));
-    q = remove_question(row, Lang::En, true);
+    q = remove_question(row, Lang::En, FolderOffer::Offer);
     CHECK(q.trash == "Also move the project folder to the Recycle Bin");
     CHECK(q.folder == "Folder: C:/sites/my-shop");
-    CHECK(remove_question(row, Lang::Ar, true).folder.find(kLri + "C:/sites/my-shop" + kPdi) != std::string::npos);
+    CHECK(q.trash_note.empty());
+    CHECK(remove_question(row, Lang::Ar, FolderOffer::Offer).folder.find(kLri + "C:/sites/my-shop" + kPdi) !=
+          std::string::npos);
+    // A drive with no Recycle Bin: no box, and the dialog says why.
+    q = remove_question(row, Lang::En, FolderOffer::NoRecycleBin);
+    CHECK(q.trash.empty());
+    CHECK(q.trash_note == "This drive has no Recycle Bin, so FloServer won't delete the folder.");
 
     // floserver.json asks for one (the project may be off), or the service says it uses one.
     row.wants.database = "mariadb-11.4";

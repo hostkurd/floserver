@@ -1050,6 +1050,21 @@ constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
     Entry{Str::RemoveFolderRefused, "FloServer doesn't move this folder to the Recycle Bin",
           "لا ينقل " FLO_LRI "FloServer" FLO_PDI " هذا المجلد إلى سلة المحذوفات",
           FLO_LRI "FloServer" FLO_PDI " ئەم بوخچەیە ناگوازێتەوە بۆ سەبەتەی خۆڵ"},
+    Entry{Str::RemoveNoRecycleBin, "This drive has no Recycle Bin, so FloServer won't delete the folder.",
+          "لا توجد سلة محذوفات في هذا القرص، لذا لن يحذف " FLO_LRI "FloServer" FLO_PDI " المجلد.",
+          "ئەم دیسکە سەبەتەی خۆڵی نییە، بۆیە " FLO_LRI "FloServer" FLO_PDI " بوخچەکە ناسڕێتەوە."},
+    Entry{Str::RemoveDoneDeleted,
+          "{0} is removed from FloServer, and its folder is deleted (Windows couldn't put it in the Recycle Bin).",
+          "أُزيل {0} من " FLO_LRI "FloServer" FLO_PDI "، وحُذف مجلده (لم يستطع " FLO_LRI "Windows" FLO_PDI
+          " وضعه في سلة المحذوفات).",
+          "{0} لە " FLO_LRI "FloServer" FLO_PDI " لابرا و بوخچەکەی سڕایەوە (" FLO_LRI "Windows" FLO_PDI
+          " نەیتوانی بیخاتە سەبەتەی خۆڵەوە)."},
+    Entry{Str::RemoveDoneGone, "{0} is removed from FloServer, and its folder is gone from where it was.",
+          "أُزيل {0} من " FLO_LRI "FloServer" FLO_PDI "، ولم يعد مجلده في مكانه.",
+          "{0} لە " FLO_LRI "FloServer" FLO_PDI " لابرا و بوخچەکەی ئیتر لە شوێنی خۆی نییە."},
+    Entry{Str::QuitAfterFolder, "FloServer quits once the folder has been moved.",
+          "سيُغلَق " FLO_LRI "FloServer" FLO_PDI " بعد نقل المجلد.",
+          FLO_LRI "FloServer" FLO_PDI " دادەخرێت کاتێک بوخچەکە گوازرایەوە."},
 }};
 
 #undef FLO_LRI

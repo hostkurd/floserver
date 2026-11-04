@@ -78,14 +78,21 @@ struct RemoveQuestion {
     std::string cancel;
     std::string drop;
     std::string trash;
-    std::string folder;  // "Folder: C:\...", with `trash`
+    std::string folder;      // "Folder: C:\...", with `trash`
+    std::string trash_note;  // why there's no box: its drive has no Recycle Bin
 };
-[[nodiscard]] RemoveQuestion remove_question(const ProjectRow& row, Lang lang, bool offer_folder = false);
+// Whether the folder may go to the Recycle Bin: Offer, not at all (the
+// rules, said nothing), or its drive has no Recycle Bin (said in the dialog).
+enum class FolderOffer : std::uint8_t { None, Offer, NoRecycleBin };
+[[nodiscard]] RemoveQuestion remove_question(const ProjectRow& row, Lang lang,
+                                             FolderOffer offer = FolderOffer::None);
 
 // What became of the folder after a removal.
 enum class FolderOutcome : std::uint8_t {
     NotAsked,   // the box wasn't ticked
-    Recycled,   // in the Recycle Bin
+    Recycled,   // in the Recycle Bin (Windows said where it put it)
+    Deleted,    // Windows deleted it for good (the user said yes to its question)
+    Gone,       // gone from its place, Windows didn't say where
     Stayed,     // it couldn't be moved (files open, refused...): `reason` says why
     Cancelled,  // the user said no in Windows' own question
 };

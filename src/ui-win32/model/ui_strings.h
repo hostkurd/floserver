@@ -550,6 +550,10 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     RemoveFolderStayed,       // {0}: the project, {1}: Windows' reason
     RemoveFolderCancelled,    // {0}: the project
     RemoveFolderRefused,      // the reason a folder isn't moved
+    RemoveNoRecycleBin,
+    RemoveDoneDeleted,        // {0}: the project
+    RemoveDoneGone,           // {0}: the project
+    QuitAfterFolder,
     Count_,
 };
 

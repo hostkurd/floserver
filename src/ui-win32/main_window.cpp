@@ -263,6 +263,10 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             }
             return 0;
         case WM_SETCURSOR:
+            if (LOWORD(lparam) == HTCLIENT && win::int_to_ptr<HWND>(wparam) == hwnd_ && !remove_checking_.empty()) {
+                SetCursor(LoadCursorW(nullptr, IDC_APPSTARTING));  // the remove question is on its way
+                return TRUE;
+            }
             if (LOWORD(lparam) == HTCLIENT && win::int_to_ptr<HWND>(wparam) == hwnd_) {
                 POINT pt{};
                 GetCursorPos(&pt);
@@ -449,6 +453,8 @@ void MainWindow::on_create() {
         SendMessageW(tooltip_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
     }
     recycle_bin_.retarget(hwnd_, kRecycledMessage);  // made again in another language: the new window
+    // A move or check that finished while the old window was going is taken now.
+    PostMessageW(hwnd_, kRecycledMessage, 0, 0);
     // The panel's icon buttons: placed and worded by place_panel_tips().
     panel_tips_ = {};
     panel_tip_rects_ = {};
@@ -679,6 +685,13 @@ void MainWindow::quit() {
     }
     if (asking_) {
         quit_after_ask_ = true;
+        return;
+    }
+    // A folder on its way to the Recycle Bin: Windows' progress and question
+    // belong to this window, so FloServer quits once it's done (on_recycled()).
+    if (recycle_bin_.busy()) {
+        quit_after_folder_ = true;
+        show_notice(std::string(text(lang_, Str::QuitAfterFolder)), false);
         return;
     }
     quitting_ = true;
@@ -1416,8 +1429,9 @@ void MainWindow::on_click(const Hit& clicked) {
 }
 
 void MainWindow::on_key(WPARAM key) {
-    // Esc closes a message first (its close mark can't be reached with Tab).
-    if (key == VK_ESCAPE && !toast_.text.empty()) {
+    // Esc closes an error first (its close mark can't be reached with Tab);
+    // information goes by itself and leaves Esc to the page.
+    if (key == VK_ESCAPE && !toast_.text.empty() && toast_.kind == ToastKind::Error) {
         toast_event(ToastEvent::Close);
         return;
     }
@@ -1728,6 +1742,28 @@ void MainWindow::sync_toast_timer() {
     }
 }
 
+void MainWindow::sync_toast_hover() {
+    // The card appeared under the mouse, or moved from under it (a new
+    // message, the window resized): its time runs only while it isn't read.
+    POINT at{};
+    bool over = false;
+    if (!toast_.text.empty() && GetCursorPos(&at) != FALSE && ScreenToClient(hwnd_, &at) != FALSE) {
+        over = contains(toast_geometry_.card, at.x, at.y);
+    }
+    if (over && !tracking_mouse_) {
+        // Told when the mouse leaves the window, so its time starts again then.
+        TRACKMOUSEEVENT tme{};
+        tme.cbSize = sizeof tme;
+        tme.dwFlags = TME_LEAVE;
+        tme.hwndTrack = hwnd_;
+        tracking_mouse_ = TrackMouseEvent(&tme) != FALSE;
+    }
+    if (over != toast_.hovered) {
+        toast_ = toast_after(toast_, over ? ToastEvent::MouseEnter : ToastEvent::MouseLeave);
+        sync_toast_timer();  // the card looks the same: no new paint needed
+    }
+}
+
 int MainWindow::toast_bottom() const {
     if (first_run_open() && height_of(first_run_geometry_.content) > 0) {
         return first_run_geometry_.content.bottom - px(kGap);
@@ -1876,6 +1912,7 @@ void MainWindow::on_paint() {
             }
             place_scroll_bars();
             toast_geometry_ = toast_geometry(mem.get(), toast_, fonts_.button.get(), width_, toast_bottom(), dpi_, rtl_);
+            sync_toast_hover();
             {
                 Canvas canvas(mem.get(), width_, rtl_);
                 canvas.fill({0, 0, width_, height_}, palette(dark_).window);

@@ -117,11 +117,21 @@ FolderRefusal folder_removal_refusal(std::string_view folder, std::string_view r
                 return FolderRefusal::KeptFolder;
             }
         }
+        for (const std::string& k : guard.system_trees) {
+            const std::string kc = comparable_path(k);
+            if (same_or_inside(c, kc) || same_or_inside(kc, c)) {
+                return FolderRefusal::SystemFolder;
+            }
+        }
         for (const std::string& k : guard.kept_with_contents) {
             const std::string kc = comparable_path(k);
             if (same_or_inside(c, kc) || same_or_inside(kc, c)) {
                 return FolderRefusal::DataFolder;
             }
+        }
+        // A drive's Recycle Bin, wherever it's reached from.
+        if (c.find(R"(\$recycle.bin)") != std::string::npos) {
+            return FolderRefusal::SystemFolder;
         }
         for (const std::string& o : guard.other_projects) {
             const std::string oc = comparable_path(o);

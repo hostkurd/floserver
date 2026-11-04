@@ -8,6 +8,7 @@
 #include <shobjidl.h>
 
 #include <cstdio>
+#include <cwchar>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -15,6 +16,9 @@
 
 #ifndef FOFX_RECYCLEONDELETE
 #define FOFX_RECYCLEONDELETE 0x00080000
+#endif
+#ifndef FOF_WANTNUKEWARNING
+#define FOF_WANTNUKEWARNING 0x4000
 #endif
 
 namespace floserver::ui {
@@ -62,6 +66,93 @@ std::string hresult_text(HRESULT hr) {
     return win::narrow(text);
 }
 
+// COM interfaces have no virtual destructor (Release is the way out); GCC warns all the same.
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wnon-virtual-dtor"
+#endif
+// What Windows did with each item it deleted: put it in the Recycle Bin
+// (it names the new item there) or deleted it for good. A COM object on
+// the move's stack; only IFileOperation holds it, while it runs.
+class DeleteWatch final : public IFileOperationProgressSink {
+public:
+    DeleteWatch() = default;
+    virtual ~DeleteWatch() = default;
+    DeleteWatch(const DeleteWatch&) = delete;
+    DeleteWatch& operator=(const DeleteWatch&) = delete;
+    DeleteWatch(DeleteWatch&&) = delete;
+    DeleteWatch& operator=(DeleteWatch&&) = delete;
+
+    bool recycled = false;
+    bool deleted = false;
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** out) override {
+        if (out == nullptr) {
+            return E_POINTER;
+        }
+        if (IsEqualIID(riid, IID_IUnknown) || IsEqualIID(riid, IID_IFileOperationProgressSink)) {
+            *out = static_cast<IFileOperationProgressSink*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *out = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++refs_; }
+    ULONG STDMETHODCALLTYPE Release() override { return refs_ > 0 ? --refs_ : 0; }  // never deleted: on the stack
+
+    HRESULT STDMETHODCALLTYPE PostDeleteItem(DWORD /*flags*/, IShellItem* /*item*/, HRESULT result,
+                                             IShellItem* created) override {
+        if (SUCCEEDED(result)) {
+            // Only an item that went to the Recycle Bin has a new one there.
+            (created != nullptr ? recycled : deleted) = true;
+        }
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE StartOperations() override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE FinishOperations(HRESULT /*result*/) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE PreRenameItem(DWORD, IShellItem*, LPCWSTR) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE PostRenameItem(DWORD, IShellItem*, LPCWSTR, HRESULT, IShellItem*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE PreMoveItem(DWORD, IShellItem*, IShellItem*, LPCWSTR) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE PostMoveItem(DWORD, IShellItem*, IShellItem*, LPCWSTR, HRESULT, IShellItem*) override {
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE PreCopyItem(DWORD, IShellItem*, IShellItem*, LPCWSTR) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE PostCopyItem(DWORD, IShellItem*, IShellItem*, LPCWSTR, HRESULT, IShellItem*) override {
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE PreDeleteItem(DWORD, IShellItem*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE PreNewItem(DWORD, IShellItem*, LPCWSTR) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE PostNewItem(DWORD, IShellItem*, LPCWSTR, LPCWSTR, DWORD, HRESULT, IShellItem*) override {
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE UpdateProgress(UINT, UINT) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE ResetTimer() override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE PauseTimer() override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE ResumeTimer() override { return S_OK; }
+
+private:
+    ULONG refs_ = 1;
+};
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+
+// The folder's drive is a fixed one that has a Recycle Bin.
+bool has_recycle_bin(const std::wstring& path) {
+    std::wstring root(MAX_PATH + 1, L'\0');
+    if (GetVolumePathNameW(path.c_str(), root.data(), static_cast<DWORD>(root.size())) == FALSE) {
+        return false;
+    }
+    root.resize(wcsnlen(root.c_str(), root.size()));
+    if (GetDriveTypeW(root.c_str()) != DRIVE_FIXED) {
+        return false;  // removable and network drives have none: Windows deletes for good
+    }
+    SHQUERYRBINFO info{};
+    info.cbSize = sizeof info;
+    return SUCCEEDED(SHQueryRecycleBinW(root.c_str(), &info));
+}
+
 bool folder_exists(const std::wstring& path) {
     const DWORD attributes = GetFileAttributesW(path.c_str());
     return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
@@ -88,9 +179,13 @@ RecycleBin::Result recycle(HWND owner, const std::string& project, bool dropped,
         return result;
     }
     operation->SetOwnerWindow(owner);
-    // The Recycle Bin, or Windows' own question when it can't take it; no
+    // The Recycle Bin, or Windows' own question when it can't take it (too
+    // big, or "remove files immediately" set for the drive); no
     // FOF_NOCONFIRMATION, which would answer that question with a permanent delete.
-    hr = operation->SetOperationFlags(FOFX_RECYCLEONDELETE | FOF_NOCONFIRMMKDIR);
+    hr = operation->SetOperationFlags(FOFX_RECYCLEONDELETE | FOF_WANTNUKEWARNING | FOF_NOCONFIRMMKDIR);
+    DeleteWatch watch;
+    DWORD cookie = 0;
+    const bool watching = SUCCEEDED(hr) && SUCCEEDED(operation->Advise(&watch, &cookie));
     IShellItem* item = nullptr;
     if (SUCCEEDED(hr)) {
         hr = SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(&item));
@@ -103,12 +198,22 @@ RecycleBin::Result recycle(HWND owner, const std::string& project, bool dropped,
     }
     BOOL aborted = FALSE;
     (void)operation->GetAnyOperationsAborted(&aborted);
+    if (watching) {
+        (void)operation->Unadvise(cookie);
+    }
     if (item != nullptr) {
         item->Release();
     }
     operation->Release();
     if (!folder_exists(path)) {
-        result.outcome = FolderOutcome::Recycled;
+        // Said as Windows reported it: in the Recycle Bin only when it named the item there.
+        if (watch.deleted) {
+            result.outcome = FolderOutcome::Deleted;
+        } else if (watch.recycled) {
+            result.outcome = FolderOutcome::Recycled;
+        } else {
+            result.outcome = FolderOutcome::Gone;
+        }
     } else if (aborted != FALSE || hr == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
         result.outcome = FolderOutcome::Cancelled;
     } else {
@@ -148,6 +253,13 @@ FolderRefusal folder_refusal_now(const std::string& folder, const FolderGuard& r
     return folder_removal_refusal(folder, real, real_guard);
 }
 
+FolderOffer folder_offer_now(const std::string& folder, const FolderGuard& guard) {
+    if (folder_refusal_now(folder, real_folder_guard(guard)) != FolderRefusal::None) {
+        return FolderOffer::None;
+    }
+    return has_recycle_bin(w(folder)) ? FolderOffer::Offer : FolderOffer::NoRecycleBin;
+}
+
 void RecycleBin::retarget(HWND window, UINT message) {
     const std::lock_guard lock(shared_->mutex);
     shared_->window = window;
@@ -160,9 +272,11 @@ void RecycleBin::start(const std::string& project, bool database_dropped, const 
     {
         const std::lock_guard lock(shared_->mutex);
         owner = shared_->window;
+        ++shared_->running;
     }
     const auto finish = [](const std::shared_ptr<Shared>& to, Result result) {
         const std::lock_guard lock(to->mutex);
+        --to->running;
         to->done.push_back(std::move(result));
         if (to->window != nullptr) {
             PostMessageW(to->window, to->message, 0, 0);
@@ -185,6 +299,33 @@ void RecycleBin::start(const std::string& project, bool database_dropped, const 
 std::vector<RecycleBin::Result> RecycleBin::take() {
     const std::lock_guard lock(shared_->mutex);
     return std::exchange(shared_->done, {});
+}
+
+bool RecycleBin::busy() const {
+    const std::lock_guard lock(shared_->mutex);
+    return shared_->running > 0;
+}
+
+void RecycleBin::check(const std::string& project, const std::string& folder, const FolderGuard& guard) {
+    const auto finish = [](const std::shared_ptr<Shared>& to, Check answer) {
+        const std::lock_guard lock(to->mutex);
+        to->checks.push_back(std::move(answer));
+        if (to->window != nullptr) {
+            PostMessageW(to->window, to->message, 0, 0);
+        }
+    };
+    try {
+        std::thread([shared = shared_, project, folder, guard, finish] {
+            finish(shared, {project, folder, folder_offer_now(folder, guard)});
+        }).detach();
+    } catch (const std::system_error&) {
+        finish(shared_, {project, folder, FolderOffer::None});  // not offered: the project is still removed if asked
+    }
+}
+
+std::vector<RecycleBin::Check> RecycleBin::take_checks() {
+    const std::lock_guard lock(shared_->mutex);
+    return std::exchange(shared_->checks, {});
 }
 
 }  // namespace floserver::ui

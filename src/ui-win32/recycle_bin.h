@@ -28,6 +28,11 @@ namespace floserver::ui {
 // (and NotFullPath when it isn't an existing folder).
 [[nodiscard]] FolderRefusal folder_refusal_now(const std::string& folder, const FolderGuard& real_guard);
 
+// Whether the remove question offers the folder: the rules let it go, and
+// its drive is a fixed one with a Recycle Bin (else Windows would delete it
+// for good). Looks at the disk: never on the window's thread (RecycleBin::check).
+[[nodiscard]] FolderOffer folder_offer_now(const std::string& folder, const FolderGuard& guard);
+
 class RecycleBin {
 public:
     struct Result {
@@ -46,6 +51,19 @@ public:
                const std::string& refused, const std::string& missing);
     // The moves finished since the last call.
     [[nodiscard]] std::vector<Result> take();
+    // A move is running: quitting waits for it (Windows' question needs its owner).
+    [[nodiscard]] bool busy() const;
+
+    // Whether a project's folder may be offered, worked out on a thread of
+    // its own (a share that's offline mustn't freeze the window); the answer
+    // comes with the same message, from take_checks().
+    struct Check {
+        std::string project;
+        std::string folder;
+        FolderOffer offer = FolderOffer::None;
+    };
+    void check(const std::string& project, const std::string& folder, const FolderGuard& guard);
+    [[nodiscard]] std::vector<Check> take_checks();
 
 private:
     struct Shared {
@@ -53,6 +71,8 @@ private:
         HWND window = nullptr;
         UINT message = 0;
         std::vector<Result> done;
+        std::vector<Check> checks;
+        int running = 0;  // moves not finished
     };
     std::shared_ptr<Shared> shared_ = std::make_shared<Shared>();
 };

@@ -78,6 +78,33 @@ TEST_CASE("folder removal: what never goes") {
     CHECK(folder_removal_refusal(R"(D:\sites\blogs)", {}, g) == FolderRefusal::None);
 }
 
+TEST_CASE("folder removal: Windows' own folders, and anything inside them") {
+    FolderGuard g = guard();
+    g.system_trees = {R"(C:\Windows)", R"(C:\Program Files)", R"(C:\Program Files (x86))", R"(C:\ProgramData)",
+                      R"(C:\Users\Me\AppData\Roaming)", R"(C:\Users\Me\AppData\Local)",
+                      R"(C:\Users\Me\AppData\LocalLow)"};
+    g.kept.insert(g.kept.end(), {R"(C:\Users)", R"(C:\Users\Public)", R"(C:\Users\Me\Pictures)",
+                                 R"(C:\Users\Me\OneDrive)"});
+    for (const char* f : {R"(C:\Windows)", R"(C:\Windows\System32\drivers)", R"(c:\program files\Git)",
+                          R"(C:\Program Files (x86)\x)", R"(C:\ProgramData\site)", R"(C:\Users\Me\AppData\Roaming\x)",
+                          R"(C:\Users\Me\AppData)", R"(C:\Users\Me\AppData\LocalLow\y)"}) {
+        CAPTURE(f);
+        CHECK(folder_removal_refusal(f, {}, g) == FolderRefusal::SystemFolder);
+    }
+    for (const char* f : {R"(C:\$Recycle.Bin)", R"(D:\$RECYCLE.BIN\S-1-5-21\x)"}) {
+        CAPTURE(f);
+        CHECK(folder_removal_refusal(f, {}, g) == FolderRefusal::SystemFolder);
+    }
+    // The known folders themselves are kept; what's in them is the user's projects.
+    CHECK(folder_removal_refusal(R"(C:\Users\Me\Pictures)", {}, g) == FolderRefusal::KeptFolder);
+    CHECK(folder_removal_refusal(R"(C:\Users\Public)", {}, g) == FolderRefusal::KeptFolder);
+    CHECK(folder_removal_refusal(R"(C:\Users\Me\OneDrive)", {}, g) == FolderRefusal::KeptFolder);
+    CHECK(folder_removal_refusal(R"(C:\Users\Me\OneDrive\sites\shop)", {}, g) == FolderRefusal::None);
+    CHECK(folder_removal_refusal(R"(C:\Users\Me\Pictures\gallery-site)", {}, g) == FolderRefusal::None);
+    CHECK(folder_removal_refusal(R"(C:\Users\Public\shop)", {}, g) == FolderRefusal::None);
+    CHECK(folder_removal_refusal(R"(C:\Windows-sites\shop)", {}, g) == FolderRefusal::None);
+}
+
 TEST_CASE("folder removal: where it really is counts too") {
     const FolderGuard g = guard();
     // A folder reached through a junction above it that is really Documents.

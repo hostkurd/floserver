@@ -13,6 +13,7 @@
 #include "model/view_model.h"
 
 #include "floserver/core/paths.h"
+#include "floserver/core/process.h"
 
 #include <shlobj.h>
 #include <windowsx.h>
@@ -299,11 +300,37 @@ void MainWindow::ask_remove(const std::string& project) {
     if (found == snap_.rows.end()) {
         return;
     }
-    // The Recycle Bin box only for a folder the rules let go (checked again before it moves).
+    if (!remove_checking_.empty()) {
+        return;  // one question at a time
+    }
+    if (found->path.empty()) {
+        ask_remove_now(project, {}, FolderOffer::None);
+        return;
+    }
+    // Whether its folder may be offered is worked out off this thread (real
+    // paths, the drive's Recycle Bin: an offline share would freeze the
+    // window); the question opens with the answer (on_recycled()).
+    remove_checking_ = project;
+    recycle_bin_.check(project, found->path, folder_guard(project));
+    SetCursor(LoadCursorW(nullptr, IDC_APPSTARTING));
+}
+
+void MainWindow::ask_remove_now(const std::string& project, const std::string& folder, FolderOffer offer) {
+    if (!worker_ || snap_.link != Link::Connected || leaving(project) || asking_ || quitting_) {
+        return;
+    }
+    const auto found = std::find_if(snap_.rows.begin(), snap_.rows.end(),
+                                    [&](const ProjectRow& r) { return r.name == project; });
+    if (found == snap_.rows.end()) {
+        return;
+    }
+    // The Recycle Bin box only for the folder that was checked (checked again before it moves).
     const ProjectRow row = *found;
-    const bool offer_folder =
-        !row.path.empty() && folder_refusal_now(row.path, real_folder_guard(folder_guard(project))) == FolderRefusal::None;
-    const RemoveQuestion question = remove_question(row, lang_, offer_folder);
+    if (row.path != folder) {
+        offer = FolderOffer::None;
+    }
+    const bool offer_folder = offer == FolderOffer::Offer;
+    const RemoveQuestion question = remove_question(row, lang_, offer);
     // The dialog runs its own message loop: as while a save question is
     // open, a quit or a new language waits for it.
     asking_ = true;
@@ -367,12 +394,33 @@ std::vector<MainWindow::Removed> MainWindow::on_remove_answers(std::vector<Snaps
 
 FolderGuard MainWindow::folder_guard(const std::string& project) const {
     FolderGuard guard;
-    for (const KNOWNFOLDERID& id : {FOLDERID_Profile, FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads}) {
+    const auto known = [](const KNOWNFOLDERID& id, std::vector<std::string>& into) {
         PWSTR found = nullptr;
-        if (SUCCEEDED(SHGetKnownFolderPath(id, 0, nullptr, &found)) && found != nullptr) {
-            guard.kept.push_back(win::narrow(found));
+        // KF_FLAG_DONT_VERIFY: a folder that isn't there (3D Objects) is still named, never made.
+        if (SUCCEEDED(SHGetKnownFolderPath(id, KF_FLAG_DONT_VERIFY, nullptr, &found)) && found != nullptr) {
+            into.push_back(win::narrow(found));
         }
         CoTaskMemFree(found);
+    };
+    // The user's own folders: never moved themselves (nor one holding them);
+    // what's inside them is where projects usually live.
+    for (const KNOWNFOLDERID& id :
+         {FOLDERID_Profile, FOLDERID_UserProfiles, FOLDERID_Public, FOLDERID_Desktop, FOLDERID_Documents,
+          FOLDERID_Downloads, FOLDERID_Pictures, FOLDERID_Music, FOLDERID_Videos, FOLDERID_SavedGames, FOLDERID_Links,
+          FOLDERID_Favorites, FOLDERID_Contacts, FOLDERID_SavedSearches, FOLDERID_Objects3D, FOLDERID_SkyDrive}) {
+        known(id, guard.kept);
+    }
+    for (const char* name : {"OneDrive", "OneDriveConsumer", "OneDriveCommercial"}) {
+        if (const auto dir = core::get_env(name); dir && !dir->empty()) {
+            guard.kept.push_back(*dir);
+        }
+    }
+    // Windows' own: never anything inside them either.
+    for (const KNOWNFOLDERID& id :
+         {FOLDERID_Windows, FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX86, FOLDERID_ProgramFilesCommon,
+          FOLDERID_ProgramFilesCommonX86, FOLDERID_ProgramData, FOLDERID_RoamingAppData, FOLDERID_LocalAppData,
+          FOLDERID_LocalAppDataLow}) {
+        known(id, guard.system_trees);
     }
     if (!snap_.projects_dir.empty()) {
         guard.kept.push_back(snap_.projects_dir);
@@ -395,6 +443,19 @@ void MainWindow::on_recycled() {
     for (const RecycleBin::Result& r : recycle_bin_.take()) {
         const RemoveOutcome said = remove_outcome(r.project, r.database_dropped, r.outcome, r.reason, lang_);
         show_notice(said.text, said.error);
+    }
+    // A Quit that waited for the move.
+    if (quit_after_folder_ && !recycle_bin_.busy()) {
+        quit_after_folder_ = false;
+        quit();
+        return;
+    }
+    // The remove question, once it's known whether the folder can be offered.
+    for (const RecycleBin::Check& c : recycle_bin_.take_checks()) {
+        if (c.project == remove_checking_) {
+            remove_checking_.clear();
+            ask_remove_now(c.project, c.folder, c.offer);
+        }
     }
 }
 
