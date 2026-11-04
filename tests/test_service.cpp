@@ -121,6 +121,8 @@ TEST_CASE("the real service starts, answers, refuses a second copy and stops") {
     const auto removed = client->call("projects.remove", {{"name", "my-shop"}});
     REQUIRE(removed.has_value());
     CHECK(removed->ok);
+    // Its folder, as the service had it: the window checks it before the Recycle Bin.
+    CHECK(removed->result["path"] == listed->result["projects"][0]["path"]);
     const auto gone = client->call("projects.remove", {{"name", "my-shop"}});
     REQUIRE(gone.has_value());
     CHECK(gone->error_code == "unknown_project");

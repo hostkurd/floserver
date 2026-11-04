@@ -542,6 +542,14 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     GeneralEditorPick,      // the file picker's title
     GeneralEditorPrograms,  // the file picker's filter
     GeneralEditorNotProgram,
+    // Remove: the folder to the Recycle Bin too (approved 4 Nov).
+    RemoveTrashFolder,
+    RemoveFolderPath,         // {0}: the folder
+    RemoveDoneTrash,          // {0}: the project
+    RemoveDoneTrashDatabase,  // {0}: the project
+    RemoveFolderStayed,       // {0}: the project, {1}: Windows' reason
+    RemoveFolderCancelled,    // {0}: the project
+    RemoveFolderRefused,      // the reason a folder isn't moved
     Count_,
 };
 

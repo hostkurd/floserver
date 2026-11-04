@@ -152,6 +152,22 @@ TEST_CASE("project menu: the Shared sites row has only what it already does") {
     CHECK_FALSE(item(shared_menu(shared), OpenFolder).enabled);
 }
 
+TEST_CASE("remove outcome: what's said about the database and the folder") {
+    CHECK(remove_outcome("my-shop", false, FolderOutcome::NotAsked, {}, Lang::En).text ==
+          "my-shop is removed from FloServer. Its folder is where it was.");
+    CHECK(remove_outcome("my-shop", false, FolderOutcome::Recycled, {}, Lang::En).text ==
+          "my-shop is removed from FloServer, and its folder is in the Recycle Bin.");
+    CHECK(remove_outcome("my-shop", true, FolderOutcome::Recycled, {}, Lang::En).text ==
+          "my-shop is removed from FloServer, its database is deleted and its folder is in the Recycle Bin.");
+    const RemoveOutcome stayed = remove_outcome("my-shop", true, FolderOutcome::Stayed, "a file is open", Lang::En);
+    CHECK(stayed.error);
+    CHECK(stayed.text == "my-shop is removed from FloServer, but its folder stayed where it was: a file is open");
+    const RemoveOutcome cancelled = remove_outcome("my-shop", false, FolderOutcome::Cancelled, {}, Lang::En);
+    CHECK_FALSE(cancelled.error);
+    CHECK(cancelled.text == "my-shop is removed from FloServer. Its folder stayed where it was.");
+    CHECK_FALSE(remove_outcome("my-shop", false, FolderOutcome::NotAsked, {}, Lang::Ar).text.empty());
+}
+
 TEST_CASE("remove question: its words, and the database box only with a database") {
     ProjectRow row = served();
     RemoveQuestion q = remove_question(row, Lang::En);
@@ -161,7 +177,13 @@ TEST_CASE("remove question: its words, and the database box only with a database
     CHECK(q.remove == "Remove");
     CHECK(q.cancel == "Cancel");
     CHECK(q.drop.empty());
+    CHECK(q.trash.empty());  // the folder only when it's offered
+    CHECK(q.folder.empty());
     CHECK_FALSE(row_has_database(row));
+    q = remove_question(row, Lang::En, true);
+    CHECK(q.trash == "Also move the project folder to the Recycle Bin");
+    CHECK(q.folder == "Folder: C:/sites/my-shop");
+    CHECK(remove_question(row, Lang::Ar, true).folder.find(kLri + "C:/sites/my-shop" + kPdi) != std::string::npos);
 
     // floserver.json asks for one (the project may be off), or the service says it uses one.
     row.wants.database = "mariadb-11.4";

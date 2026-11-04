@@ -14,7 +14,8 @@ add_library(floserver_ui_model STATIC
     model/folders_page.cpp
     model/first_run.cpp
     model/project_menu.cpp
-    model/code_editor.cpp)
+    model/code_editor.cpp
+    model/folder_removal.cpp)
 target_include_directories(floserver_ui_model PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # Core for paths.h's file helpers (window.json is read and written here, testably).
 target_link_libraries(floserver_ui_model PUBLIC floserver_third_party PRIVATE floserver_core)
@@ -45,6 +46,7 @@ add_executable(floserver_ui WIN32
     settings_general.cpp
     window_prefs.cpp
     code_editors.cpp
+    recycle_bin.cpp
     settings_folders.cpp
     settings_shared.cpp
     form_parts.cpp

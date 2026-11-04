@@ -396,6 +396,9 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
         case kFirstRunTrustMessage:
             first_run_trust_now();
             return 0;
+        case kRecycledMessage:
+            on_recycled();
+            return 0;
         case kSettingsClosedMessage:
             if (wparam == 1) {
                 quit();  // asked while Settings' save question was open; it's answered now
@@ -448,6 +451,7 @@ void MainWindow::on_create() {
         ti.lpszText = tip->data();
         SendMessageW(tooltip_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
     }
+    recycle_bin_.retarget(hwnd_, kRecycledMessage);  // made again in another language: the new window
     // The panel's icon buttons: placed and worded by place_panel_tips().
     panel_tips_ = {};
     panel_tip_rects_ = {};
@@ -552,7 +556,7 @@ void MainWindow::on_snapshot() {
     }
     open_phpmyadmin_links(s.db);
     const std::string error_before = change_error_;
-    const std::vector<std::pair<std::string, bool>> removed = on_remove_answers(s.db);
+    const std::vector<Removed> removed = on_remove_answers(s.db);
     if (change_error_ != error_before && !change_error_.empty()) {
         SetTimer(hwnd_, kErrorTimer, kErrorShownMs, nullptr);
     }
@@ -586,13 +590,23 @@ void MainWindow::on_snapshot() {
     }
     // Removed from the window: its panel closes now, and the list is asked
     // for again (the row goes with the next answer).
-    for (const auto& [project, dropped] : removed) {
-        removed_.insert(project);
-        if (selected_ == project) {
+    for (const Removed& r : removed) {
+        removed_.insert(r.project);
+        if (selected_ == r.project) {
             (void)leave_php_part(false);
             close_panel();
         }
-        show_notice(fill(lang_, dropped ? Str::RemoveDoneDatabase : Str::RemoveDone, {project}), false);
+        if (r.trash) {
+            // Removed from the list first; only now the folder (said once it's moved, or not).
+            recycle_bin_.start(r.project, r.dropped, r.path, folder_guard(r.project),
+                               std::string(text(lang_, Str::RemoveFolderRefused)),
+                               std::string(text(lang_, Str::ProgramMissing)));
+        } else {
+            const RemoveOutcome said =
+                remove_outcome(r.project, r.dropped, r.refused ? FolderOutcome::Stayed : FolderOutcome::NotAsked,
+                               std::string(text(lang_, Str::RemoveFolderRefused)), lang_);
+            show_notice(said.text, said.error);
+        }
     }
     if (!removed.empty()) {
         update_visible();

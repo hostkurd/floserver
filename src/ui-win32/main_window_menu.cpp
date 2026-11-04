@@ -9,8 +9,12 @@
 #include "main_window.h"
 
 #include "main_window_layout.h"
+#include "model/folder_removal.h"
 #include "model/view_model.h"
 
+#include "floserver/core/paths.h"
+
+#include <shlobj.h>
 #include <windowsx.h>
 
 #include <algorithm>
@@ -295,7 +299,11 @@ void MainWindow::ask_remove(const std::string& project) {
     if (found == snap_.rows.end()) {
         return;
     }
-    const RemoveQuestion question = remove_question(*found, lang_);
+    // The Recycle Bin box only for a folder the rules let go (checked again before it moves).
+    const ProjectRow row = *found;
+    const bool offer_folder =
+        !row.path.empty() && folder_refusal_now(row.path, real_folder_guard(folder_guard(project))) == FolderRefusal::None;
+    const RemoveQuestion question = remove_question(row, lang_, offer_folder);
     // The dialog runs its own message loop: as while a save question is
     // open, a quit or a new language waits for it.
     asking_ = true;
@@ -303,7 +311,8 @@ void MainWindow::ask_remove(const std::string& project) {
     hover_ = {};
     InvalidateRect(hwnd_, nullptr, FALSE);
     bool drop = false;
-    const bool remove = ask_remove_project(hwnd_, lang_, question, drop);
+    bool trash = false;
+    const bool remove = ask_remove_project(hwnd_, lang_, question, drop, trash);
     asking_ = false;
     first_run_after_ask();
     if (quit_after_ask_) {
@@ -314,21 +323,23 @@ void MainWindow::ask_remove(const std::string& project) {
     if (!remove || !worker_ || snap_.link != Link::Connected || leaving(project)) {
         return;
     }
-    removing_[project] = drop;
+    removing_[project] = Removing{drop, trash && offer_folder, row.path};
     change_error_.clear();
     worker_->database_call("projects.remove", {{"name", project}, {"drop_database", drop}},
                            std::string(kRemovePurpose) + project);
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
-std::vector<std::pair<std::string, bool>> MainWindow::on_remove_answers(std::vector<Snapshot::DbAnswer>& answers) {
-    std::vector<std::pair<std::string, bool>> removed;
+std::vector<MainWindow::Removed> MainWindow::on_remove_answers(std::vector<Snapshot::DbAnswer>& answers) {
+    std::vector<Removed> removed;
     for (auto it = answers.begin(); it != answers.end();) {
         if (it->method != "projects.remove" || !it->purpose.starts_with(kRemovePurpose)) {
             ++it;
             continue;
         }
         const std::string project = it->purpose.substr(kRemovePurpose.size());
+        const auto asked = removing_.find(project);
+        const Removing job = asked != removing_.end() ? asked->second : Removing{};
         removing_.erase(project);
         // Said deleted only when the service dropped one it made.
         const bool drop = it->reply && it->reply->is_object() && it->reply->value("database_dropped", false);
@@ -336,11 +347,55 @@ std::vector<std::pair<std::string, bool>> MainWindow::on_remove_answers(std::vec
             // Nothing was removed: the user can try again (on_snapshot shows it).
             change_error_ = fill(lang_, Str::RemoveFailed, {project, it->error.empty() ? "no answer" : it->error});
         } else {
-            removed.emplace_back(project, drop);
+            Removed done{project, drop, false, {}, false};
+            if (job.trash) {
+                // Only the folder the question showed, and only if it's still the
+                // project's as the service had it when it removed it.
+                const std::string had =
+                    it->reply->is_object() ? it->reply->value("path", std::string()) : std::string();
+                const std::string want = comparable_path(job.path);
+                done.trash = !want.empty() && comparable_path(had) == want;
+                done.refused = !done.trash;
+                done.path = job.path;
+            }
+            removed.push_back(std::move(done));
         }
         it = answers.erase(it);
     }
     return removed;
+}
+
+FolderGuard MainWindow::folder_guard(const std::string& project) const {
+    FolderGuard guard;
+    for (const KNOWNFOLDERID& id : {FOLDERID_Profile, FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads}) {
+        PWSTR found = nullptr;
+        if (SUCCEEDED(SHGetKnownFolderPath(id, 0, nullptr, &found)) && found != nullptr) {
+            guard.kept.push_back(win::narrow(found));
+        }
+        CoTaskMemFree(found);
+    }
+    if (!snap_.projects_dir.empty()) {
+        guard.kept.push_back(snap_.projects_dir);
+    }
+    if (!snap_.shared.dir.empty()) {
+        guard.kept.push_back(snap_.shared.dir);
+    }
+    if (const auto data = core::data_dir()) {
+        guard.kept_with_contents.push_back(core::path_to_utf8(*data));
+    }
+    for (const ProjectRow& r : snap_.rows) {
+        if (r.name != project && !r.path.empty()) {
+            guard.other_projects.push_back(r.path);
+        }
+    }
+    return guard;
+}
+
+void MainWindow::on_recycled() {
+    for (const RecycleBin::Result& r : recycle_bin_.take()) {
+        const RemoveOutcome said = remove_outcome(r.project, r.database_dropped, r.outcome, r.reason, lang_);
+        show_notice(said.text, said.error);
+    }
 }
 
 }  // namespace floserver::ui

@@ -1030,6 +1030,26 @@ constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
           FLO_LRI ".cmd" FLO_PDI ".",
           "بەرنامەیەک هەڵبژێرە (" FLO_LRI ".exe" FLO_PDI "): فایلی " FLO_LRI ".bat" FLO_PDI " یان " FLO_LRI
           ".cmd" FLO_PDI " بەکارنایەت."},
+    // Remove: the folder to the Recycle Bin too (approved 4 Nov). Arabic and Kurdish need a native read.
+    Entry{Str::RemoveTrashFolder, "Also move the project folder to the Recycle Bin",
+          "انقل أيضًا مجلد المشروع إلى سلة المحذوفات", "هەروەها بوخچەی پڕۆژەکە بگوازەوە بۆ سەبەتەی خۆڵ"},
+    Entry{Str::RemoveFolderPath, "Folder: {0}", "المجلد: {0}", "بوخچە: {0}"},
+    Entry{Str::RemoveDoneTrash, "{0} is removed from FloServer, and its folder is in the Recycle Bin.",
+          "أُزيل {0} من " FLO_LRI "FloServer" FLO_PDI "، ومجلده في سلة المحذوفات.",
+          "{0} لە " FLO_LRI "FloServer" FLO_PDI " لابرا و بوخچەکەی لە سەبەتەی خۆڵدایە."},
+    Entry{Str::RemoveDoneTrashDatabase,
+          "{0} is removed from FloServer, its database is deleted and its folder is in the Recycle Bin.",
+          "أُزيل {0} من " FLO_LRI "FloServer" FLO_PDI "، وحُذفت قاعدة بياناته، ومجلده في سلة المحذوفات.",
+          "{0} لە " FLO_LRI "FloServer" FLO_PDI " لابرا، داتابەیسەکەی سڕایەوە و بوخچەکەی لە سەبەتەی خۆڵدایە."},
+    Entry{Str::RemoveFolderStayed, "{0} is removed from FloServer, but its folder stayed where it was: {1}",
+          "أُزيل {0} من " FLO_LRI "FloServer" FLO_PDI "، لكن مجلده بقي في مكانه: {1}",
+          "{0} لە " FLO_LRI "FloServer" FLO_PDI " لابرا، بەڵام بوخچەکەی لە شوێنی خۆی مایەوە: {1}"},
+    Entry{Str::RemoveFolderCancelled, "{0} is removed from FloServer. Its folder stayed where it was.",
+          "أُزيل {0} من " FLO_LRI "FloServer" FLO_PDI ". بقي مجلده في مكانه.",
+          "{0} لە " FLO_LRI "FloServer" FLO_PDI " لابرا. بوخچەکەی لە شوێنی خۆی مایەوە."},
+    Entry{Str::RemoveFolderRefused, "FloServer doesn't move this folder to the Recycle Bin",
+          "لا ينقل " FLO_LRI "FloServer" FLO_PDI " هذا المجلد إلى سلة المحذوفات",
+          FLO_LRI "FloServer" FLO_PDI " ئەم بوخچەیە ناگوازێتەوە بۆ سەبەتەی خۆڵ"},
 }};
 
 #undef FLO_LRI

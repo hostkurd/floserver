@@ -12,6 +12,7 @@
 #include "model/php_page.h"
 #include "model/project_menu.h"
 #include "model/ui_strings.h"
+#include "recycle_bin.h"
 #include "scroll_bar.h"
 #include "service_worker.h"
 #include "settings_window.h"
@@ -385,11 +386,24 @@ private:
     void show_project_menu(const std::string& project, POINT at);
     void show_shared_menu(POINT at);
     void run_project_command(const std::string& project, MenuCommand command);
-    // Asks first (a task dialog, with the database box when it has one),
-    // then projects.remove; its answer comes in on_remove_answers().
+    // Asks first (with the database box when it has one, the Recycle Bin box
+    // when its folder may go there), then projects.remove; its answer comes
+    // in on_remove_answers(). The folder goes only once the project is removed.
     void ask_remove(const std::string& project);
+    struct Removed {
+        std::string project;
+        bool dropped = false;   // its database was deleted
+        bool trash = false;     // its folder goes to the Recycle Bin now
+        std::string path;       // that folder, as the service confirmed it
+        bool refused = false;   // asked for, but the service had another folder for it
+    };
     // projects.remove's answers, taken out of `answers`; the projects removed.
-    [[nodiscard]] std::vector<std::pair<std::string, bool>> on_remove_answers(std::vector<Snapshot::DbAnswer>& answers);
+    [[nodiscard]] std::vector<Removed> on_remove_answers(std::vector<Snapshot::DbAnswer>& answers);
+    // The folders a project's folder is never moved with (model/folder_removal.h):
+    // Windows' own, FloServer's, the other projects'.
+    [[nodiscard]] FolderGuard folder_guard(const std::string& project) const;
+    // The Recycle Bin moves that finished: what became of each folder, said.
+    void on_recycled();
     void copy_address(const std::string& address);
     [[nodiscard]] bool is_settled(const std::string& key) const;
     void settle(const std::vector<std::string>& keys);
@@ -641,7 +655,13 @@ private:
     std::map<std::string, bool> installing_;    // Download clicked; the worker hasn't reported yet
     std::string change_error_;
     bool pma_busy_ = false;  // the panel's phpmyadmin.login is on its way
-    std::map<std::string, bool> removing_;  // projects.remove on its way, per project: with its database
+    struct Removing {
+        bool drop = false;   // with its database
+        bool trash = false;  // and then its folder to the Recycle Bin
+        std::string path;    // the folder the question showed
+    };
+    std::map<std::string, Removing> removing_;  // projects.remove on its way, per project
+    RecycleBin recycle_bin_;
     std::set<std::string> removed_;         // removed; hidden until the list no longer has them
     Notice notice_;  // a short message in the banner ("copied")
 
@@ -713,6 +733,7 @@ private:
     static constexpr UINT_PTR kFirstRunScrollTimer = 5;
     // Posted after certs.ensure_ca's answer: Windows' question is asked outside on_snapshot.
     static constexpr UINT kFirstRunTrustMessage = WM_APP + 8;
+    static constexpr UINT kRecycledMessage = WM_APP + 9;  // a folder's move to the Recycle Bin finished
     // Settings > General (or the first-run page): a preference changed; wparam PrefChange, lparam the index.
     static constexpr UINT kPrefsMessage = WM_APP + 7;
     ScrollBar list_bar_{kListScrollTimer, [this](int offset) { scroll_to(offset); }};

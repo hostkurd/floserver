@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <tuple>
+#include <vector>
 #include <utility>
 
 namespace floserver::ui {
@@ -357,45 +359,197 @@ SaveChoice ask_to_save(HWND owner, Lang lang, const std::string& question) {
 }
 
 
-bool ask_remove_project(HWND owner, Lang lang, const RemoveQuestion& question, bool& drop) {
-    constexpr int kRemove = 100;
-    const std::wstring window_title = win::widen(question.window_title);
-    const std::wstring title = win::widen(question.title);
-    const std::wstring content = win::widen(question.text);
-    const std::wstring remove = win::widen(question.remove);
-    const std::wstring cancel = win::widen(question.cancel);
-    const std::wstring box = win::widen(question.drop);
-    // Both buttons in the window's language (Windows' own Cancel is in Windows').
-    const std::array<TASKDIALOG_BUTTON, 2> buttons{{{kRemove, remove.c_str()}, {IDCANCEL, cancel.c_str()}}};
-    TASKDIALOGCONFIG config{};
-    config.cbSize = sizeof config;
-    config.hwndParent = owner;
-    config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW |
-                     (is_rtl(lang) ? TDF_RTL_LAYOUT : 0);
-    config.pszWindowTitle = window_title.c_str();
-    config.pszMainInstruction = title.c_str();
-    config.pszContent = content.c_str();
-    config.cButtons = static_cast<UINT>(buttons.size());
-    config.pButtons = buttons.data();
-    config.nDefaultButton = IDCANCEL;
-    if (!box.empty()) {
-        config.pszVerificationText = box.c_str();  // unticked: no TDF_VERIFICATION_FLAG_CHECKED
+namespace {
+
+// The remove question's controls.
+constexpr int kRemoveButton = 100;
+constexpr int kTitleText = 101;
+constexpr int kBodyText = 102;
+constexpr int kDropBox = 103;
+constexpr int kTrashBox = 104;
+constexpr int kFolderText = 105;
+
+// A dialog template built in memory (DLGTEMPLATE, then its items), WORD by WORD.
+class DialogTemplate {
+public:
+    DialogTemplate(DWORD style, DWORD ex_style, short cx, short cy) {
+        add_dword(style);
+        add_dword(ex_style);
+        count_at_ = words_.size();
+        add_word(0);  // the items, counted as they're added
+        add_word(0);  // x, y
+        add_word(0);
+        add_word(static_cast<WORD>(cx));
+        add_word(static_cast<WORD>(cy));
+        add_word(0);  // no menu
+        add_word(0);  // the dialog class
+        add_word(0);  // no title: set when it opens
+        add_word(9);  // DS_SETFONT: 9 point Segoe UI
+        add_text(L"Segoe UI");
     }
-    int pressed = IDCANCEL;
-    BOOL ticked = FALSE;
-    if (FAILED(TaskDialogIndirect(&config, &pressed, nullptr, &ticked))) {
-        // Without common controls 6 (it's in the manifest): the plain box,
-        // Cancel first, and the database is kept.
-        const std::wstring both = title + L"\n\n" + content;
-        pressed = MessageBoxW(owner, both.c_str(), window_title.c_str(),
-                              MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2 |
-                                  (is_rtl(lang) ? MB_RTLREADING | MB_RIGHT : 0U)) == IDOK
-                      ? kRemove
-                      : IDCANCEL;
-        ticked = FALSE;
+    // `kind`: 0x0080 a button, 0x0082 a static text.
+    void add(DWORD style, short x, short y, short cx, short cy, WORD id, WORD kind) {
+        while (words_.size() % 2 != 0) {
+            add_word(0);  // each item starts on a DWORD
+        }
+        add_dword(style | WS_CHILD | WS_VISIBLE);
+        add_dword(0);
+        add_word(static_cast<WORD>(x));
+        add_word(static_cast<WORD>(y));
+        add_word(static_cast<WORD>(cx));
+        add_word(static_cast<WORD>(cy));
+        add_word(id);
+        add_word(0xFFFF);
+        add_word(kind);
+        add_word(0);  // no text: set when it opens
+        add_word(0);  // no creation data
+        ++words_[count_at_];
     }
-    drop = pressed == kRemove && !box.empty() && ticked != FALSE;
-    return pressed == kRemove;
+    [[nodiscard]] const DLGTEMPLATE* get() const { return reinterpret_cast<const DLGTEMPLATE*>(words_.data()); }
+
+private:
+    void add_word(WORD v) { words_.push_back(v); }
+    void add_dword(DWORD v) {
+        add_word(LOWORD(v));
+        add_word(HIWORD(v));
+    }
+    void add_text(const wchar_t* s) {
+        for (; *s != L'\0'; ++s) {
+            add_word(static_cast<WORD>(*s));
+        }
+        add_word(0);
+    }
+    std::vector<WORD> words_;
+    std::size_t count_at_ = 0;
+};
+
+struct RemoveDialog {
+    std::wstring window_title;
+    std::wstring title;
+    std::wstring body;
+    std::wstring remove;
+    std::wstring cancel;
+    std::wstring drop;
+    std::wstring trash;
+    std::wstring folder;
+    bool dropped = false;
+    bool trashed = false;
+    HFONT bold = nullptr;
+};
+
+INT_PTR CALLBACK remove_dialog_proc(HWND dialog, UINT msg, WPARAM wparam, LPARAM lparam) {
+    auto* d = win::int_to_ptr<RemoveDialog*>(GetWindowLongPtrW(dialog, DWLP_USER));
+    switch (msg) {
+        case WM_INITDIALOG: {
+            d = win::int_to_ptr<RemoveDialog*>(lparam);
+            SetWindowLongPtrW(dialog, DWLP_USER, lparam);
+            SetWindowTextW(dialog, d->window_title.c_str());
+            SetDlgItemTextW(dialog, kTitleText, d->title.c_str());
+            SetDlgItemTextW(dialog, kBodyText, d->body.c_str());
+            SetDlgItemTextW(dialog, kDropBox, d->drop.c_str());
+            SetDlgItemTextW(dialog, kTrashBox, d->trash.c_str());
+            SetDlgItemTextW(dialog, kFolderText, d->folder.c_str());
+            SetDlgItemTextW(dialog, kRemoveButton, d->remove.c_str());
+            SetDlgItemTextW(dialog, IDCANCEL, d->cancel.c_str());
+            // The question in bold, a little larger, as a task dialog's main line.
+            LOGFONTW lf{};
+            if (const auto font = reinterpret_cast<HFONT>(SendMessageW(dialog, WM_GETFONT, 0, 0));
+                font != nullptr && GetObjectW(font, sizeof lf, &lf) != 0) {
+                lf.lfWeight = FW_SEMIBOLD;
+                lf.lfHeight = lf.lfHeight * 4 / 3;
+                d->bold = CreateFontIndirectW(&lf);
+                SendDlgItemMessageW(dialog, kTitleText, WM_SETFONT, reinterpret_cast<WPARAM>(d->bold), FALSE);
+            }
+            // Cancel is the default: Enter and Esc both keep everything.
+            SendMessageW(dialog, DM_SETDEFID, IDCANCEL, 0);
+            SetFocus(GetDlgItem(dialog, IDCANCEL));
+            return FALSE;
+        }
+        case WM_COMMAND:
+            if (d != nullptr && (LOWORD(wparam) == kRemoveButton || LOWORD(wparam) == IDCANCEL)) {
+                const bool remove = LOWORD(wparam) == kRemoveButton;
+                d->dropped = remove && IsDlgButtonChecked(dialog, kDropBox) == BST_CHECKED;
+                d->trashed = remove && IsDlgButtonChecked(dialog, kTrashBox) == BST_CHECKED;
+                EndDialog(dialog, remove ? 1 : 0);
+                return TRUE;
+            }
+            break;
+        case WM_DESTROY:
+            if (d != nullptr && d->bold != nullptr) {
+                DeleteObject(d->bold);
+                d->bold = nullptr;
+            }
+            break;
+        default:
+            break;
+    }
+    (void)lparam;
+    return FALSE;
+}
+
+}  // namespace
+
+bool ask_remove_project(HWND owner, Lang lang, const RemoveQuestion& question, bool& drop, bool& trash) {
+    drop = false;
+    trash = false;
+    RemoveDialog d;
+    d.window_title = win::widen(question.window_title);
+    d.title = win::widen(question.title);
+    d.body = win::widen(question.text);
+    d.remove = win::widen(question.remove);
+    d.cancel = win::widen(question.cancel);
+    d.drop = win::widen(question.drop);
+    d.trash = win::widen(question.trash);
+    d.folder = win::widen(question.folder);
+    // In dialog units: the question, what happens to the folder, the boxes
+    // (each only when it applies, both unticked), then Remove and Cancel.
+    constexpr short kWidth = 280;
+    constexpr short kMargin = 10;
+    constexpr short kInner = kWidth - 2 * kMargin;
+    const bool rtl = is_rtl(lang);
+    short y = kMargin;
+    std::vector<std::tuple<DWORD, short, short, short, short, WORD, WORD>> items;
+    items.emplace_back(SS_LEFT | SS_NOPREFIX, kMargin, y, kInner, 24, kTitleText, 0x0082);
+    y += 28;
+    items.emplace_back(SS_LEFT | SS_NOPREFIX, kMargin, y, kInner, 18, kBodyText, 0x0082);
+    y += 22;
+    if (!d.drop.empty()) {
+        items.emplace_back(BS_AUTOCHECKBOX | BS_MULTILINE | BS_TOP | WS_TABSTOP, kMargin, y, kInner, 20, kDropBox,
+                           0x0080);
+        y += 24;
+    }
+    if (!d.trash.empty()) {
+        items.emplace_back(BS_AUTOCHECKBOX | BS_MULTILINE | BS_TOP | WS_TABSTOP, kMargin, y, kInner, 20, kTrashBox,
+                           0x0080);
+        y += 20;
+        // Which folder, under its box; a long path breaks anywhere.
+        items.emplace_back(SS_LEFT | SS_NOPREFIX | SS_EDITCONTROL, kMargin + 12, y, kInner - 12, 26, kFolderText,
+                           0x0082);
+        y += 30;
+    }
+    y += 6;
+    constexpr short kButtonW = 60;
+    constexpr short kButtonH = 14;
+    items.emplace_back(BS_PUSHBUTTON | WS_TABSTOP, kWidth - kMargin - 2 * kButtonW - 6, y, kButtonW, kButtonH,
+                       kRemoveButton, 0x0080);
+    items.emplace_back(BS_DEFPUSHBUTTON | WS_TABSTOP, kWidth - kMargin - kButtonW, y, kButtonW, kButtonH, IDCANCEL,
+                       0x0080);
+    y += kButtonH + kMargin;
+    // Mirrored in Arabic and Kurdish: the boxes, the text and the buttons from the right.
+    DialogTemplate dialog(DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU,
+                          rtl ? WS_EX_LAYOUTRTL | WS_EX_RTLREADING : 0U, kWidth, y);
+    for (const auto& [style, x, iy, cx, cy, id, kind] : items) {
+        dialog.add(style, x, iy, cx, cy, id, kind);
+    }
+    const INT_PTR answer =
+        DialogBoxIndirectParamW(GetModuleHandleW(nullptr), dialog.get(), owner, remove_dialog_proc,
+                                reinterpret_cast<LPARAM>(&d));
+    if (answer != 1) {
+        return false;  // Cancel, Esc, closed, or no dialog at all: nothing is removed
+    }
+    drop = d.dropped;
+    trash = d.trashed;
+    return true;
 }
 
 }  // namespace floserver::ui

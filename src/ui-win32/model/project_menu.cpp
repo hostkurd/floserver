@@ -54,7 +54,7 @@ std::string menu_item_text(const MenuItem& item, Lang lang, std::string_view edi
 
 bool row_has_database(const ProjectRow& row) { return is_mariadb(row.database) || is_mariadb(row.wants.database); }
 
-RemoveQuestion remove_question(const ProjectRow& row, Lang lang) {
+RemoveQuestion remove_question(const ProjectRow& row, Lang lang, bool offer_folder) {
     RemoveQuestion q;
     q.window_title = "FloServer";
     q.title = fill(lang, Str::RemoveTitle, {row.name});
@@ -65,7 +65,27 @@ RemoveQuestion remove_question(const ProjectRow& row, Lang lang) {
         // The name the service gives it; the service works it out again itself.
         q.drop = fill(lang, Str::RemoveDropDatabase, {core::project_database_name(row.name)});
     }
+    if (offer_folder && !row.path.empty()) {
+        q.trash = std::string(text(lang, Str::RemoveTrashFolder));
+        q.folder = fill(lang, Str::RemoveFolderPath, {row.path});
+    }
     return q;
+}
+
+RemoveOutcome remove_outcome(const std::string& project, bool database_dropped, FolderOutcome folder,
+                             const std::string& reason, Lang lang) {
+    switch (folder) {
+        case FolderOutcome::Recycled:
+            return {fill(lang, database_dropped ? Str::RemoveDoneTrashDatabase : Str::RemoveDoneTrash, {project}), false};
+        case FolderOutcome::Stayed:
+            // The project is removed; the folder is where it was, and why is said.
+            return {fill(lang, Str::RemoveFolderStayed, {project, reason}), true};
+        case FolderOutcome::Cancelled:
+            return {fill(lang, Str::RemoveFolderCancelled, {project}), false};
+        case FolderOutcome::NotAsked:
+            break;
+    }
+    return {fill(lang, database_dropped ? Str::RemoveDoneDatabase : Str::RemoveDone, {project}), false};
 }
 
 }  // namespace floserver::ui
