@@ -101,13 +101,11 @@ private:
         FrWithout,    // step 2's Continue without downloading
     };
     enum class PanelAction : std::uint8_t { Browser, Folder, Terminal, Editor, Studio, Download };
-    // The square icon buttons after Open in browser (approved 3 Nov), in their order.
-    static constexpr std::array<PanelAction, 4> kIconActions = {PanelAction::Folder, PanelAction::Terminal,
-                                                                PanelAction::Editor, PanelAction::Studio};
-    [[nodiscard]] static constexpr bool is_icon_action(PanelAction a) {
-        return a == PanelAction::Folder || a == PanelAction::Terminal || a == PanelAction::Editor ||
-               a == PanelAction::Studio;
-    }
+    // The panel's square icon buttons (approved 3 and 4 Nov), in their order.
+    static constexpr std::array<PanelAction, 5> kIconActions = {PanelAction::Browser, PanelAction::Folder,
+                                                                PanelAction::Terminal, PanelAction::Editor,
+                                                                PanelAction::Studio};
+    [[nodiscard]] static constexpr bool is_icon_action(PanelAction a) { return a != PanelAction::Download; }
     [[nodiscard]] static constexpr bool is_panel_part(Part part) {
         return part == Part::PanelClose || part == Part::PanelAddress || part == Part::PanelTab ||
                part == Part::PanelButton || part == Part::PanelField || part == Part::PanelCopyEnv ||
@@ -445,7 +443,7 @@ private:
     void paint_panel(Canvas& c, HDC dc, bool text_pass) const;
     void paint_switch(Canvas& c, const RECT& r, bool on, bool hover) const;
     void paint_button(Canvas& c, const RECT& r, bool hover, bool focused) const;
-    // A square open button's stroke icon (folder, >_, </>, Studio's layers), 16 px, centred in `r`.
+    // A square open button's stroke icon (globe, folder, >_, </>, Studio's layers), 16 px, centred in `r`.
     void paint_open_icon(Canvas& c, const RECT& r, PanelAction action, Rgb color) const;
     // An icon button's tooltip, which is also its accessible name: "Open
     // folder", "Open in VS Code", "Choose a code editor…".

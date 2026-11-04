@@ -146,6 +146,14 @@ void Canvas::circle(float cx, float cy, float radius, Rgb color, float width) {
     shapes_->g.DrawEllipse(&pen, physical_x(cx) - radius, cy - radius, radius * 2, radius * 2);
 }
 
+void Canvas::ellipse_outline(float cx, float cy, float rx, float ry, Rgb color, float width) {
+    if (!shapes_) {
+        return;
+    }
+    const Gdiplus::Pen pen(gp(color), width);
+    shapes_->g.DrawEllipse(&pen, physical_x(cx) - rx, cy - ry, rx * 2, ry * 2);
+}
+
 void Canvas::line(float x1, float y1, float x2, float y2, Rgb color, float width) {
     if (!shapes_) {
         return;

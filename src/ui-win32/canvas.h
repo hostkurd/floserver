@@ -57,6 +57,7 @@ public:
     void round_outline(const RECT& r, float radius, Rgb color, float width);
     void ellipse(float cx, float cy, float radius, Rgb fill);
     void circle(float cx, float cy, float radius, Rgb color, float width);
+    void ellipse_outline(float cx, float cy, float rx, float ry, Rgb color, float width);
     void line(float x1, float y1, float x2, float y2, Rgb color, float width);
     void clip(const RECT& r);
     void unclip();

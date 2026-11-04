@@ -300,8 +300,8 @@ std::string MainWindow::panel_button_text(PanelAction action) const {
         const ProjectRow* row = selected_row();
         return row != nullptr ? download_button_text(downloads_for(*row, snap_.installed), lang_) : std::string();
     }
-    // The icon buttons have no words on them; their tooltips name them.
-    return action == PanelAction::Browser ? std::string(text(lang_, Str::OpenInBrowser)) : std::string();
+    return {};  // the icon buttons have no words on them; their tooltips name them
+
 }
 
 bool MainWindow::panel_action_enabled(PanelAction action) const {
@@ -321,6 +321,7 @@ std::string MainWindow::panel_button_tip(PanelAction action) const {
         case PanelAction::Studio:
             return std::string(text(lang_, Str::OpenInStudio));
         case PanelAction::Browser:
+            return std::string(text(lang_, Str::OpenInBrowser));
         case PanelAction::Download:
             break;
     }
@@ -389,31 +390,25 @@ MainWindow::PanelGeometry MainWindow::panel_geometry(HDC dc) const {
             g.buttons.emplace_back(RECT{x0, y, std::min(x1, x0 + bw), y + px(kButtonH)}, PanelAction::Download);
             y += px(kButtonH) + px(kButtonGap);
         }
-        // One line, never wrapped (approved 3 Nov): Open in browser in words,
-        // then square icon buttons as tall as it, from the reading start
-        // (the right in Arabic and Kurdish). The gaps shrink before anything
-        // would be cut at the narrowest panel.
-        std::vector<PanelAction> icons = {PanelAction::Folder, PanelAction::Terminal, PanelAction::Editor};
+        // One line of equal square icon buttons (approved 3 and 4 Nov), from
+        // the reading start (the right in Arabic and Kurdish): the browser
+        // (when there's an address), Folder, Terminal, the editor, Studio.
+        // The gaps shrink before anything would be cut at the narrowest panel.
+        std::vector<PanelAction> icons;
+        if (is_openable_address(row->address)) {
+            icons.push_back(PanelAction::Browser);
+        }
+        icons.insert(icons.end(), {PanelAction::Folder, PanelAction::Terminal, PanelAction::Editor});
         if (snap_.panel.project == row->name && snap_.panel.studio) {
             icons.push_back(PanelAction::Studio);
         }
-        const bool browser = is_openable_address(row->address);
         const int side = px(kButtonH);
-        const int count = static_cast<int>(icons.size()) + (browser ? 1 : 0);
-        const int bw = browser ? Canvas::measure(dc, w(text(lang_, Str::OpenInBrowser)), fonts_.button.get(), rtl_) +
-                                     px(24)
-                               : 0;
-        const int room = x1 - x0;
+        const int count = static_cast<int>(icons.size());
         int gap = px(kButtonGap);
-        while (gap > px(2) && bw + static_cast<int>(icons.size()) * side + (count - 1) * gap > room) {
+        while (gap > px(2) && count * side + (count - 1) * gap > x1 - x0) {
             gap -= std::max(1, px(1));
         }
         x = x0;
-        if (browser) {
-            const int most = std::max(0, room - static_cast<int>(icons.size()) * (side + gap));
-            g.buttons.emplace_back(RECT{x, y, x + std::min(bw, most), y + side}, PanelAction::Browser);
-            x += std::min(bw, most) + gap;
-        }
         for (const PanelAction action : icons) {
             g.buttons.emplace_back(RECT{x, y, x + side, y + side}, action);
             x += side + gap;
@@ -988,7 +983,7 @@ void MainWindow::place_panel_tips() {
 }
 
 // Stroke icons in the app's style (the close mark's and the gear's line):
-// a folder, a prompt ">_", code "</>" and Studio's mark, two stacked layers
+// a globe, a folder, a prompt ">_", code "</>" and Studio's mark, two stacked layers
 // (not FloCMS's logo; the repository has none). Drawn the same way round in
 // every language, as Windows draws its own icons.
 void MainWindow::paint_open_icon(Canvas& c, const RECT& r, PanelAction action, Rgb color) const {
@@ -1032,6 +1027,11 @@ void MainWindow::paint_open_icon(Canvas& c, const RECT& r, PanelAction action, R
             path({{1.5F, 9.0F}, {8.0F, 12.5F}, {14.5F, 9.0F}});
             break;
         case PanelAction::Browser:
+            // A globe: its outline, the equator and a meridian.
+            c.circle(cx, cy, 6.5F * s, color, stroke);
+            c.ellipse_outline(cx, cy, 2.9F * s, 6.5F * s, color, stroke);
+            seg(1.5F, 8.0F, 14.5F, 8.0F);
+            break;
         case PanelAction::Download:
             break;
     }
