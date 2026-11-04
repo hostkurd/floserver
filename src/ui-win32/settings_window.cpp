@@ -23,6 +23,7 @@ namespace {
 constexpr wchar_t kClassName[] = L"FloServerSettings";
 // Only while an information toast is shown, and not while the mouse is over it.
 constexpr UINT_PTR kToastTimer = 1;
+constexpr UINT kToastMessage = WM_APP + 30;  // the toast's popup: the mouse, its close mark
 constexpr UINT_PTR kTipId = 1;
 constexpr UINT kFirstChoice = 100;
 
@@ -333,7 +334,6 @@ LRESULT SettingsWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             break;
         case WM_MOUSELEAVE:
             tracking_mouse_ = false;
-            toast_event(ToastEvent::MouseLeave);
             if (scroll_bar_.leave()) {
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
@@ -345,6 +345,15 @@ LRESULT SettingsWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
         case WM_RBUTTONDOWN:
         case WM_MBUTTONDOWN:
             mouse_used();
+            break;
+        case kToastMessage:
+            // The popup: information stays while it's read; its close mark.
+            toast_event(wparam == kToastCloseClicked  ? ToastEvent::Close
+                        : wparam == kToastMouseEntered ? ToastEvent::MouseEnter
+                                                       : ToastEvent::MouseLeave);
+            return 0;
+        case WM_MOVE:
+            toast_popup_.follow();
             break;
         case WM_UPDATEUISTATE:
             // Windows' own word on the focus cues (as in FloServer's window).
@@ -372,9 +381,7 @@ LRESULT SettingsWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             }
             ReleaseCapture();
             const Hit hit = hit_test(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
-            if (hit == pressed_ && hit.part == Part::ToastClose) {
-                toast_event(ToastEvent::Close);
-            } else if (hit == pressed_ && hit.part != Part::None && hit.part != Part::Toast) {
+            if (hit == pressed_ && hit.part != Part::None) {
                 // The keys carry on from what was clicked.
                 const std::vector<Hit> order = focus_order();
                 if (const auto it = std::find(order.begin(), order.end(), hit); it != order.end()) {
@@ -440,6 +447,7 @@ void SettingsWindow::on_create() {
     icon_big_ = std::move(big_icon);
 
     // One tool, moved to the disabled Remove under the mouse: "Used by …".
+    toast_popup_.attach(hwnd_, kToastMessage);
     tooltip_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
                                CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, hwnd_, nullptr, instance_,
                                nullptr);
@@ -1021,13 +1029,6 @@ std::vector<SettingsWindow::Hit> SettingsWindow::focus_order() const {
 }
 
 SettingsWindow::Hit SettingsWindow::hit_test(int x, int y) const {
-    // A message's card lies over the page.
-    if (contains(toast_geometry_.close, x, y)) {
-        return {Part::ToastClose, -1, -1};
-    }
-    if (contains(toast_geometry_.card, x, y)) {
-        return {Part::Toast, -1, -1};
-    }
     if (scroll_bar_.over(x, y)) {
         return {};  // the bar's, not what's under it
     }
@@ -1065,11 +1066,6 @@ void SettingsWindow::on_mouse_move(int x, int y) {
         hover_ = hit;
         update_tip(hit);
         InvalidateRect(hwnd_, nullptr, FALSE);
-    }
-    // Information stays while it's being read; its time starts again on the way out.
-    const bool over_toast = hit.part == Part::Toast || hit.part == Part::ToastClose;
-    if (over_toast != toast_.hovered) {
-        toast_event(over_toast ? ToastEvent::MouseEnter : ToastEvent::MouseLeave);
     }
 }
 
@@ -1373,29 +1369,13 @@ void SettingsWindow::on_paint() {
             {
                 toast_geometry_ =
                     toast_geometry(mem.get(), toast_, fonts_.button.get(), width_, height_ - px(16), dpi_, rtl_);
-                // The card appeared under the mouse, or moved from under it.
-                POINT at{};
-                const bool over = !toast_.text.empty() && GetCursorPos(&at) != FALSE &&
-                                  ScreenToClient(hwnd_, &at) != FALSE && contains(toast_geometry_.card, at.x, at.y);
-                if (over && !tracking_mouse_) {
-                    TRACKMOUSEEVENT tme{};
-                    tme.cbSize = sizeof tme;
-                    tme.dwFlags = TME_LEAVE;
-                    tme.hwndTrack = hwnd_;
-                    tracking_mouse_ = TrackMouseEvent(&tme) != FALSE;
-                }
-                if (over != toast_.hovered) {
-                    toast_ = toast_after(toast_, over ? ToastEvent::MouseEnter : ToastEvent::MouseLeave);
-                    sync_toast_timer();
-                }
+                // Its own popup over the page: nothing under it shows through.
+                toast_popup_.show(toast_, toast_geometry_, fonts_.button.get(), dark_, dpi_, rtl_);
                 Canvas canvas(mem.get(), width_, rtl_);
                 canvas.fill({0, 0, width_, height_}, palette(dark_).window);
                 paint_shapes(canvas);
-                const bool close_hover = hover_.part == Part::ToastClose;
-                paint_toast(canvas, toast_geometry_, toast_, fonts_.button.get(), dark_, dpi_, close_hover, false);
                 canvas.begin_text();
                 paint_text(canvas);
-                paint_toast(canvas, toast_geometry_, toast_, fonts_.button.get(), dark_, dpi_, close_hover, true);
             }
             // The bitmap is already laid out right to left; copy it as it is.
             SetLayout(hdc, 0);

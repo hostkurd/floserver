@@ -28,8 +28,7 @@ std::vector<MenuItem> project_menu(const ProjectRow& row, const ProjectMenuState
         {MenuCommand::Toggle, state.on ? Str::MenuTurnOff : Str::MenuTurnOn, change, false},
         {MenuCommand::KeepRunning, Str::KeepRunning, change, state.keep},
         {},
-        {MenuCommand::Settings, Str::MenuProjectSettings, true, false},
-        {},
+        // No Project settings…: a click on the row opens its panel (approved 4 Nov).
         {MenuCommand::Remove, Str::RemoveProject, change, false},
     };
 }
@@ -43,6 +42,30 @@ std::vector<MenuItem> shared_menu(const SharedSites& shared) {
         {},
         {MenuCommand::Settings, Str::MenuSettings, true, false},
     };
+}
+
+std::optional<Glyph> menu_glyph(MenuCommand command) {
+    switch (command) {
+        case MenuCommand::OpenBrowser:
+            return Glyph::Globe;
+        case MenuCommand::OpenFolder:
+            return Glyph::Folder;
+        case MenuCommand::OpenTerminal:
+            return Glyph::Terminal;
+        case MenuCommand::OpenEditor:
+            return Glyph::Code;
+        case MenuCommand::CopyAddress:
+            return Glyph::Copy;
+        case MenuCommand::Toggle:
+            return Glyph::Power;
+        case MenuCommand::Remove:
+            return Glyph::Trash;
+        case MenuCommand::None:
+        case MenuCommand::KeepRunning:  // a ticked item: its tick is its mark
+        case MenuCommand::Settings:
+            break;
+    }
+    return std::nullopt;
 }
 
 std::string menu_item_text(const MenuItem& item, Lang lang, std::string_view editor) {

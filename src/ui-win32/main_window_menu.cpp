@@ -36,10 +36,11 @@ constexpr std::string_view kRemovePurpose = "remove\n";
 // A command's menu id: never 0, which TrackPopupMenuEx returns for none.
 UINT menu_id(MenuCommand command) { return static_cast<UINT>(command) + 1U; }
 
-// The menu as Windows shows it; `labels` keeps the words alive meanwhile.
+// The menu as Windows shows it; `labels` and `icons` keep its words and
+// icons alive meanwhile (declared before the menu, they go after it).
 // `editor` is the code editor's name for its item.
 win::UniqueMenu make_menu(const std::vector<MenuItem>& items, Lang lang, std::vector<std::wstring>& labels,
-                          std::string_view editor = {}) {
+                          std::vector<win::UniqueBitmap>& icons, UINT dpi, std::string_view editor = {}) {
     win::UniqueMenu menu(CreatePopupMenu());
     if (!menu) {
         return menu;
@@ -63,6 +64,22 @@ win::UniqueMenu make_menu(const std::vector<MenuItem>& items, Lang lang, std::ve
         flags |= item.enabled ? 0U : UINT{MF_GRAYED};
         flags |= item.checked ? UINT{MF_CHECKED} : 0U;
         AppendMenuW(menu.get(), flags, menu_id(item.command), labels.back().c_str());
+        // The panel's icon beside it (approved 4 Nov), in the menu's own text
+        // colour (greyed with the item), small-icon size for the screen.
+        if (const auto glyph = menu_glyph(item.command)) {
+            const DWORD ink = GetSysColor(item.enabled ? COLOR_MENUTEXT : COLOR_GRAYTEXT);
+            const Rgb color = (static_cast<Rgb>(GetRValue(ink)) << 16U) | (static_cast<Rgb>(GetGValue(ink)) << 8U) |
+                              static_cast<Rgb>(GetBValue(ink));
+            win::UniqueBitmap icon(make_glyph_bitmap(*glyph, GetSystemMetricsForDpi(SM_CXSMICON, dpi), color));
+            if (icon) {
+                MENUITEMINFOW info{};
+                info.cbSize = sizeof info;
+                info.fMask = MIIM_BITMAP;
+                info.hbmpItem = icon.get();
+                SetMenuItemInfoW(menu.get(), menu_id(item.command), FALSE, &info);
+                icons.push_back(std::move(icon));
+            }
+        }
     }
     return menu;
 }
@@ -141,11 +158,23 @@ void MainWindow::on_context_menu(LPARAM lparam) {
                 if (row < 0) {
                     return;
                 }
-                // Selected, without a focus frame: it was the mouse (Windows' rule).
+                // Selected, as Explorer does, without a focus frame (it was the
+                // mouse): an open panel shows this project; a closed one stays
+                // closed and the row shows as selected.
                 focus_ = row;
                 shared_focused_ = false;
-                panel_focus_ = -1;
                 show_focus_ = false;
+                if (panel_open()) {
+                    if (hit.project != selected_) {
+                        select(hit.project);
+                    }
+                    if (hit.project != selected_) {
+                        return;  // unsaved PHP changes kept it where it was
+                    }
+                } else {
+                    highlighted_ = hit.project;
+                }
+                panel_focus_ = -1;
                 InvalidateRect(hwnd_, nullptr, FALSE);
                 UpdateWindow(hwnd_);
                 show_project_menu(hit.project, {sx, sy});
@@ -201,7 +230,8 @@ void MainWindow::show_project_menu(const std::string& project, POINT at) {
     const std::string editor_name = target ? target->name : std::string();
     const std::vector<MenuItem> items = project_menu(row, state, editor_name);
     std::vector<std::wstring> labels;
-    const win::UniqueMenu menu = make_menu(items, lang_, labels, editor_name);
+    std::vector<win::UniqueBitmap> icons;
+    const win::UniqueMenu menu = make_menu(items, lang_, labels, icons, dpi_, editor_name);
     if (!menu) {
         return;
     }
@@ -216,7 +246,8 @@ void MainWindow::show_shared_menu(POINT at) {
     const SharedSites shared = snap_.shared;
     const std::vector<MenuItem> items = shared_menu(shared);
     std::vector<std::wstring> labels;
-    const win::UniqueMenu menu = make_menu(items, lang_, labels);
+    std::vector<win::UniqueBitmap> icons;
+    const win::UniqueMenu menu = make_menu(items, lang_, labels, icons, dpi_);
     if (!menu) {
         return;
     }

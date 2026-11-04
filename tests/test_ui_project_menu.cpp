@@ -51,7 +51,7 @@ TEST_CASE("project menu: the items, in the approved order") {
     const auto menu = project_menu(served(), {true, false, true, false});
     using enum MenuCommand;
     CHECK(commands(menu) == std::vector<MenuCommand>{OpenBrowser, OpenFolder, OpenTerminal, OpenEditor, CopyAddress,
-                                                     None, Toggle, KeepRunning, None, Settings, None, Remove});
+                                                     None, Toggle, KeepRunning, None, Remove});
     for (const MenuItem& i : menu) {
         CAPTURE(static_cast<int>(i.command));
         CHECK(i.enabled);
@@ -63,7 +63,16 @@ TEST_CASE("project menu: the items, in the approved order") {
     CHECK(item(menu, OpenBrowser).label == Str::OpenInBrowser);
     CHECK(item(menu, KeepRunning).label == Str::KeepRunning);
     CHECK(text(Lang::En, item(menu, Remove).label) == "Remove from FloServer…");
-    CHECK(text(Lang::En, item(menu, Settings).label) == "Project settings…");
+    // Its icons: the panel's, and a tick for Keep running.
+    CHECK(menu_glyph(OpenBrowser) == Glyph::Globe);
+    CHECK(menu_glyph(OpenFolder) == Glyph::Folder);
+    CHECK(menu_glyph(OpenTerminal) == Glyph::Terminal);
+    CHECK(menu_glyph(OpenEditor) == Glyph::Code);
+    CHECK(menu_glyph(CopyAddress) == Glyph::Copy);
+    CHECK(menu_glyph(Toggle) == Glyph::Power);
+    CHECK(menu_glyph(Remove) == Glyph::Trash);
+    CHECK_FALSE(menu_glyph(KeepRunning).has_value());
+    CHECK_FALSE(menu_glyph(Settings).has_value());
 }
 
 TEST_CASE("project menu: the code editor's item, after Open terminal") {
@@ -124,7 +133,6 @@ TEST_CASE("project menu: what doesn't apply is greyed out") {
     CHECK_FALSE(item(offline, MenuCommand::Toggle).enabled);
     CHECK_FALSE(item(offline, MenuCommand::KeepRunning).enabled);
     CHECK_FALSE(item(offline, MenuCommand::Remove).enabled);
-    CHECK(item(offline, MenuCommand::Settings).enabled);
     CHECK(item(offline, MenuCommand::OpenBrowser).enabled);
     // Being removed: not again, nor switched.
     const auto removing = project_menu(served(), {true, false, true, true});

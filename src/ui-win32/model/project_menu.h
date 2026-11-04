@@ -6,10 +6,12 @@
 // C++, so they're tested on every platform; the window only shows them and
 // runs the actions the panel's buttons and switches already run.
 
+#include "model/glyphs.h"
 #include "model/ui_strings.h"
 #include "model/view_model.h"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -25,7 +27,7 @@ enum class MenuCommand : std::uint8_t {
     CopyAddress,
     Toggle,       // Turn on / Turn off
     KeepRunning,
-    Settings,     // the project's panel; Settings → Shared sites for the shared row
+    Settings,     // Settings → Shared sites, from the Shared sites row
     Remove,
 };
 
@@ -45,14 +47,18 @@ struct ProjectMenuState {
 };
 
 // Open in browser · Open folder · Open terminal · Open in <editor> · Copy
-// address | Turn on (or off) · Keep running | Project settings… | Remove from
-// FloServer…
+// address | Turn on (or off) · Keep running | Remove from FloServer…
+// (no Project settings…: a click on the row opens its panel).
 // The address items are greyed out when there's nothing to open (off, a
 // problem, needs a download); the changes while the service isn't there or
 // the project is being removed. `editor` is the code editor's name ("VS
 // Code"); empty when there's none: the item is Choose a code editor… then.
 [[nodiscard]] std::vector<MenuItem> project_menu(const ProjectRow& row, const ProjectMenuState& state,
                                                  std::string_view editor = {});
+
+// The small icon beside an item, the panel's own where there's one (approved
+// 4 Nov): Keep running keeps its tick instead.
+[[nodiscard]] std::optional<Glyph> menu_glyph(MenuCommand command);
 
 // An item's words: "Open in VS Code" with the editor's name filled in.
 [[nodiscard]] std::string menu_item_text(const MenuItem& item, Lang lang, std::string_view editor);

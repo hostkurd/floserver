@@ -253,7 +253,6 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             break;
         case WM_MOUSELEAVE:
             tracking_mouse_ = false;
-            toast_event(ToastEvent::MouseLeave);
             if (list_bar_.leave() || panel_bar_.leave() || first_run_bar_.leave()) {
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
@@ -298,6 +297,10 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             break;
         case WM_LBUTTONDOWN:
             mouse_used();
+            if (!highlighted_.empty()) {
+                highlighted_.clear();  // a click elsewhere (or on it: its panel opens) ends the right-click's selection
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
             if (scroll_bar_mouse(msg, GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam))) {
                 return 0;  // a scroll bar's: the keyboard focus stays where it is
             }
@@ -400,6 +403,20 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
         case kRecycledMessage:
             on_recycled();
             return 0;
+        case kToastMessage:
+            // The popup: information stays while it's read; its close mark.
+            toast_event(wparam == kToastCloseClicked  ? ToastEvent::Close
+                        : wparam == kToastMouseEntered ? ToastEvent::MouseEnter
+                                                       : ToastEvent::MouseLeave);
+            return 0;
+        case WM_MOVE:
+            toast_popup_.follow();
+            break;
+        case WM_SHOWWINDOW:
+            if (wparam == FALSE) {
+                toast_popup_.hide();  // to the tray: an owned popup would stay on the screen
+            }
+            break;
         case kSettingsClosedMessage:
             if (wparam == 1) {
                 quit();  // asked while Settings' save question was open; it's answered now
@@ -453,6 +470,7 @@ void MainWindow::on_create() {
         SendMessageW(tooltip_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
     }
     recycle_bin_.retarget(hwnd_, kRecycledMessage);  // made again in another language: the new window
+    toast_popup_.attach(hwnd_, kToastMessage);
     // A move or check that finished while the old window was going is taken now.
     PostMessageW(hwnd_, kRecycledMessage, 0, 0);
     // The panel's icon buttons: placed and worded by place_panel_tips().
@@ -1210,12 +1228,6 @@ bool MainWindow::switch_value(const ProjectRow& row) const {
 
 MainWindow::Hit MainWindow::hit_test(int x, int y) const {
     if (first_run_open()) {
-        if (contains(toast_geometry_.close, x, y)) {
-            return {Part::ToastClose, -1, {}};
-        }
-        if (contains(toast_geometry_.card, x, y)) {
-            return {Part::Toast, -1, {}};
-        }
         // The page is all there is: no top bar, list or panel under it.
         if (first_run_bar_.over(x, y)) {
             return {};
@@ -1224,12 +1236,6 @@ MainWindow::Hit MainWindow::hit_test(int x, int y) const {
             return {Part::Banner, -1, {}};
         }
         return first_run_hit_test(x, y);
-    }
-    if (contains(toast_geometry_.close, x, y)) {
-        return {Part::ToastClose, -1, {}};
-    }
-    if (contains(toast_geometry_.card, x, y)) {
-        return {Part::Toast, -1, {}};
     }
     if (!status_line().text.empty() && contains(footer_rect(), x, y)) {
         return {Part::Banner, -1, {}};
@@ -1291,11 +1297,6 @@ void MainWindow::on_mouse_move(int x, int y) {
     if (!(hit == hover_)) {
         hover_ = hit;
         InvalidateRect(hwnd_, nullptr, FALSE);
-    }
-    // Information stays while it's being read; its time starts again on the way out.
-    const bool over_toast = hit.part == Part::Toast || hit.part == Part::ToastClose;
-    if (over_toast != toast_.hovered) {
-        toast_event(over_toast ? ToastEvent::MouseEnter : ToastEvent::MouseLeave);
     }
 }
 
@@ -1366,11 +1367,6 @@ void MainWindow::on_click(const Hit& clicked) {
         case Part::PanelPhpSave:
             on_php_panel_click(hit);
             break;
-        case Part::ToastClose:
-            toast_event(ToastEvent::Close);
-            break;
-        case Part::Toast:
-            break;  // a click on the words: they stay
         case Part::Banner:
             if (status_line().clickable && worker_) {
                 worker_->start_service();
@@ -1742,28 +1738,6 @@ void MainWindow::sync_toast_timer() {
     }
 }
 
-void MainWindow::sync_toast_hover() {
-    // The card appeared under the mouse, or moved from under it (a new
-    // message, the window resized): its time runs only while it isn't read.
-    POINT at{};
-    bool over = false;
-    if (!toast_.text.empty() && GetCursorPos(&at) != FALSE && ScreenToClient(hwnd_, &at) != FALSE) {
-        over = contains(toast_geometry_.card, at.x, at.y);
-    }
-    if (over && !tracking_mouse_) {
-        // Told when the mouse leaves the window, so its time starts again then.
-        TRACKMOUSEEVENT tme{};
-        tme.cbSize = sizeof tme;
-        tme.dwFlags = TME_LEAVE;
-        tme.hwndTrack = hwnd_;
-        tracking_mouse_ = TrackMouseEvent(&tme) != FALSE;
-    }
-    if (over != toast_.hovered) {
-        toast_ = toast_after(toast_, over ? ToastEvent::MouseEnter : ToastEvent::MouseLeave);
-        sync_toast_timer();  // the card looks the same: no new paint needed
-    }
-}
-
 int MainWindow::toast_bottom() const {
     if (first_run_open() && height_of(first_run_geometry_.content) > 0) {
         return first_run_geometry_.content.bottom - px(kGap);
@@ -1912,7 +1886,8 @@ void MainWindow::on_paint() {
             }
             place_scroll_bars();
             toast_geometry_ = toast_geometry(mem.get(), toast_, fonts_.button.get(), width_, toast_bottom(), dpi_, rtl_);
-            sync_toast_hover();
+            // Its own popup over the content: nothing under it shows through.
+            toast_popup_.show(toast_, toast_geometry_, fonts_.button.get(), dark_, dpi_, rtl_);
             {
                 Canvas canvas(mem.get(), width_, rtl_);
                 canvas.fill({0, 0, width_, height_}, palette(dark_).window);
@@ -1923,8 +1898,6 @@ void MainWindow::on_paint() {
                     if (first_run_open()) {
                         paint_first_run(canvas, mem.get(), text_pass);
                         paint_banner(canvas, text_pass);
-                        paint_toast(canvas, toast_geometry_, toast_, fonts_.button.get(), dark_, dpi_,
-                                    hover_.part == Part::ToastClose, text_pass);
                         continue;
                     }
                     paint_top_bar(canvas, mem.get(), text_pass);
@@ -1937,9 +1910,6 @@ void MainWindow::on_paint() {
                         paint_panel(canvas, mem.get(), text_pass);
                     }
                     paint_footer(canvas, mem.get(), text_pass);
-                    // Over everything, nothing moved for it.
-                    paint_toast(canvas, toast_geometry_, toast_, fonts_.button.get(), dark_, dpi_,
-                                hover_.part == Part::ToastClose, text_pass);
                 }
             }
             // The bitmap is already laid out right to left; copy it as it is.
@@ -2058,7 +2028,7 @@ void MainWindow::paint_list(Canvas& c, HDC /*dc*/, bool text_pass) const {
         const bool on = switch_value(row);
 
         if (!text_pass) {
-            const bool selected = row.name == selected_ && panel_open();
+            const bool selected = (row.name == selected_ && panel_open()) || row.name == highlighted_;
             if (selected) {
                 c.fill(g.row, p.selected);
                 c.fill({g.row.left, g.row.top, g.row.left + px(3), g.row.bottom}, p.accent);

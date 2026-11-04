@@ -139,6 +139,7 @@ void MainWindow::select(const std::string& project) {
         return;
     }
     forget_php_info();
+    highlighted_.clear();
     selected_ = project;
     panel_scroll_ = 0;
     // When the panel takes the list's place, the keys go to it: the hidden
@@ -987,54 +988,27 @@ void MainWindow::place_panel_tips() {
 // (not FloCMS's logo; the repository has none). Drawn the same way round in
 // every language, as Windows draws its own icons.
 void MainWindow::paint_open_icon(Canvas& c, const RECT& r, PanelAction action, Rgb color) const {
-    const float s = pxf(1.0F);
-    const float cx = static_cast<float>(r.left + r.right) / 2.0F;
-    const float cy = static_cast<float>(r.top + r.bottom) / 2.0F;
-    const float stroke = pxf(1.4F);
-    // From a 16 x 16 box centred on the button; x unmirrored in right-to-left (the canvas mirrors it back).
-    const auto seg = [&](float x1, float y1, float x2, float y2) {
-        const float dx1 = (x1 - 8.0F) * s;
-        const float dx2 = (x2 - 8.0F) * s;
-        c.line(rtl_ ? cx - dx1 : cx + dx1, cy + (y1 - 8.0F) * s, rtl_ ? cx - dx2 : cx + dx2, cy + (y2 - 8.0F) * s,
-               color, stroke);
-    };
-    const auto path = [&](std::initializer_list<std::pair<float, float>> points) {
-        const std::pair<float, float>* last = nullptr;
-        for (const auto& point : points) {
-            if (last != nullptr) {
-                seg(last->first, last->second, point.first, point.second);
-            }
-            last = &point;
-        }
-    };
+    Glyph glyph = Glyph::Folder;
     switch (action) {
+        case PanelAction::Browser:
+            glyph = Glyph::Globe;
+            break;
         case PanelAction::Folder:
-            path({{1.5F, 13.0F}, {1.5F, 3.0F}, {6.0F, 3.0F}, {7.5F, 4.75F}, {14.5F, 4.75F}, {14.5F, 13.0F},
-                  {1.5F, 13.0F}});
-            seg(1.5F, 6.75F, 14.5F, 6.75F);
             break;
         case PanelAction::Terminal:
-            path({{2.5F, 4.0F}, {6.5F, 8.0F}, {2.5F, 12.0F}});
-            seg(8.5F, 12.5F, 13.5F, 12.5F);
+            glyph = Glyph::Terminal;
             break;
         case PanelAction::Editor:
-            path({{5.0F, 4.0F}, {1.5F, 8.0F}, {5.0F, 12.0F}});
-            path({{11.0F, 4.0F}, {14.5F, 8.0F}, {11.0F, 12.0F}});
-            seg(9.5F, 2.5F, 6.5F, 13.5F);
+            glyph = Glyph::Code;
             break;
         case PanelAction::Studio:
-            path({{8.0F, 2.0F}, {14.5F, 5.5F}, {8.0F, 9.0F}, {1.5F, 5.5F}, {8.0F, 2.0F}});
-            path({{1.5F, 9.0F}, {8.0F, 12.5F}, {14.5F, 9.0F}});
-            break;
-        case PanelAction::Browser:
-            // A globe: its outline, the equator and a meridian.
-            c.circle(cx, cy, 6.5F * s, color, stroke);
-            c.ellipse_outline(cx, cy, 2.9F * s, 6.5F * s, color, stroke);
-            seg(1.5F, 8.0F, 14.5F, 8.0F);
+            glyph = Glyph::Studio;
             break;
         case PanelAction::Download:
-            break;
+            return;
     }
+    c.glyph(glyph, static_cast<float>(r.left + r.right) / 2.0F, static_cast<float>(r.top + r.bottom) / 2.0F,
+            pxf(1.0F), color, pxf(1.4F));
 }
 
 void MainWindow::open_folder(const std::string& path) {

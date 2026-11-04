@@ -3,6 +3,8 @@
 #include "win_util.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <cstring>
 #include <optional>
 
 // The GDI+ headers use min and max unqualified; NOMINMAX takes the macros away.
@@ -154,6 +156,19 @@ void Canvas::ellipse_outline(float cx, float cy, float rx, float ry, Rgb color, 
     shapes_->g.DrawEllipse(&pen, physical_x(cx) - rx, cy - ry, rx * 2, ry * 2);
 }
 
+void Canvas::glyph(Glyph g, float cx, float cy, float scale, Rgb color, float width) {
+    // x from the box's middle, turned back in right to left (the canvas mirrors it again).
+    const auto x = [&](float v) { return rtl_ ? cx - (v - 8.0F) * scale : cx + (v - 8.0F) * scale; };
+    const auto y = [&](float v) { return cy + (v - 8.0F) * scale; };
+    for (const GlyphShape& s : glyph_shapes(g)) {
+        if (s.kind == GlyphShape::Kind::Line) {
+            line(x(s.x1), y(s.y1), x(s.x2), y(s.y2), color, width);
+        } else {
+            ellipse_outline(x(s.x1), y(s.y1), s.x2 * scale, s.y2 * scale, color, width);
+        }
+    }
+}
+
 void Canvas::line(float x1, float y1, float x2, float y2, Rgb color, float width) {
     if (!shapes_) {
         return;
@@ -240,6 +255,56 @@ int Canvas::measure(HDC dc, std::wstring_view s, HFONT font, bool rtl_reading) {
     DrawTextW(dc, s.data(), static_cast<int>(s.size()), &r,
               DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT | (rtl_reading ? DT_RTLREADING : 0U));
     return r.right - r.left;
+}
+
+HBITMAP make_glyph_bitmap(Glyph glyph, int size, Rgb color) {
+    if (size <= 0) {
+        return nullptr;
+    }
+    Gdiplus::Bitmap bitmap(size, size, PixelFormat32bppPARGB);
+    {
+        Gdiplus::Graphics g(&bitmap);
+        prepare(g);
+        g.Clear(Gdiplus::Color(0, 0, 0, 0));
+        const float s = static_cast<float>(size) / 16.0F;
+        Gdiplus::Pen pen(gp(color), std::max(1.0F, 1.3F * s));
+        pen.SetStartCap(Gdiplus::LineCapRound);
+        pen.SetEndCap(Gdiplus::LineCapRound);
+        for (const GlyphShape& shape : glyph_shapes(glyph)) {
+            if (shape.kind == GlyphShape::Kind::Line) {
+                g.DrawLine(&pen, shape.x1 * s, shape.y1 * s, shape.x2 * s, shape.y2 * s);
+            } else {
+                g.DrawEllipse(&pen, (shape.x1 - shape.x2) * s, (shape.y1 - shape.y2) * s, 2 * shape.x2 * s,
+                              2 * shape.y2 * s);
+            }
+        }
+    }
+    // Copied as it is into a top-down DIB: menus take premultiplied alpha.
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof info.bmiHeader;
+    info.bmiHeader.biWidth = size;
+    info.bmiHeader.biHeight = -size;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP dib = CreateDIBSection(nullptr, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (dib == nullptr || bits == nullptr) {
+        return nullptr;
+    }
+    Gdiplus::BitmapData data{};
+    const Gdiplus::Rect all(0, 0, size, size);
+    if (bitmap.LockBits(&all, Gdiplus::ImageLockModeRead, PixelFormat32bppPARGB, &data) != Gdiplus::Ok) {
+        DeleteObject(dib);
+        return nullptr;
+    }
+    const auto row = static_cast<std::size_t>(size) * 4U;
+    for (int y = 0; y < size; ++y) {
+        std::memcpy(static_cast<unsigned char*>(bits) + static_cast<std::size_t>(y) * row,
+                    static_cast<const unsigned char*>(data.Scan0) + static_cast<std::ptrdiff_t>(y) * data.Stride, row);
+    }
+    bitmap.UnlockBits(&data);
+    return dib;
 }
 
 HICON make_app_icon(int size) {

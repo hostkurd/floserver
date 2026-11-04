@@ -58,8 +58,6 @@ private:
         NewProject,
         Settings,
         Banner,      // the service's state: the clickable status line (Start FloServer)
-        Toast,       // a message's card, over the content
-        ToastClose,
         Download,  // a row's Download button
         // The project panel; `row` is the item's index where there are several.
         PanelClose,
@@ -418,7 +416,6 @@ private:
     void dismiss_error();
     void toast_event(ToastEvent event);
     void sync_toast_timer();
-    void sync_toast_hover();
     // The toast's bottom edge: above the footer (the first-run page's buttons).
     [[nodiscard]] int toast_bottom() const;
     // True when it's there.
@@ -674,11 +671,13 @@ private:
     };
     std::map<std::string, Removing> removing_;  // projects.remove on its way, per project
     RecycleBin recycle_bin_;
+    std::string highlighted_;  // a row right-clicked while the panel is closed: shown selected
     std::string remove_checking_;     // the project whose remove question waits for its folder's check
     bool quit_after_folder_ = false;  // Quit waits for a folder's move (Windows' question needs its owner)
     std::set<std::string> removed_;         // removed; hidden until the list no longer has them
     Toast toast_;  // the message shown (model/toast.h)
     ToastGeometry toast_geometry_;
+    ToastPopup toast_popup_;  // where it's shown: a popup of its own over the content
 
     WizardState wizard_;
     mutable WizardGeometry wizard_geometry_;
@@ -749,6 +748,7 @@ private:
     // Posted after certs.ensure_ca's answer: Windows' question is asked outside on_snapshot.
     static constexpr UINT kFirstRunTrustMessage = WM_APP + 8;
     static constexpr UINT kRecycledMessage = WM_APP + 9;  // a folder's move to the Recycle Bin finished
+    static constexpr UINT kToastMessage = WM_APP + 10;    // the toast's popup: the mouse, its close mark
     // Settings > General (or the first-run page): a preference changed; wparam PrefChange, lparam the index.
     static constexpr UINT kPrefsMessage = WM_APP + 7;
     ScrollBar list_bar_{kListScrollTimer, [this](int offset) { scroll_to(offset); }};

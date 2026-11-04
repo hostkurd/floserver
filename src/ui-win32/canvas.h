@@ -9,6 +9,7 @@
 // A paint has two passes: shapes first (GDI+), then text (GDI), because the
 // two shouldn't interleave on one DC.
 
+#include "model/glyphs.h"
 #include "model/theme.h"
 
 #include <windows.h>
@@ -58,6 +59,9 @@ public:
     void ellipse(float cx, float cy, float radius, Rgb fill);
     void circle(float cx, float cy, float radius, Rgb color, float width);
     void ellipse_outline(float cx, float cy, float rx, float ry, Rgb color, float width);
+    // A stroke icon (model/glyphs.h), its 16-unit box `scale` pixels a unit,
+    // centred on (cx, cy); the same way round in every language.
+    void glyph(Glyph g, float cx, float cy, float scale, Rgb color, float width);
     void line(float x1, float y1, float x2, float y2, Rgb color, float width);
     void clip(const RECT& r);
     void unclip();
@@ -85,6 +89,10 @@ private:
 };
 
 [[nodiscard]] constexpr COLORREF colorref(Rgb c) { return RGB(red(c), green(c), blue(c)); }
+
+// A stroke icon as a 32-bit premultiplied-alpha DIB section `size` pixels
+// square, for a menu item's bitmap (MIIM_BITMAP). The caller deletes it.
+[[nodiscard]] HBITMAP make_glyph_bitmap(Glyph g, int size, Rgb color);
 
 // The FloServer mark (the mockup's title-bar logo) as an icon `size` pixels square.
 [[nodiscard]] HICON make_app_icon(int size);

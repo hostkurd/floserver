@@ -153,8 +153,6 @@ private:
                   "Section and kSettingsSidebar list the sections in the same order");
     enum class Part : std::uint8_t {
         None,
-        Toast,       // a message's card, over the page
-        ToastClose,
         Nav,     // row: the section
         Check,
         Picker,
@@ -747,6 +745,7 @@ private:
     std::map<std::string, std::optional<std::string>> pending_default_;  // runtime -> series
     Toast toast_;  // the message shown (model/toast.h)
     ToastGeometry toast_geometry_;
+    ToastPopup toast_popup_;  // where it's shown: a popup of its own over the page
 
     Section section_ = Section::General;  // opening Settings plainly opens General
     // Settings > PHP: the series shown, its php.get answer, and the changes
