@@ -21,8 +21,9 @@ using nlohmann::json;
 namespace {
 
 constexpr wchar_t kClassName[] = L"FloServerSettings";
-constexpr UINT_PTR kMessageTimer = 1;
-constexpr UINT kMessageShownMs = 8000;
+// Only while an information toast is shown, and not while the mouse is over it.
+constexpr UINT_PTR kToastTimer = 1;
+constexpr UINT kToastMessage = WM_APP + 30;  // the toast's popup: the mouse, its close mark
 constexpr UINT_PTR kTipId = 1;
 constexpr UINT kFirstChoice = 100;
 
@@ -341,7 +342,32 @@ LRESULT SettingsWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
             return 0;
+        case WM_RBUTTONDOWN:
+        case WM_MBUTTONDOWN:
+            mouse_used();
+            break;
+        case kToastMessage:
+            // The popup: information stays while it's read; its close mark.
+            toast_event(wparam == kToastCloseClicked  ? ToastEvent::Close
+                        : wparam == kToastMouseEntered ? ToastEvent::MouseEnter
+                                                       : ToastEvent::MouseLeave);
+            return 0;
+        case WM_MOVE:
+            toast_popup_.follow();
+            break;
+        case WM_UPDATEUISTATE:
+            // Windows' own word on the focus cues (as in FloServer's window).
+            if ((HIWORD(wparam) & UISF_HIDEFOCUS) != 0 && LOWORD(wparam) != UIS_INITIALIZE) {
+                const bool show = LOWORD(wparam) == UIS_CLEAR;
+                if (show != show_focus_) {
+                    show_focus_ = show;
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                }
+            }
+            break;
         case WM_LBUTTONDOWN:
+            // Any click, on a control or not: the focus frame hides until a key is used (Windows' rule).
+            mouse_used();
             if (scroll_bar_.press(hwnd_, GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam))) {
                 return 0;  // the bar's: the keyboard focus stays where it is
             }
@@ -384,17 +410,22 @@ LRESULT SettingsWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             if (scroll_bar_.tick(hwnd_, wparam)) {
                 return 0;
             }
-            if (wparam == kMessageTimer) {
-                KillTimer(hwnd_, kMessageTimer);
-                message_.clear();
-                relayout();
-                InvalidateRect(hwnd_, nullptr, FALSE);
+            if (wparam == kToastTimer) {
+                KillTimer(hwnd_, kToastTimer);
+                toast_event(ToastEvent::TimeUp);
             }
             return 0;
         default:
             break;
     }
     return DefWindowProcW(hwnd_, msg, wparam, lparam);
+}
+
+void SettingsWindow::mouse_used() {
+    if (show_focus_) {
+        show_focus_ = false;
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
 }
 
 // --- lifetime -------------------------------------------------------------
@@ -416,6 +447,7 @@ void SettingsWindow::on_create() {
     icon_big_ = std::move(big_icon);
 
     // One tool, moved to the disabled Remove under the mouse: "Used by …".
+    toast_popup_.attach(hwnd_, kToastMessage);
     tooltip_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
                                CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, hwnd_, nullptr, instance_,
                                nullptr);
@@ -439,7 +471,7 @@ void SettingsWindow::on_create() {
 }
 
 void SettingsWindow::on_destroy() {
-    KillTimer(hwnd_, kMessageTimer);
+    KillTimer(hwnd_, kToastTimer);
     KillTimer(hwnd_, kScrollTimer);
     edits_.clear();
     field_edit_.clear();
@@ -593,11 +625,37 @@ void SettingsWindow::rebuild() {
 }
 
 void SettingsWindow::show_message(std::string message, bool error) {
-    message_ = std::move(message);
-    message_error_ = error;
-    SetTimer(hwnd_, kMessageTimer, kMessageShownMs, nullptr);  // only while there's a message to clear
-    relayout();
+    // A toast at the bottom (model/toast.h): nothing on the page moves for it.
+    toast_ = toast_with(toast_, std::move(message), error ? ToastKind::Error : ToastKind::Info);
+    sync_toast_timer();
     InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void SettingsWindow::clear_toast() { toast_event(ToastEvent::Close); }
+
+void SettingsWindow::toast_event(ToastEvent event) {
+    const Toast before = toast_;
+    toast_ = toast_after(toast_, event);
+    if (!(toast_ == before)) {
+        sync_toast_timer();
+        if (toast_.text.empty()) {
+            toast_popup_.hide();
+        }
+        if (hwnd_ != nullptr) {
+            InvalidateRect(hwnd_, nullptr, FALSE);
+        }
+    }
+}
+
+void SettingsWindow::sync_toast_timer() {
+    if (hwnd_ == nullptr) {
+        return;
+    }
+    if (toast_timer_runs(toast_)) {
+        SetTimer(hwnd_, kToastTimer, static_cast<UINT>(kToastInfoTime.count()), nullptr);
+    } else {
+        KillTimer(hwnd_, kToastTimer);
+    }
 }
 
 // --- geometry (logical coordinates: x from the reading start) ---------------------
@@ -659,11 +717,6 @@ SettingsWindow::Geometry SettingsWindow::layout(HDC dc) const {
     g.check = {x1 - check_w, check_top, x1, check_top + px(kButtonH)};
     y = std::max(g.hint.bottom, g.check.bottom) + px(kGap);
 
-    if (!message_.empty()) {
-        const int mh = std::max(px(32), text_height(dc, w(message_), fonts_.button.get(), x1 - x0 - px(24), rtl_) + px(14));
-        g.message = {x0, y, x1, y + mh};
-        y += mh + px(kGap);
-    }
     if (!has_reply_) {
         g.note = {x0, y, x1, y + px(24)};
         y += px(24) + px(kGap);
@@ -1122,6 +1175,11 @@ void SettingsWindow::on_key(WPARAM key) {
             }
             return;
         case VK_ESCAPE:
+            // An error first; then Settings itself (information goes by itself).
+            if (!toast_.text.empty() && toast_.kind == ToastKind::Error) {
+                toast_event(ToastEvent::Close);
+                return;
+            }
             try_close();
             return;
         case VK_HOME:
@@ -1203,7 +1261,7 @@ void SettingsWindow::check_for_updates() {
         return;
     }
     checking_ = true;
-    message_.clear();
+    clear_toast();
     worker_.list_runtimes(true);
     relayout();
 }
@@ -1256,7 +1314,7 @@ void SettingsWindow::picker_menu(int group) {
     // Saved at once: there's no Save button. The list is asked again after.
     const std::optional<std::string>& value = g.picker->choices[picked].value;
     pending_default_[g.runtime] = value;
-    message_.clear();
+    clear_toast();
     worker_.set_default(g.runtime, value);
     relayout();
     InvalidateRect(hwnd_, nullptr, FALSE);
@@ -1272,7 +1330,7 @@ void SettingsWindow::run_button(const Hit& hit) {
         case Button::Download: {
             const std::string key = settings_install_key(row->name, row->version);
             starting_.insert(ServiceWorker::install_key(key));
-            message_.clear();
+            clear_toast();
             worker_.install(key, {{row->name, row->version}});
             break;
         }
@@ -1283,7 +1341,7 @@ void SettingsWindow::run_button(const Hit& hit) {
             break;
         case Button::Remove:
             removing_.insert(ServiceWorker::remove_key(row->name, row->folder));
-            message_.clear();
+            clear_toast();
             worker_.remove_runtime(row->name, row->folder);
             break;
         case Button::RemoveDisabled:
@@ -1312,6 +1370,10 @@ void SettingsWindow::on_paint() {
             SetLayout(mem.get(), 0);
             const win::Selected selected(mem.get(), bitmap.get());
             {
+                toast_geometry_ =
+                    toast_geometry(mem.get(), toast_, fonts_.button.get(), width_, height_ - px(16), dpi_, rtl_);
+                // Its own popup over the page: nothing under it shows through.
+                toast_popup_.show(toast_, toast_geometry_, fonts_.button.get(), dark_, dpi_, rtl_);
                 Canvas canvas(mem.get(), width_, rtl_);
                 canvas.fill({0, 0, width_, height_}, palette(dark_).window);
                 paint_shapes(canvas);
@@ -1475,9 +1537,6 @@ void SettingsWindow::paint_shapes(Canvas& c) const {
     const RECT column{main_left() - px(4), 0, width_, height_};
     c.clip(column);
     paint_button(c, g.check, hover_.part == Part::Check, focused({Part::Check, -1, -1}), !checking_ && connected_);
-    if (!is_empty(g.message)) {
-        c.round_rect(g.message, pxf(4), message_error_ ? p.banner_error.fill : p.banner_info.fill);
-    }
     for (std::size_t i = 0; i < g.groups.size() && i < page_.groups.size(); ++i) {
         const GroupGeometry& gg = g.groups[i];
         if (gg.card.bottom < 0 || gg.card.top > height_) {
@@ -1573,11 +1632,6 @@ void SettingsWindow::paint_text(Canvas& c) const {
     c.paragraph(g.hint, w(hint), fonts_.caption.get(), p.text_subtle);
     c.text(g.check, w(text(lang_, checking_ ? Str::SettingsChecking : Str::SettingsCheckUpdates)), fonts_.button.get(),
            !checking_ && connected_ ? p.text : p.button_disabled_text, Align::Center, false);
-    if (!is_empty(g.message)) {
-        RECT inner = g.message;
-        InflateRect(&inner, -px(12), -px(7));
-        c.paragraph(inner, w(message_), fonts_.button.get(), message_error_ ? p.banner_error.text : p.banner_info.text);
-    }
     if (!is_empty(g.note)) {
         c.text(g.note, w(text(lang_, Str::SettingsLoading)), fonts_.button.get(), p.text_subtle, Align::Start, false);
     }

@@ -1,5 +1,7 @@
 #include "floserver/core/process.h"
 
+#include "floserver/core/paths.h"
+
 #ifdef _WIN32
 #include "win_text.h"
 #endif
@@ -8,6 +10,8 @@
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
+#include <system_error>
+#include <cwctype>
 #include <thread>
 
 #ifdef _WIN32
@@ -182,6 +186,45 @@ bool spawn_detached(const fs::path& program, const std::vector<std::string>& arg
     return true;
 }
 
+bool start_program(const fs::path& program, const std::vector<std::string>& args, const fs::path& folder,
+                   std::string& error) {
+    // A .bat or .cmd would be run by cmd.exe: a shell, with its own reading of the arguments.
+    std::wstring extension = program.extension().wstring();
+    for (wchar_t& ch : extension) {
+        ch = static_cast<wchar_t>(std::towlower(ch));
+    }
+    if (extension != L".exe") {
+        error = "only a program (.exe) can be started";
+        return false;
+    }
+    std::wstring command = win::quote(program.wstring());
+    for (const std::string& a : args) {
+        command += L" " + win::quote(win::widen(a));
+    }
+    STARTUPINFOW startup{};
+    startup.cb = sizeof startup;
+    PROCESS_INFORMATION info{};
+    const std::wstring dir = folder.empty() ? program.parent_path().wstring() : folder.wstring();
+    // No CREATE_NO_WINDOW: Windows ignores it for a GUI program, and a
+    // console one chosen as the editor (Vim, say) needs its console shown.
+    const auto create = [&](DWORD flags) {
+        return CreateProcessW(program.c_str(), command.data(), nullptr, nullptr, FALSE,
+                              CREATE_DEFAULT_ERROR_MODE | flags, nullptr,
+                              dir.empty() ? nullptr : dir.c_str(), &startup, &info) != 0;
+    };
+    if (!create(CREATE_BREAKAWAY_FROM_JOB) && !create(0)) {
+        const DWORD code = GetLastError();
+        error = error_text(std::error_code(static_cast<int>(code), std::system_category()));
+        if (error.empty()) {
+            error = "Windows error " + std::to_string(code);
+        }
+        return false;
+    }
+    CloseHandle(info.hThread);
+    CloseHandle(info.hProcess);
+    return true;
+}
+
 std::optional<int> run_and_wait(const fs::path& program, const std::vector<std::string>& args,
                                 std::chrono::milliseconds limit, std::string& error, bool* timed_out) {
     if (timed_out != nullptr) {
@@ -219,6 +262,12 @@ std::optional<int> run_and_wait(const fs::path& program, const std::vector<std::
 }
 
 #else
+
+bool start_program(const fs::path& program, const std::vector<std::string>& args, const fs::path& folder,
+                   std::string& error) {
+    (void)folder;  // the windows' programs only (no posix_spawn chdir everywhere): started where the caller is
+    return spawn_detached(program, args, error);
+}
 
 bool spawn_detached(const fs::path& program, const std::vector<std::string>& args, std::string& error) {
     posix_spawn_file_actions_t actions{};

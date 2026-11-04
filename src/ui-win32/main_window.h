@@ -7,11 +7,15 @@
 
 #include "canvas.h"
 #include "form_parts.h"
+#include "model/code_editor.h"
 #include "model/first_run.h"
 #include "model/php_page.h"
 #include "model/project_menu.h"
+#include "model/toast.h"
 #include "model/ui_strings.h"
+#include "recycle_bin.h"
 #include "scroll_bar.h"
+#include "toast_view.h"
 #include "service_worker.h"
 #include "settings_window.h"
 #include "win_util.h"
@@ -20,6 +24,7 @@
 #include <windows.h>
 #include <shellapi.h>
 
+#include <array>
 #include <map>
 #include <optional>
 #include <memory>
@@ -52,7 +57,7 @@ private:
         Address,
         NewProject,
         Settings,
-        Banner,
+        Banner,      // the service's state: the clickable status line (Start FloServer)
         Download,  // a row's Download button
         // The project panel; `row` is the item's index where there are several.
         PanelClose,
@@ -98,7 +103,12 @@ private:
         FrSkipSetup,  // every step's Skip setup
         FrWithout,    // step 2's Continue without downloading
     };
-    enum class PanelAction : std::uint8_t { Browser, Folder, Terminal, Studio, Download };
+    enum class PanelAction : std::uint8_t { Browser, Folder, Terminal, Editor, Studio, Download };
+    // The panel's square icon buttons (approved 3 and 4 Nov), in their order.
+    static constexpr std::array<PanelAction, 5> kIconActions = {PanelAction::Browser, PanelAction::Folder,
+                                                                PanelAction::Terminal, PanelAction::Editor,
+                                                                PanelAction::Studio};
+    [[nodiscard]] static constexpr bool is_icon_action(PanelAction a) { return a != PanelAction::Download; }
     [[nodiscard]] static constexpr bool is_panel_part(Part part) {
         return part == Part::PanelClose || part == Part::PanelAddress || part == Part::PanelTab ||
                part == Part::PanelButton || part == Part::PanelField || part == Part::PanelCopyEnv ||
@@ -313,10 +323,6 @@ private:
     // False for a template with nothing to choose (no Versions page).
     [[nodiscard]] bool wizard_has_versions() const;
     using Fonts = UiFonts;
-    struct Notice {
-        std::string text;
-        bool error = false;
-    };
     struct BannerText {
         std::string text;
         bool error = false;
@@ -357,7 +363,10 @@ private:
     void ensure_visible(int row);
     [[nodiscard]] int list_height() const;
     [[nodiscard]] Hit hit_test(int x, int y) const;
-    [[nodiscard]] BannerText banner() const;
+    // The service's state, for the status line at the bottom (the first-run
+    // page: over it): connecting, stopped (clickable), stopped answering...
+    // Empty while it's connected and well.
+    [[nodiscard]] BannerText status_line() const;
     [[nodiscard]] bool shows_rows() const;
     [[nodiscard]] bool switch_value(const ProjectRow& row) const;
     void toggle(int visible_row);
@@ -378,15 +387,37 @@ private:
     void show_project_menu(const std::string& project, POINT at);
     void show_shared_menu(POINT at);
     void run_project_command(const std::string& project, MenuCommand command);
-    // Asks first (a task dialog, with the database box when it has one),
-    // then projects.remove; its answer comes in on_remove_answers().
+    // Asks first (with the database box when it has one, the Recycle Bin box
+    // when its folder may go there), then projects.remove; its answer comes
+    // in on_remove_answers(). The folder goes only once the project is removed.
     void ask_remove(const std::string& project);
+    // The question itself, once ask_remove()'s check has said whether `folder` may be offered.
+    void ask_remove_now(const std::string& project, const std::string& folder, FolderOffer offer);
+    struct Removed {
+        std::string project;
+        bool dropped = false;   // its database was deleted
+        bool trash = false;     // its folder goes to the Recycle Bin now
+        std::string path;       // that folder, as the service confirmed it
+        bool refused = false;   // asked for, but the service had another folder for it
+    };
     // projects.remove's answers, taken out of `answers`; the projects removed.
-    [[nodiscard]] std::vector<std::pair<std::string, bool>> on_remove_answers(std::vector<Snapshot::DbAnswer>& answers);
+    [[nodiscard]] std::vector<Removed> on_remove_answers(std::vector<Snapshot::DbAnswer>& answers);
+    // The folders a project's folder is never moved with (model/folder_removal.h):
+    // Windows' own, FloServer's, the other projects'.
+    [[nodiscard]] FolderGuard folder_guard(const std::string& project) const;
+    // The Recycle Bin moves that finished: what became of each folder, said.
+    void on_recycled();
     void copy_address(const std::string& address);
     [[nodiscard]] bool is_settled(const std::string& key) const;
     void settle(const std::vector<std::string>& keys);
+    // A toast (model/toast.h): information goes by itself, an error stays until closed.
     void show_notice(std::string text, bool error);
+    // An error shown from before goes as the user tries again.
+    void dismiss_error();
+    void toast_event(ToastEvent event);
+    void sync_toast_timer();
+    // The toast's bottom edge: above the footer (the first-run page's buttons).
+    [[nodiscard]] int toast_bottom() const;
     // True when it's there.
     bool put_on_clipboard(std::string& text);
 
@@ -436,6 +467,31 @@ private:
     void paint_panel(Canvas& c, HDC dc, bool text_pass) const;
     void paint_switch(Canvas& c, const RECT& r, bool on, bool hover) const;
     void paint_button(Canvas& c, const RECT& r, bool hover, bool focused) const;
+    // A square open button's stroke icon (globe, folder, >_, </>, Studio's layers), 16 px, centred in `r`.
+    void paint_open_icon(Canvas& c, const RECT& r, PanelAction action, Rgb color) const;
+    // An icon button's tooltip, which is also its accessible name: "Open
+    // folder", "Open in VS Code", "Choose a code editor…".
+    [[nodiscard]] std::string panel_button_tip(PanelAction action) const;
+    // Open in browser only while the service is there; the others always.
+    [[nodiscard]] bool panel_action_enabled(PanelAction action) const;
+    // The tooltips follow the icon buttons (after each paint's geometry).
+    void place_panel_tips();
+    // FloCMS Studio with the project's folder (the window has it: no
+    // request to the service). Quietly: nothing said when Studio isn't installed.
+    void open_studio(const std::string& path, bool quietly);
+    // The code editor with the project's folder; Settings → General's
+    // Code editor when there's none.
+    void open_editor(const std::string& path);
+    void open_settings_editor();
+    // The code editor projects open in, as last looked for (painting only
+    // reads it). ensure_editor() looks once a window session, never while
+    // painting: when the panel is laid out, before the row menu, on a click.
+    // forget_editor() (General's choice changed, Settings closed) asks again.
+    [[nodiscard]] const std::optional<EditorTarget>& editor() const { return editor_; }
+    void ensure_editor();
+    void forget_editor();
+    // A mouse button went down: the keyboard focus frames hide (Windows' rule).
+    void mouse_used();
     // 16 px, centred in `r`: Windows' Settings glyph in the text pass, or
     // drawn by hand in the shapes pass when the icon font isn't there.
     void paint_gear(Canvas& c, const RECT& r, Rgb color, bool text_pass) const;
@@ -607,11 +663,21 @@ private:
     std::map<std::string, std::optional<std::string>> pending_use_;  // ServiceWorker::use_key -> value
     std::map<std::string, int> outstanding_;    // commands not yet finished, per ServiceWorker key
     std::map<std::string, bool> installing_;    // Download clicked; the worker hasn't reported yet
-    std::string change_error_;
     bool pma_busy_ = false;  // the panel's phpmyadmin.login is on its way
-    std::map<std::string, bool> removing_;  // projects.remove on its way, per project: with its database
+    struct Removing {
+        bool drop = false;   // with its database
+        bool trash = false;  // and then its folder to the Recycle Bin
+        std::string path;    // the folder the question showed
+    };
+    std::map<std::string, Removing> removing_;  // projects.remove on its way, per project
+    RecycleBin recycle_bin_;
+    std::string highlighted_;  // a row right-clicked while the panel is closed: shown selected
+    std::string remove_checking_;     // the project whose remove question waits for its folder's check
+    bool quit_after_folder_ = false;  // Quit waits for a folder's move (Windows' question needs its owner)
     std::set<std::string> removed_;         // removed; hidden until the list no longer has them
-    Notice notice_;  // a short message in the banner ("copied")
+    Toast toast_;  // the message shown (model/toast.h)
+    ToastGeometry toast_geometry_;
+    ToastPopup toast_popup_;  // where it's shown: a popup of its own over the content
 
     WizardState wizard_;
     mutable WizardGeometry wizard_geometry_;
@@ -681,6 +747,8 @@ private:
     static constexpr UINT_PTR kFirstRunScrollTimer = 5;
     // Posted after certs.ensure_ca's answer: Windows' question is asked outside on_snapshot.
     static constexpr UINT kFirstRunTrustMessage = WM_APP + 8;
+    static constexpr UINT kRecycledMessage = WM_APP + 9;  // a folder's move to the Recycle Bin finished
+    static constexpr UINT kToastMessage = WM_APP + 10;    // the toast's popup: the mouse, its close mark
     // Settings > General (or the first-run page): a preference changed; wparam PrefChange, lparam the index.
     static constexpr UINT kPrefsMessage = WM_APP + 7;
     ScrollBar list_bar_{kListScrollTimer, [this](int offset) { scroll_to(offset); }};
@@ -689,8 +757,16 @@ private:
     Hit hover_;
     Hit pressed_;
     int focus_ = -1;  // keyboard focus in the list
+    // Focus frames show only after the keyboard was used (Tab, the arrows,
+    // the menu key, Alt); any mouse click hides them again, as Windows does.
     bool show_focus_ = false;
     bool tracking_mouse_ = false;
+    // The code editor (editor()): found once, kept for the window session.
+    bool editor_known_ = false;
+    std::optional<EditorTarget> editor_;
+    // The icon buttons' tooltips, by kIconActions' order: their words and where they are.
+    std::array<std::wstring, kIconActions.size()> panel_tips_;
+    std::array<RECT, kIconActions.size()> panel_tip_rects_{};
 };
 
 }  // namespace floserver::ui

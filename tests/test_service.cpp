@@ -98,10 +98,31 @@ TEST_CASE("the real service starts, answers, refuses a second copy and stops") {
     REQUIRE(listed.has_value());
     REQUIRE(listed->ok);
     REQUIRE(listed->result["projects"].size() == 1);
+    // Empty braces are a null json, not an object: the window's Open in
+    // Studio asked projects.list that way and was refused as a bad request
+    // (answered with id 0, so the call read it as no answer: "FloServer
+    // stopped answering", 3 Nov). Still a request, and the next one too.
+    const auto braces = client->call("projects.list", {});
+    REQUIRE(braces.has_value());
+    CHECK(braces->ok);
+    const auto after = client->call("status");
+    REQUIRE(after.has_value());
+    CHECK(after->ok);
+    // Params that aren't an object are refused, as an error for that request:
+    // the connection stays and the next request is answered.
+    const auto refused = client->call("projects.list", nlohmann::json::array());
+    REQUIRE(refused.has_value());
+    CHECK_FALSE(refused->ok);
+    CHECK(refused->error_code == "bad_request");
+    const auto still = client->call("status");
+    REQUIRE(still.has_value());
+    CHECK(still->ok);
     CHECK(std::filesystem::is_regular_file(data.path() / "config.json"));
     const auto removed = client->call("projects.remove", {{"name", "my-shop"}});
     REQUIRE(removed.has_value());
     CHECK(removed->ok);
+    // Its folder, as the service had it: the window checks it before the Recycle Bin.
+    CHECK(removed->result["path"] == listed->result["projects"][0]["path"]);
     const auto gone = client->call("projects.remove", {{"name", "my-shop"}});
     REQUIRE(gone.has_value());
     CHECK(gone->error_code == "unknown_project");

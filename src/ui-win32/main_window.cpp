@@ -26,10 +26,8 @@ constexpr UINT kSnapshotMessage = WM_APP + 2;
 constexpr UINT kTrayMessage = WM_APP + 3;
 constexpr UINT kSettingsClosedMessage = WM_APP + 4;
 // WM_APP + 5 and + 6 are the panel's (main_window.h).
-constexpr UINT_PTR kErrorTimer = 1;
-constexpr UINT kErrorShownMs = 8000;
-constexpr UINT_PTR kNoticeTimer = 2;
-constexpr UINT kNoticeShownMs = 4000;
+// Only while an information toast is shown, and not while the mouse is over it.
+constexpr UINT_PTR kToastTimer = 2;
 constexpr UINT kTrayId = 1;
 constexpr UINT_PTR kSearchSubclass = 1;
 constexpr UINT_PTR kTipNewProject = 1;
@@ -264,6 +262,10 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             }
             return 0;
         case WM_SETCURSOR:
+            if (LOWORD(lparam) == HTCLIENT && win::int_to_ptr<HWND>(wparam) == hwnd_ && !remove_checking_.empty()) {
+                SetCursor(LoadCursorW(nullptr, IDC_APPSTARTING));  // the remove question is on its way
+                return TRUE;
+            }
             if (LOWORD(lparam) == HTCLIENT && win::int_to_ptr<HWND>(wparam) == hwnd_) {
                 POINT pt{};
                 GetCursorPos(&pt);
@@ -273,12 +275,32 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
                                   hit.part == Part::FrChange ||
                                   hit.part == Part::PanelAddress || hit.part == Part::PanelKeep ||
                                   hit.part == Part::SharedSwitch || hit.part == Part::SharedEnd ||
-                                  (hit.part == Part::Banner && banner().clickable);
+                                  (hit.part == Part::Banner && status_line().clickable);
                 SetCursor(LoadCursorW(nullptr, hand ? IDC_HAND : IDC_ARROW));
                 return TRUE;
             }
             break;
+        case WM_RBUTTONDOWN:
+        case WM_MBUTTONDOWN:
+            mouse_used();
+            break;  // a right-click's menu comes with WM_CONTEXTMENU
+        case WM_UPDATEUISTATE:
+            // Windows' own word on the focus cues, for those it sends (the
+            // keys and clicks handled here set show_focus_ themselves).
+            if ((HIWORD(wparam) & UISF_HIDEFOCUS) != 0 && LOWORD(wparam) != UIS_INITIALIZE) {
+                const bool show = LOWORD(wparam) == UIS_CLEAR;
+                if (show != show_focus_) {
+                    show_focus_ = show;
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                }
+            }
+            break;
         case WM_LBUTTONDOWN:
+            mouse_used();
+            if (!highlighted_.empty()) {
+                highlighted_.clear();  // a click elsewhere (or on it: its panel opens) ends the right-click's selection
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
             if (scroll_bar_mouse(msg, GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam))) {
                 return 0;  // a scroll bar's: the keyboard focus stays where it is
             }
@@ -343,11 +365,9 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             if (list_bar_.tick(hwnd_, wparam) || panel_bar_.tick(hwnd_, wparam) || first_run_bar_.tick(hwnd_, wparam)) {
                 return 0;
             }
-            if (wparam == kErrorTimer || wparam == kNoticeTimer) {
-                KillTimer(hwnd_, wparam);
-                (wparam == kErrorTimer ? change_error_ : notice_.text).clear();
-                layout();
-                InvalidateRect(hwnd_, nullptr, FALSE);
+            if (wparam == kToastTimer) {
+                KillTimer(hwnd_, kToastTimer);
+                toast_event(ToastEvent::TimeUp);
             }
             return 0;
         case kSnapshotMessage:
@@ -380,11 +400,31 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
         case kFirstRunTrustMessage:
             first_run_trust_now();
             return 0;
+        case kRecycledMessage:
+            on_recycled();
+            return 0;
+        case kToastMessage:
+            // The popup: information stays while it's read; its close mark.
+            toast_event(wparam == kToastCloseClicked  ? ToastEvent::Close
+                        : wparam == kToastMouseEntered ? ToastEvent::MouseEnter
+                                                       : ToastEvent::MouseLeave);
+            return 0;
+        case WM_MOVE:
+            toast_popup_.follow();
+            break;
+        case WM_SHOWWINDOW:
+            if (wparam == FALSE) {
+                toast_popup_.hide();  // to the tray: an owned popup would stay on the screen
+            }
+            break;
         case kSettingsClosedMessage:
             if (wparam == 1) {
                 quit();  // asked while Settings' save question was open; it's answered now
                 return 0;
             }
+            // An editor installed or removed while General was open is seen
+            // the next time the window needs one.
+            forget_editor();
             // The Settings window is gone: nothing of it stays but where it was.
             if (settings_ && !settings_->is_open()) {
                 settings_placement_ = settings_->placement();
@@ -429,6 +469,22 @@ void MainWindow::on_create() {
         ti.lpszText = tip->data();
         SendMessageW(tooltip_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
     }
+    recycle_bin_.retarget(hwnd_, kRecycledMessage);  // made again in another language: the new window
+    toast_popup_.attach(hwnd_, kToastMessage);
+    // A move or check that finished while the old window was going is taken now.
+    PostMessageW(hwnd_, kRecycledMessage, 0, 0);
+    // The panel's icon buttons: placed and worded by place_panel_tips().
+    panel_tips_ = {};
+    panel_tip_rects_ = {};
+    for (std::size_t i = 0; i < kIconActions.size(); ++i) {
+        TOOLINFOW ti{};
+        ti.cbSize = sizeof ti;
+        ti.uFlags = TTF_SUBCLASS | (rtl_ ? TTF_RTLREADING : 0U);
+        ti.hwnd = hwnd_;
+        ti.uId = kTipPanelFirst + i;
+        ti.lpszText = panel_tips_[i].data();
+        SendMessageW(tooltip_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
+    }
 
     make_fonts();
     make_icons();
@@ -444,8 +500,7 @@ void MainWindow::on_create() {
 }
 
 void MainWindow::on_destroy() {
-    KillTimer(hwnd_, kErrorTimer);
-    KillTimer(hwnd_, kNoticeTimer);
+    KillTimer(hwnd_, kToastTimer);
     list_bar_.cancel(hwnd_);
     panel_bar_.cancel(hwnd_);
     first_run_bar_.cancel(hwnd_);
@@ -490,8 +545,7 @@ void MainWindow::open_phpmyadmin_links(std::vector<Snapshot::DbAnswer>& answers)
         }
         if (panel) {
             if (!ours) {
-                change_error_ = fill(lang_, Str::PmaOpenFailed, {it->error});
-                SetTimer(hwnd_, kErrorTimer, kErrorShownMs, nullptr);
+                show_notice(fill(lang_, Str::PmaOpenFailed, {it->error}), true);
             }
             it = answers.erase(it);
         } else {
@@ -508,8 +562,7 @@ void MainWindow::on_snapshot() {
     // A switch or picker shows the user's choice until its last command has finished.
     settle(s.settled);
     if (!s.change_error.empty()) {
-        change_error_ = s.change_error;
-        SetTimer(hwnd_, kErrorTimer, kErrorShownMs, nullptr);
+        show_notice(s.change_error, true);
     }
     // Copy .env lines from Settings > Shared sites comes here too: it's told after.
     std::optional<bool> copied;
@@ -520,11 +573,7 @@ void MainWindow::on_snapshot() {
         pending_added_ = s.added;
     }
     open_phpmyadmin_links(s.db);
-    const std::string error_before = change_error_;
-    const std::vector<std::pair<std::string, bool>> removed = on_remove_answers(s.db);
-    if (change_error_ != error_before && !change_error_.empty()) {
-        SetTimer(hwnd_, kErrorTimer, kErrorShownMs, nullptr);
-    }
+    const std::vector<Removed> removed = on_remove_answers(s.db);
     on_first_run_answers(s);
     const bool quit_done = s.quit_done;
     const std::string quit_error = s.quit_error;
@@ -555,13 +604,23 @@ void MainWindow::on_snapshot() {
     }
     // Removed from the window: its panel closes now, and the list is asked
     // for again (the row goes with the next answer).
-    for (const auto& [project, dropped] : removed) {
-        removed_.insert(project);
-        if (selected_ == project) {
+    for (const Removed& r : removed) {
+        removed_.insert(r.project);
+        if (selected_ == r.project) {
             (void)leave_php_part(false);
             close_panel();
         }
-        show_notice(fill(lang_, dropped ? Str::RemoveDoneDatabase : Str::RemoveDone, {project}), false);
+        if (r.trash) {
+            // Removed from the list first; only now the folder (said once it's moved, or not).
+            recycle_bin_.start(r.project, r.dropped, r.path, folder_guard(r.project),
+                               std::string(text(lang_, Str::RemoveFolderRefused)),
+                               std::string(text(lang_, Str::ProgramMissing)));
+        } else {
+            const RemoveOutcome said =
+                remove_outcome(r.project, r.dropped, r.refused ? FolderOutcome::Stayed : FolderOutcome::NotAsked,
+                               std::string(text(lang_, Str::RemoveFolderRefused)), lang_);
+            show_notice(said.text, said.error);
+        }
     }
     if (!removed.empty()) {
         update_visible();
@@ -606,8 +665,13 @@ void MainWindow::on_snapshot() {
     if (first_run_open() && first_run_.step == FirstRunStep::Runtimes && first_run_.list == FirstRunList::Idle) {
         first_run_ask_list();
     }
-    if (just_made && worker_ && wizard_.studio) {
-        worker_->open_in_studio(snap_.create.project, true);
+    if (just_made && wizard_.studio) {
+        // The new project's folder, from the list that came with the answer.
+        const auto made = std::find_if(snap_.rows.begin(), snap_.rows.end(),
+                                       [&](const ProjectRow& r) { return r.name == snap_.create.project; });
+        if (made != snap_.rows.end()) {
+            open_studio(made->path, true);
+        }
     }
     layout();
     update_tray_tip();
@@ -639,6 +703,13 @@ void MainWindow::quit() {
     }
     if (asking_) {
         quit_after_ask_ = true;
+        return;
+    }
+    // A folder on its way to the Recycle Bin: Windows' progress and question
+    // belong to this window, so FloServer quits once it's done (on_recycled()).
+    if (recycle_bin_.busy()) {
+        quit_after_folder_ = true;
+        show_notice(std::string(text(lang_, Str::QuitAfterFolder)), false);
         return;
     }
     quitting_ = true;
@@ -688,6 +759,12 @@ void MainWindow::on_pref_change(WPARAM change, LPARAM value) {
             break;
         case PrefChange::StartInTray:
             prefs_.start_in_tray = index == 1;
+            break;
+        case PrefChange::CodeEditor:
+            if (settings_) {
+                prefs_.code_editor = settings_->prefs().code_editor;
+            }
+            forget_editor();  // looked for again with the new choice
             break;
     }
     if (prefs_ == before) {
@@ -783,12 +860,8 @@ void MainWindow::change_language(Lang lang) {
     }
     // The words made from the snapshot, in the new language.
     update_fields();
-    if (!change_error_.empty()) {
-        SetTimer(hwnd_, kErrorTimer, kErrorShownMs, nullptr);
-    }
-    if (!notice_.text.empty()) {
-        SetTimer(hwnd_, kNoticeTimer, kNoticeShownMs, nullptr);
-    }
+    toast_.hovered = false;  // a new window: the mouse isn't over it yet
+    sync_toast_timer();
     layout();
     scroll_to(list_scroll);
     panel_scroll_to(panel_scroll);
@@ -901,14 +974,12 @@ RECT MainWindow::search_box() const {
 }
 
 RECT MainWindow::banner_rect() const {
-    if (banner().text.empty()) {
+    // Only the first-run page, which has no status line, shows the service's
+    // state at its top; elsewhere it's in the status line and nothing moves.
+    if (!first_run_open() || status_line().text.empty()) {
         return {};
     }
-    if (first_run_open()) {
-        // Over the page, which has no top bar.
-        return {px(kPad), px(8), width_ - px(kPad), px(8) + px(kBannerH)};
-    }
-    return {px(kPad), px(kTopBarH), width_ - px(kPad), px(kTopBarH) + px(kBannerH)};
+    return {px(kPad), px(8), width_ - px(kPad), px(8) + px(kBannerH)};
 }
 
 RECT MainWindow::card_rect() const {
@@ -1002,6 +1073,9 @@ std::vector<MainWindow::RowGeometry> MainWindow::row_geometry(HDC dc) const {
 void MainWindow::layout() {
     if (search_ == nullptr || !fonts_.button) {
         return;
+    }
+    if (panel_open()) {
+        ensure_editor();  // once a session, here rather than while painting
     }
     // The first-run page has no top bar: its search box goes too.
     if ((IsWindowVisible(search_) != FALSE) == first_run_open()) {
@@ -1123,13 +1197,7 @@ bool MainWindow::shows_rows() const {
            (snap_.link == Link::Connected || snap_.link == Link::Lost || snap_.link == Link::Stopping);
 }
 
-MainWindow::BannerText MainWindow::banner() const {
-    if (!change_error_.empty()) {
-        return {change_error_, true, false};
-    }
-    if (!notice_.text.empty()) {
-        return {notice_.text, notice_.error, false};
-    }
+MainWindow::BannerText MainWindow::status_line() const {
     switch (snap_.link) {
         case Link::Connecting:
             return {std::string(text(lang_, Str::Connecting)), false, false};
@@ -1168,6 +1236,9 @@ MainWindow::Hit MainWindow::hit_test(int x, int y) const {
             return {Part::Banner, -1, {}};
         }
         return first_run_hit_test(x, y);
+    }
+    if (!status_line().text.empty() && contains(footer_rect(), x, y)) {
+        return {Part::Banner, -1, {}};
     }
     if (panel_bar_.over(x, y) || (list_bar_.over(x, y) && !(panel_open() && contains(panel_geometry_.panel, x, y)))) {
         return {};  // a scroll bar's
@@ -1297,7 +1368,7 @@ void MainWindow::on_click(const Hit& clicked) {
             on_php_panel_click(hit);
             break;
         case Part::Banner:
-            if (banner().clickable && worker_) {
+            if (status_line().clickable && worker_) {
                 worker_->start_service();
             }
             break;
@@ -1354,6 +1425,19 @@ void MainWindow::on_click(const Hit& clicked) {
 }
 
 void MainWindow::on_key(WPARAM key) {
+    // The keys move from the focused row: a right-click's selection ends, so
+    // the selected row and the focus frame never disagree.
+    if (!highlighted_.empty() && (key == VK_UP || key == VK_DOWN || key == VK_HOME || key == VK_END ||
+                                  key == VK_PRIOR || key == VK_NEXT || key == VK_TAB || key == VK_ESCAPE)) {
+        highlighted_.clear();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+    // Esc closes an error first (its close mark can't be reached with Tab);
+    // information goes by itself and leaves Esc to the page.
+    if (key == VK_ESCAPE && !toast_.text.empty() && toast_.kind == ToastKind::Error) {
+        toast_event(ToastEvent::Close);
+        return;
+    }
     // Ctrl+, opens Settings from anywhere in the window.
     if (key == VK_OEM_COMMA && (GetKeyState(VK_CONTROL) & 0x8000) != 0) {
         open_settings();
@@ -1433,7 +1517,7 @@ void MainWindow::on_key(WPARAM key) {
             return;
         case VK_F5:
             // Also the keyboard's way to start a stopped service (the banner).
-            if (worker_ && banner().clickable) {
+            if (worker_ && status_line().clickable) {
                 worker_->start_service();
             } else if (worker_) {
                 worker_->refresh();
@@ -1549,7 +1633,7 @@ void MainWindow::toggle_project(const std::string& project) {
     const bool value = !switch_value(row);
     pending_[row.name] = value;
     ++outstanding_[ServiceWorker::on_key(row.name)];
-    change_error_.clear();
+    dismiss_error();
     worker_->set_on(row.name, value);
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
@@ -1598,7 +1682,7 @@ void MainWindow::start_downloads_for(const std::string& project) {
     }
     installing_[row.name] = true;
     ++outstanding_[ServiceWorker::install_key(row.name)];
-    change_error_.clear();
+    dismiss_error();
     worker_->install(row.name, downloads);
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
@@ -1629,10 +1713,46 @@ void MainWindow::settle(const std::vector<std::string>& keys) {
 }
 
 void MainWindow::show_notice(std::string message, bool error) {
-    notice_ = {std::move(message), error};
-    SetTimer(hwnd_, kNoticeTimer, kNoticeShownMs, nullptr);
-    layout();
+    toast_ = toast_with(toast_, std::move(message), error ? ToastKind::Error : ToastKind::Info);
+    sync_toast_timer();
     InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void MainWindow::dismiss_error() {
+    if (toast_.kind == ToastKind::Error) {
+        toast_event(ToastEvent::Close);
+    }
+}
+
+void MainWindow::toast_event(ToastEvent event) {
+    const Toast before = toast_;
+    toast_ = toast_after(toast_, event);
+    if (!(toast_ == before)) {
+        sync_toast_timer();
+        if (toast_.text.empty()) {
+            toast_popup_.hide();  // at once, minimised or not: no flash on restore
+        }
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+}
+
+void MainWindow::sync_toast_timer() {
+    if (hwnd_ == nullptr) {
+        return;
+    }
+    // One timer, only while information is shown and not being read; set again, it starts over.
+    if (toast_timer_runs(toast_)) {
+        SetTimer(hwnd_, kToastTimer, static_cast<UINT>(kToastInfoTime.count()), nullptr);
+    } else {
+        KillTimer(hwnd_, kToastTimer);
+    }
+}
+
+int MainWindow::toast_bottom() const {
+    if (first_run_open() && height_of(first_run_geometry_.content) > 0) {
+        return first_run_geometry_.content.bottom - px(kGap);
+    }
+    return footer_rect().top - px(kGap);
 }
 
 // The .env lines hold the database password: they're kept out of Windows'
@@ -1686,7 +1806,7 @@ void MainWindow::update_tray_tip() {
     if (shows_rows() && snap_.link == Link::Connected) {
         tip += w(snap_.footer.counts);
     } else {
-        tip += w(banner().text);
+        tip += w(status_line().text);
     }
     if (tip == tray_tip_) {
         return;
@@ -1761,6 +1881,7 @@ void MainWindow::on_paint() {
             const win::Selected selected(mem.get(), bitmap.get());
             geometry_ = row_geometry(mem.get());
             update_panel_geometry(mem.get());
+            place_panel_tips();
             wizard_geometry_ = wizard_open() ? wizard_geometry(mem.get()) : WizardGeometry{};
             shared_geometry_ = !wizard_open() && !first_run_open() ? shared_geometry(mem.get()) : SharedGeometry{};
             first_run_geometry_ = FirstRunGeometry{};
@@ -1774,6 +1895,9 @@ void MainWindow::on_paint() {
                 }
             }
             place_scroll_bars();
+            toast_geometry_ = toast_geometry(mem.get(), toast_, fonts_.button.get(), width_, toast_bottom(), dpi_, rtl_);
+            // Its own popup over the content: nothing under it shows through.
+            toast_popup_.show(toast_, toast_geometry_, fonts_.button.get(), dark_, dpi_, rtl_);
             {
                 Canvas canvas(mem.get(), width_, rtl_);
                 canvas.fill({0, 0, width_, height_}, palette(dark_).window);
@@ -1858,8 +1982,8 @@ void MainWindow::paint_gear(Canvas& c, const RECT& r, Rgb color, bool text_pass)
 }
 
 void MainWindow::paint_banner(Canvas& c, bool text_pass) const {
-    const BannerText b = banner();
-    if (b.text.empty()) {
+    const BannerText b = status_line();
+    if (b.text.empty() || height_of(banner_rect()) <= 0) {
         return;
     }
     const Palette& p = palette(dark_);
@@ -1914,7 +2038,7 @@ void MainWindow::paint_list(Canvas& c, HDC /*dc*/, bool text_pass) const {
         const bool on = switch_value(row);
 
         if (!text_pass) {
-            const bool selected = row.name == selected_ && panel_open();
+            const bool selected = (row.name == selected_ && panel_open()) || row.name == highlighted_;
             if (selected) {
                 c.fill(g.row, p.selected);
                 c.fill({g.row.left, g.row.top, g.row.left + px(3), g.row.bottom}, p.accent);
@@ -1975,15 +2099,25 @@ void MainWindow::paint_list(Canvas& c, HDC /*dc*/, bool text_pass) const {
 void MainWindow::paint_footer(Canvas& c, HDC dc, bool text_pass) const {
     const Palette& p = palette(dark_);
     const RECT f = footer_rect();
-    const bool live = shows_rows() && snap_.link == Link::Connected;
+    // The service's state (stopped, stopped answering, connecting...) takes
+    // the line until it's connected and well; red while it's a problem.
+    const BannerText status = status_line();
+    const bool live = shows_rows() && snap_.link == Link::Connected && status.text.empty();
     const int mid = (f.top + f.bottom) / 2;
     if (!text_pass) {
         c.fill(f, p.footer);
         c.fill({f.left, f.top, f.right, f.top + std::max(1, px(1))}, p.footer_border);
-        if (live) {
-            c.ellipse(static_cast<float>(px(kPad)) + pxf(4), static_cast<float>(mid), pxf(4),
-                      snap_.footer.any_running ? p.footer_dot : p.text_subtle);
+        if (live || !status.text.empty()) {
+            const Rgb dot = !status.text.empty() ? (status.error ? p.problem.text : p.text_subtle)
+                                                 : (snap_.footer.any_running ? p.footer_dot : p.text_subtle);
+            c.ellipse(static_cast<float>(px(kPad)) + pxf(4), static_cast<float>(mid), pxf(4), dot);
         }
+        return;
+    }
+    if (!status.text.empty()) {
+        const RECT line{px(kPad) + px(8) + px(6), f.top, f.right - px(kPad), f.bottom};
+        c.text(line, w(status.text), status.error ? fonts_.button_bold.get() : fonts_.caption.get(),
+               status.error ? p.problem.text : p.text_subtle, Align::Start, false);
         return;
     }
     if (!live) {

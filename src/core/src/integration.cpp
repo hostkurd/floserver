@@ -187,7 +187,7 @@ std::optional<fs::path> find_studio() {
 }
 
 bool open_in_studio(const fs::path& studio, const fs::path& folder, std::string& error) {
-    return spawn_detached(studio, {"--open", path_to_utf8(folder)}, error);
+    return start_program(studio, {"--open", path_to_utf8(folder)}, {}, error);
 }
 
 }  // namespace floserver::core

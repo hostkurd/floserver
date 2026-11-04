@@ -9,6 +9,7 @@
 // user in window.json in FloServer's data folder (%LOCALAPPDATA%\FloServer),
 // next to the service's files but written only by FloServer.exe.
 
+#include "model/code_editor.h"
 #include "model/ui_strings.h"
 
 #include <nlohmann/json.hpp>
@@ -42,6 +43,8 @@ struct WindowPrefs {
     bool start_in_tray = true;
     // The first-run page was finished, skipped or closed: it doesn't show again.
     bool first_run_done = false;
+    // What a project opens in (the panel's editor button, the row menu).
+    EditorChoice code_editor;
     bool operator==(const WindowPrefs&) const = default;
 };
 

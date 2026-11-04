@@ -78,6 +78,9 @@ WindowPrefs parse_window_prefs(std::string_view text) {
     if (doc.contains("first_run_done") && doc["first_run_done"].is_boolean()) {
         prefs.first_run_done = doc["first_run_done"].get<bool>();
     }
+    if (doc.contains("code_editor")) {
+        prefs.code_editor = parse_editor_choice(doc["code_editor"]);
+    }
     return prefs;
 }
 
@@ -113,6 +116,11 @@ std::string window_prefs_json(const WindowPrefs& prefs, const json& existing) {
     doc["theme"] = theme();
     doc["close"] = prefs.close == CloseAction::Quit ? "quit" : "tray";
     doc["start_in_tray"] = prefs.start_in_tray;
+    // A value this version doesn't understand (a newer FloServer's editor)
+    // reads as Automatic; it's kept as it is until the choice is changed.
+    if (!doc.contains("code_editor") || parse_editor_choice(doc["code_editor"]) != prefs.code_editor) {
+        doc["code_editor"] = editor_choice_json(prefs.code_editor);
+    }
     if (prefs.first_run_done) {
         doc["first_run_done"] = true;
     } else {

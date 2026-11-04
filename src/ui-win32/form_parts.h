@@ -81,6 +81,11 @@ bool put_secret_on_clipboard(HWND owner, std::string& value);
 // picker couldn't be shown. It runs its own message loop.
 [[nodiscard]] std::optional<std::string> pick_folder(HWND owner, const std::string& title, const std::string& start);
 
+// Windows' file picker for a program (.exe), titled `title`, `filter` naming
+// the .exe files ("Programs"). The program picked; empty when cancelled;
+// nothing when the picker couldn't be shown. It runs its own message loop.
+[[nodiscard]] std::optional<std::string> pick_program(HWND owner, const std::string& title, const std::string& filter);
+
 // Opens an existing folder in Explorer ("explore" opens folders only, never
 // runs a file). False when it isn't one or couldn't be opened.
 bool explore_folder(HWND owner, const std::string& path);
@@ -90,11 +95,13 @@ enum class SaveChoice : std::uint8_t { Save, DontSave, Cancel };
 // "Save your changes to PHP 8.5?" with Save, Don't save and Cancel.
 [[nodiscard]] SaveChoice ask_to_save(HWND owner, Lang lang, const std::string& question);
 
-// The question before a project is removed from FloServer (approved 2 Nov):
-// a task dialog in the window's language (laid out right to left in Arabic
-// and Kurdish) with Remove and Cancel (the default) and, when the project
-// has a database, an unticked box to delete it too. True for Remove;
-// `drop` is the box.
-[[nodiscard]] bool ask_remove_project(HWND owner, Lang lang, const RemoveQuestion& question, bool& drop);
+// The question before a project is removed from FloServer (approved 2 and
+// 4 Nov): a small dialog in the window's language (laid out right to left in
+// Arabic and Kurdish) with Remove and Cancel (the default; Enter and Esc
+// keep everything) and up to two boxes, both unticked: delete the database
+// (when it has one) and move the folder to the Recycle Bin (when it's
+// offered), the folder shown under it. True for Remove; `drop` and `trash`
+// are the boxes.
+[[nodiscard]] bool ask_remove_project(HWND owner, Lang lang, const RemoveQuestion& question, bool& drop, bool& trash);
 
 }  // namespace floserver::ui

@@ -118,7 +118,7 @@ std::size_t SettingsWindow::shared_field_value(const VersionField& field) const 
 
 void SettingsWindow::send_shared(const json& changes, const std::string& key) {
     ++shared_waiting_[key];
-    message_.clear();
+    clear_toast();
     worker_.set_shared(changes, key);
     relayout();
     InvalidateRect(hwnd_, nullptr, FALSE);
@@ -220,11 +220,6 @@ void SettingsWindow::layout_shared(HDC dc, Geometry& g, int x0, int x1, int y) c
     const int hint_h = shared_.known ? text_height(dc, w(hint), fonts_.caption.get(), x1 - x0, rtl_) : 0;
     g.hint = {x0, g.title.bottom + px(2), x1, g.title.bottom + px(2) + hint_h};
     y = static_cast<int>(g.hint.bottom) + px(kGap);
-    if (!message_.empty()) {
-        const int mh = std::max(px(32), text_height(dc, w(message_), fonts_.button.get(), x1 - x0 - px(24), rtl_) + px(14));
-        g.message = {x0, y, x1, y + mh};
-        y += mh + px(kGap);
-    }
     if (!shared_.known) {
         sg.note = {x0, y, x1, y + px(24)};
         g.content_h = sg.note.bottom + scroll_ + px(8);
@@ -333,7 +328,7 @@ void SettingsWindow::on_shared_click(const Hit& hit) {
         case Part::SharedCopyEnv:
             if (connected_ && !copying_env_) {
                 copying_env_ = true;
-                message_.clear();
+                clear_toast();
                 worker_.copy_shared_env();  // the main window puts it on the clipboard; env_copied() follows
                 relayout();
             }
@@ -364,9 +359,6 @@ void SettingsWindow::paint_shared_shapes(Canvas& c) const {
     const SharedGeometry& sg = geometry_.shared;
     const float border = std::max(1.0F, pxf(1.0F));
     c.clip({main_left() - px(4), 0, width_, height_});
-    if (!is_empty(geometry_.message)) {
-        c.round_rect(geometry_.message, pxf(4), message_error_ ? p.banner_error.fill : p.banner_info.fill);
-    }
     if (!is_empty(sg.toggle)) {
         const Hit toggle{Part::SharedSwitch, -1, -1};
         paint_switch(c, sg.toggle, shown_shared_on(), hover_ == toggle && connected_);
@@ -415,11 +407,6 @@ void SettingsWindow::paint_shared_text(Canvas& c) const {
     if (!is_empty(geometry_.hint)) {
         c.paragraph(geometry_.hint, w(shared_page_.hint), fonts_.caption.get(),
                     shared_page_.problem ? p.problem.text : p.text_subtle);
-    }
-    if (!is_empty(geometry_.message)) {
-        RECT inner = geometry_.message;
-        InflateRect(&inner, -px(12), -px(7));
-        c.paragraph(inner, w(message_), fonts_.button.get(), message_error_ ? p.banner_error.text : p.banner_info.text);
     }
     if (!is_empty(sg.note)) {
         c.text(sg.note, w(text(lang_, Str::SettingsLoading)), fonts_.button.get(), p.text_subtle, Align::Start, false);

@@ -9,8 +9,13 @@
 #include "main_window.h"
 
 #include "main_window_layout.h"
+#include "model/folder_removal.h"
 #include "model/view_model.h"
 
+#include "floserver/core/paths.h"
+#include "floserver/core/process.h"
+
+#include <shlobj.h>
 #include <windowsx.h>
 
 #include <algorithm>
@@ -31,8 +36,11 @@ constexpr std::string_view kRemovePurpose = "remove\n";
 // A command's menu id: never 0, which TrackPopupMenuEx returns for none.
 UINT menu_id(MenuCommand command) { return static_cast<UINT>(command) + 1U; }
 
-// The menu as Windows shows it; `labels` keeps the words alive meanwhile.
-win::UniqueMenu make_menu(const std::vector<MenuItem>& items, Lang lang, std::vector<std::wstring>& labels) {
+// The menu as Windows shows it; `labels` and `icons` keep its words and
+// icons alive meanwhile (declared before the menu, they go after it).
+// `editor` is the code editor's name for its item.
+win::UniqueMenu make_menu(const std::vector<MenuItem>& items, Lang lang, std::vector<std::wstring>& labels,
+                          std::vector<win::UniqueBitmap>& icons, UINT dpi, std::string_view editor = {}) {
     win::UniqueMenu menu(CreatePopupMenu());
     if (!menu) {
         return menu;
@@ -43,11 +51,38 @@ win::UniqueMenu make_menu(const std::vector<MenuItem>& items, Lang lang, std::ve
             AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
             continue;
         }
-        labels.push_back(w(text(lang, item.label)));
+        // A program's own name may hold '&': shown as it is, not as a shortcut key.
+        std::wstring label;
+        for (const wchar_t ch : w(menu_item_text(item, lang, editor))) {
+            label += ch;
+            if (ch == L'&') {
+                label += L'&';
+            }
+        }
+        labels.push_back(std::move(label));
         UINT flags = MF_STRING;
         flags |= item.enabled ? 0U : UINT{MF_GRAYED};
         flags |= item.checked ? UINT{MF_CHECKED} : 0U;
         AppendMenuW(menu.get(), flags, menu_id(item.command), labels.back().c_str());
+        // The panel's icon beside it (approved 4 Nov), in the menu's own text
+        // colour (greyed with the item), small-icon size for the screen.
+        if (const auto glyph = menu_glyph(item.command)) {
+            const DWORD ink = GetSysColor(item.enabled ? COLOR_MENUTEXT : COLOR_GRAYTEXT);
+            const Rgb color = (static_cast<Rgb>(GetRValue(ink)) << 16U) | (static_cast<Rgb>(GetGValue(ink)) << 8U) |
+                              static_cast<Rgb>(GetBValue(ink));
+            // A right-to-left menu (TPM_LAYOUTRTL) mirrors its bitmaps: drawn
+            // mirrored, they show the right way round, as in the panel.
+            win::UniqueBitmap icon(
+                make_glyph_bitmap(*glyph, GetSystemMetricsForDpi(SM_CXSMICON, dpi), color, is_rtl(lang)));
+            if (icon) {
+                MENUITEMINFOW info{};
+                info.cbSize = sizeof info;
+                info.fMask = MIIM_BITMAP;
+                info.hbmpItem = icon.get();
+                SetMenuItemInfoW(menu.get(), menu_id(item.command), FALSE, &info);
+                icons.push_back(std::move(icon));
+            }
+        }
     }
     return menu;
 }
@@ -126,10 +161,23 @@ void MainWindow::on_context_menu(LPARAM lparam) {
                 if (row < 0) {
                     return;
                 }
+                // Selected, as Explorer does, without a focus frame (it was the
+                // mouse): an open panel shows this project; a closed one stays
+                // closed and the row shows as selected.
                 focus_ = row;
                 shared_focused_ = false;
+                show_focus_ = false;
+                if (panel_open()) {
+                    if (hit.project != selected_) {
+                        select(hit.project);
+                    }
+                    if (hit.project != selected_) {
+                        return;  // unsaved PHP changes kept it where it was
+                    }
+                } else {
+                    highlighted_ = hit.project;
+                }
                 panel_focus_ = -1;
-                show_focus_ = true;
                 InvalidateRect(hwnd_, nullptr, FALSE);
                 UpdateWindow(hwnd_);
                 show_project_menu(hit.project, {sx, sy});
@@ -180,9 +228,13 @@ void MainWindow::show_project_menu(const std::string& project, POINT at) {
     const ProjectRow row = *found;
     const ProjectMenuState state{switch_value(row), keep_value(row), snap_.link == Link::Connected,
                                  leaving(project)};
-    const std::vector<MenuItem> items = project_menu(row, state);
+    ensure_editor();
+    const auto& target = editor();
+    const std::string editor_name = target ? target->name : std::string();
+    const std::vector<MenuItem> items = project_menu(row, state, editor_name);
     std::vector<std::wstring> labels;
-    const win::UniqueMenu menu = make_menu(items, lang_, labels);
+    std::vector<win::UniqueBitmap> icons;
+    const win::UniqueMenu menu = make_menu(items, lang_, labels, icons, dpi_, editor_name);
     if (!menu) {
         return;
     }
@@ -197,7 +249,8 @@ void MainWindow::show_shared_menu(POINT at) {
     const SharedSites shared = snap_.shared;
     const std::vector<MenuItem> items = shared_menu(shared);
     std::vector<std::wstring> labels;
-    const win::UniqueMenu menu = make_menu(items, lang_, labels);
+    std::vector<win::UniqueBitmap> icons;
+    const win::UniqueMenu menu = make_menu(items, lang_, labels, icons, dpi_);
     if (!menu) {
         return;
     }
@@ -237,6 +290,9 @@ void MainWindow::run_project_command(const std::string& project, MenuCommand com
             break;
         case MenuCommand::OpenTerminal:
             open_terminal(row.path);
+            break;
+        case MenuCommand::OpenEditor:
+            open_editor(row.path);
             break;
         case MenuCommand::CopyAddress:
             if (is_openable_address(row.address)) {
@@ -278,7 +334,37 @@ void MainWindow::ask_remove(const std::string& project) {
     if (found == snap_.rows.end()) {
         return;
     }
-    const RemoveQuestion question = remove_question(*found, lang_);
+    if (!remove_checking_.empty()) {
+        return;  // one question at a time
+    }
+    if (found->path.empty()) {
+        ask_remove_now(project, {}, FolderOffer::None);
+        return;
+    }
+    // Whether its folder may be offered is worked out off this thread (real
+    // paths, the drive's Recycle Bin: an offline share would freeze the
+    // window); the question opens with the answer (on_recycled()).
+    remove_checking_ = project;
+    recycle_bin_.check(project, found->path, folder_guard(project));
+    SetCursor(LoadCursorW(nullptr, IDC_APPSTARTING));
+}
+
+void MainWindow::ask_remove_now(const std::string& project, const std::string& folder, FolderOffer offer) {
+    if (!worker_ || snap_.link != Link::Connected || leaving(project) || asking_ || quitting_) {
+        return;
+    }
+    const auto found = std::find_if(snap_.rows.begin(), snap_.rows.end(),
+                                    [&](const ProjectRow& r) { return r.name == project; });
+    if (found == snap_.rows.end()) {
+        return;
+    }
+    // The Recycle Bin box only for the folder that was checked (checked again before it moves).
+    const ProjectRow row = *found;
+    if (row.path != folder) {
+        offer = FolderOffer::None;
+    }
+    const bool offer_folder = offer == FolderOffer::Offer;
+    const RemoveQuestion question = remove_question(row, lang_, offer);
     // The dialog runs its own message loop: as while a save question is
     // open, a quit or a new language waits for it.
     asking_ = true;
@@ -286,7 +372,8 @@ void MainWindow::ask_remove(const std::string& project) {
     hover_ = {};
     InvalidateRect(hwnd_, nullptr, FALSE);
     bool drop = false;
-    const bool remove = ask_remove_project(hwnd_, lang_, question, drop);
+    bool trash = false;
+    const bool remove = ask_remove_project(hwnd_, lang_, question, drop, trash);
     asking_ = false;
     first_run_after_ask();
     if (quit_after_ask_) {
@@ -297,33 +384,113 @@ void MainWindow::ask_remove(const std::string& project) {
     if (!remove || !worker_ || snap_.link != Link::Connected || leaving(project)) {
         return;
     }
-    removing_[project] = drop;
-    change_error_.clear();
+    removing_[project] = Removing{drop, trash && offer_folder, row.path};
+    dismiss_error();
     worker_->database_call("projects.remove", {{"name", project}, {"drop_database", drop}},
                            std::string(kRemovePurpose) + project);
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
-std::vector<std::pair<std::string, bool>> MainWindow::on_remove_answers(std::vector<Snapshot::DbAnswer>& answers) {
-    std::vector<std::pair<std::string, bool>> removed;
+std::vector<MainWindow::Removed> MainWindow::on_remove_answers(std::vector<Snapshot::DbAnswer>& answers) {
+    std::vector<Removed> removed;
     for (auto it = answers.begin(); it != answers.end();) {
         if (it->method != "projects.remove" || !it->purpose.starts_with(kRemovePurpose)) {
             ++it;
             continue;
         }
         const std::string project = it->purpose.substr(kRemovePurpose.size());
+        const auto asked = removing_.find(project);
+        const Removing job = asked != removing_.end() ? asked->second : Removing{};
         removing_.erase(project);
         // Said deleted only when the service dropped one it made.
         const bool drop = it->reply && it->reply->is_object() && it->reply->value("database_dropped", false);
         if (!it->error.empty() || !it->reply) {
             // Nothing was removed: the user can try again (on_snapshot shows it).
-            change_error_ = fill(lang_, Str::RemoveFailed, {project, it->error.empty() ? "no answer" : it->error});
+            show_notice(fill(lang_, Str::RemoveFailed, {project, it->error.empty() ? "no answer" : it->error}), true);
         } else {
-            removed.emplace_back(project, drop);
+            Removed done{project, drop, false, {}, false};
+            if (job.trash) {
+                // Only the folder the question showed, and only if it's still the
+                // project's as the service had it when it removed it.
+                const std::string had =
+                    it->reply->is_object() ? it->reply->value("path", std::string()) : std::string();
+                const std::string want = comparable_path(job.path);
+                done.trash = !want.empty() && comparable_path(had) == want;
+                done.refused = !done.trash;
+                done.path = job.path;
+            }
+            removed.push_back(std::move(done));
         }
         it = answers.erase(it);
     }
     return removed;
+}
+
+FolderGuard MainWindow::folder_guard(const std::string& project) const {
+    FolderGuard guard;
+    const auto known = [](const KNOWNFOLDERID& id, std::vector<std::string>& into) {
+        PWSTR found = nullptr;
+        // KF_FLAG_DONT_VERIFY: a folder that isn't there (3D Objects) is still named, never made.
+        if (SUCCEEDED(SHGetKnownFolderPath(id, KF_FLAG_DONT_VERIFY, nullptr, &found)) && found != nullptr) {
+            into.push_back(win::narrow(found));
+        }
+        CoTaskMemFree(found);
+    };
+    // The user's own folders: never moved themselves (nor one holding them);
+    // what's inside them is where projects usually live.
+    for (const KNOWNFOLDERID& id :
+         {FOLDERID_Profile, FOLDERID_UserProfiles, FOLDERID_Public, FOLDERID_Desktop, FOLDERID_Documents,
+          FOLDERID_Downloads, FOLDERID_Pictures, FOLDERID_Music, FOLDERID_Videos, FOLDERID_SavedGames, FOLDERID_Links,
+          FOLDERID_Favorites, FOLDERID_Contacts, FOLDERID_SavedSearches, FOLDERID_Objects3D, FOLDERID_SkyDrive}) {
+        known(id, guard.kept);
+    }
+    for (const char* name : {"OneDrive", "OneDriveConsumer", "OneDriveCommercial"}) {
+        if (const auto dir = core::get_env(name); dir && !dir->empty()) {
+            guard.kept.push_back(*dir);
+        }
+    }
+    // Windows' own: never anything inside them either.
+    for (const KNOWNFOLDERID& id :
+         {FOLDERID_Windows, FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX86, FOLDERID_ProgramFilesCommon,
+          FOLDERID_ProgramFilesCommonX86, FOLDERID_ProgramData, FOLDERID_RoamingAppData, FOLDERID_LocalAppData,
+          FOLDERID_LocalAppDataLow}) {
+        known(id, guard.system_trees);
+    }
+    if (!snap_.projects_dir.empty()) {
+        guard.kept.push_back(snap_.projects_dir);
+    }
+    if (!snap_.shared.dir.empty()) {
+        guard.kept.push_back(snap_.shared.dir);
+    }
+    if (const auto data = core::data_dir()) {
+        guard.kept_with_contents.push_back(core::path_to_utf8(*data));
+    }
+    for (const ProjectRow& r : snap_.rows) {
+        if (r.name != project && !r.path.empty()) {
+            guard.other_projects.push_back(r.path);
+        }
+    }
+    return guard;
+}
+
+void MainWindow::on_recycled() {
+    for (const RecycleBin::Result& r : recycle_bin_.take()) {
+        const RemoveOutcome said = remove_outcome(r.project, r.database_dropped, r.outcome, r.reason, lang_);
+        show_notice(said.text, said.error);
+    }
+    // A Quit that waited for the move.
+    if (quit_after_folder_ && !recycle_bin_.busy()) {
+        quit_after_folder_ = false;
+        quit();
+        return;
+    }
+    // The remove question, once it's known whether the folder can be offered.
+    for (const RecycleBin::Check& c : recycle_bin_.take_checks()) {
+        if (c.project == remove_checking_) {
+            remove_checking_.clear();
+            ask_remove_now(c.project, c.folder, c.offer);
+        }
+    }
 }
 
 }  // namespace floserver::ui

@@ -11,6 +11,7 @@
 
 #include "settings_window.h"
 
+#include "code_editors.h"
 #include "main_window_layout.h"
 #include "model/theme.h"
 #include "window_prefs.h"
@@ -132,7 +133,31 @@ void SettingsWindow::destroy_now() {
     }
 }
 
+void SettingsWindow::show_general_editor() {
+    if (hwnd_ == nullptr) {
+        return;
+    }
+    bring_to_front();
+    if (asking_) {
+        return;
+    }
+    if (section_ != Section::General) {
+        open_section(Section::General);
+    } else {
+        load_general();  // looked for again: the user may have just installed one
+    }
+    if (section_ != Section::General) {
+        return;  // a Save question elsewhere was answered with Cancel
+    }
+    // Its card at the top (as far as the page scrolls).
+    relayout();
+    scroll_to(scroll_ + static_cast<int>(geometry_.general.editor_card.top) - px(8));
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
 void SettingsWindow::load_general() {
+    editors_found_ = detect_editors();  // files and the registry; nothing is run
+    check_editor_program();
     own_exe_ = own_exe_path();
     std::string error;
     run_entry_ = read_run_entry(error);
@@ -173,7 +198,7 @@ void SettingsWindow::set_start(bool on, bool tray) {
     } else {
         run_entry_.reset();
     }
-    message_.clear();
+    clear_toast();
     relayout();
 }
 
@@ -244,6 +269,20 @@ void SettingsWindow::on_general_click(const Hit& hit) {
             }
             break;
         }
+        case Part::GeneralEditor: {
+            const std::vector<EditorRow> rows = editor_rows();
+            if (row >= rows.size()) {
+                break;
+            }
+            if (rows[row].program) {
+                choose_editor_program();  // also to change the one chosen before
+            } else if (rows[row].choice != prefs_.code_editor) {
+                prefs_.code_editor = rows[row].choice;
+                check_editor_program();
+                post_pref(PrefChange::CodeEditor, row);
+            }
+            break;
+        }
         case Part::GeneralUpdates: {
             // No updater yet: the website says what's new.
             const auto opened = reinterpret_cast<INT_PTR>(
@@ -262,6 +301,70 @@ void SettingsWindow::on_general_click(const Hit& hit) {
     relayout();
 }
 
+std::vector<SettingsWindow::EditorRow> SettingsWindow::editor_rows() const {
+    std::vector<EditorRow> rows;
+    const EditorChoice& chosen = prefs_.code_editor;
+    // Automatic: the order it follows, and what it opens now.
+    const auto now = pick_editor({}, editors_found_);
+    std::string note(text(lang_, Str::GeneralEditorAutoNote));
+    note += ' ';
+    note += now ? fill(lang_, Str::GeneralEditorUses, {now->name}) : std::string(text(lang_, Str::GeneralEditorNoneFound));
+    rows.push_back({EditorChoice{}, std::string(text(lang_, Str::GeneralEditorAuto)), std::move(note), false});
+    for (const EditorId id : kEditors) {
+        const auto found = std::find_if(editors_found_.begin(), editors_found_.end(),
+                                        [&](const FoundEditor& f) { return f.id == id; });
+        const EditorChoice choice{EditorChoice::Kind::Known, id, {}};
+        if (found != editors_found_.end()) {
+            // Where it is: a path, left to right in every language.
+            const std::string path = core::path_to_utf8(found->program);
+            rows.push_back({choice, std::string(editor_name(id)), rtl_ ? isolate_ltr(path) : path, false});
+        } else if (chosen == choice) {
+            rows.push_back({choice, std::string(editor_name(id)), std::string(text(lang_, Str::GeneralEditorNotFound)),
+                            false});
+        }
+    }
+    // Choose program…: the one chosen, under it.
+    EditorChoice program = chosen.kind == EditorChoice::Kind::Program ? chosen : EditorChoice{EditorChoice::Kind::Program, EditorId::VsCode, {}};
+    std::string where;
+    if (!program.path.empty()) {
+        where = rtl_ ? isolate_ltr(program.path) : program.path;
+        if (editor_program_missing_) {
+            where = std::string(text(lang_, Str::GeneralEditorNotFound)) + ": " + where;
+        }
+    }
+    rows.push_back({std::move(program), std::string(text(lang_, Str::GeneralEditorChoose)), std::move(where), true});
+    return rows;
+}
+
+void SettingsWindow::check_editor_program() {
+    // Once here, not at each paint: a program on a share that's offline can take a while to answer.
+    const EditorChoice& chosen = prefs_.code_editor;
+    editor_program_missing_ = chosen.kind == EditorChoice::Kind::Program && !resolve_editor(chosen, {});
+}
+
+void SettingsWindow::choose_editor_program() {
+    asking_ = true;  // the picker runs its own message loop
+    const auto picked = pick_program(hwnd_, std::string(text(lang_, Str::GeneralEditorPick)),
+                                     std::string(text(lang_, Str::GeneralEditorPrograms)));
+    asking_ = false;
+    if (!picked || picked->empty()) {
+        return;  // cancelled (or no picker): the choice stays
+    }
+    if (!is_program_file(*picked)) {
+        // A .bat or .cmd typed in the box: it would run through cmd.exe.
+        show_message(std::string(text(lang_, Str::GeneralEditorNotProgram)), true);
+        return;
+    }
+    const EditorChoice choice{EditorChoice::Kind::Program, EditorId::VsCode, *picked};
+    if (choice != prefs_.code_editor) {
+        prefs_.code_editor = choice;
+        post_pref(PrefChange::CodeEditor, 0);
+    }
+    check_editor_program();
+    relayout();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
 // --- geometry ------------------------------------------------------------------------
 
 void SettingsWindow::layout_general(HDC dc, Geometry& g, int x0, int x1, int y) const {
@@ -273,11 +376,6 @@ void SettingsWindow::layout_general(HDC dc, Geometry& g, int x0, int x1, int y) 
     g.title = {x0, y, x1, y + px(28)};
     g.hint = {x0, g.title.bottom, x1, g.title.bottom + hint_h};
     y = static_cast<int>(g.hint.bottom) + px(kGap);
-    if (!message_.empty()) {
-        const int mh = std::max(px(32), height(message_, fonts_.button.get(), x1 - x0 - px(24)) + px(14));
-        g.message = {x0, y, x1, y + mh};
-        y += mh + px(kGap);
-    }
     const int cx0 = x0 + px(kCardPad);
     const int cx1 = x1 - px(kCardPad);
     const int radio_x = cx0 + px(kRadio) + px(10);
@@ -343,6 +441,15 @@ void SettingsWindow::layout_general(HDC dc, Geometry& g, int x0, int x1, int y) 
     choice(gg.closes[1], cx0, radio_x, yy, text(lang_, Str::GeneralCloseQuitNote));
     card_end(gg.close_card, yy);
 
+    // Code editor (approved 3 Nov): Automatic, the editors found, Choose program….
+    card_top(gg.editor_card, gg.editor_title, yy);
+    const std::vector<EditorRow> editors = editor_rows();
+    gg.editors.assign(editors.size(), ChoiceGeometry{});
+    for (std::size_t i = 0; i < editors.size(); ++i) {
+        choice(gg.editors[i], cx0, radio_x, yy, editors[i].note);
+    }
+    card_end(gg.editor_card, yy);
+
     // About: the version, two buttons and where the first one goes.
     card_top(gg.about_card, gg.about_title, yy);
     gg.version = {cx0, yy, cx1, yy + px(20)};
@@ -384,6 +491,8 @@ const RECT* SettingsWindow::general_rect_of(const Hit& hit) const {
             return at(g.modes);
         case Part::GeneralClose:
             return at(g.closes);
+        case Part::GeneralEditor:
+            return at(g.editors);
         case Part::GeneralUpdates:
             return &g.updates;
         case Part::GeneralLicences:
@@ -406,6 +515,9 @@ void SettingsWindow::general_focus_order(std::vector<Hit>& order) const {
     order.push_back({Part::GeneralStartMode, -1, 1});
     order.push_back({Part::GeneralClose, -1, 0});
     order.push_back({Part::GeneralClose, -1, 1});
+    for (std::size_t i = 0; i < geometry_.general.editors.size(); ++i) {
+        order.push_back({Part::GeneralEditor, -1, static_cast<int>(i)});
+    }
     order.push_back({Part::GeneralUpdates, -1, -1});
     order.push_back({Part::GeneralLicences, -1, -1});
 }
@@ -440,10 +552,8 @@ void SettingsWindow::paint_general_shapes(Canvas& c) const {
     const float border = std::max(1.0F, pxf(1.0F));
     const RECT column{main_left() - px(4), 0, width_, height_};
     c.clip(column);
-    if (!is_empty(g.message)) {
-        c.round_rect(g.message, pxf(4), message_error_ ? p.banner_error.fill : p.banner_info.fill);
-    }
-    for (const RECT* card : {&gg.lang_card, &gg.theme_card, &gg.start_card, &gg.close_card, &gg.about_card}) {
+    for (const RECT* card :
+         {&gg.lang_card, &gg.theme_card, &gg.start_card, &gg.close_card, &gg.editor_card, &gg.about_card}) {
         c.round_rect(*card, pxf(8), p.card, p.card_border, border);
     }
     for (std::size_t i = 0; i < kLangChoices.size(); ++i) {
@@ -480,6 +590,14 @@ void SettingsWindow::paint_general_shapes(Canvas& c) const {
     paint_radio(c, gg.closes[0], prefs_.close == CloseAction::Tray, {Part::GeneralClose, -1, 0});
     paint_radio(c, gg.closes[1], prefs_.close == CloseAction::Quit, {Part::GeneralClose, -1, 1});
 
+    const std::vector<EditorRow> editors = editor_rows();
+    for (std::size_t i = 0; i < editors.size() && i < gg.editors.size(); ++i) {
+        // Choose program… is on once a program is chosen.
+        const bool on = editors[i].program ? prefs_.code_editor.kind == EditorChoice::Kind::Program
+                                           : editors[i].choice == prefs_.code_editor;
+        paint_radio(c, gg.editors[i], on, {Part::GeneralEditor, -1, static_cast<int>(i)});
+    }
+
     for (const auto& [part, rect] : {std::pair{Part::GeneralUpdates, gg.updates}, std::pair{Part::GeneralLicences, gg.licences}}) {
         const Hit hit{part, -1, -1};
         paint_button(c, rect, hover_ == hit, is_focused(hit), true);
@@ -497,11 +615,6 @@ void SettingsWindow::paint_general_text(Canvas& c) const {
     c.clip_text(column);
     c.text(g.title, w(text(lang_, Str::SettingsGeneral)), fonts_.title.get(), p.text, Align::Start, false);
     c.paragraph(g.hint, w(text(lang_, Str::GeneralHint)), fonts_.caption.get(), p.text_subtle);
-    if (!is_empty(g.message)) {
-        RECT inner = g.message;
-        InflateRect(&inner, -px(12), -px(7));
-        c.paragraph(inner, w(message_), fonts_.button.get(), message_error_ ? p.banner_error.text : p.banner_info.text);
-    }
     const auto title = [&](const RECT& r, Str key) {
         c.text(r, w(text(lang_, key)), fonts_.body_bold.get(), p.text, Align::Start, false);
     };
@@ -535,6 +648,17 @@ void SettingsWindow::paint_general_text(Canvas& c) const {
     title(gg.close_title, Str::GeneralClosing);
     label(gg.closes[0], text(lang_, Str::GeneralCloseTray), text(lang_, Str::GeneralCloseTrayNote));
     label(gg.closes[1], text(lang_, Str::GeneralCloseQuit), text(lang_, Str::GeneralCloseQuitNote));
+
+    title(gg.editor_title, Str::GeneralEditor);
+    const std::vector<EditorRow> editors = editor_rows();
+    for (std::size_t i = 0; i < editors.size() && i < gg.editors.size(); ++i) {
+        // Editors' names and paths read left to right; the rest is in the window's language.
+        const bool code = !editors[i].program && editors[i].choice.kind == EditorChoice::Kind::Known;
+        c.text(gg.editors[i].label, w(editors[i].label), fonts_.body.get(), p.text, Align::Start, code);
+        if (!editors[i].note.empty() && !is_empty(gg.editors[i].note)) {
+            c.paragraph(gg.editors[i].note, w(editors[i].note), fonts_.caption.get(), p.text_subtle);
+        }
+    }
 
     title(gg.about_title, Str::GeneralAbout);
     c.text(gg.version, w(fill(lang_, Str::GeneralVersion, {core::kVersion})), fonts_.body.get(), p.text, Align::Start,

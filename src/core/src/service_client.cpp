@@ -38,9 +38,16 @@ std::optional<protocol::Reply> ServiceClient::call(const std::string& method, co
         return std::nullopt;
     }
     auto reply = protocol::parse_reply(*text);
-    if (!reply || reply->id != id) {
+    if (!reply) {
         return std::nullopt;
     }
+    // One request at a time on a connection: a refusal with id 0 (a request
+    // the service couldn't read, from one that doesn't echo the id) is this
+    // request's answer, an error to show, not a service that stopped answering.
+    if (reply->id != id && (reply->id != 0 || reply->ok)) {
+        return std::nullopt;
+    }
+    reply->id = id;
     return reply;
 }
 

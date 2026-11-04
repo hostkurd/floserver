@@ -72,5 +72,8 @@ struct Reply {
 // Nothing when the text isn't a well-formed request or reply of this version.
 [[nodiscard]] std::optional<Request> parse_request(std::string_view text, std::string& error_code);
 [[nodiscard]] std::optional<Reply> parse_reply(std::string_view text);
+// A request's id even when the rest of it can't be read (bad params, say),
+// so a refusal answers the request it refuses; 0 when there's none.
+[[nodiscard]] std::int64_t request_id(std::string_view text);
 
 }  // namespace floserver::core::protocol

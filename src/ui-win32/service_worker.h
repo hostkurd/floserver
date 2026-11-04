@@ -153,8 +153,6 @@ public:
     void set_keep_running(const std::string& project, bool keep);
     void use(const std::string& project, const std::string& key, const std::optional<std::string>& value);
     void copy_env(const std::string& project);
-    // Quietly: nothing is said when Studio isn't installed (after a FloCMS template).
-    void open_in_studio(const std::string& project, bool quietly = false);
     // Adds a folder as a project (projects.add) and turns it on.
     void add_folder(const std::string& path);
     // Installs what a project needs (runtimes.install) and follows the jobs.
@@ -241,7 +239,6 @@ private:
             SetKeep,
             Use,
             CopyEnv,
-            OpenStudio,
             AddFolder,
             Install,
             SetShared,

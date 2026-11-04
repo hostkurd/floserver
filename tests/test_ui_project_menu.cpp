@@ -50,8 +50,8 @@ std::vector<MenuCommand> commands(const std::vector<MenuItem>& menu) {
 TEST_CASE("project menu: the items, in the approved order") {
     const auto menu = project_menu(served(), {true, false, true, false});
     using enum MenuCommand;
-    CHECK(commands(menu) == std::vector<MenuCommand>{OpenBrowser, OpenFolder, OpenTerminal, CopyAddress, None, Toggle,
-                                                     KeepRunning, None, Settings, None, Remove});
+    CHECK(commands(menu) == std::vector<MenuCommand>{OpenBrowser, OpenFolder, OpenTerminal, OpenEditor, CopyAddress,
+                                                     None, Toggle, KeepRunning, None, Remove});
     for (const MenuItem& i : menu) {
         CAPTURE(static_cast<int>(i.command));
         CHECK(i.enabled);
@@ -63,7 +63,35 @@ TEST_CASE("project menu: the items, in the approved order") {
     CHECK(item(menu, OpenBrowser).label == Str::OpenInBrowser);
     CHECK(item(menu, KeepRunning).label == Str::KeepRunning);
     CHECK(text(Lang::En, item(menu, Remove).label) == "Remove from FloServer…");
-    CHECK(text(Lang::En, item(menu, Settings).label) == "Project settings…");
+    // Its icons: the panel's, and a tick for Keep running.
+    CHECK(menu_glyph(OpenBrowser) == Glyph::Globe);
+    CHECK(menu_glyph(OpenFolder) == Glyph::Folder);
+    CHECK(menu_glyph(OpenTerminal) == Glyph::Terminal);
+    CHECK(menu_glyph(OpenEditor) == Glyph::Code);
+    CHECK(menu_glyph(CopyAddress) == Glyph::Copy);
+    CHECK(menu_glyph(Toggle) == Glyph::Power);
+    CHECK(menu_glyph(Remove) == Glyph::Trash);
+    CHECK_FALSE(menu_glyph(KeepRunning).has_value());
+    CHECK_FALSE(menu_glyph(Settings).has_value());
+}
+
+TEST_CASE("project menu: the code editor's item, after Open terminal") {
+    const ProjectMenuState state{true, false, true, false};
+    auto menu = project_menu(served(), state, "VS Code");
+    const MenuItem& open = item(menu, MenuCommand::OpenEditor);
+    CHECK(open.enabled);
+    CHECK(menu_item_text(open, Lang::En, "VS Code") == "Open in VS Code");
+    // The editor's Latin name keeps its direction in Arabic and Kurdish.
+    CHECK(menu_item_text(open, Lang::Ar, "VS Code") == "فتح في " + kLri + "VS Code" + kPdi);
+    CHECK(menu_item_text(open, Lang::Ku, "VS Code") == "کردنەوە لە " + kLri + "VS Code" + kPdi);
+    CHECK(menu_item_text(item(menu, MenuCommand::OpenTerminal), Lang::En, "VS Code") == "Open terminal");
+    // None found: the item asks for one, even without a folder.
+    menu = project_menu(served(), state);
+    CHECK(menu_item_text(item(menu, MenuCommand::OpenEditor), Lang::En, {}) == "Choose a code editor…");
+    ProjectRow row = served();
+    row.path.clear();
+    CHECK(item(project_menu(row, state), MenuCommand::OpenEditor).enabled);
+    CHECK_FALSE(item(project_menu(row, state, "Cursor"), MenuCommand::OpenEditor).enabled);
 }
 
 TEST_CASE("project menu: Turn on or off and Keep running follow the switches") {
@@ -105,7 +133,6 @@ TEST_CASE("project menu: what doesn't apply is greyed out") {
     CHECK_FALSE(item(offline, MenuCommand::Toggle).enabled);
     CHECK_FALSE(item(offline, MenuCommand::KeepRunning).enabled);
     CHECK_FALSE(item(offline, MenuCommand::Remove).enabled);
-    CHECK(item(offline, MenuCommand::Settings).enabled);
     CHECK(item(offline, MenuCommand::OpenBrowser).enabled);
     // Being removed: not again, nor switched.
     const auto removing = project_menu(served(), {true, false, true, true});
@@ -133,6 +160,27 @@ TEST_CASE("project menu: the Shared sites row has only what it already does") {
     CHECK_FALSE(item(shared_menu(shared), OpenFolder).enabled);
 }
 
+TEST_CASE("remove outcome: what's said about the database and the folder") {
+    CHECK(remove_outcome("my-shop", false, FolderOutcome::NotAsked, {}, Lang::En).text ==
+          "my-shop is removed from FloServer. Its folder is where it was.");
+    CHECK(remove_outcome("my-shop", false, FolderOutcome::Recycled, {}, Lang::En).text ==
+          "my-shop is removed from FloServer, and its folder is in the Recycle Bin.");
+    CHECK(remove_outcome("my-shop", true, FolderOutcome::Recycled, {}, Lang::En).text ==
+          "my-shop is removed from FloServer, its database is deleted and its folder is in the Recycle Bin.");
+    const RemoveOutcome stayed = remove_outcome("my-shop", true, FolderOutcome::Stayed, "a file is open", Lang::En);
+    CHECK(stayed.error);
+    CHECK(stayed.text == "my-shop is removed from FloServer, but its folder stayed where it was: a file is open");
+    const RemoveOutcome cancelled = remove_outcome("my-shop", false, FolderOutcome::Cancelled, {}, Lang::En);
+    CHECK_FALSE(cancelled.error);
+    CHECK(cancelled.text == "my-shop is removed from FloServer. Its folder stayed where it was.");
+    CHECK_FALSE(remove_outcome("my-shop", false, FolderOutcome::NotAsked, {}, Lang::Ar).text.empty());
+    // Never "in the Recycle Bin" without Windows saying so.
+    CHECK(remove_outcome("my-shop", true, FolderOutcome::Deleted, {}, Lang::En).text ==
+          "my-shop is removed from FloServer, and its folder is deleted (Windows couldn't put it in the Recycle Bin).");
+    CHECK(remove_outcome("my-shop", false, FolderOutcome::Gone, {}, Lang::En).text ==
+          "my-shop is removed from FloServer, and its folder is gone from where it was.");
+}
+
 TEST_CASE("remove question: its words, and the database box only with a database") {
     ProjectRow row = served();
     RemoveQuestion q = remove_question(row, Lang::En);
@@ -142,7 +190,19 @@ TEST_CASE("remove question: its words, and the database box only with a database
     CHECK(q.remove == "Remove");
     CHECK(q.cancel == "Cancel");
     CHECK(q.drop.empty());
+    CHECK(q.trash.empty());  // the folder only when it's offered
+    CHECK(q.folder.empty());
     CHECK_FALSE(row_has_database(row));
+    q = remove_question(row, Lang::En, FolderOffer::Offer);
+    CHECK(q.trash == "Also move the project folder to the Recycle Bin");
+    CHECK(q.folder == "Folder: C:/sites/my-shop");
+    CHECK(q.trash_note.empty());
+    CHECK(remove_question(row, Lang::Ar, FolderOffer::Offer).folder.find(kLri + "C:/sites/my-shop" + kPdi) !=
+          std::string::npos);
+    // A drive with no Recycle Bin: no box, and the dialog says why.
+    q = remove_question(row, Lang::En, FolderOffer::NoRecycleBin);
+    CHECK(q.trash.empty());
+    CHECK(q.trash_note == "This drive has no Recycle Bin, so FloServer won't delete the folder.");
 
     // floserver.json asks for one (the project may be off), or the service says it uses one.
     row.wants.database = "mariadb-11.4";

@@ -117,7 +117,7 @@ void SettingsWindow::send_ports(const json& params) {
         return;
     }
     ++ports_waiting_;
-    message_.clear();
+    clear_toast();
     worker_.web_settings("set", params);
 }
 
@@ -209,7 +209,7 @@ void SettingsWindow::trust_ca() {
         // Made by the service first; trusted when its answer comes.
         trust_after_ca_ = true;
         ++ports_waiting_;
-        message_.clear();
+        clear_toast();
         worker_.web_settings("ca");
         return;
     }
@@ -293,11 +293,6 @@ void SettingsWindow::layout_ports(HDC dc, Geometry& g, int x0, int x1, int y) co
     g.title = {x0, y, x1, y + px(28)};
     g.hint = {x0, g.title.bottom, x1, g.title.bottom + hint_h};
     y = static_cast<int>(g.hint.bottom) + px(kGap);
-    if (!message_.empty()) {
-        const int mh = std::max(px(32), height(message_, fonts_.button.get(), x1 - x0 - px(24)) + px(14));
-        g.message = {x0, y, x1, y + mh};
-        y += mh + px(kGap);
-    }
     if (!ports_) {
         if (ports_loading_) {
             pg.note = {x0, y, x1, y + px(24)};
@@ -553,9 +548,6 @@ void SettingsWindow::paint_ports_shapes(Canvas& c) const {
     const float border = std::max(1.0F, pxf(1.0F));
     const RECT column{main_left() - px(4), 0, width_, height_};
     c.clip(column);
-    if (!is_empty(g.message)) {
-        c.round_rect(g.message, pxf(4), message_error_ ? p.banner_error.fill : p.banner_info.fill);
-    }
     if (ports_) {
         const bool can = connected_;
         c.round_rect(pg.web_card, pxf(8), p.card, p.card_border, border);
@@ -646,11 +638,6 @@ void SettingsWindow::paint_ports_text(Canvas& c) const {
     c.clip_text(column);
     c.text(g.title, w(text(lang_, Str::SettingsPorts)), fonts_.title.get(), p.text, Align::Start, false);
     c.paragraph(g.hint, w(text(lang_, Str::PortsHint)), fonts_.caption.get(), p.text_subtle);
-    if (!is_empty(g.message)) {
-        RECT inner = g.message;
-        InflateRect(&inner, -px(12), -px(7));
-        c.paragraph(inner, w(message_), fonts_.button.get(), message_error_ ? p.banner_error.text : p.banner_info.text);
-    }
     if (!is_empty(pg.note)) {
         c.text(pg.note, w(text(lang_, Str::SettingsLoading)), fonts_.button.get(), p.text_subtle, Align::Start, false);
     }

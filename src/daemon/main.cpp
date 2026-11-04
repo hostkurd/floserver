@@ -462,8 +462,15 @@ struct Service {
             if (drop && !databases->drop_project_database(name, refusal, dropped)) {
                 return protocol::make_error(r.id, refusal.code, refusal.message);
             }
+            // Its folder as the service had it: the window moves it to the
+            // Recycle Bin (when asked) only if it's the one it showed.
+            core::ServiceRefusal folder_refusal;
+            const auto folder = projects->folder(name, folder_refusal);
             if (projects->remove(name, refusal)) {
                 result = json::object();
+                if (folder) {
+                    (*result)["path"] = core::path_to_utf8(*folder);
+                }
                 if (drop) {
                     (*result)["database_dropped"] = dropped;
                 }
@@ -1064,7 +1071,8 @@ struct Service {
             std::string reply;
             bool quit = false;
             if (!request) {
-                reply = protocol::make_error(0, error_code, "the request couldn't be read");
+                // Answered with its own id when it has one: the client sees a refusal, not silence.
+                reply = protocol::make_error(protocol::request_id(*text), error_code, "the request couldn't be read");
             } else if (request->method == "status") {
                 reply = protocol::make_result(request->id, status());
             } else if (request->method == "runtimes.list" || request->method == "runtimes.install" ||

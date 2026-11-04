@@ -7,6 +7,9 @@
 
 namespace floserver::ui::layout {
 
+// The main window's tooltips: New project, Settings, then the panel's icon buttons.
+inline constexpr UINT_PTR kTipPanelFirst = 10;
+
 // Sizes in device-independent pixels, from the mockups. The window opens at
 // the mockups' size when the screen has room for it, else smaller.
 inline constexpr int kWindowW = 1120;

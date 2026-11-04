@@ -10,9 +10,13 @@
 #include "model/theme.h"
 #include "model/view_model.h"
 
+#include "code_editors.h"
+
+#include "floserver/core/integration.h"
 #include "floserver/core/mariadb.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/project_config.h"
+#include "floserver/core/process.h"
 #include "floserver/core/shim.h"
 
 #include <shlobj.h>
@@ -59,19 +63,6 @@ std::string_view tab_label(Lang lang, PanelTab tab) {
     return text(lang, Str::PanelTabGeneral);
 }
 
-Str action_label(int action) {
-    switch (action) {
-        case 0:
-            return Str::OpenInBrowser;
-        case 1:
-            return Str::OpenFolder;
-        case 2:
-            return Str::OpenTerminal;
-        default:
-            break;
-    }
-    return Str::OpenInStudio;
-}
 
 // A folder the service gave, as Windows wants it; nothing when it isn't an
 // existing folder (a file there would be run by the shell).
@@ -148,6 +139,7 @@ void MainWindow::select(const std::string& project) {
         return;
     }
     forget_php_info();
+    highlighted_.clear();
     selected_ = project;
     panel_scroll_ = 0;
     // When the panel takes the list's place, the keys go to it: the hidden
@@ -309,7 +301,32 @@ std::string MainWindow::panel_button_text(PanelAction action) const {
         const ProjectRow* row = selected_row();
         return row != nullptr ? download_button_text(downloads_for(*row, snap_.installed), lang_) : std::string();
     }
-    return std::string(text(lang_, action_label(static_cast<int>(action))));
+    return {};  // the icon buttons have no words on them; their tooltips name them
+
+}
+
+bool MainWindow::panel_action_enabled(PanelAction action) const {
+    return action != PanelAction::Browser || snap_.link == Link::Connected;
+}
+
+std::string MainWindow::panel_button_tip(PanelAction action) const {
+    switch (action) {
+        case PanelAction::Folder:
+            return std::string(text(lang_, Str::SharedOpenFolder));
+        case PanelAction::Terminal:
+            return std::string(text(lang_, Str::MenuOpenTerminal));
+        case PanelAction::Editor: {
+            const auto& target = editor();
+            return target ? fill(lang_, Str::OpenInEditor, {target->name}) : std::string(text(lang_, Str::ChooseEditor));
+        }
+        case PanelAction::Studio:
+            return std::string(text(lang_, Str::OpenInStudio));
+        case PanelAction::Browser:
+            return std::string(text(lang_, Str::OpenInBrowser));
+        case PanelAction::Download:
+            break;
+    }
+    return panel_button_text(action);
 }
 
 // --- geometry ----------------------------------------------------------------
@@ -366,31 +383,38 @@ MainWindow::PanelGeometry MainWindow::panel_geometry(HDC dc) const {
     const int top = g.content.top + px(kPanelGap);
     y = top - panel_scroll_;
     if (tab == PanelTab::General) {
-        // The buttons, wrapping to a new line when they don't fit.
-        x = x0;
-        const auto add_button = [&](PanelAction action) {
-            const int bw = Canvas::measure(dc, w(panel_button_text(action)), fonts_.button.get(), rtl_) + px(24);
-            if (x > x0 && x + bw > x1) {
-                x = x0;
-                y += px(kButtonH) + px(kButtonGap);
-            }
-            g.buttons.emplace_back(RECT{x, y, std::min(x1, x + bw), y + px(kButtonH)}, action);
-            x += bw + px(kButtonGap);
-        };
-        // The row's Download button again, where the keyboard reaches it.
+        // The row's Download button again, where the keyboard reaches it: a line of its own.
         std::string ignored;
         if (row_end(*row, ignored) == RowGeometry::End::Download) {
-            add_button(PanelAction::Download);
+            const int bw = Canvas::measure(dc, w(panel_button_text(PanelAction::Download)), fonts_.button.get(), rtl_) +
+                           px(24);
+            g.buttons.emplace_back(RECT{x0, y, std::min(x1, x0 + bw), y + px(kButtonH)}, PanelAction::Download);
+            y += px(kButtonH) + px(kButtonGap);
         }
+        // One line of equal square icon buttons (approved 3 and 4 Nov), from
+        // the reading start (the right in Arabic and Kurdish): the browser
+        // (when there's an address), Folder, Terminal, the editor, Studio.
+        // The gaps shrink before anything would be cut at the narrowest panel.
+        std::vector<PanelAction> icons;
         if (is_openable_address(row->address)) {
-            add_button(PanelAction::Browser);
+            icons.push_back(PanelAction::Browser);
         }
-        add_button(PanelAction::Folder);
-        add_button(PanelAction::Terminal);
+        icons.insert(icons.end(), {PanelAction::Folder, PanelAction::Terminal, PanelAction::Editor});
         if (snap_.panel.project == row->name && snap_.panel.studio) {
-            add_button(PanelAction::Studio);
+            icons.push_back(PanelAction::Studio);
         }
-        y += px(kButtonH) + px(kPanelGap);
+        const int side = px(kButtonH);
+        const int count = static_cast<int>(icons.size());
+        int gap = px(kButtonGap);
+        while (gap > px(2) && count * side + (count - 1) * gap > x1 - x0) {
+            gap -= std::max(1, px(1));
+        }
+        x = x0;
+        for (const PanelAction action : icons) {
+            g.buttons.emplace_back(RECT{x, y, x + side, y + side}, action);
+            x += side + gap;
+        }
+        y += side + px(kPanelGap);
 
         // The project folder (the header shows the address when there's one).
         g.folder_label = {x0, y, x1, y + px(18)};
@@ -619,7 +643,9 @@ std::vector<MainWindow::Hit> MainWindow::panel_focus_order() const {
         add_php_focus_order(order);
     }
     for (std::size_t i = 0; i < g.buttons.size(); ++i) {
-        order.push_back({Part::PanelButton, static_cast<int>(i), g.project});
+        if (panel_action_enabled(g.buttons[i].second)) {  // a greyed-out button isn't a stop
+            order.push_back({Part::PanelButton, static_cast<int>(i), g.project});
+        }
     }
     for (std::size_t i = 0; i < g.fields.size(); ++i) {
         order.push_back({Part::PanelField, static_cast<int>(i), g.project});
@@ -675,14 +701,14 @@ void MainWindow::on_panel_click(const Hit& hit) {
             break;
         case Part::PanelCopyEnv:
             if (worker_ && snap_.link == Link::Connected) {
-                change_error_.clear();
+                dismiss_error();
                 worker_->copy_env(selected_);
             }
             break;
         case Part::PanelPhpMyAdmin:
             // One request; on_snapshot() opens the link it answers with.
             if (worker_ && snap_.link == Link::Connected && !pma_busy_ && phpmyadmin_installed(snap_.installed)) {
-                change_error_.clear();
+                dismiss_error();
                 pma_busy_ = true;
                 worker_->database_call("phpmyadmin.login",
                                        {{"project", selected_}, {"lang", std::string(lang_code(lang_))}}, "panel");
@@ -799,6 +825,9 @@ void MainWindow::run_panel_action(PanelAction action) {
     if (row == nullptr) {
         return;
     }
+    if (!panel_action_enabled(action)) {
+        return;  // greyed out
+    }
     switch (action) {
         case PanelAction::Browser:
             // Only a project's own local address ever reaches the shell.
@@ -812,15 +841,174 @@ void MainWindow::run_panel_action(PanelAction action) {
         case PanelAction::Terminal:
             open_terminal(row->path);
             break;
+        case PanelAction::Editor:
+            open_editor(row->path);
+            break;
         case PanelAction::Studio:
-            if (worker_) {
-                worker_->open_in_studio(row->name);
-            }
+            open_studio(row->path, false);
             break;
         case PanelAction::Download:
             start_downloads_for(row->name);
             break;
     }
+}
+
+void MainWindow::open_studio(const std::string& path, bool quietly) {
+    // The folder is the one in the window's list: the service isn't asked
+    // again. (It used to be, with projects.list sent with null params, which
+    // the service refused: "FloServer stopped answering", 3 Nov.)
+    const auto folder = existing_folder(path);
+    if (!folder) {
+        show_notice(fill(lang_, Str::OpenFailed, {path}), true);
+        return;
+    }
+    const auto program = core::find_studio();
+    std::string error;
+    if (!program) {
+        if (!quietly) {
+            error = std::string(text(lang_, Str::ProgramMissing));
+        }
+    } else if (!core::open_in_studio(*program, *folder, error) && error.empty()) {
+        error = "it didn't start";
+    }
+    if (!error.empty()) {
+        const bool rtl = is_rtl(lang_);
+        show_notice(fill_pattern(text(lang_, Str::OpenProgramFailed), false,
+                                 {rtl ? isolate_ltr("FloCMS Studio") : "FloCMS Studio", rtl ? isolate_auto(error) : error}),
+                    true);
+    }
+}
+
+void MainWindow::ensure_editor() {
+    if (!editor_known_) {
+        // Looked for once (files and the registry, nothing is run), then kept.
+        editor_ = resolve_editor(prefs_.code_editor, detect_editors());
+        editor_known_ = true;
+    }
+}
+
+void MainWindow::forget_editor() {
+    editor_known_ = false;
+    editor_.reset();
+    if (panel_open()) {
+        ensure_editor();  // its tooltip shows the editor's name
+    }
+    if (hwnd_ != nullptr) {
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+}
+
+void MainWindow::open_settings_editor() {
+    open_settings();
+    if (settings_ && settings_->is_open()) {
+        settings_->show_general_editor();
+    }
+}
+
+void MainWindow::open_editor(const std::string& path) {
+    ensure_editor();
+    const auto& target = editor();
+    if (!target) {
+        open_settings_editor();  // none found, or the chosen one is gone: the choice is made there
+        return;
+    }
+    const auto folder = existing_folder(path);
+    if (!folder) {
+        show_notice(fill(lang_, Str::OpenFailed, {path}), true);
+        return;
+    }
+    // The editor's own program with the folder as its one argument: never a
+    // shell, never a command line put together from text.
+    const EditorTarget chosen = *target;
+    std::string error;
+    if (GetFileAttributesW(chosen.program.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        error = std::string(text(lang_, Str::ProgramMissing));
+        forget_editor();  // uninstalled since it was found: looked for again next time
+    } else if (!core::start_program(chosen.program, editor_arguments(win::narrow(*folder)), *folder, error) &&
+               error.empty()) {
+        error = "it didn't start";
+    }
+    if (!error.empty()) {
+        const bool rtl = is_rtl(lang_);
+        show_notice(fill_pattern(text(lang_, Str::OpenProgramFailed), false,
+                                 {rtl ? isolate_auto(chosen.name) : chosen.name, rtl ? isolate_auto(error) : error}),
+                    true);
+    }
+}
+
+void MainWindow::mouse_used() {
+    if (show_focus_) {
+        show_focus_ = false;
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+}
+
+void MainWindow::place_panel_tips() {
+    if (tooltip_ == nullptr) {
+        return;
+    }
+    const PanelGeometry& g = panel_geometry_;
+    const bool shown = !g.project.empty() && shown_tab() == PanelTab::General && !wizard_open() && !first_run_open();
+    for (std::size_t i = 0; i < kIconActions.size(); ++i) {
+        RECT rect{};
+        std::wstring tip;
+        if (shown) {
+            for (const auto& [r, action] : g.buttons) {
+                // Only while it's wholly in view: never a tip for a button scrolled under the tabs.
+                if (action == kIconActions.at(i) && r.top >= g.content.top && r.bottom <= g.content.bottom) {
+                    rect = r;
+                    tip = w(panel_button_tip(action));
+                }
+            }
+        }
+        const UINT_PTR id = kTipPanelFirst + i;
+        if (tip != panel_tips_.at(i)) {
+            panel_tips_.at(i) = tip;
+            TOOLINFOW ti{};
+            ti.cbSize = sizeof ti;
+            ti.hwnd = hwnd_;
+            ti.uId = id;
+            ti.lpszText = panel_tips_.at(i).data();
+            SendMessageW(tooltip_, TTM_UPDATETIPTEXTW, 0, reinterpret_cast<LPARAM>(&ti));
+        }
+        if (!EqualRect(&rect, &panel_tip_rects_.at(i))) {
+            panel_tip_rects_.at(i) = rect;
+            TOOLINFOW ti{};
+            ti.cbSize = sizeof ti;
+            ti.hwnd = hwnd_;
+            ti.uId = id;
+            ti.rect = rect;
+            SendMessageW(tooltip_, TTM_NEWTOOLRECTW, 0, reinterpret_cast<LPARAM>(&ti));
+        }
+    }
+}
+
+// Stroke icons in the app's style (the close mark's and the gear's line):
+// a globe, a folder, a prompt ">_", code "</>" and Studio's mark, two stacked layers
+// (not FloCMS's logo; the repository has none). Drawn the same way round in
+// every language, as Windows draws its own icons.
+void MainWindow::paint_open_icon(Canvas& c, const RECT& r, PanelAction action, Rgb color) const {
+    Glyph glyph = Glyph::Folder;
+    switch (action) {
+        case PanelAction::Browser:
+            glyph = Glyph::Globe;
+            break;
+        case PanelAction::Folder:
+            break;
+        case PanelAction::Terminal:
+            glyph = Glyph::Terminal;
+            break;
+        case PanelAction::Editor:
+            glyph = Glyph::Code;
+            break;
+        case PanelAction::Studio:
+            glyph = Glyph::Studio;
+            break;
+        case PanelAction::Download:
+            return;
+    }
+    c.glyph(glyph, static_cast<float>(r.left + r.right) / 2.0F, static_cast<float>(r.top + r.bottom) / 2.0F,
+            pxf(1.0F), color, pxf(1.4F));
 }
 
 void MainWindow::open_folder(const std::string& path) {
@@ -948,7 +1136,7 @@ void MainWindow::add_existing_folder() {
     if (failed) {
         show_notice(fill(lang_, Str::OpenFailed, {"folder picker"}), true);
     } else if (!path.empty() && worker_) {
-        change_error_.clear();
+        dismiss_error();
         worker_->add_folder(path);
     }
 }
@@ -996,7 +1184,7 @@ void MainWindow::show_field_menu(std::size_t index) {
     const std::string key = ServiceWorker::use_key(project, field.key);
     pending_use_[key] = field.choices[picked].value;
     ++outstanding_[key];
-    change_error_.clear();
+    dismiss_error();
     worker_->use(project, field.key, field.choices[picked].value);
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
@@ -1013,7 +1201,7 @@ void MainWindow::toggle_keep_running_for(const std::string& project) {
     const bool value = !keep_value(*row);
     pending_keep_[row->name] = value;
     ++outstanding_[ServiceWorker::keep_key(row->name)];
-    change_error_.clear();
+    dismiss_error();
     worker_->set_keep_running(row->name, value);
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
@@ -1109,9 +1297,25 @@ void MainWindow::paint_panel(Canvas& c, HDC dc, bool text_pass) const {
         if (shown == PanelTab::Php) {
             paint_php_panel(c, false);
         }
+        // Open in browser needs the service serving it: greyed out while
+        // it isn't there. Folder, Terminal, the editor and Studio don't.
         for (std::size_t i = 0; i < g.buttons.size(); ++i) {
             const int index = static_cast<int>(i);
-            paint_button(c, g.buttons[i].first, hovered(Part::PanelButton, index), focused(Part::PanelButton, index));
+            const auto& [r, action] = g.buttons[i];
+            const bool can = panel_action_enabled(action);
+            if (can) {
+                paint_button(c, r, hovered(Part::PanelButton, index), focused(Part::PanelButton, index));
+            } else {
+                c.round_rect(r, pxf(4), p.button_disabled, p.button_border, border);
+                if (focused(Part::PanelButton, index)) {
+                    RECT ring = r;
+                    InflateRect(&ring, px(2), px(2));
+                    c.round_outline(ring, pxf(6), p.focus, pxf(2));
+                }
+            }
+            if (is_icon_action(action)) {
+                paint_open_icon(c, r, action, can ? p.text : p.button_disabled_text);
+            }
         }
         for (std::size_t i = 0; i < g.fields.size(); ++i) {
             const int index = static_cast<int>(i);
@@ -1176,7 +1380,11 @@ void MainWindow::paint_panel(Canvas& c, HDC dc, bool text_pass) const {
         paint_php_panel(c, true);
     }
     for (const auto& [rect, action] : g.buttons) {
-        c.text(rect, w(panel_button_text(action)), fonts_.button.get(), p.text, Align::Center, false);
+        if (!is_icon_action(action)) {
+            const bool can = panel_action_enabled(action);
+            c.text(rect, w(panel_button_text(action)), fonts_.button.get(), can ? p.text : p.button_disabled_text,
+                   Align::Center, false);
+        }
     }
     if (g.folder.right > g.folder.left) {
         c.text(g.folder_label, w(text(lang_, Str::PanelFolder)), fonts_.button_bold.get(), p.text, Align::Start, false);
