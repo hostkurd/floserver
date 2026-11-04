@@ -27,6 +27,7 @@ void line(std::vector<GlyphShape>& out, float x1, float y1, float x2, float y2) 
 
 std::vector<GlyphShape> glyph_shapes(Glyph glyph) {
     std::vector<GlyphShape> out;
+    out.reserve(24);  // every glyph fits; also keeps GCC 13 -O3 from a false -Wstringop-overflow
     switch (glyph) {
         case Glyph::Globe:
             // Its outline, a meridian and the equator.
