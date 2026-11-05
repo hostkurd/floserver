@@ -77,4 +77,11 @@ private:
     std::shared_ptr<Shared> shared_ = std::make_shared<Shared>();
 };
 
+// One move on the calling thread, for a thread that has others to do
+// (Remove FloServer…'s clean-up); it must be in a single-threaded COM
+// apartment, as the shell wants. The same checks and the same Windows move
+// as RecycleBin::start; Windows' progress and questions belong to `owner`.
+[[nodiscard]] RecycleBin::Result recycle_folder_now(HWND owner, const std::string& folder, const FolderGuard& guard,
+                                                    const std::string& refused, const std::string& missing);
+
 }  // namespace floserver::ui

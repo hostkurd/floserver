@@ -414,6 +414,9 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
         case kFirstRunTrustMessage:
             first_run_trust_now();
             return 0;
+        case kUninstallMessage:
+            on_uninstall();
+            return 0;
         case kRecycledMessage:
             on_recycled();
             return 0;
@@ -490,6 +493,7 @@ void MainWindow::on_create() {
         SendMessageW(tooltip_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
     }
     recycle_bin_.retarget(hwnd_, kRecycledMessage);  // made again in another language: the new window
+    uninstaller_.retarget(hwnd_, kUninstallMessage);
     toast_popup_.attach(hwnd_, kToastMessage);
     // A move or check that finished while the old window was going is taken now.
     PostMessageW(hwnd_, kRecycledMessage, 0, 0);
@@ -708,6 +712,10 @@ void MainWindow::on_snapshot() {
     }
     InvalidateRect(hwnd_, nullptr, FALSE);
 
+    if (quit_done && uninstalling_) {
+        uninstall_stopped(quit_error);  // Remove FloServer… goes on: the clean-up
+        return;
+    }
     if (quit_done) {
         if (!quit_error.empty()) {
             const std::wstring message = w(fill(lang_, Str::ServiceFailed, {quit_error}));
@@ -720,7 +728,8 @@ void MainWindow::on_snapshot() {
 }
 
 void MainWindow::quit() {
-    if (quitting_ || !worker_) {
+    // Remove FloServer… quits by itself once its last step is done.
+    if (quitting_ || !worker_ || uninstalling_) {
         return;
     }
     // Quitting with the first-run page open leaves it for good, as closing does.
@@ -754,7 +763,7 @@ void MainWindow::open_settings() {
         settings_->bring_to_front();  // one at a time
         return;
     }
-    if (!worker_ || quitting_) {
+    if (!worker_ || quitting_ || uninstalling_) {
         return;
     }
     // An earlier open's answers mustn't show before this one's arrive.
@@ -772,6 +781,10 @@ void MainWindow::open_settings() {
 }
 
 void MainWindow::on_pref_change(WPARAM change, LPARAM value) {
+    if (static_cast<PrefChange>(change) == PrefChange::RemoveFloServer) {
+        start_uninstall(uninstall_ticks_from(static_cast<unsigned>(value)));  // not a preference: nothing saved
+        return;
+    }
     const auto index = static_cast<std::size_t>(value);
     const WindowPrefs before = prefs_;
     switch (static_cast<PrefChange>(change)) {
@@ -797,6 +810,8 @@ void MainWindow::on_pref_change(WPARAM change, LPARAM value) {
             }
             forget_editor();  // looked for again with the new choice
             break;
+        case PrefChange::RemoveFloServer:
+            break;  // handled above
     }
     if (prefs_ == before) {
         return;

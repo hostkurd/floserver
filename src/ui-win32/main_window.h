@@ -17,6 +17,7 @@
 #include "recycle_bin.h"
 #include "scroll_bar.h"
 #include "toast_view.h"
+#include "uninstall.h"
 #include "service_worker.h"
 #include "settings_window.h"
 #include "win_util.h"
@@ -633,6 +634,21 @@ private:
     void open_settings();
     // Settings > General changed one of the window's preferences (PrefChange, the choice's index).
     void on_pref_change(WPARAM change, LPARAM value);
+
+    // --- Remove FloServer… (main_window_uninstall.cpp, D21) ---
+    // Settings > General's question was answered: Settings closes, and the
+    // steps run in order (uninstall.h), each said here as it starts.
+    void start_uninstall(const UninstallTicks& ticks);
+    // A step finished on its thread: the next one, or what went wrong.
+    void on_uninstall();
+    // The worker stopped the service (`error`: not within its few seconds): the clean-up next.
+    void uninstall_stopped(const std::string& error);
+    // Stopped before anything was deleted: said, and FloServer goes on as it was.
+    void uninstall_failed(const std::string& message);
+    // The end: Windows' uninstall (or what was left said), then quit.
+    void uninstall_done(const Uninstaller::Answer& answer);
+    // Windows' own folders and the data folder, never moved to the Recycle Bin.
+    [[nodiscard]] static FolderGuard windows_folder_guard();
     // Both windows made again in `lang` (its direction set at creation),
     // keeping where they are, what's open and what's typed.
     void change_language(Lang lang);
@@ -724,6 +740,9 @@ private:
     };
     std::map<std::string, Removing> removing_;  // projects.remove on its way, per project
     RecycleBin recycle_bin_;
+    Uninstaller uninstaller_;  // Remove FloServer…'s steps
+    bool uninstalling_ = false;  // they're running: no Quit, no Settings meanwhile
+    UninstallTicks uninstall_ticks_;
     std::string highlighted_;  // a row right-clicked while the panel is closed: shown selected
     std::string remove_checking_;     // the project whose remove question waits for its folder's check
     bool quit_after_folder_ = false;  // Quit waits for a folder's move (Windows' question needs its owner)
@@ -826,6 +845,7 @@ private:
     // any message), the one the last events were raised from (only while a
     // screen reader listens), and the requests waiting for kAccessMessage.
     static constexpr UINT kAccessMessage = WM_APP + 11;
+    static constexpr UINT kUninstallMessage = WM_APP + 12;  // a Remove FloServer… step finished
     AccessRoot access_;
     AccessTree access_now_;
     bool access_dirty_ = true;
