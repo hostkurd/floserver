@@ -4,7 +4,7 @@
   that earn money with it, D21):
 
     wix build installer\FloServer.wxs -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext -arch x64
-        -d Version=<x.y.z> -d BinDir=<folder with the Release programs>
+        -d Version=<x.y.z> -d BinDir=<full path of the folder with the Release programs>
         -o FloServer-<x.y.z>-x64.msi
 
   What it does and doesn't touch is in D21 and in the EULA (section 6).
@@ -28,7 +28,7 @@
     <Icon Id="FloServer.ico" SourceFile="$(sys.SOURCEFILEDIR)..\src\ui-win32\FloServer.ico" />
     <Property Id="ARPPRODUCTICON" Value="FloServer.ico" />
     <Property Id="ARPURLINFOABOUT" Value="https://floserver.org" />
-    <Property Id="ARPNOMODIFY" Value="1" />
+    <!-- ARPNOMODIFY comes from WixUI_Minimal. -->
 
     <!-- %LOCALAPPDATA%\Programs\FloServer, named outright: per user, never
          Program Files, so no admin rights (D5). (Windows Installer's ICE38,
