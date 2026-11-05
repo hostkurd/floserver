@@ -4,7 +4,7 @@
   that earn money with it, D21):
 
     wix build installer\FloServer.wxs -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext -arch x64
-        -d Version=<x.y.z> -d BinDir=<full path of the folder with the Release programs>
+        -d Version=<x.y.z> -d StageDir=<full path of the folder to ship, laid out as installed>
         -o FloServer-<x.y.z>-x64.msi
 
   What it does and doesn't touch is in D21 and in the EULA (section 6).
@@ -36,36 +36,27 @@
          build doesn't run them, and they assume a machine-wide install.) -->
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="PROGRAMSFOLDER" Name="Programs">
-        <Directory Id="INSTALLFOLDER" Name="FloServer">
-          <Directory Id="VCRUNTIMEFOLDER" Name="vcruntime" />
-        </Directory>
+        <Directory Id="INSTALLFOLDER" Name="FloServer" />
       </Directory>
     </StandardDirectory>
     <StandardDirectory Id="ProgramMenuFolder" />
 
-    <!-- Every program finds the others next to itself, so they stay in one folder. -->
+    <!-- Exactly the staged folder (CI lays it out): FloServer.exe, floserverd.exe,
+         flo.exe and floserver-shim.exe side by side, as each finds the others
+         next to itself; the Visual C++ runtime next to them, so they start on
+         a PC without the redistributable (app-local, which Microsoft allows);
+         and vcruntime\, the copies the service hands to each runtime it
+         installs (PHP, nginx, Apache). No floserver.exe on Windows: it would
+         be FloServer.exe, the window. Not the Publisher (HostKurd's tool). -->
     <ComponentGroup Id="Programs" Directory="INSTALLFOLDER">
-      <Component><File Source="$(BinDir)\FloServer.exe" /></Component>
-      <Component><File Source="$(BinDir)\floserverd.exe" /></Component>
-      <Component><File Source="$(BinDir)\flo.exe" /></Component>
-      <Component><File Source="$(BinDir)\floserver-shim.exe" /></Component>
-      <!-- The Visual C++ runtime next to the programs, so they start on a PC
-           without the redistributable (app-local, which Microsoft allows). -->
-      <Files Include="$(BinDir)\vcruntime\*.dll" />
-      <!-- The folder on the user's Path, so flo works in new terminals.
-         (No floserver.exe on Windows: it would be FloServer.exe, the window.) -->
+      <Files Include="$(StageDir)\**" />
+      <!-- The folder on the user's Path, so flo works in new terminals. -->
       <Component Id="PathEntry" Guid="9D1E2B5C-6F0A-4C1E-9B2D-5A7E3C4F8B10">
         <Environment Id="FloOnPath" Name="PATH" Value="[INSTALLFOLDER]" Part="last" Action="set" System="no" Permanent="no" />
         <RegistryValue Root="HKCU" Key="Software\HostKurd\FloServer" Name="PathEntry" Type="integer" Value="1" KeyPath="yes" />
-        <!-- The folders go on uninstall (only when empty, which they are then). -->
+        <!-- The folder goes on uninstall (only when empty, which it is then). -->
         <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
-        <RemoveFolder Id="RemoveVcRuntimeFolder" Directory="VCRUNTIMEFOLDER" On="uninstall" />
       </Component>
-    </ComponentGroup>
-
-    <!-- The copies the service hands to each runtime it installs (PHP, nginx, Apache). -->
-    <ComponentGroup Id="VcRuntime" Directory="VCRUNTIMEFOLDER">
-      <Files Include="$(BinDir)\vcruntime\*.dll" />
     </ComponentGroup>
 
     <ComponentGroup Id="StartMenu" Directory="ProgramMenuFolder">
@@ -78,7 +69,6 @@
 
     <Feature Id="Main" Title="FloServer" Level="1">
       <ComponentGroupRef Id="Programs" />
-      <ComponentGroupRef Id="VcRuntime" />
       <ComponentGroupRef Id="StartMenu" />
     </Feature>
 
