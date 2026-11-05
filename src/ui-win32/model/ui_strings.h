@@ -554,6 +554,14 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     RemoveDoneDeleted,        // {0}: the project
     RemoveDoneGone,           // {0}: the project
     QuitAfterFolder,
+    // Screen readers (UI Automation): words said, never drawn (approved 5 Nov).
+    AccessSwitchOn,        // a row's switch in its name: "my-shop, on, Sleeping"
+    AccessSwitchOff,
+    AccessToggleSwitch,    // what a switch is called
+    AccessNewProject,      // the New project button, without its "+"
+    AccessSharedSettings,  // the Shared sites row's gear
+    AccessMessage,         // a toast
+    AccessCloseMessage,    // its close mark
     Count_,
 };
 

@@ -17,7 +17,9 @@ add_library(floserver_ui_model STATIC
     model/code_editor.cpp
     model/folder_removal.cpp
     model/toast.cpp
-    model/glyphs.cpp)
+    model/glyphs.cpp
+    model/access_tree.cpp
+    model/main_access.cpp)
 target_include_directories(floserver_ui_model PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # Core for paths.h's file helpers (window.json is read and written here, testably).
 target_link_libraries(floserver_ui_model PUBLIC floserver_third_party PRIVATE floserver_core)
@@ -38,6 +40,8 @@ add_executable(floserver_ui WIN32
     main_window_wizard.cpp
     main_window_first_run.cpp
     main_window_menu.cpp
+    main_window_access.cpp
+    access_provider.cpp
     canvas.cpp
     service_worker.cpp
     settings_window.cpp
@@ -58,7 +62,7 @@ add_executable(floserver_ui WIN32
     FloServer.rc)
 set_target_properties(floserver_ui PROPERTIES OUTPUT_NAME FloServer)
 target_link_libraries(floserver_ui PRIVATE floserver_core floserver_ui_model
-    comctl32 dwmapi gdiplus shell32 ole32 uuid advapi32 user32 gdi32)
+    comctl32 dwmapi gdiplus shell32 ole32 oleaut32 uuid advapi32 user32 gdi32)
 # The window starts floserverd the way the CLI does; build it alongside.
 add_dependencies(floserver_ui floserverd)
 if(MINGW)

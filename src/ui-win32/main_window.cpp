@@ -111,6 +111,16 @@ LRESULT CALLBACK MainWindow::window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPA
 }
 
 LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
+    if (msg == WM_GETOBJECT) {
+        // UI Automation asking for the window's elements (main_window_access.cpp).
+        LRESULT result = 0;
+        if (access_.on_get_object(wparam, lparam, result)) {
+            return result;
+        }
+        return DefWindowProcW(hwnd_, msg, wparam, lparam);
+    }
+    // Anything may change what's shown: the elements are made again when next asked for.
+    access_dirty_ = true;
     if (msg == taskbar_created_ && taskbar_created_ != 0) {
         tray_added_ = false;  // Explorer restarted
         add_tray_icon();
@@ -403,6 +413,9 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
         case kRecycledMessage:
             on_recycled();
             return 0;
+        case kAccessMessage:
+            run_access_requests();
+            return 0;
         case kToastMessage:
             // The popup: information stays while it's read; its close mark.
             toast_event(wparam == kToastCloseClicked  ? ToastEvent::Close
@@ -454,6 +467,9 @@ void MainWindow::on_create() {
     // system's cue banner grey can't be changed and is hard to read on dark.
     search_cue_ = w(text(lang_, Str::SearchProjects));
     SetWindowSubclass(search_, search_proc, kSearchSubclass, reinterpret_cast<DWORD_PTR>(this));
+    // Its placeholder is drawn, not a label: screen readers are told its name.
+    set_accessible_name(search_, text(lang_, Str::SearchProjects));
+    access_.attach(hwnd_, this);
 
     tooltip_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
                                CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, hwnd_, nullptr, instance_,
@@ -500,6 +516,11 @@ void MainWindow::on_create() {
 }
 
 void MainWindow::on_destroy() {
+    // Screen readers holding an element from this window are told it's gone.
+    access_.detach();
+    access_said_.reset();
+    access_queue_.clear();
+    set_accessible_name(search_, {});
     KillTimer(hwnd_, kToastTimer);
     list_bar_.cancel(hwnd_);
     panel_bar_.cancel(hwnd_);
@@ -1443,6 +1464,13 @@ void MainWindow::on_key(WPARAM key) {
         open_settings();
         return;
     }
+    // Ctrl+N: New project, the top bar's button (it isn't a Tab stop).
+    if (key == 'N' && (GetKeyState(VK_CONTROL) & 0x8000) != 0) {
+        if (!first_run_open() && !wizard_open()) {
+            open_wizard();
+        }
+        return;
+    }
     if (first_run_open()) {
         on_first_run_key(key);
         return;
@@ -1550,6 +1578,11 @@ LRESULT CALLBACK MainWindow::search_proc(HWND hwnd, UINT msg, WPARAM wparam, LPA
                 self->open_settings();  // Ctrl+, works with the search box focused too
                 return 0;
             }
+            if (wparam == 'N' && (GetKeyState(VK_CONTROL) & 0x8000) != 0) {
+                SetFocus(self->hwnd_);
+                self->on_key(wparam);  // Ctrl+N too
+                return 0;
+            }
             if (wparam == VK_ESCAPE) {
                 if (GetWindowTextLengthW(hwnd) > 0) {
                     SetWindowTextW(hwnd, L"");
@@ -1572,8 +1605,8 @@ LRESULT CALLBACK MainWindow::search_proc(HWND hwnd, UINT msg, WPARAM wparam, LPA
             }
             break;
         case WM_CHAR:
-            if (wparam == VK_ESCAPE || wparam == VK_TAB || wparam == VK_RETURN) {
-                return 0;  // no beep
+            if (wparam == VK_ESCAPE || wparam == VK_TAB || wparam == VK_RETURN || wparam == 0x0E) {
+                return 0;  // no beep (0x0E: Ctrl+N's character)
             }
             break;
         case WM_SETFOCUS:
@@ -1714,6 +1747,8 @@ void MainWindow::settle(const std::vector<std::string>& keys) {
 
 void MainWindow::show_notice(std::string message, bool error) {
     toast_ = toast_with(toast_, std::move(message), error ? ToastKind::Error : ToastKind::Info);
+    // Said by a screen reader as it comes, without moving the focus.
+    access_.notify(toast_.text, error);
     sync_toast_timer();
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
@@ -1928,6 +1963,7 @@ void MainWindow::on_paint() {
         }
     }
     EndPaint(hwnd_, &ps);
+    access_after_paint();
 }
 
 void MainWindow::paint_top_bar(Canvas& c, HDC /*dc*/, bool text_pass) const {

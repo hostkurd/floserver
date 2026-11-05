@@ -1065,6 +1065,15 @@ constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
     Entry{Str::QuitAfterFolder, "FloServer quits once the folder has been moved.",
           "سيُغلَق " FLO_LRI "FloServer" FLO_PDI " بعد نقل المجلد.",
           FLO_LRI "FloServer" FLO_PDI " دادەخرێت کاتێک بوخچەکە گوازرایەوە."},
+    // Screen readers (approved 5 Nov). Said, never drawn; Arabic and Kurdish need a native read.
+    Entry{Str::AccessSwitchOn, "on", "مفعّل", "هەڵکراوە"},
+    Entry{Str::AccessSwitchOff, "off", "غير مفعّل", "کوژاوە"},
+    Entry{Str::AccessToggleSwitch, "toggle switch", "مفتاح تبديل", "سویچی گۆڕین"},
+    Entry{Str::AccessNewProject, "New project", "مشروع جديد", "پڕۆژەی نوێ"},
+    Entry{Str::AccessSharedSettings, "Shared sites settings", "إعدادات المواقع المشتركة",
+          "ڕێکخستنەکانی ماڵپەڕە هاوبەشەکان"},
+    Entry{Str::AccessMessage, "Message", "رسالة", "پەیام"},
+    Entry{Str::AccessCloseMessage, "Close message", "إغلاق الرسالة", "داخستنی پەیام"},
 }};
 
 #undef FLO_LRI

@@ -5,6 +5,7 @@
 // (step 5b), in a tray icon's keeping (D2). Everything it shows comes from
 // floserverd through ServiceWorker.
 
+#include "access_provider.h"
 #include "canvas.h"
 #include "form_parts.h"
 #include "model/code_editor.h"
@@ -37,11 +38,12 @@ namespace floserver::ui {
 // Posted by a second FloServer.exe to bring this one forward.
 inline constexpr UINT kShowWindowMessage = WM_APP + 1;
 
-class MainWindow {
+// Screen readers see it through AccessSource (main_window_access.cpp).
+class MainWindow final : private AccessSource {
 public:
     // `prefs`: window.json (Settings > General); `lang` is what they resolve to.
     MainWindow(HINSTANCE instance, Lang lang, const WindowPrefs& prefs, std::wstring class_name);
-    ~MainWindow() = default;
+    ~MainWindow() override = default;
     MainWindow(const MainWindow&) = delete;
     MainWindow& operator=(const MainWindow&) = delete;
     MainWindow(MainWindow&&) = delete;
@@ -629,6 +631,25 @@ private:
     void paint_list(Canvas& c, HDC dc, bool text_pass) const;
     void paint_footer(Canvas& c, HDC dc, bool text_pass) const;
 
+    // --- screen readers (main_window_access.cpp, approved 5 Nov) ---
+    // AccessSource: the tree as the window is now; a screen reader's request, run later.
+    [[nodiscard]] const AccessTree& access_tree() override;
+    void access_request(const std::string& id, AccessAction action) override;
+    // What the last paint showed, as elements; the focus where the keys are.
+    [[nodiscard]] AccessTree build_access_tree() const;
+    void add_list_access(AccessTree& t) const;
+    void add_shared_access(AccessTree& t) const;
+    void add_panel_access(AccessTree& t) const;
+    void add_php_access(AccessTree& t, int content, const AccessRect& clip) const;
+    // The element id of a part ("row/my-shop/switch"); empty for parts not described yet.
+    [[nodiscard]] std::string access_id(const Hit& hit) const;
+    [[nodiscard]] std::string access_focus_id() const;
+    // After each paint, while a screen reader listens: what changed is told.
+    void access_after_paint();
+    void run_access_requests();
+    void run_access(const AccessNode& node, AccessAction action);
+    void access_focus(const Hit& hit);
+
     HINSTANCE instance_;
     Lang lang_;
     bool rtl_;
@@ -767,6 +788,16 @@ private:
     // The icon buttons' tooltips, by kIconActions' order: their words and where they are.
     std::array<std::wstring, kIconActions.size()> panel_tips_;
     std::array<RECT, kIconActions.size()> panel_tip_rects_{};
+
+    // Screen readers: the provider, the tree as it is now (made again after
+    // any message), the one the last events were raised from (only while a
+    // screen reader listens), and the requests waiting for kAccessMessage.
+    static constexpr UINT kAccessMessage = WM_APP + 11;
+    AccessRoot access_;
+    AccessTree access_now_;
+    bool access_dirty_ = true;
+    std::optional<AccessTree> access_said_;
+    std::vector<std::pair<std::string, AccessAction>> access_queue_;
 };
 
 }  // namespace floserver::ui

@@ -1,5 +1,6 @@
 #include "toast_view.h"
 
+#include "model/access_tree.h"
 #include "model/theme.h"
 #include "win_util.h"
 
@@ -137,6 +138,11 @@ void ToastPopup::show(const Toast& toast, const ToastGeometry& g, HFONT font, bo
         SetWindowLongPtrW(hwnd_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
         close_hover_ = false;
         tracking_ = false;
+        toast_.text.clear();  // named below
+    }
+    if (toast.text != toast_.text) {
+        // Never drawn (a popup has no title bar): the name screen readers find it by.
+        SetWindowTextW(hwnd_, win::widen(access_text(toast.text)).c_str());
     }
     toast_ = toast;
     card_ = g.card;

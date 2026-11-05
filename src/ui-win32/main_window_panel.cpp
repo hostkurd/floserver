@@ -7,6 +7,7 @@
 #include "main_window.h"
 
 #include "main_window_layout.h"
+#include "model/main_access.h"
 #include "model/theme.h"
 #include "model/view_model.h"
 
@@ -1440,11 +1441,8 @@ void MainWindow::paint_panel(Canvas& c, HDC dc, bool text_pass) const {
     if (g.keep_switch.right > g.keep_switch.left) {
         const bool keep = keep_value(*row);
         c.text(g.keep_title, w(text(lang_, Str::KeepRunning)), fonts_.button_bold.get(), p.text, Align::Start, false);
-        c.text(g.keep_detail,
-               w(keep ? std::string(text(lang_, Str::KeepRunningOn))
-                      : fill(lang_, Str::KeepRunningOff,
-                             {std::to_string(snap_.footer.idle_minutes != 0 ? snap_.footer.idle_minutes : 10)})),
-               fonts_.caption.get(), p.text_subtle, Align::Start, false);
+        c.text(g.keep_detail, w(keep_running_detail(keep, snap_.footer.idle_minutes, lang_)), fonts_.caption.get(),
+               p.text_subtle, Align::Start, false);
     }
 
     if (g.remove.right > g.remove.left) {
