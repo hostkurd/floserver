@@ -85,7 +85,7 @@ jobs:
       - name: Report sizes
         shell: pwsh
         run: |
-          Get-ChildItem build -Recurse -Include FloServer.exe,floserverd.exe,floserver.exe |
+          Get-ChildItem build -Recurse -Include FloServer.exe,floserverd.exe,flo.exe |
             Where-Object { $_.FullName -match '\\Release\\' } |
             ForEach-Object { "{0,-16} {1,10:N0} bytes" -f $_.Name, $_.Length }
           "vcruntime/:"
@@ -382,9 +382,12 @@ jobs:
         run: |
           dotnet tool install --global wix --version 5.0.2 | Out-Null
           wix extension add --global WixToolset.UI.wixext/5.0.2 | Out-Null
-          $version = (Select-String -Path CMakeLists.txt -Pattern 'VERSION (\d+\.\d+\.\d+)' | Select-Object -First 1).Matches[0].Groups[1].Value
+          wix extension add --global WixToolset.Util.wixext/5.0.2 | Out-Null
+          # The version in project(FloServer VERSION x.y.z ...), not the first VERSION in the file.
+          $version = [regex]::Match((Get-Content CMakeLists.txt -Raw), 'project\(FloServer\s+VERSION\s+(\d+\.\d+\.\d+)').Groups[1].Value
+          if (-not $version) { "::error title=MSI::no version in CMakeLists.txt's project()"; exit 1 }
           $msi = "FloServer-$version-x64.msi"
-          wix build installer/FloServer.wxs -ext WixToolset.UI.wixext -arch x64 `
+          wix build installer/FloServer.wxs -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext -arch x64 `
             -d Version=$version -d BinDir=build/bin/Release -o $msi 2>&1 | Tee-Object -FilePath wix.log
           if ($LASTEXITCODE -ne 0) {
             Get-Content wix.log | Select-String 'error|warning' | Select-Object -First 20 |
@@ -405,7 +408,7 @@ jobs:
           $dir = Join-Path $env:LOCALAPPDATA 'Programs\FloServer'
           $proc = Start-Process msiexec -ArgumentList '/i', $env:MSI, '/qn', '/l*v', 'install.log' -Wait -PassThru
           if ($proc.ExitCode -ne 0) { Get-Content install.log -Tail 40; Fail "install exited with $($proc.ExitCode)" }
-          foreach ($f in 'FloServer.exe', 'floserverd.exe', 'floserver.exe', 'flo.exe', 'floserver-shim.exe', 'vcruntime140.dll', 'vcruntime\vcruntime140.dll') {
+          foreach ($f in 'FloServer.exe', 'floserverd.exe', 'flo.exe', 'floserver-shim.exe', 'vcruntime140.dll', 'vcruntime\vcruntime140.dll') {
             if (-not (Test-Path (Join-Path $dir $f))) { Fail "$f isn't in $dir" }
           }
           if (Test-Path (Join-Path $dir 'floserver-publisher.exe')) { Fail "the Publisher (HostKurd's tool) was installed" }
@@ -413,16 +416,28 @@ jobs:
           if (($userPath -split ';') -notcontains $dir -and ($userPath -split ';') -notcontains "$dir\") { Fail "$dir isn't on the user's Path: $userPath" }
           $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'FloServer.lnk'
           if (-not (Test-Path $shortcut)) { Fail "no Start menu shortcut at $shortcut" }
+          # FloServer.exe must be the window, not the CLI (they once shared a name).
+          if ((Get-Item (Join-Path $dir 'FloServer.exe')).VersionInfo.FileName -and
+              (Get-FileHash (Join-Path $dir 'FloServer.exe')).Hash -eq (Get-FileHash (Join-Path $dir 'flo.exe')).Hash) {
+            Fail "FloServer.exe is the same program as flo.exe"
+          }
+          if ((Get-Item HKCU:\Environment).GetValueKind('Path') -ne 'ExpandString') {
+            Fail "the user's Path is no longer REG_EXPAND_SZ after installing"
+          }
           $version = (& (Join-Path $dir 'flo.exe') version 2>&1 | Out-String).Trim()
           "installed: $version"
           if (-not $version) { Fail "flo version printed nothing" }
+          # A running service must be stopped by the uninstall, or its files stay.
+          & (Join-Path $dir 'flo.exe') service start | Out-Null
+          if (-not (Get-Process floserverd -ErrorAction SilentlyContinue)) { Fail "flo service start didn't start floserverd" }
           $proc = Start-Process msiexec -ArgumentList '/x', $env:MSI, '/qn', '/l*v', 'uninstall.log' -Wait -PassThru
           if ($proc.ExitCode -ne 0) { Get-Content uninstall.log -Tail 40; Fail "uninstall exited with $($proc.ExitCode)" }
+          if (Get-Process floserverd -ErrorAction SilentlyContinue) { Fail "floserverd is still running after uninstalling" }
           if (Test-Path $dir) { Fail "$dir is still there after uninstalling: $((Get-ChildItem $dir -Recurse).FullName -join ', ')" }
           $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
           if ((($userPath -split ';') -contains $dir) -or (($userPath -split ';') -contains "$dir\")) { Fail "$dir is still on the user's Path" }
           if (Test-Path $shortcut) { Fail "the Start menu shortcut is still there" }
-          "::notice title=MSI::$env:MSI installed per user without admin, ran flo, and uninstalled cleanly"
+          "::notice title=MSI::$env:MSI installed per user without admin, ran flo and the service, and uninstalled cleanly (service stopped, files, Path entry and shortcut gone)"
       - name: Upload the installer
         uses: actions/upload-artifact@v4
         with:
