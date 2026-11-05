@@ -45,6 +45,10 @@ bool start_msi_uninstall(HWND owner, const std::string& product_code, std::strin
 // walks the folders: never the window's).
 [[nodiscard]] UninstallSizes count_uninstall_sizes();
 
+// Waits until no floserverd runs and nothing runs from `runtimes`; false if
+// something still does after `limit` (then nothing may be deleted).
+[[nodiscard]] bool wait_until_nothing_runs(const std::filesystem::path& runtimes, std::chrono::milliseconds limit);
+
 class Uninstaller {
 public:
     enum class Step : std::uint8_t { ReadCa, RemoveCa, Clean };
@@ -66,7 +70,10 @@ public:
     // `base`: Windows' folders and the data folder (projects_folder_guard()
     // adds the rest on the thread, from config.json). `refused` and
     // `missing` as for RecycleBin::start.
-    void clean(const UninstallTicks& ticks, const FolderGuard& base, const std::string& refused,
+    // `confirmed_projects_dir`: the projects folder as the user saw it in the
+    // question; a different one now (config.json changed) stays.
+    void clean(const UninstallTicks& ticks, const std::string& confirmed_projects_dir, const FolderGuard& base,
+               const std::string& no_recycle_bin, const std::string& refused,
                const std::string& missing);
     // The steps finished since the last call.
     [[nodiscard]] std::vector<Answer> take();

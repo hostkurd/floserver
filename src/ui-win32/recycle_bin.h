@@ -84,4 +84,8 @@ private:
 [[nodiscard]] RecycleBin::Result recycle_folder_now(HWND owner, const std::string& folder, const FolderGuard& guard,
                                                     const std::string& refused, const std::string& missing);
 
+// Whether the folder's drive is a fixed one with a Recycle Bin (else a
+// "move to the Recycle Bin" would delete it for good).
+[[nodiscard]] bool folder_has_recycle_bin(const std::wstring& path);
+
 }  // namespace floserver::ui

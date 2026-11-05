@@ -40,6 +40,7 @@ struct UninstallTicks {
 // Folders (else the default), every registered project's folder, the www
 // folder. Empty where there's none.
 struct UninstallFolders {
+    bool readable = true;  // false: config.json is there but can't be read
     std::string projects_dir;
     std::vector<std::string> project_dirs;
     std::string shared_dir;

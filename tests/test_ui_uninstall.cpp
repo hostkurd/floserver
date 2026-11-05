@@ -89,6 +89,7 @@ TEST_CASE("remove FloServer: the folders come from config.json") {
                               {"shared", {{"dir", floserver::core::path_to_utf8(www)}}}}
                    .dump());
     const UninstallFolders f = uninstall_folders(data.path());
+    CHECK(f.readable);
     CHECK(f.projects_dir == floserver::core::path_to_utf8(fs::path(projects).make_preferred()));
     REQUIRE(f.project_dirs.size() == 2);
     CHECK(f.project_dirs[0] == floserver::core::path_to_utf8(fs::path(projects / "shop").make_preferred()));
@@ -99,6 +100,8 @@ TEST_CASE("remove FloServer: the folders come from config.json") {
     const UninstallFolders damaged = uninstall_folders(data.path());
     CHECK(damaged.projects_dir.empty());
     CHECK(damaged.project_dirs.empty());
+    // ...and the clean-up deletes nothing, as no project can be protected.
+    CHECK_FALSE(damaged.readable);
 }
 
 TEST_CASE("remove FloServer: the projects folder's guard keeps everything but the projects folder") {

@@ -8,6 +8,9 @@
 
 #include "main_window.h"
 
+#include "model/uninstall.h"
+
+#include "floserver/core/paths.h"
 #include "floserver/core/trust_store.h"
 
 #include <string>
@@ -35,6 +38,11 @@ void MainWindow::start_uninstall(const UninstallTicks& ticks) {
     }
     uninstalling_ = true;
     uninstall_ticks_ = ticks;
+    // The projects folder as the question showed it (read from config.json
+    // just now, as Settings did): the clean-up moves that one or none.
+    if (const auto data = core::data_dir()) {
+        uninstall_projects_dir_ = uninstall_folders(*data).projects_dir;
+    }
     // Settings goes (nothing in General waits for a Save); what happens is said here.
     if (settings_) {
         settings_->destroy_now();
@@ -106,7 +114,8 @@ void MainWindow::uninstall_stopped(const std::string& error) {
     // deletes nothing unless it's gone.
     (void)error;
     show_notice(std::string(text(lang_, Str::UninstallCleaning)), false);
-    uninstaller_.clean(uninstall_ticks_, windows_folder_guard(), std::string(text(lang_, Str::RemoveFolderRefused)),
+    uninstaller_.clean(uninstall_ticks_, uninstall_projects_dir_, windows_folder_guard(),
+                       std::string(text(lang_, Str::RemoveNoRecycleBin)), std::string(text(lang_, Str::RemoveFolderRefused)),
                        std::string(text(lang_, Str::ProgramMissing)));
 }
 

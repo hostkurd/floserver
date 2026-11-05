@@ -42,7 +42,9 @@ UninstallFolders uninstall_folders(const fs::path& data) {
     const auto config = core::load_app_config(core::app_config_file(data), error);
     if (!config) {
         // A config.json that can't be read: which projects were added from
-        // elsewhere isn't known, so the projects folder isn't offered at all.
+        // elsewhere isn't known, so the projects folder isn't offered at all,
+        // and the clean-up deletes nothing (no project can be protected).
+        out.readable = false;
         return out;
     }
     if (const auto dir = config->projects_dir ? config->projects_dir : core::default_projects_dir()) {

@@ -1137,9 +1137,13 @@ constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
           " ـت بە نەخێر دایەوە. هیچ نەگۆڕا."},
     Entry{Str::UninstallFailed, "FloServer wasn't removed: {0}", "لم تتم إزالة " FLO_LRI "FloServer" FLO_PDI ": {0}",
           FLO_LRI "FloServer" FLO_PDI " لانەبرا: {0}"},
-    Entry{Str::UninstallStopFailed, "FloServer's services didn't stop, so nothing was deleted: {0}",
-          "لم تتوقف خدمات " FLO_LRI "FloServer" FLO_PDI "، لذا لم يُحذف شيء: {0}",
-          "خزمەتگوزارییەکانی " FLO_LRI "FloServer" FLO_PDI " نەوەستان، بۆیە هیچ نەسڕایەوە: {0}"},
+    Entry{Str::UninstallStopFailed,
+          "FloServer's services didn't stop, so nothing was deleted: {0}. Its certificate is already removed from "
+          "Windows: run flo trust to make a new one.",
+          "لم تتوقف خدمات " FLO_LRI "FloServer" FLO_PDI "، لذا لم يُحذف شيء: {0}. أُزيلت شهادته من " FLO_LRI
+          "Windows" FLO_PDI " مسبقًا: شغّل " FLO_LRI "flo trust" FLO_PDI " لإنشاء واحدة جديدة.",
+          "خزمەتگوزارییەکانی " FLO_LRI "FloServer" FLO_PDI " نەوەستان، بۆیە هیچ نەسڕایەوە: {0}. بڕوانامەکەی پێشتر لە "
+          FLO_LRI "Windows" FLO_PDI " لابرا: " FLO_LRI "flo trust" FLO_PDI " کارپێبکە بۆ دروستکردنی یەکێکی نوێ."},
     Entry{Str::UninstallLeft, "Some of what you chose stayed: {0}.", "بقي بعض ما اخترته: {0}.",
           "هەندێک لەوەی هەڵتبژارد مایەوە: {0}."},
     Entry{Str::UninstallProjectsStayed, "The projects folder stayed where it was: {0}",

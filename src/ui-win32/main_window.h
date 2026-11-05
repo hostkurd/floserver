@@ -741,6 +741,7 @@ private:
     std::map<std::string, Removing> removing_;  // projects.remove on its way, per project
     RecycleBin recycle_bin_;
     Uninstaller uninstaller_;  // Remove FloServer…'s steps
+    std::string uninstall_projects_dir_;  // the projects folder the user agreed to move
     bool uninstalling_ = false;  // they're running: no Quit, no Settings meanwhile
     UninstallTicks uninstall_ticks_;
     std::string highlighted_;  // a row right-clicked while the panel is closed: shown selected

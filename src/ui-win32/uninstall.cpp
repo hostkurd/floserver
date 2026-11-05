@@ -10,6 +10,7 @@
 #include "floserver/core/service_client.h"
 
 #include <msi.h>
+#include <tlhelp32.h>
 #include <objbase.h>
 #include <shellapi.h>
 
@@ -158,6 +159,61 @@ void Uninstaller::run(Step step, std::function<Answer()> work) {
     }
 }
 
+namespace {
+
+// Whether a process runs floserverd.exe, or a program from `runtimes`
+// (MariaDB, nginx, php-cgi, Node... the service started them). Compared as
+// Windows compares paths: without case.
+bool something_runs(const fs::path& runtimes) {
+    std::wstring prefix = runtimes.wstring();
+    if (!prefix.empty() && prefix.back() != L'\\') {
+        prefix += L'\\';
+    }
+    CharLowerBuffW(prefix.data(), static_cast<DWORD>(prefix.size()));
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) {
+        return true;  // can't tell: assume it runs, delete nothing
+    }
+    bool found = false;
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof entry;
+    for (BOOL more = Process32FirstW(snap, &entry); more != FALSE && !found; more = Process32NextW(snap, &entry)) {
+        std::wstring name = entry.szExeFile;
+        CharLowerBuffW(name.data(), static_cast<DWORD>(name.size()));
+        if (name == L"floserverd.exe") {
+            found = true;
+            break;
+        }
+        HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID);
+        if (process == nullptr) {
+            continue;  // another user's or a system process: not ours
+        }
+        std::array<wchar_t, 32768> image{};
+        DWORD length = static_cast<DWORD>(image.size());
+        if (QueryFullProcessImageNameW(process, 0, image.data(), &length) != FALSE) {
+            std::wstring path(image.data(), length);
+            CharLowerBuffW(path.data(), static_cast<DWORD>(path.size()));
+            found = path.starts_with(prefix);
+        }
+        CloseHandle(process);
+    }
+    CloseHandle(snap);
+    return found;
+}
+
+}  // namespace
+
+bool wait_until_nothing_runs(const fs::path& runtimes, std::chrono::milliseconds limit) {
+    const auto deadline = std::chrono::steady_clock::now() + limit;
+    while (something_runs(runtimes)) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
+    return true;
+}
+
 void Uninstaller::read_ca(const std::string& lost, const std::string& unreadable) {
     run(Step::ReadCa, [lost, unreadable] {
         Answer answer;
@@ -209,31 +265,40 @@ void Uninstaller::remove_ca(const std::string& lost) {
     });
 }
 
-void Uninstaller::clean(const UninstallTicks& ticks, const FolderGuard& base, const std::string& refused,
+void Uninstaller::clean(const UninstallTicks& ticks, const std::string& confirmed_projects_dir,
+                        const FolderGuard& base, const std::string& no_recycle_bin, const std::string& refused,
                         const std::string& missing) {
     HWND owner = nullptr;
     {
         const std::lock_guard lock(shared_->mutex);
         owner = shared_->window;
     }
-    run(Step::Clean, [ticks, base, refused, missing, owner] {
+    run(Step::Clean, [ticks, confirmed_projects_dir, base, no_recycle_bin, refused, missing, owner] {
         Answer answer;
-        // The worker asked it to quit and waited a few seconds; stopping
-        // every project (MariaDB above all) can take longer. Nothing is
-        // deleted while it may still have files open.
-        std::string stop_error;
-        if (!core::stop_service(core::ipc::default_instance(), stop_error, kStopFor)) {
-            answer.stopped = false;
-            answer.error = stop_error;
-            return answer;
-        }
         const auto data = core::data_dir();
         if (!data) {
             answer.error = "Windows gives no LOCALAPPDATA folder";
             return answer;
         }
+        // The worker asked it to quit and waited a few seconds; stopping
+        // every project (MariaDB above all) can take longer. Its channel
+        // closes before it has stopped what it runs, so "gone" means no
+        // floserverd and nothing running from FloServer's runtimes folder.
+        // Nothing is deleted while any of it may still have files open.
+        std::string stop_error;
+        (void)core::stop_service(core::ipc::default_instance(), stop_error, kStopFor);
+        if (!wait_until_nothing_runs(*data / "runtimes", kStopFor)) {
+            answer.stopped = false;
+            answer.error = stop_error.empty() ? std::string("floserverd or one of its runtimes is still running")
+                                              : stop_error;
+            return answer;
+        }
         // Read now, with the service stopped: config.json as it was left.
         const UninstallFolders folders = uninstall_folders(*data);
+        if (!folders.readable) {
+            answer.error = "config.json can't be read, so FloServer can't tell which folders hold projects; nothing was deleted";
+            return answer;
+        }
         core::CleanOptions options;
         for (const std::string& dir : folders.project_dirs) {
             options.protected_dirs.push_back(core::path_from_utf8(dir));
@@ -257,7 +322,19 @@ void Uninstaller::clean(const UninstallTicks& ticks, const FolderGuard& base, co
         }
         std::error_code ec;
         if (ticks.projects && !folders.projects_dir.empty() &&
-            fs::is_directory(core::path_from_utf8(folders.projects_dir), ec)) {
+            comparable_path(folders.projects_dir) != comparable_path(confirmed_projects_dir)) {
+            // config.json names another projects folder than the one asked about.
+            answer.report.projects = FolderOutcome::Stayed;
+            answer.report.projects_reason = refused;
+        } else if (ticks.projects && !folders.projects_dir.empty() &&
+                   fs::is_directory(core::path_from_utf8(folders.projects_dir), ec) &&
+                   !folder_has_recycle_bin(win::widen(folders.projects_dir))) {
+            // The question said "moved to the Recycle Bin": on a drive with
+            // none, Windows would delete it for good instead.
+            answer.report.projects = FolderOutcome::Stayed;
+            answer.report.projects_reason = no_recycle_bin;
+        } else if (ticks.projects && !folders.projects_dir.empty() &&
+                   fs::is_directory(core::path_from_utf8(folders.projects_dir), ec)) {
             // The shell's move wants a single-threaded apartment on its thread.
             const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
             const RecycleBin::Result moved = recycle_folder_now(owner, folders.projects_dir,

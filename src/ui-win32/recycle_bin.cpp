@@ -224,6 +224,8 @@ RecycleBin::Result recycle(HWND owner, const std::string& project, bool dropped,
 
 }  // namespace
 
+bool folder_has_recycle_bin(const std::wstring& path) { return has_recycle_bin(path); }
+
 FolderGuard real_folder_guard(const FolderGuard& guard) {
     FolderGuard out = guard;
     for (auto* list : {&out.kept, &out.kept_with_contents, &out.other_projects}) {

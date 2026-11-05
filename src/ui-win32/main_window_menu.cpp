@@ -326,7 +326,9 @@ void MainWindow::copy_address(const std::string& address) {
 }
 
 void MainWindow::ask_remove(const std::string& project) {
-    if (!worker_ || snap_.link != Link::Connected || leaving(project) || asking_ || quitting_) {
+    // Not while Remove FloServer runs: its own move of the projects folder
+    // mustn't race a project's.
+    if (!worker_ || snap_.link != Link::Connected || leaving(project) || asking_ || quitting_ || uninstalling_) {
         return;
     }
     const auto found = std::find_if(snap_.rows.begin(), snap_.rows.end(),
