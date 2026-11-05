@@ -1079,6 +1079,11 @@ constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
     Entry{Str::AccessStepOf, "Step {0} of {1}, {2}", "الخطوة {0} من {1}، {2}", "هەنگاوی {0} لە {1}، {2}"},
     Entry{Str::AccessStepDone, "done", "تمّت", "تەواو بوو"},
     Entry{Str::AccessTemplates, "Templates", "القوالب", "قاڵبەکان"},
+    // Screen readers: Settings. Said, never drawn; Arabic and Kurdish need a native read.
+    Entry{Str::AccessSections, "Sections", "الأقسام", "بەشەکان"},
+    Entry{Str::AccessNotInstalled, "Not installed", "غير مثبّت", "دانەمەزراوە"},
+    Entry{Str::AccessResetField, "Reset {0}", "إعادة تعيين {0}", "گەڕاندنەوەی {0}"},
+    Entry{Str::AccessPasswordHidden, "Hidden", "مخفية", "شاراوەیە"},
 }};
 
 #undef FLO_LRI

@@ -152,6 +152,7 @@ void SettingsWindow::make_port_edits() {
                                                 [this, id](WPARAM key) { return on_edit_key(id, key); });
         SendMessageW(edit->hwnd(), EM_LIMITTEXT, 5, 0);
         edit->set_cue(i == 0 ? "8000" : "8443");
+        set_accessible_name(edit->hwnd(), text(lang_, i == 0 ? Str::PortsHttpLabel : Str::PortsHttpsLabel));
         edit->set_cue_color(palette(dark_).text_subtle);
         port_edits_.push_back(std::move(edit));
     }
@@ -228,7 +229,11 @@ void SettingsWindow::trust_ca_now() {
     bool cancelled = false;
     std::string error;
     // Windows shows its own question here and waits for the answer.
-    if (!floserver::core::trust_ca(*der, cancelled, error)) {
+    ++modal_;
+    const bool trusted = floserver::core::trust_ca(*der, cancelled, error);
+    --modal_;
+    modal_closed();
+    if (!trusted) {
         show_message(cancelled ? std::string(text(lang_, Str::PortsTrustNo))
                                : fill_pattern(text(lang_, Str::PortsTrustFailed), false, {rtl_ ? isolate_ltr(error) : error}),
                      !cancelled);
@@ -250,7 +255,11 @@ void SettingsWindow::remove_ca() {
     }
     bool cancelled = false;
     std::string error;
-    if (!floserver::core::untrust_ca(*der, cancelled, error)) {
+    ++modal_;
+    const bool removed = floserver::core::untrust_ca(*der, cancelled, error);
+    --modal_;
+    modal_closed();
+    if (!removed) {
         show_message(cancelled ? std::string(text(lang_, Str::PortsRemoveNo))
                                : fill_pattern(text(lang_, Str::PortsRemoveFailed), false, {rtl_ ? isolate_ltr(error) : error}),
                      !cancelled);

@@ -66,6 +66,9 @@ struct Canvas::Shapes {
 Canvas::Canvas(HDC dc, int width, bool rtl)
     : dc_(dc), width_(width), rtl_(rtl), shapes_(std::make_unique<Shapes>(dc)) {}
 
+Canvas::Canvas(std::vector<DrawnText>& record, int width, bool rtl)
+    : dc_(nullptr), width_(width), rtl_(rtl), record_(&record) {}
+
 Canvas::~Canvas() {
     unclip_text();
 }
@@ -193,11 +196,17 @@ void Canvas::unclip() {
 
 void Canvas::begin_text() {
     shapes_.reset();  // flushes GDI+ before GDI draws
-    SetBkMode(dc_, TRANSPARENT);
+    if (dc_ != nullptr) {
+        SetBkMode(dc_, TRANSPARENT);
+    }
 }
 
 void Canvas::text(const RECT& r, std::wstring_view s, HFONT font, Rgb color, Align align, bool code) {
     if (s.empty()) {
+        return;
+    }
+    if (record_ != nullptr) {
+        record_->push_back({r, std::wstring(s), font});
         return;
     }
     UINT flags = DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS;
@@ -225,6 +234,10 @@ void Canvas::paragraph(const RECT& r, std::wstring_view s, HFONT font, Rgb color
     if (s.empty()) {
         return;
     }
+    if (record_ != nullptr) {
+        record_->push_back({r, std::wstring(s), font});
+        return;
+    }
     UINT flags = DT_WORDBREAK | DT_NOPREFIX | DT_END_ELLIPSIS | DT_EDITCONTROL | (rtl_ ? DT_RIGHT | DT_RTLREADING : DT_LEFT);
     RECT p = physical(r);
     const win::Selected selected(dc_, font);
@@ -234,6 +247,9 @@ void Canvas::paragraph(const RECT& r, std::wstring_view s, HFONT font, Rgb color
 
 void Canvas::clip_text(const RECT& r) {
     unclip_text();
+    if (dc_ == nullptr) {
+        return;
+    }
     saved_ = SaveDC(dc_);
     const RECT p = physical(r);
     IntersectClipRect(dc_, p.left, p.top, p.right, p.bottom);

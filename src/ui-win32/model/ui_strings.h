@@ -567,6 +567,11 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     AccessStepOf,          // {0}: the step's place, {1}: how many, {2}: its name ("Step 2 of 3, Runtimes")
     AccessStepDone,        // a step already done, after its name
     AccessTemplates,       // New project's cards
+    // Screen readers: Settings
+    AccessSections,        // the Settings sidebar, as a list of tabs
+    AccessNotInstalled,    // a runtime's row that offers a download: "PHP 8.3.29, Not installed, 30 MB"
+    AccessResetField,      // a field's Reset link: "Reset memory_limit"
+    AccessPasswordHidden,  // root's password while it's masked with dots
     Count_,
 };
 

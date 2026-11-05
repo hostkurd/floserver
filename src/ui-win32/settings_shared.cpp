@@ -147,6 +147,7 @@ void SettingsWindow::change_www_folder() {
     const auto picked = pick_folder(hwnd_, std::string(text(lang_, Str::SharedWwwFolder)), shown_www_dir());
     picking_folder_ = false;
     asking_ = false;
+    modal_closed();
     if (quit_after_ask_) {
         PostMessageW(owner_, closed_message_, 1, 0);
         return;
@@ -188,7 +189,7 @@ void SettingsWindow::shared_field_menu(std::size_t index) {
     ClientToScreen(hwnd_, &at);
     UINT flags = TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTBUTTON | TPM_TOPALIGN;
     flags |= rtl_ ? UINT{TPM_RIGHTALIGN | TPM_LAYOUTRTL} : UINT{TPM_LEFTALIGN};
-    const auto command = static_cast<UINT>(TrackPopupMenuEx(menu.get(), flags, at.x, at.y, hwnd_, nullptr));
+    const auto command = track_menu(menu.get(), flags, at);
     if (command < kFirstChoice || command - kFirstChoice >= field.choices.size() || hwnd_ == nullptr) {
         return;
     }

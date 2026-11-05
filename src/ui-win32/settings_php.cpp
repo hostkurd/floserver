@@ -74,6 +74,7 @@ bool SettingsWindow::settle_php_changes(AfterSave then, const std::string& serie
     asking_ = true;
     const SaveChoice choice = ask_to_save(hwnd_, lang_, fill(lang_, Str::PhpAskSave, {php_series_}));
     asking_ = false;
+    modal_closed();
     if (quit_after_ask_) {
         // FloServer quit meanwhile: the owner goes on with it; nothing else here.
         PostMessageW(owner_, closed_message_, 1, 0);
@@ -366,12 +367,15 @@ void SettingsWindow::make_php_edits() {
         edits_.push_back(std::move(edit));
     };
     make(text(lang_, Str::PhpFindExtension));
+    // Screen readers: the placeholder isn't a label.
+    set_accessible_name(edits_.front()->hwnd(), text(lang_, Str::PhpFindExtension));
     edits_.front()->set_text(php_query_);
     field_edit_.clear();
     for (const PhpIniField& field : settings_php_ini_fields()) {
         if (field.choices.empty()) {
             field_edit_.push_back(static_cast<int>(edits_.size()));
             make(text(lang_, Str::PhpDefaultCue));
+            set_accessible_name(edits_.back()->hwnd(), field.key);  // the label drawn over it
         } else {
             field_edit_.push_back(-1);
         }
@@ -540,6 +544,11 @@ bool SettingsWindow::on_edit_key(int id, WPARAM key) {
             use_custom_ports();  // Enter in a port box: Use these ports
         }
         return true;  // the value is kept as it's typed; Save sends it
+    }
+    if (key == VK_TAB && ctrl_only()) {
+        // Ctrl+Tab: the next section, after this message (the box goes with this one).
+        PostMessageW(hwnd_, kSectionMessage, (GetKeyState(VK_SHIFT) & 0x8000) != 0 ? 1 : 0, 0);
+        return true;
     }
     // Tab: on through the page as the window's own keys go.
     const std::vector<Hit> order = focus_order();
@@ -976,7 +985,7 @@ void SettingsWindow::php_version_menu() {
     ClientToScreen(hwnd_, &at);
     UINT flags = TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTBUTTON | TPM_TOPALIGN;
     flags |= rtl_ ? UINT{TPM_RIGHTALIGN | TPM_LAYOUTRTL} : UINT{TPM_LEFTALIGN};
-    const auto command = static_cast<UINT>(TrackPopupMenuEx(menu.get(), flags, at.x, at.y, hwnd_, nullptr));
+    const auto command = track_menu(menu.get(), flags, at);
     if (command < kFirstChoice || command - kFirstChoice >= versions.size() || hwnd_ == nullptr) {
         return;
     }
@@ -1012,7 +1021,7 @@ void SettingsWindow::php_field_menu(int index) {
     ClientToScreen(hwnd_, &at);
     UINT flags = TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTBUTTON | TPM_TOPALIGN;
     flags |= rtl_ ? UINT{TPM_RIGHTALIGN | TPM_LAYOUTRTL} : UINT{TPM_LEFTALIGN};
-    const auto command = static_cast<UINT>(TrackPopupMenuEx(menu.get(), flags, at.x, at.y, hwnd_, nullptr));
+    const auto command = track_menu(menu.get(), flags, at);
     if (command < kFirstChoice || command - kFirstChoice >= choices.size() || hwnd_ == nullptr || !php_) {
         return;
     }

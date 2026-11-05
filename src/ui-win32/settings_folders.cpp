@@ -169,6 +169,7 @@ void SettingsWindow::change_projects_folder() {
     const auto picked = pick_folder(hwnd_, std::string(text(lang_, Str::FoldersPickProjects)), start);
     picking_folder_ = false;
     asking_ = false;
+    modal_closed();
     if (quit_after_ask_) {
         PostMessageW(owner_, closed_message_, 1, 0);
         return;

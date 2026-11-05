@@ -42,7 +42,12 @@
 // network); what's installed then comes from the main window's 2 s
 // snapshot, and the full list is asked again only after a change is done or
 // "Check for updates".
+//
+// Screen readers see it through AccessSource (settings_window_access.cpp,
+// approved 5 Nov): the sidebar as a list of tabs, the section's page with
+// its cards, texts and controls, and the toast.
 
+#include "access_provider.h"
 #include "canvas.h"
 #include "form_parts.h"
 #include "model/apache_page.h"
@@ -53,6 +58,7 @@
 #include "model/php_page.h"
 #include "model/ports_page.h"
 #include "model/runtimes_page.h"
+#include "model/settings_access.h"
 #include "model/toast.h"
 #include "model/ui_strings.h"
 #include "scroll_bar.h"
@@ -82,7 +88,7 @@ namespace floserver::ui {
 // CodeEditor: the choice is read from prefs() (a program's path doesn't fit an lparam).
 enum class PrefChange : std::uint8_t { Language, Theme, Close, StartInTray, CodeEditor };
 
-class SettingsWindow {
+class SettingsWindow : public AccessSource {
 public:
     // `closed_message` is posted to `owner` once the window is gone (wparam 0),
     // or with wparam 1 when the owner asked to quit while Settings was asking
@@ -92,7 +98,7 @@ public:
     // General is posted to `owner` as `prefs_message` (see PrefChange).
     SettingsWindow(HINSTANCE instance, Lang lang, const WindowPrefs& prefs, ServiceWorker& worker, HWND owner,
                    UINT closed_message, UINT prefs_message);
-    ~SettingsWindow();
+    ~SettingsWindow() override;
     SettingsWindow(const SettingsWindow&) = delete;
     SettingsWindow& operator=(const SettingsWindow&) = delete;
     SettingsWindow(SettingsWindow&&) = delete;
@@ -706,6 +712,34 @@ private:
     void check_editor_program();
     [[nodiscard]] static bool is_general_part(Part part) { return part >= Part::GeneralLang; }
 
+    // --- screen readers (settings_window_access.cpp, approved 5 Nov) ---
+    [[nodiscard]] const AccessTree& access_tree() override;
+    void access_request(const std::string& id, AccessAction action) override;
+    void access_scroll_to(const std::string& id, double percent) override;
+    [[nodiscard]] AccessTree build_access_tree();
+    [[nodiscard]] std::string access_id(const Hit& hit) const;
+    [[nodiscard]] std::string access_focus_id() const;
+    // A focus stop's role, state and (when the page doesn't draw it inside) name.
+    [[nodiscard]] AccessNode access_node(const Hit& hit) const;
+    // The parts that hold others: the section's cards, Runtimes' rows.
+    void access_parts(std::vector<PageItem>& items) const;
+    // The words the page draws, as its text pass draws them (nothing is drawn).
+    [[nodiscard]] std::vector<PageText> access_texts() const;
+    void access_after_paint();
+    void run_access_requests();
+    void run_access(const AccessNode& node, AccessAction action, double percent);
+    // Ctrl+Tab / Ctrl+Shift+Tab: the next or the previous section.
+    void step_section(bool back);
+    [[nodiscard]] static bool ctrl_only();
+    // A menu (a picker's) as TrackPopupMenuEx shows it; modal_ is up meanwhile.
+    UINT track_menu(HMENU menu, UINT flags, POINT at);
+    // After a layout: the keys stay on the control they were on, found by
+    // its id (a list that grew or a button that went doesn't move them).
+    void keep_focus();
+    [[nodiscard]] std::vector<std::string> focus_ids() const;
+    // A menu or question has closed: the requests that waited for it are posted.
+    void modal_closed();
+
     HINSTANCE instance_;
     Lang lang_;
     bool rtl_;
@@ -848,6 +882,34 @@ private:
     int focus_ = -1;  // index into focus_order()
     bool show_focus_ = false;
     bool tracking_mouse_ = false;
+
+    // Screen readers: the tree as the window is now (made again when asked
+    // after any message), the one last told (only while a screen reader
+    // listens), each element's whole rectangle (for scrolling one into
+    // view), and the requests waiting for kAccessMessage.
+    static constexpr UINT kAccessMessage = WM_APP + 31;
+    static constexpr UINT kSectionMessage = WM_APP + 32;  // Ctrl+Tab in a box: wparam 1 goes back
+    struct AccessJob {
+        std::string id;
+        AccessAction action = AccessAction::Invoke;
+        double percent = -1;  // access_scroll_to()'s; below 0 for the others
+    };
+    AccessRoot access_;
+    AccessTree access_now_;
+    bool access_dirty_ = true;
+    std::optional<AccessTree> access_said_;
+    std::map<std::string, AccessRect, std::less<>> access_rects_;
+    std::vector<AccessJob> access_queue_;
+    bool access_running_ = false;  // a request is being run (it may have a menu or a question open)
+    bool access_asked_ = false;    // a UI Automation client has asked this window for its elements
+    bool access_deferred_ = false; // requests wait for a menu or question opened otherwise to close
+    int modal_ = 0;                // a menu or Windows' own question is open (asking_ covers ours)
+    // The focus stops as the last layout left them (their section and ids:
+    // focus_ indexes them until the next layout), and a stop that went (a
+    // Download that became "Starting…") to go back to when it's there again.
+    Section focus_section_ = Section::General;
+    std::vector<std::string> focus_ids_;
+    LostFocus lost_focus_;
 };
 
 }  // namespace floserver::ui
