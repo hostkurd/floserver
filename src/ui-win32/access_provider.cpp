@@ -8,6 +8,7 @@
 #include <uiautomation.h>
 
 #include <atomic>
+#include <cstdint>
 #include <map>
 #include <utility>
 
@@ -25,6 +26,7 @@ namespace {
 
 constexpr LONG kUiaRootObjectId = -25;
 constexpr int kAppendRuntimeId = 3;  // UiaAppendRuntimeId
+constexpr int kHwndRuntimeIdBase = 42;  // UiaHwndRuntimeIdBase: an HWND element's id is {42, hwnd}
 constexpr HRESULT kNotAvailable = static_cast<HRESULT>(0x80040201UL);     // UIA_E_ELEMENTNOTAVAILABLE
 constexpr HRESULT kNotEnabled = static_cast<HRESULT>(0x80040200UL);       // UIA_E_ELEMENTNOTENABLED
 constexpr HRESULT kInvalidOperation = static_cast<HRESULT>(0x80131509UL);  // UIA_E_INVALIDOPERATION
@@ -167,7 +169,7 @@ struct AccessBridge {
     // Only on the window's thread (UI Automation calls arrive there through
     // COM), and never once the window is gone.
     [[nodiscard]] bool live() const {
-        return source != nullptr && hwnd != nullptr && GetCurrentThreadId() == thread;
+        return GetCurrentThreadId() == thread && source != nullptr && hwnd != nullptr;
     }
     [[nodiscard]] const AccessTree* tree() const { return live() ? &source->access_tree() : nullptr; }
     int runtime_id(const std::string& id) {
@@ -176,6 +178,14 @@ struct AccessBridge {
             ++next_runtime_id;
         }
         return it->second;
+    }
+    // The ids of elements gone from `tree` are forgotten once there are many
+    // of them (one that comes back gets a new number, as a new element would).
+    void prune(const AccessTree& tree) {
+        if (runtime_ids.size() <= tree.nodes().size() + 256) {
+            return;
+        }
+        std::erase_if(runtime_ids, [&](const auto& entry) { return tree.find(entry.first) < 0; });
     }
 };
 
@@ -854,15 +864,19 @@ bool AccessRoot::on_get_object(WPARAM wparam, LPARAM lparam, LRESULT& result) {
 bool AccessRoot::listening() { return uia().listening != nullptr && uia().listening() != FALSE; }
 
 void AccessRoot::raise(const std::vector<AccessChange>& changes) {
-    if (!bridge_ || !bridge_->live() || root_ == nullptr || changes.empty()) {
+    if (!bridge_ || !bridge_->live() || root_ == nullptr) {
         return;
     }
     const UiaApi& api = uia();
     const AccessTree& tree = bridge_->source->access_tree();
+    bridge_->prune(tree);
     for (const AccessChange& change : changes) {
         if (change.id.empty()) {
             if (change.kind == AccessChangeKind::Children && api.raise_structure != nullptr) {
-                api.raise_structure(root_, StructureChangeType_ChildrenInvalidated, nullptr, 0);
+                // The window's own element: its id is the HWND's (the root fragment answers none).
+                int ids[2] = {kHwndRuntimeIdBase,
+                              static_cast<int>(reinterpret_cast<std::intptr_t>(bridge_->hwnd))};
+                api.raise_structure(root_, StructureChangeType_ChildrenInvalidated, ids, 2);
             }
             continue;  // the focus on the window itself is Windows' to say
         }

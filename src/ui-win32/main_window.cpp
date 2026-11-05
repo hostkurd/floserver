@@ -37,6 +37,9 @@ constexpr UINT kMenuQuit = 2;
 
 std::wstring w(std::string_view s) { return win::widen(s); }
 
+// Ctrl without Alt: AltGr is Ctrl+Alt, and AltGr+N types a letter (Polish ń).
+bool ctrl_only() { return (GetKeyState(VK_CONTROL) & 0x8000) != 0 && (GetKeyState(VK_MENU) & 0x8000) == 0; }
+
 }  // namespace
 
 MainWindow::MainWindow(HINSTANCE instance, Lang lang, const WindowPrefs& prefs, std::wstring class_name)
@@ -1460,12 +1463,12 @@ void MainWindow::on_key(WPARAM key) {
         return;
     }
     // Ctrl+, opens Settings from anywhere in the window.
-    if (key == VK_OEM_COMMA && (GetKeyState(VK_CONTROL) & 0x8000) != 0) {
+    if (key == VK_OEM_COMMA && ctrl_only()) {
         open_settings();
         return;
     }
     // Ctrl+N: New project, the top bar's button (it isn't a Tab stop).
-    if (key == 'N' && (GetKeyState(VK_CONTROL) & 0x8000) != 0) {
+    if (key == 'N' && ctrl_only()) {
         if (!first_run_open() && !wizard_open()) {
             open_wizard();
         }
@@ -1574,13 +1577,18 @@ LRESULT CALLBACK MainWindow::search_proc(HWND hwnd, UINT msg, WPARAM wparam, LPA
     auto* self = win::int_to_ptr<MainWindow*>(self_ptr);
     switch (msg) {
         case WM_KEYDOWN:
-            if (wparam == VK_OEM_COMMA && (GetKeyState(VK_CONTROL) & 0x8000) != 0) {
+            if (wparam == VK_OEM_COMMA && ctrl_only()) {
                 self->open_settings();  // Ctrl+, works with the search box focused too
                 return 0;
             }
-            if (wparam == 'N' && (GetKeyState(VK_CONTROL) & 0x8000) != 0) {
-                SetFocus(self->hwnd_);
-                self->on_key(wparam);  // Ctrl+N too
+            if (wparam == 'N' && ctrl_only()) {
+                // Ctrl+N too; the keys leave the box only when the page opens.
+                if (!self->first_run_open() && !self->wizard_open()) {
+                    self->open_wizard();
+                    if (self->wizard_open()) {
+                        SetFocus(self->hwnd_);
+                    }
+                }
                 return 0;
             }
             if (wparam == VK_ESCAPE) {

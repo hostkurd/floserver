@@ -16,6 +16,7 @@
 #include "floserver/core/project_config.h"
 
 #include <algorithm>
+#include <map>
 #include <utility>
 
 namespace floserver::ui {
@@ -256,7 +257,8 @@ void MainWindow::add_list_access(AccessTree& t) const {
         const int index = static_cast<int>(i);
         RowAccessState s;
         s.on = switch_value(row);
-        s.selected = (row.name == selected_ && panel_open()) || row.name == highlighted_;
+        // One at most: the panel's row, else a right-click's highlight.
+        s.selected = panel_open() ? row.name == selected_ : row.name == highlighted_;
         s.can_change = snap_.link == Link::Connected && !leaving(row.name);
         s.end = g.end == RowGeometry::End::Download   ? RowEndKind::Download
                 : g.end == RowGeometry::End::Progress ? RowEndKind::Progress
@@ -496,8 +498,12 @@ void MainWindow::add_panel_access(AccessTree& t) const {
         const std::vector<std::string> lines =
             log_access_lines(ours ? snap_.panel.log : none, static_cast<std::size_t>(fit), ours, lang_);
         int y = inner.top;
+        // Known by their words (and which of the same words), not their place: a new
+        // request moves every line up, and only the new one is new.
+        std::map<std::string, int> seen;
         for (std::size_t i = 0; i < lines.size(); ++i) {
-            AccessNode line = text_node(base + "log/" + std::to_string(i), lines[i]);
+            const int copy = seen[lines[i]]++;
+            AccessNode line = text_node(base + "log/" + lines[i] + "#" + std::to_string(copy), lines[i]);
             line.bounds = clip_rect(ar(RECT{inner.left, y, inner.right, y + px(kLogLineH)}), clip);
             t.add(log_index, std::move(line));
             y += px(kLogLineH);
@@ -613,7 +619,8 @@ const AccessTree& MainWindow::access_tree() {
 void MainWindow::access_request(const std::string& id, AccessAction action) {
     const bool first = access_queue_.empty();
     access_queue_.emplace_back(id, action);
-    if (first && hwnd_ != nullptr) {
+    // While one runs (a menu it opened is still open), the next waits for it.
+    if (first && !access_running_ && hwnd_ != nullptr) {
         PostMessageW(hwnd_, kAccessMessage, 0, 0);
     }
 }
@@ -632,11 +639,18 @@ void MainWindow::access_after_paint() {
 }
 
 void MainWindow::run_access_requests() {
-    std::vector<std::pair<std::string, AccessAction>> asked;
-    asked.swap(access_queue_);
-    for (const auto& [id, action] : asked) {
+    // Never inside another: a picker's menu runs messages, and a second menu
+    // or Remove's question must not open over it.
+    if (access_running_) {
+        return;
+    }
+    access_running_ = true;
+    while (!access_queue_.empty()) {
+        const auto [id, action] = access_queue_.front();
+        access_queue_.erase(access_queue_.begin());
         if (hwnd_ == nullptr || quitting_) {
-            return;
+            access_queue_.clear();
+            break;
         }
         // Found again in the window as it is now: it may have gone meanwhile.
         access_dirty_ = true;
@@ -649,6 +663,7 @@ void MainWindow::run_access_requests() {
         const AccessNode node = *n;
         run_access(node, action);
     }
+    access_running_ = false;
 }
 
 void MainWindow::run_access(const AccessNode& n, AccessAction action) {

@@ -798,6 +798,7 @@ private:
     bool access_dirty_ = true;
     std::optional<AccessTree> access_said_;
     std::vector<std::pair<std::string, AccessAction>> access_queue_;
+    bool access_running_ = false;  // a request is being run (it may have a menu open)
 };
 
 }  // namespace floserver::ui
