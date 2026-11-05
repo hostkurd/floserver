@@ -375,6 +375,61 @@ jobs:
             build/bin/Release/*.exe
             build/bin/Release/vcruntime/*.dll
           retention-days: 14
+      # The installer (D21): WiX 5, pinned (WiX 6+ asks companies that earn
+      # money with it for a fee). Built from the Release programs above.
+      - name: Build the installer (MSI)
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 5.0.2 | Out-Null
+          wix extension add --global WixToolset.UI.wixext/5.0.2 | Out-Null
+          $version = (Select-String -Path CMakeLists.txt -Pattern 'VERSION (\d+\.\d+\.\d+)' | Select-Object -First 1).Matches[0].Groups[1].Value
+          $msi = "FloServer-$version-x64.msi"
+          wix build installer/FloServer.wxs -ext WixToolset.UI.wixext -arch x64 `
+            -d Version=$version -d BinDir=build/bin/Release `
+            -sice ICE38 -sice ICE64 -sice ICE91 -o $msi 2>&1 | Tee-Object -FilePath wix.log
+          if ($LASTEXITCODE -ne 0) {
+            Get-Content wix.log | Select-String 'error|warning' | Select-Object -First 20 |
+              ForEach-Object { "::error title=WiX::$($_.Line.Trim())" }
+            exit 1
+          }
+          $bytes = (Get-Item $msi).Length
+          "{0}: {1:N0} bytes ({2:N1} MB)" -f $msi, $bytes, ($bytes / 1MB)
+          # D15: above 15 MB is an alarm to look at, not a failed PR.
+          if ($bytes -gt 15MB) { "::warning title=Installer size::$msi is {0:N1} MB, above the 15 MB alarm (D15)" -f ($bytes / 1MB) }
+          "MSI=$msi" | Out-File -FilePath $env:GITHUB_ENV -Append
+      # Install it as an ordinary user would (per user, no admin), check what
+      # it put where, uninstall it, and check it all went.
+      - name: Install and uninstall the MSI
+        shell: pwsh
+        run: |
+          function Fail($what) { "::error title=MSI::$what"; exit 1 }
+          $dir = Join-Path $env:LOCALAPPDATA 'Programs\FloServer'
+          $proc = Start-Process msiexec -ArgumentList '/i', $env:MSI, '/qn', '/l*v', 'install.log' -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { Get-Content install.log -Tail 40; Fail "install exited with $($proc.ExitCode)" }
+          foreach ($f in 'FloServer.exe', 'floserverd.exe', 'floserver.exe', 'flo.exe', 'floserver-shim.exe', 'vcruntime140.dll', 'vcruntime\vcruntime140.dll') {
+            if (-not (Test-Path (Join-Path $dir $f))) { Fail "$f isn't in $dir" }
+          }
+          if (Test-Path (Join-Path $dir 'floserver-publisher.exe')) { Fail "the Publisher (HostKurd's tool) was installed" }
+          $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+          if (($userPath -split ';') -notcontains $dir -and ($userPath -split ';') -notcontains "$dir\") { Fail "$dir isn't on the user's Path: $userPath" }
+          $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'FloServer.lnk'
+          if (-not (Test-Path $shortcut)) { Fail "no Start menu shortcut at $shortcut" }
+          $version = (& (Join-Path $dir 'flo.exe') version 2>&1 | Out-String).Trim()
+          "installed: $version"
+          if (-not $version) { Fail "flo version printed nothing" }
+          $proc = Start-Process msiexec -ArgumentList '/x', $env:MSI, '/qn', '/l*v', 'uninstall.log' -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { Get-Content uninstall.log -Tail 40; Fail "uninstall exited with $($proc.ExitCode)" }
+          if (Test-Path $dir) { Fail "$dir is still there after uninstalling: $((Get-ChildItem $dir -Recurse).FullName -join ', ')" }
+          $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+          if ((($userPath -split ';') -contains $dir) -or (($userPath -split ';') -contains "$dir\")) { Fail "$dir is still on the user's Path" }
+          if (Test-Path $shortcut) { Fail "the Start menu shortcut is still there" }
+          "::notice title=MSI::$env:MSI installed per user without admin, ran flo, and uninstalled cleanly"
+      - name: Upload the installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: FloServer-installer-${{ github.sha }}
+          path: FloServer-*-x64.msi
+          retention-days: 14
 
   linux-sanitizers:
     name: Linux (clang, ASan + UBSan)
