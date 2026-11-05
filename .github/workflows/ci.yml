@@ -387,10 +387,17 @@ jobs:
           $version = [regex]::Match((Get-Content CMakeLists.txt -Raw), 'project\(FloServer\s+VERSION\s+(\d+\.\d+\.\d+)').Groups[1].Value
           if (-not $version) { "::error title=MSI::no version in CMakeLists.txt's project()"; exit 1 }
           $msi = "FloServer-$version-x64.msi"
-          # A full path: WiX reads relative ones from the .wxs file's folder.
-          $bin = (Resolve-Path build/bin/Release).Path
+          # What ships, laid out as installed (see installer/FloServer.wxs).
+          $stage = Join-Path $env:RUNNER_TEMP 'msi-stage'
+          New-Item -ItemType Directory -Force -Path (Join-Path $stage 'vcruntime') | Out-Null
+          foreach ($f in 'FloServer.exe', 'floserverd.exe', 'flo.exe', 'floserver-shim.exe') {
+            Copy-Item (Join-Path 'build/bin/Release' $f) $stage
+          }
+          Copy-Item build/bin/Release/vcruntime/*.dll $stage
+          Copy-Item build/bin/Release/vcruntime/*.dll (Join-Path $stage 'vcruntime')
+          Get-ChildItem $stage -Recurse -File | ForEach-Object { "  {0,-40} {1,10:N0} bytes" -f $_.FullName.Substring($stage.Length + 1), $_.Length }
           wix build installer/FloServer.wxs -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext -arch x64 `
-            -d Version=$version -d BinDir=$bin -o $msi 2>&1 | Tee-Object -FilePath wix.log
+            -d Version=$version -d StageDir=$stage -o $msi 2>&1 | Tee-Object -FilePath wix.log
           if ($LASTEXITCODE -ne 0) {
             Get-Content wix.log | Select-String 'error|warning' | Select-Object -First 20 |
               ForEach-Object { "::error title=WiX::$($_.Line.Trim())" }
