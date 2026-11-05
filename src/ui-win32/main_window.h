@@ -81,6 +81,7 @@ private:
         // The New project page; `row` is the card's or field's index.
         WizCard,
         WizField,
+        WizName,  // the name box (a real EDIT): a stop in the page's keyboard order
         WizBrowse,
         WizAddFolder,
         WizCancel,
@@ -210,6 +211,7 @@ private:
     struct WizardGeometry {
         RECT area{};
         RECT steps{};
+        std::vector<RECT> step_rects;  // each step's words in the strip
         RECT title{};
         RECT footer{};
         RECT next{};
@@ -241,6 +243,9 @@ private:
         // Kept from the card at step 0 -> 1: the card list may change later.
         std::string template_id;
         bool studio = false;
+        // Where the keys are on the page (wizard_focus_order()); Part::None:
+        // the step's first stop (wizard_focus()).
+        Hit focus;
     };
     // The Shared sites row's pieces, from the last paint; empty when it isn't shown.
     struct SharedGeometry {
@@ -288,12 +293,17 @@ private:
         std::string folder_ask;  // the folders.set on its way (its purpose)
         std::string folder_picked;
         int scroll = 0;
-        int focus = -1;  // index into first_run_focus_order(); -1: none
+        // The stop the keys are on (one of first_run_focus_order()), kept by
+        // what it is, not its place: the stops come and go as the page changes.
+        // Part::None: none. `focus_order` is the list it was last seen in.
+        Hit focus;
+        std::vector<Hit> focus_order;
     };
     // Its pieces, from the last paint.
     struct FirstRunGeometry {
         RECT area{};
         RECT steps{};
+        std::vector<RECT> step_rects;  // each step's words in the strip (as many as fit)
         RECT content{};  // the part that scrolls, between the steps and the footer
         int content_h = 0;
         RECT title{};
@@ -550,6 +560,17 @@ private:
     void wizard_field_menu(std::size_t index);
     void on_wizard_click(const Hit& hit);
     void on_wizard_key(WPARAM key);
+    // The page's keyboard stops, in reading order: the cards (one stop, the
+    // arrows choose), the name box, Browse, the pickers, the footer's buttons.
+    [[nodiscard]] std::vector<Hit> wizard_focus_order() const;
+    // The stop the keys are on now: wizard_.focus, or the step's first.
+    [[nodiscard]] Hit wizard_focus() const;
+    // The keys to `hit` (the name box takes the real focus); `keyboard`: its frame shows.
+    void wizard_focus_to(const Hit& hit, bool keyboard);
+    // Tab (`back`: Shift+Tab) from where the keys are.
+    void wizard_tab(bool back);
+    // The name box's help for screen readers: its address or its rule.
+    void sync_name_help();
     void paint_wizard(Canvas& c, HDC dc, bool text_pass) const;
 
     // --- the first-run page (main_window_first_run.cpp) ---
@@ -578,6 +599,15 @@ private:
     [[nodiscard]] std::vector<Hit> first_run_focus_order() const;
     [[nodiscard]] RECT first_run_rect_of(const Hit& hit) const;
     void first_run_scroll_to(int target);
+    // The keys to stop `index` of first_run_focus_order(), scrolled into view.
+    void first_run_focus_at(int index);
+    // Where first_run_.focus is in first_run_focus_order(); -1: none, or gone.
+    [[nodiscard]] int first_run_focus_index() const;
+    // After each layout: a stop that went (a download's Cancel when it
+    // finished) hands the keys to the next one still there, or the one before.
+    void first_run_sync_focus();
+    // The footer's words: the privacy line, the total to download, what comes next.
+    [[nodiscard]] std::string first_run_footer_words() const;
     void on_first_run_click(const Hit& hit);
     void on_first_run_key(WPARAM key);
     void paint_first_run(Canvas& c, HDC dc, bool text_pass) const;
@@ -641,7 +671,9 @@ private:
     void add_shared_access(AccessTree& t) const;
     void add_panel_access(AccessTree& t) const;
     void add_php_access(AccessTree& t, int content, const AccessRect& clip) const;
-    // The element id of a part ("row/my-shop/switch"); empty for parts not described yet.
+    void add_wizard_access(AccessTree& t) const;
+    void add_first_run_access(AccessTree& t) const;
+    // The element id of a part ("row/my-shop/switch"); empty for the name box (a real EDIT).
     [[nodiscard]] std::string access_id(const Hit& hit) const;
     [[nodiscard]] std::string access_focus_id() const;
     // After each paint, while a screen reader listens: what changed is told.
@@ -705,6 +737,7 @@ private:
     FirstRunState first_run_;
     mutable FirstRunGeometry first_run_geometry_;
     HWND name_edit_ = nullptr;  // the New project name box
+    std::string name_help_;     // what screen readers were told is its help
 
     std::string selected_;  // the project whose panel is open
     std::string pending_added_;  // a folder just added; its panel opens once its row is listed
@@ -799,6 +832,9 @@ private:
     std::optional<AccessTree> access_said_;
     std::vector<std::pair<std::string, AccessAction>> access_queue_;
     bool access_running_ = false;  // a request is being run (it may have a menu open)
+    // A page was just opened (not a window made again in another language):
+    // its step is said even when it's the first thing a screen reader is told.
+    bool access_page_opened_ = false;
 };
 
 }  // namespace floserver::ui

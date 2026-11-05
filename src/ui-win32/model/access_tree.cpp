@@ -123,6 +123,22 @@ std::vector<AccessChange> access_changes(const AccessTree& before, const AccessT
     return out;
 }
 
+std::vector<AccessNews> access_news(const AccessTree& before, const AccessTree& after) {
+    std::vector<AccessNews> out;
+    for (const AccessNews& now : after.news) {
+        if (now.text.empty()) {
+            continue;
+        }
+        const bool known = std::any_of(before.news.begin(), before.news.end(), [&](const AccessNews& then) {
+            return then.key == now.key && then.text == now.text;
+        });
+        if (!known) {
+            out.push_back(now);
+        }
+    }
+    return out;
+}
+
 std::string access_text(std::string_view text) {
     std::string out;
     out.reserve(text.size());

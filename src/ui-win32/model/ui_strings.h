@@ -562,6 +562,11 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     AccessSharedSettings,  // the Shared sites row's gear
     AccessMessage,         // a toast
     AccessCloseMessage,    // its close mark
+    // Screen readers: New project and first run
+    AccessSteps,           // a page's step strip
+    AccessStepOf,          // {0}: the step's place, {1}: how many, {2}: its name ("Step 2 of 3, Runtimes")
+    AccessStepDone,        // a step already done, after its name
+    AccessTemplates,       // New project's cards
     Count_,
 };
 

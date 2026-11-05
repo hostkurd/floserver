@@ -66,7 +66,9 @@ public:
     // The events for `changes` (access_changes()), from the window's tree as it is now.
     void raise(const std::vector<AccessChange>& changes);
     // Said without moving the focus (a toast): `important` for errors.
-    void notify(std::string_view text, bool important);
+    // `activity` tells one kind of message from another ("step", "trust"):
+    // a newer one of the same kind replaces an older one still waiting.
+    void notify(std::string_view text, bool important, std::string_view activity = {});
 
 private:
     std::shared_ptr<AccessBridge> bridge_;
@@ -76,5 +78,7 @@ private:
 // A real child control's name for screen readers (an EDIT whose label the
 // window draws): "Search projects". Windows keeps it with the control.
 void set_accessible_name(HWND control, std::string_view name);
+// Its help, said after its name and value (the rule under New project's name box).
+void set_accessible_help(HWND control, std::string_view help);
 
 }  // namespace floserver::ui

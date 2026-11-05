@@ -36,6 +36,9 @@ enum class AccessRole : std::uint8_t {
     TabItem,
     ComboBox,   // a picker: its value, a menu of choices
     Edit,       // a box to type in, drawn by the window (real EDIT controls describe themselves)
+    CheckBox,   // ticked or not (`toggled`)
+    Radio,      // one of a group (`selected`)
+    Progress,   // how far a download got (`progress`)
 };
 
 // What a screen reader can ask an element to do.
@@ -90,6 +93,8 @@ struct AccessNode {
     bool selection_required = false;   // a container whose items are selected: one always is (tabs)
     int position = 0;                  // 1-based place among its kind ("2 of 5"); 0: not said
     int set_size = 0;
+    int heading = 0;                   // a page's title: 1; 0: not a heading
+    std::optional<double> progress;    // a progress bar: done, 0 to 1 (unknown: none)
     AccessTarget target;
     // Filled by AccessTree::finish(): indexes into the tree's nodes, -1 for none.
     int parent = -1;
@@ -97,6 +102,17 @@ struct AccessNode {
     int last_child = -1;
     int next = -1;
     int prev = -1;
+};
+
+// Something said once, without moving the focus, when it's new: a page's
+// step, "Downloads finished", "my-shop is ready". A window puts what's true
+// now in its tree (AccessTree::news); what wasn't there before, or reads
+// otherwise now, is said.
+struct AccessNews {
+    std::string key;   // what it's about ("step", "trust", "row/php")
+    std::string text;
+    bool important = false;  // an error: said before what's queued
+    bool operator==(const AccessNews&) const = default;
 };
 
 class AccessTree {
@@ -120,6 +136,8 @@ public:
 
     // The element the window's keyboard focus is on; empty: the window itself.
     std::string focus;
+    // What's worth saying once (access_news()).
+    std::vector<AccessNews> news;
 
 private:
     std::vector<AccessNode> nodes_;
@@ -147,6 +165,9 @@ struct AccessChange {
 };
 
 [[nodiscard]] std::vector<AccessChange> access_changes(const AccessTree& before, const AccessTree& after);
+
+// The news in `after` that `before` didn't have (by key and words), in order.
+[[nodiscard]] std::vector<AccessNews> access_news(const AccessTree& before, const AccessTree& after);
 
 // Text as it's said: without the direction marks put around code words for
 // drawing (fill() and isolate_ltr() add them in Arabic and Kurdish).

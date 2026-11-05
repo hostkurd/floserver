@@ -1074,6 +1074,11 @@ constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
           "ڕێکخستنەکانی ماڵپەڕە هاوبەشەکان"},
     Entry{Str::AccessMessage, "Message", "رسالة", "پەیام"},
     Entry{Str::AccessCloseMessage, "Close message", "إغلاق الرسالة", "داخستنی پەیام"},
+    // Screen readers: New project and first run
+    Entry{Str::AccessSteps, "Steps", "الخطوات", "هەنگاوەکان"},
+    Entry{Str::AccessStepOf, "Step {0} of {1}, {2}", "الخطوة {0} من {1}، {2}", "هەنگاوی {0} لە {1}، {2}"},
+    Entry{Str::AccessStepDone, "done", "تمّت", "تەواو بوو"},
+    Entry{Str::AccessTemplates, "Templates", "القوالب", "قاڵبەکان"},
 }};
 
 #undef FLO_LRI
