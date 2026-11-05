@@ -109,7 +109,8 @@ private:
 // `mirrored`: drawn flipped, for a right-to-left menu, which flips it back.
 [[nodiscard]] HBITMAP make_glyph_bitmap(Glyph g, int size, Rgb color, bool mirrored);
 
-// The FloServer mark (the mockup's title-bar logo) as an icon `size` pixels square.
+// FloServer's icon (FloServer.ico, built into the exe) at `size` pixels
+// square, for the title bar, the taskbar and the tray. Null if it can't load.
 [[nodiscard]] HICON make_app_icon(int size);
 
 }  // namespace floserver::ui
