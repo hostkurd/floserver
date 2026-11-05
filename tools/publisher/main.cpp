@@ -1227,7 +1227,7 @@ void Publisher::publish() {
     if (signed_sequence_ > live_->sequence) {
         MessageBoxW(hwnd_,
                     (L"Sequence " + std::to_wstring(signed_sequence_) +
-                     L" was already made in this window. Upload it and invalidate, then press Check live; it "
+                     L" was already made in this window. Upload it to the R2 bucket, then press Check live; it "
                      L"must show that sequence before the next one is made.\n\nIf you won't upload it, delete "
                      L"its folder in Documents\\FloServer Publisher and open the Publisher again.")
                         .c_str(),

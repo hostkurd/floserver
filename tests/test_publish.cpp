@@ -188,6 +188,10 @@ TEST_CASE("publisher: a new file that differs, or has no official checksum") {
     // Not uploaded (R2 answers 404; a private bucket would answer 403).
     PublishFile missing;
     missing.path = "node/24.24.0/node-v24.24.0-win-x64.zip";
+    cdn.http.serve(kTestCdn + "/" + missing.path, {404, ""});
+    check_file(ctx, missing);
+    CHECK(missing.state == CheckState::Failed);
+    CHECK(missing.detail.find("HTTP 404") != std::string::npos);
     cdn.http.serve(kTestCdn + "/" + missing.path, {403, ""});
     check_file(ctx, missing);
     CHECK(missing.state == CheckState::Failed);

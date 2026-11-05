@@ -46,7 +46,7 @@ $files = @(
     @{ Path = "wordpress/7.1.4/wordpress-7.1.4.zip";            Orig = "https://wordpress.org/wordpress-7.1.4.zip" },
     @{ Path = "wordpress/7.0.8/wordpress-7.0.8.zip";            Orig = "https://wordpress.org/wordpress-7.0.8.zip" },
     @{ Path = "apache/2.4.69/httpd-2.4.69-261002-Win64-VS18.zip"; Orig = "https://www.apachelounge.com/download/VS18/binaries/httpd-2.4.69-261002-Win64-VS18.zip" },
-    # python-build-standalone names its files with "+"; on the CDN it is "-" (S3 may read "+" in a URL as a space).
+    # python-build-standalone names its files with "+"; on the CDN it is "-" (S3-style storage such as R2 may read "+" in a URL as a space).
     # Name = the file name in the official checksum list.
     @{ Path = "python/3.13.18/cpython-3.13.18-20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz";
        Name = "cpython-3.13.18+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz";
@@ -151,10 +151,14 @@ try {
     $r = Invoke-WebRequest -Uri "$Cdn/manifest.json" -UseBasicParsing -Method Head -TimeoutSec 60
     $status = $r.Headers["CF-Cache-Status"]
     if ($status -is [array]) { $status = $status[0] }
-    if ($status -eq "HIT" -or $status -eq "STALE" -or $status -eq "REVALIDATED" -or $status -eq "UPDATING") {
-        $cache = "FAIL: manifest.json came from the cache ($status); add the Cloudflare cache rule that bypasses manifest.json*"
-    } else {
+    # Only DYNAMIC or BYPASS mean "never cached". MISS or EXPIRED mean it is
+    # cacheable and the next request may be a HIT.
+    if ($status -eq "DYNAMIC" -or $status -eq "BYPASS") {
         $cache = "OK: manifest.json isn't cached ($status)"
+    } elseif (-not $status) {
+        $cache = "CHECK BY HAND: no CF-Cache-Status header; is cdn.floserver.org served through Cloudflare?"
+    } else {
+        $cache = "FAIL: manifest.json is cacheable ($status); add the Cloudflare cache rule that bypasses manifest.json*"
     }
 } catch {
     $cache = "CHECK BY HAND: $Cdn/manifest.json didn't answer ($($_.Exception.Message))"
