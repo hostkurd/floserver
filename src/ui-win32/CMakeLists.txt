@@ -16,6 +16,7 @@ add_library(floserver_ui_model STATIC
     model/project_menu.cpp
     model/code_editor.cpp
     model/folder_removal.cpp
+    model/uninstall.cpp
     model/toast.cpp
     model/glyphs.cpp
     model/access_tree.cpp
