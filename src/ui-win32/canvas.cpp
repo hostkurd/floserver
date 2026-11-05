@@ -12,6 +12,7 @@ namespace Gdiplus {
 using std::max;  // NOLINT(misc-unused-using-decls): used by the headers below on some SDKs
 using std::min;  // NOLINT(misc-unused-using-decls)
 }  // namespace Gdiplus
+#include <commctrl.h>
 #include <objidl.h>
 #include <gdiplus.h>
 
@@ -325,24 +326,11 @@ HBITMAP make_glyph_bitmap(Glyph glyph, int size, Rgb color, bool mirrored) {
 }
 
 HICON make_app_icon(int size) {
-    Gdiplus::Bitmap bitmap(size, size, PixelFormat32bppARGB);
-    {
-        Gdiplus::Graphics g(&bitmap);
-        prepare(g);
-        g.Clear(Gdiplus::Color(0, 0, 0, 0));
-        const float s = static_cast<float>(size) / 16.0F;
-        Gdiplus::GraphicsPath path;
-        add_round(path, Gdiplus::RectF(1 * s, 1 * s, 14 * s, 14 * s), 3 * s);
-        const Gdiplus::SolidBrush brush(gp(0x0F6CBD));
-        g.FillPath(&brush, &path);
-        Gdiplus::Pen pen(gp(0xFFFFFF), std::max(1.0F, 1.6F * s));
-        pen.SetLineJoin(Gdiplus::LineJoinMiter);
-        const Gdiplus::PointF stroke[] = {{5 * s, 11 * s}, {5 * s, 5 * s}, {11 * s, 5 * s}};
-        g.DrawLines(&pen, stroke, 3);
-        g.DrawLine(&pen, 5 * s, 8 * s, 9 * s, 8 * s);
-    }
+    // FloServer.ico (FloServer.rc, icon 1). LoadIconWithScaleDown picks the
+    // nearest drawn size at or above `size` and scales it down smoothly,
+    // which a plain LoadImage doesn't. The caller owns the icon.
     HICON icon = nullptr;
-    if (bitmap.GetHICON(&icon) != Gdiplus::Ok) {
+    if (FAILED(LoadIconWithScaleDown(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1), size, size, &icon))) {
         return nullptr;
     }
     return icon;
