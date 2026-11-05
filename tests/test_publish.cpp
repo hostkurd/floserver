@@ -185,9 +185,13 @@ TEST_CASE("publisher: a new file that differs, or has no official checksum") {
     CHECK(ng.state == CheckState::Failed);
     CHECK(ng.detail.find("Can't download the original") != std::string::npos);
 
-    // Not uploaded (S3 answers 403 through CloudFront).
+    // Not uploaded (R2 answers 404; a private bucket would answer 403).
     PublishFile missing;
     missing.path = "node/24.24.0/node-v24.24.0-win-x64.zip";
+    cdn.http.serve(kTestCdn + "/" + missing.path, {404, ""});
+    check_file(ctx, missing);
+    CHECK(missing.state == CheckState::Failed);
+    CHECK(missing.detail.find("HTTP 404") != std::string::npos);
     cdn.http.serve(kTestCdn + "/" + missing.path, {403, ""});
     check_file(ctx, missing);
     CHECK(missing.state == CheckState::Failed);
@@ -404,20 +408,27 @@ TEST_CASE("publisher: signing refuses a key FloServer doesn't trust and a damage
     CHECK_FALSE(parse_secret_key(one_line, k3));
 }
 
-TEST_CASE("publisher: the bucket must refuse direct reads, and its Date checks the clock") {
+TEST_CASE("publisher: the clock is checked against the CDN's Date, on a reply no cache can answer") {
     FakeTransport http;
-    const std::string s3(kDirectS3);
     const auto now = at("2026-10-30T12:00:00Z");
-    http.serve(s3 + "/composer/2.10.3/composer.phar", {403, "", "", now + std::chrono::minutes{3}});
-    const S3Check refused = check_direct_s3(http, s3, "composer/2.10.3/composer.phar");
-    CHECK(refused.problem.empty());
-    CHECK(clock_problem(refused.server_date, now).empty());
+    const std::string url =
+        kTestCdn + "/manifest.json.sig?clock=" + std::to_string(now.time_since_epoch().count());
+    http.serve(url, {200, "sig", "", now + std::chrono::minutes{3}});
+    const CdnClock clock = read_cdn_clock(http, kTestCdn, now);
+    CHECK(clock.error.empty());
+    CHECK(http.requests(url) == 1);
+    CHECK(clock_problem(clock.server_date, now).empty());
     CHECK(clock_problem(now + std::chrono::minutes{11}, now).find("11 minutes off") != std::string::npos);
     CHECK(clock_problem(std::nullopt, now).find("Can't check") != std::string::npos);
-    http.serve(s3 + "/composer/2.10.3/composer.phar", {200, "phar"});
-    CHECK(check_direct_s3(http, s3, "composer/2.10.3/composer.phar").problem.find("make it private") !=
-          std::string::npos);
-    CHECK(check_direct_s3(http, s3, "nothing").problem.find("by hand") != std::string::npos);
+
+    // No answer, or not a 200: no time to trust.
+    const CdnClock missing = read_cdn_clock(http, kTestCdn, now + std::chrono::seconds{1});
+    CHECK_FALSE(missing.server_date);
+    CHECK(missing.error.find("Can't read the time") != std::string::npos);
+    http.serve(url, {404, "", "", now});
+    const CdnClock not_found = read_cdn_clock(http, kTestCdn, now);
+    CHECK_FALSE(not_found.server_date);
+    CHECK(not_found.error.find("HTTP 404") != std::string::npos);
 }
 
 TEST_CASE("publisher: an old live list, or different templates, need a yes or stop") {

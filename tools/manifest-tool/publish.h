@@ -7,11 +7,10 @@
 //   2. check the files: those already in the live list are still served at
 //      their size (the app checks every byte against the signed SHA-256 when
 //      it downloads them); new ones are downloaded from the CDN and compared
-//      with the checksum their project publishes; the S3 bucket must refuse
-//      direct reads;
+//      with the checksum their project publishes;
 //   3. build the next list (live sequence + 1, 90 days) from those results;
 //   4. sign it (signing.h).
-// Uploading and the CloudFront invalidation stay by hand.
+// Uploading (to the R2 bucket behind the CDN) stays by hand.
 
 #include "floserver/core/http.h"
 #include "floserver/core/manifest.h"
@@ -28,9 +27,8 @@
 
 namespace floserver::manifest_tool {
 
+// Cloudflare R2 bucket floserver-cdn, served through its custom domain.
 inline constexpr std::string_view kCdn = "https://cdn.floserver.org";
-// The bucket behind the CDN; it must refuse direct reads (only CloudFront may read it).
-inline constexpr std::string_view kDirectS3 = "https://floserver-cdn-origin.s3.eu-central-1.amazonaws.com";
 
 struct LiveList {
     std::int64_t sequence = 0;
@@ -115,15 +113,14 @@ struct CheckContext {
 // Checks one file and sets its state, detail, and (new files) size and sha256.
 void check_file(CheckContext& ctx, PublishFile& file);
 
-// Direct reads of the bucket must give 403. `problem` is empty when they do.
-// S3's Date header is fresh (CloudFront's may be cached), so it also serves
-// as the clock check before signing.
-struct S3Check {
-    std::string problem;
+// The time for the clock check: the CDN's Date header on a request no cache
+// can answer (a query string used once), so it's Cloudflare's current time.
+struct CdnClock {
     std::optional<std::chrono::sys_seconds> server_date;
+    std::string error;  // set when the CDN didn't answer 200
 };
-[[nodiscard]] S3Check check_direct_s3(core::HttpTransport& http, std::string_view s3_base,
-                                      std::string_view path, const std::atomic<bool>* cancel = nullptr);
+[[nodiscard]] CdnClock read_cdn_clock(core::HttpTransport& http, std::string_view cdn,
+                                      std::chrono::sys_seconds now, const std::atomic<bool>* cancel = nullptr);
 
 // Before building on `live`: what stops publishing, and what needs the
 // user's yes. `templates_json` is what the new list will carry.

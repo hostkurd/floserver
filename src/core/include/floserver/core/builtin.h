@@ -9,7 +9,7 @@
 
 namespace floserver::core {
 
-// Where the signed runtime list lives (D5): Amazon S3 behind CloudFront.
+// Where the signed runtime list lives (D5): Cloudflare R2 behind its custom domain.
 inline constexpr std::string_view kManifestUrl = "https://cdn.floserver.org/manifest.json";
 inline constexpr std::string_view kManifestSignatureUrl =
     "https://cdn.floserver.org/manifest.json.sig";
