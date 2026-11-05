@@ -38,6 +38,7 @@ add_executable(floserver_tests
     test_ui_folder_removal.cpp
     test_ui_toast.cpp
     test_ui_glyphs.cpp
+    test_ui_access.cpp
     test_web_service.cpp
     test_web_settings.cpp
     test_tar.cpp

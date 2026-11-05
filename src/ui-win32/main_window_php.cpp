@@ -353,6 +353,8 @@ void MainWindow::make_project_php_edits() {
             continue;
         }
         const std::string& key = php_keys_[f];
+        // Its label is drawn beside it: screen readers are told it.
+        set_accessible_name(edit->hwnd(), key.empty() ? text(lang_, Str::ProjectPhpAnother) : std::string_view(key));
         if (key.empty()) {
             edit->set_cue(text(lang_, Str::ProjectPhpAnotherCue));
             edit->set_text(php_another_);

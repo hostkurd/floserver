@@ -1,5 +1,6 @@
 #include "form_parts.h"
 
+#include "access_provider.h"
 #include "canvas.h"
 #include "win_util.h"
 
@@ -34,6 +35,7 @@ FieldEdit::FieldEdit(HWND parent, int id, HFONT font, bool rtl, KeyFn on_key)
 
 FieldEdit::~FieldEdit() {
     if (hwnd_ != nullptr) {
+        set_accessible_name(hwnd_, {});  // a name given to it goes with it
         RemoveWindowSubclass(hwnd_, proc, kSubclass);
         DestroyWindow(hwnd_);
     }
