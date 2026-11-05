@@ -702,6 +702,10 @@ void MainWindow::on_snapshot() {
     }
     layout();
     update_tray_tip();
+    // The name box's help has the address in it: the domain or port may have changed.
+    if (wizard_open()) {
+        sync_name_help();
+    }
     InvalidateRect(hwnd_, nullptr, FALSE);
 
     if (quit_done) {
@@ -1409,6 +1413,10 @@ void MainWindow::on_click(const Hit& clicked) {
         case Part::WizCancel:
         case Part::WizBack:
         case Part::WizNext:
+            // A click isn't a keyboard stop: Enter mustn't press what was
+            // clicked unseen. The keys go back to the step's first (a clicked
+            // card is the cards' stop: on_wizard_click).
+            wizard_.focus = {};
             on_wizard_click(hit);
             break;
         case Part::SharedRow:
@@ -1946,6 +1954,7 @@ void MainWindow::on_paint() {
                     first_run_.scroll = most;
                     first_run_geometry_ = first_run_geometry(mem.get(), first_run_.scroll);
                 }
+                first_run_sync_focus();  // a stop that went (a finished download's Cancel) hands the keys on
             }
             place_scroll_bars();
             toast_geometry_ = toast_geometry(mem.get(), toast_, fonts_.button.get(), width_, toast_bottom(), dpi_, rtl_);

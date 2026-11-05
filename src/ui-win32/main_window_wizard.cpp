@@ -77,6 +77,7 @@ void MainWindow::open_wizard() {
     }
     wizard_ = {};
     wizard_.open = true;
+    access_page_opened_ = true;
     if (!snap_.templates_loaded || !snap_.templates_error.empty() || snap_.templates.empty()) {
         snap_.templates_loaded = false;
         snap_.templates_error.clear();
@@ -291,7 +292,10 @@ void MainWindow::wizard_browse() {
         }
     }
     dialog->Release();
-    if (wizard_.step == 1 && name_edit_ != nullptr) {
+    // Browse pressed from the keyboard keeps the keys on it; else back to the name box.
+    if (wizard_.step == 1 && wizard_focus().part == Part::WizBrowse) {
+        SetFocus(hwnd_);
+    } else if (wizard_.step == 1 && name_edit_ != nullptr) {
         SetFocus(name_edit_);
     }
     InvalidateRect(hwnd_, nullptr, FALSE);
@@ -327,9 +331,8 @@ void MainWindow::wizard_field_menu(std::size_t index) {
 }
 
 void MainWindow::on_wizard_click(const Hit& hit) {
-    // The keys follow the mouse to what it clicked.
-    const std::vector<Hit> order = wizard_focus_order();
-    if (hit.part == Part::WizCard || std::find(order.begin(), order.end(), hit) != order.end()) {
+    // A card chosen is where the cards' stop is.
+    if (hit.part == Part::WizCard) {
         wizard_.focus = hit;
     }
     switch (hit.part) {
@@ -549,6 +552,10 @@ LRESULT CALLBACK MainWindow::name_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARA
             }
             if (wparam == VK_ESCAPE) {
                 self->close_wizard();
+                return 0;
+            }
+            if (wparam == VK_F5) {
+                self->on_key(VK_F5);  // starts a stopped service, as from the page
                 return 0;
             }
             if (wparam == VK_TAB) {

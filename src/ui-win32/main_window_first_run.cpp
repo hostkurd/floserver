@@ -112,9 +112,10 @@ void MainWindow::open_first_run() {
         close_panel();
     }
     first_run_.open = true;
+    access_page_opened_ = true;
     first_run_.step = FirstRunStep::Language;
     first_run_.system_lang = window_lang(WindowPrefs{});  // "Same as Windows" now
-    first_run_.focus = -1;
+    first_run_.focus = {};
     first_run_.scroll = 0;
     hover_ = {};
     SetFocus(hwnd_);
@@ -253,7 +254,7 @@ void MainWindow::first_run_start_downloads() {
     first_run_.ends.clear();
     first_run_.started = true;
     first_run_.scroll = 0;
-    first_run_.focus = -1;
+    first_run_.focus = {};
     // The service installs them one after another, nginx first.
     worker_->install(std::string(kFirstRunKey), first_run_.wanted);
     // And Windows is asked to trust the CA meanwhile, as Settings → Ports &
@@ -269,7 +270,7 @@ void MainWindow::first_run_start_downloads() {
 void MainWindow::first_run_to_ready() {
     first_run_.step = FirstRunStep::Ready;
     first_run_.scroll = 0;
-    first_run_.focus = -1;
+    first_run_.focus = {};
     // Without downloads the CA wasn't looked at: trusted already (an earlier install) says so.
     if (first_run_check_ca(first_run_.trust, first_run_.ca_checked) && worker_) {
         first_run_.ca_checked = true;
@@ -379,7 +380,7 @@ std::vector<FirstRunRow> MainWindow::first_run_rows_now() const {
 void MainWindow::on_first_run_click(const Hit& hit) {
     const std::vector<Hit> order = first_run_focus_order();
     if (const auto it = std::find(order.begin(), order.end(), hit); it != order.end()) {
-        first_run_.focus = static_cast<int>(it - order.begin());
+        first_run_.focus = *it;
     }
     switch (hit.part) {
         case Part::FrLang:
@@ -442,7 +443,7 @@ void MainWindow::on_first_run_click(const Hit& hit) {
             if (first_run_.step == FirstRunStep::Runtimes) {
                 first_run_.step = FirstRunStep::Language;
                 first_run_.scroll = 0;
-                first_run_.focus = -1;
+                first_run_.focus = {};
             }
             break;
         case Part::FrNext:
@@ -450,7 +451,7 @@ void MainWindow::on_first_run_click(const Hit& hit) {
                 case FirstRunStep::Language:
                     first_run_.step = FirstRunStep::Runtimes;
                     first_run_.scroll = 0;
-                    first_run_.focus = -1;
+                    first_run_.focus = {};
                     if (first_run_.list == FirstRunList::Idle) {
                         first_run_ask_list();
                     }
@@ -485,7 +486,7 @@ void MainWindow::on_first_run_key(WPARAM key) {
                 return;
             }
             const bool back = key == VK_UP || (key == VK_TAB && shift);
-            int next = first_run_.focus;
+            int next = first_run_focus_index();
             if (next < 0) {
                 next = back ? count - 1 : 0;
             } else {
@@ -496,8 +497,8 @@ void MainWindow::on_first_run_key(WPARAM key) {
         }
         case VK_SPACE:
         case VK_RETURN:
-            if (first_run_.focus >= 0 && first_run_.focus < count) {
-                on_first_run_click(order[static_cast<std::size_t>(first_run_.focus)]);
+            if (const int at = first_run_focus_index(); at >= 0 && at < count) {
+                on_first_run_click(order[static_cast<std::size_t>(at)]);
             } else if (key == VK_RETURN && !is_empty(first_run_geometry_.next)) {
                 on_first_run_click({Part::FrNext, -1, {}});
             }
@@ -517,7 +518,7 @@ void MainWindow::first_run_focus_at(int index) {
     if (index < 0 || index >= static_cast<int>(order.size())) {
         return;
     }
-    first_run_.focus = index;
+    first_run_.focus = order[static_cast<std::size_t>(index)];
     show_focus_ = true;
     // Into view (the footer's buttons are always in view).
     const RECT r = first_run_rect_of(order[static_cast<std::size_t>(index)]);
@@ -542,6 +543,36 @@ std::string MainWindow::first_run_footer_words() const {
             break;
     }
     return fill(lang_, Str::FirstRunTotal, {size_text(first_run_total(first_run_.offers, first_run_.ticks))});
+}
+
+int MainWindow::first_run_focus_index() const {
+    if (first_run_.focus.part == Part::None) {
+        return -1;
+    }
+    const std::vector<Hit> order = first_run_focus_order();
+    const auto it = std::find(order.begin(), order.end(), first_run_.focus);
+    return it != order.end() ? static_cast<int>(it - order.begin()) : -1;
+}
+
+void MainWindow::first_run_sync_focus() {
+    const std::vector<Hit> order = first_run_focus_order();
+    const auto here = [&](const Hit& h) { return std::find(order.begin(), order.end(), h) != order.end(); };
+    if (first_run_.focus.part != Part::None && !here(first_run_.focus)) {
+        // The next stop of the list it was in that's still there, else the one before.
+        Hit to{};
+        const std::vector<Hit>& was = first_run_.focus_order;
+        if (const auto lost = std::find(was.begin(), was.end(), first_run_.focus); lost != was.end()) {
+            const auto after = std::find_if(lost + 1, was.end(), here);
+            if (after != was.end()) {
+                to = *after;
+            } else if (const auto before = std::find_if(std::make_reverse_iterator(lost), was.rend(), here);
+                       before != was.rend()) {
+                to = *before;
+            }
+        }
+        first_run_.focus = to;
+    }
+    first_run_.focus_order = order;
 }
 
 void MainWindow::first_run_scroll_to(int target) {
@@ -918,8 +949,8 @@ void MainWindow::paint_first_run(Canvas& c, HDC dc, bool text_pass) const {
     const bool has_focus = GetFocus() == hwnd_;
     const std::vector<Hit> order = first_run_focus_order();
     const auto focused = [&](const Hit& h) {
-        return show_focus_ && has_focus && first_run_.focus >= 0 &&
-               first_run_.focus < static_cast<int>(order.size()) && order[static_cast<std::size_t>(first_run_.focus)] == h;
+        return show_focus_ && has_focus && first_run_.focus.part != Part::None && first_run_.focus == h &&
+               std::find(order.begin(), order.end(), h) != order.end();
     };
     const auto hovered = [&](Part part, int row) { return hover_.part == part && hover_.row == row; };
     const std::vector<FirstRunRow> rows =

@@ -168,11 +168,7 @@ std::string MainWindow::access_focus_id() const {
         return {};
     }
     if (first_run_open()) {
-        const std::vector<Hit> order = first_run_focus_order();
-        if (first_run_.focus >= 0 && std::cmp_less(first_run_.focus, order.size())) {
-            return access_id(order[static_cast<std::size_t>(first_run_.focus)]);
-        }
-        return {};
+        return first_run_focus_index() >= 0 ? access_id(first_run_.focus) : std::string();
     }
     if (wizard_open()) {
         return access_id(wizard_focus());
@@ -855,10 +851,10 @@ void MainWindow::add_first_run_access(AccessTree& t) const {
     const int current = static_cast<int>(first_run_.step);
     const int strip = add(pane, step_strip_node("first-run/steps", lang_), g.steps);
     for (std::size_t i = 0; i < steps.size(); ++i) {
-        add(strip,
-            step_node("first-run/step/" + std::to_string(i), steps[i], static_cast<int>(i), current,
-                      static_cast<int>(steps.size()), lang_),
-            rect_at(g.step_rects, i));
+        AccessNode step = step_node("first-run/step/" + std::to_string(i), steps[i], static_cast<int>(i), current,
+                                    static_cast<int>(steps.size()), lang_);
+        step.offscreen = i >= g.step_rects.size();  // its words didn't fit in the strip
+        add(strip, std::move(step), rect_at(g.step_rects, i));
     }
     add_in(pane, heading_node("first-run/title", text(lang_, title)), g.title);
     if (!intro.empty()) {
@@ -1045,12 +1041,23 @@ void MainWindow::access_request(const std::string& id, AccessAction action) {
 }
 
 void MainWindow::access_after_paint() {
+    const bool opened = access_page_opened_;
+    access_page_opened_ = false;
     if (!AccessRoot::listening()) {
         access_said_.reset();  // nobody to tell: nothing kept
         return;
     }
     access_now_ = build_access_tree();
     access_dirty_ = false;
+    if (!access_said_ && opened) {
+        // The first tree since the screen reader came (the window just made with
+        // the first-run page open): nothing to compare with, but the page's step is said.
+        for (const AccessNews& news : access_now_.news) {
+            if (news.key == "step") {
+                access_.notify(news.text, news.important, news.key);
+            }
+        }
+    }
     if (access_said_) {
         access_.raise(access_changes(*access_said_, access_now_));
         // What's new on a page (its step, a download that ended, the project made): said once.

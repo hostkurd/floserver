@@ -293,7 +293,11 @@ private:
         std::string folder_ask;  // the folders.set on its way (its purpose)
         std::string folder_picked;
         int scroll = 0;
-        int focus = -1;  // index into first_run_focus_order(); -1: none
+        // The stop the keys are on (one of first_run_focus_order()), kept by
+        // what it is, not its place: the stops come and go as the page changes.
+        // Part::None: none. `focus_order` is the list it was last seen in.
+        Hit focus;
+        std::vector<Hit> focus_order;
     };
     // Its pieces, from the last paint.
     struct FirstRunGeometry {
@@ -597,6 +601,11 @@ private:
     void first_run_scroll_to(int target);
     // The keys to stop `index` of first_run_focus_order(), scrolled into view.
     void first_run_focus_at(int index);
+    // Where first_run_.focus is in first_run_focus_order(); -1: none, or gone.
+    [[nodiscard]] int first_run_focus_index() const;
+    // After each layout: a stop that went (a download's Cancel when it
+    // finished) hands the keys to the next one still there, or the one before.
+    void first_run_sync_focus();
     // The footer's words: the privacy line, the total to download, what comes next.
     [[nodiscard]] std::string first_run_footer_words() const;
     void on_first_run_click(const Hit& hit);
@@ -823,6 +832,9 @@ private:
     std::optional<AccessTree> access_said_;
     std::vector<std::pair<std::string, AccessAction>> access_queue_;
     bool access_running_ = false;  // a request is being run (it may have a menu open)
+    // A page was just opened (not a window made again in another language):
+    // its step is said even when it's the first thing a screen reader is told.
+    bool access_page_opened_ = false;
 };
 
 }  // namespace floserver::ui
