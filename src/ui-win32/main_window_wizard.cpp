@@ -7,12 +7,14 @@
 #include "main_window.h"
 
 #include "main_window_layout.h"
+#include "model/pages_access.h"
 #include "model/theme.h"
 #include "model/view_model.h"
 
 #include <shlobj.h>
 
 #include <algorithm>
+#include <iterator>
 #include <utility>
 
 namespace floserver::ui {
@@ -95,6 +97,21 @@ void MainWindow::make_name_edit() {
         SetWindowSubclass(name_edit_, name_proc, kNameSubclass, reinterpret_cast<DWORD_PTR>(this));
         SendMessageW(name_edit_, EM_LIMITTEXT, 63, 0);  // a project name's most
         SendMessageW(name_edit_, WM_SETFONT, reinterpret_cast<WPARAM>(fonts_.body.get()), TRUE);
+        // Its label is drawn: screen readers are told its name, and the line under it as its help.
+        set_accessible_name(name_edit_, text(lang_, Str::WizardName));
+        name_help_.clear();
+    }
+    sync_name_help();
+}
+
+void MainWindow::sync_name_help() {
+    if (name_edit_ == nullptr) {
+        return;
+    }
+    const std::string help = wizard_name_hint(wizard_name(), snap_.footer, lang_);
+    if (help != name_help_) {
+        name_help_ = help;
+        set_accessible_help(name_edit_, help);
     }
 }
 
@@ -159,6 +176,7 @@ void MainWindow::wizard_next() {
             wizard_.template_id = card->id;
             wizard_.studio = card->studio;
             wizard_.step = 1;
+            wizard_.focus = {};
             if (wizard_.parent.empty()) {
                 wizard_.parent = !snap_.projects_dir.empty() ? snap_.projects_dir : default_projects_parent();
             }
@@ -181,6 +199,7 @@ void MainWindow::wizard_next() {
             }
             wizard_.fields = template_fields(*card, snap_.installed, lang_, snap_.defaults);
             wizard_.step = 2;
+            wizard_.focus = {};
             ShowWindow(name_edit_, SW_HIDE);
             SetFocus(hwnd_);
             // Nothing to choose (a static site): no Versions page, make it now.
@@ -210,6 +229,7 @@ void MainWindow::wizard_next() {
             }
             snap_.create = {};
             wizard_.step = 3;
+            wizard_.focus = {};
             dismiss_error();
             worker_->create_project(wizard_.template_id, wizard_.name, wizard_.parent, versions);
             break;
@@ -221,6 +241,7 @@ void MainWindow::wizard_next() {
 }
 
 void MainWindow::wizard_back() {
+    wizard_.focus = {};
     if (wizard_.step == 3) {
         if (wizard_running()) {
             return;
@@ -306,6 +327,11 @@ void MainWindow::wizard_field_menu(std::size_t index) {
 }
 
 void MainWindow::on_wizard_click(const Hit& hit) {
+    // The keys follow the mouse to what it clicked.
+    const std::vector<Hit> order = wizard_focus_order();
+    if (hit.part == Part::WizCard || std::find(order.begin(), order.end(), hit) != order.end()) {
+        wizard_.focus = hit;
+    }
     switch (hit.part) {
         case Part::WizCard:
             if (hit.row >= 0) {
@@ -355,8 +381,18 @@ void MainWindow::on_wizard_key(WPARAM key) {
                 close_wizard();
             }
             break;
-        case VK_RETURN:
-            if (wizard_.step == 3) {
+        case VK_TAB:
+            wizard_tab((GetKeyState(VK_SHIFT) & 0x8000) != 0);
+            break;
+        case VK_RETURN: {
+            // A button with the keys on it does what it says; elsewhere (a
+            // card, a picker) Enter goes on, as a dialog's default button does.
+            const Hit focus = wizard_focus();
+            const bool button = focus.part == Part::WizBrowse || focus.part == Part::WizAddFolder ||
+                                focus.part == Part::WizCancel || focus.part == Part::WizBack || focus.part == Part::WizNext;
+            if (button) {
+                on_wizard_click(focus);
+            } else if (wizard_.step == 3) {
                 if (!wizard_running()) {
                     close_wizard();
                 }
@@ -364,6 +400,18 @@ void MainWindow::on_wizard_key(WPARAM key) {
                 wizard_next();
             }
             break;
+        }
+        case VK_SPACE:
+        case VK_F4: {
+            // Space presses a button; Space or F4 opens a picker's menu.
+            const Hit focus = wizard_focus();
+            if (focus.part == Part::WizField && focus.row >= 0) {
+                wizard_field_menu(static_cast<std::size_t>(focus.row));
+            } else if (key == VK_SPACE && focus.part != Part::WizCard && focus.part != Part::None) {
+                on_wizard_click(focus);
+            }
+            break;
+        }
         case VK_LEFT:
         case VK_RIGHT:
         case VK_UP:
@@ -380,12 +428,109 @@ void MainWindow::on_wizard_key(WPARAM key) {
                 }
                 i = std::clamp(i + step, 0, count - 1);
                 wizard_.card = static_cast<std::size_t>(i);
+                wizard_.focus = {Part::WizCard, i, {}};
+                show_focus_ = true;
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
             break;
         default:
             break;
     }
+}
+
+std::vector<MainWindow::Hit> MainWindow::wizard_focus_order() const {
+    const WizardGeometry& g = wizard_geometry_;
+    std::vector<Hit> out;
+    const auto shown = [](const RECT& r) { return r.right > r.left && r.bottom > r.top; };
+    switch (wizard_.step) {
+        case 0:
+            if (!g.cards.empty()) {
+                out.push_back({Part::WizCard, static_cast<int>(std::min(wizard_.card, g.cards.size() - 1)), {}});
+            }
+            break;
+        case 1:
+            if (name_edit_ != nullptr) {
+                out.push_back({Part::WizName, -1, {}});
+            }
+            if (shown(g.browse)) {
+                out.push_back({Part::WizBrowse, -1, {}});
+            }
+            break;
+        case 2:
+            for (std::size_t i = 0; i < g.fields.size() && i < wizard_.fields.size(); ++i) {
+                out.push_back({Part::WizField, static_cast<int>(i), {}});
+            }
+            break;
+        default:
+            break;
+    }
+    // The footer in reading order.
+    for (const auto& [rect, part] : {std::pair{g.add_folder, Part::WizAddFolder}, std::pair{g.cancel, Part::WizCancel},
+                                     std::pair{g.back, Part::WizBack}, std::pair{g.next, Part::WizNext}}) {
+        if (shown(rect)) {
+            out.push_back({part, -1, {}});
+        }
+    }
+    return out;
+}
+
+MainWindow::Hit MainWindow::wizard_focus() const {
+    const std::vector<Hit> order = wizard_focus_order();
+    if (order.empty()) {
+        return {};
+    }
+    if (wizard_.focus.part == Part::WizCard) {
+        // The cards are one stop: the chosen one.
+        if (order.front().part == Part::WizCard) {
+            return order.front();
+        }
+    } else if (wizard_.focus.part != Part::None &&
+               std::find(order.begin(), order.end(), wizard_.focus) != order.end()) {
+        return wizard_.focus;
+    }
+    // The step's first: the cards, the name box, the first picker; then Open project or Close.
+    switch (wizard_.step) {
+        case 0:
+            return order.front().part == Part::WizCard ? order.front() : Hit{};
+        case 3:
+            return order.back().part == Part::WizNext ? order.back() : Hit{};
+        default:
+            return order.front();
+    }
+}
+
+void MainWindow::wizard_focus_to(const Hit& hit, bool keyboard) {
+    wizard_.focus = hit;
+    if (hit.part == Part::WizCard && hit.row >= 0) {
+        wizard_.card = static_cast<std::size_t>(hit.row);
+    }
+    if (hit.part == Part::WizName && name_edit_ != nullptr) {
+        SetFocus(name_edit_);
+        SendMessageW(name_edit_, EM_SETSEL, 0, -1);
+    } else {
+        SetFocus(hwnd_);
+    }
+    if (keyboard) {
+        show_focus_ = true;
+    }
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void MainWindow::wizard_tab(bool back) {
+    const std::vector<Hit> order = wizard_focus_order();
+    if (order.empty()) {
+        return;
+    }
+    const Hit now = name_edit_ != nullptr && GetFocus() == name_edit_ ? Hit{Part::WizName, -1, {}} : wizard_focus();
+    const auto it = std::find(order.begin(), order.end(), now);
+    const int count = static_cast<int>(order.size());
+    int next = 0;
+    if (it == order.end()) {
+        next = back ? count - 1 : 0;
+    } else {
+        next = (static_cast<int>(it - order.begin()) + (back ? count - 1 : 1)) % count;
+    }
+    wizard_focus_to(order[static_cast<std::size_t>(next)], true);
 }
 
 LRESULT CALLBACK MainWindow::name_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, UINT_PTR id, DWORD_PTR self_ptr) {
@@ -406,9 +551,14 @@ LRESULT CALLBACK MainWindow::name_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARA
                 self->close_wizard();
                 return 0;
             }
+            if (wparam == VK_TAB) {
+                // On to Browse and the footer's buttons (Shift+Tab: round to the last of them).
+                self->wizard_tab((GetKeyState(VK_SHIFT) & 0x8000) != 0);
+                return 0;
+            }
             break;
         case WM_CHAR:
-            if (wparam == VK_RETURN || wparam == VK_ESCAPE) {
+            if (wparam == VK_RETURN || wparam == VK_ESCAPE || wparam == VK_TAB) {
                 return 0;  // no beep
             }
             // Only what a project name may hold (ES_LOWERCASE makes letters small).
@@ -436,6 +586,21 @@ MainWindow::WizardGeometry MainWindow::wizard_geometry(HDC dc) const {
     const int x1 = g.area.right - px(kWizardPad);
     int y = g.area.top + px(16);
     g.steps = {x0, y, x1, y + px(20)};
+    {
+        // The steps' words, the current one bold; a template with nothing to choose has two.
+        const bool versions = wizard_.step == 0 || wizard_has_versions();
+        const int current = wizard_strip_step(wizard_.step, versions);
+        int x = g.steps.left;
+        const Str labels[] = {Str::WizardStepTemplate, Str::WizardStepName, Str::WizardStepVersions};
+        for (int index = 0; index < (versions ? 3 : 2); ++index) {
+            const bool now = index == current;
+            const int sw = Canvas::measure(dc, w(text(lang_, labels[index])), (now ? fonts_.button_bold : fonts_.button).get(),
+                                           rtl_) +
+                           px(4);
+            g.step_rects.push_back({x, g.steps.top, x + sw, g.steps.bottom});
+            x += sw + px(16);
+        }
+    }
     y += px(20) + px(12);
     g.title = {x0, y, x1, y + px(30)};
     y += px(30) + px(16);
@@ -575,6 +740,14 @@ void MainWindow::paint_wizard(Canvas& c, HDC dc, bool text_pass) const {
     const Palette& p = palette(dark_);
     const float border = std::max(1.0F, pxf(1.0F));
     const auto hovered = [&](Part part, int index) { return hover_.part == part && hover_.row == index; };
+    // The keys' frame, once the keyboard was used (as on the first-run page).
+    const Hit focus = show_focus_ && GetFocus() == hwnd_ ? wizard_focus() : Hit{};
+    const auto focused = [&](Part part, int index) { return focus.part == part && focus.row == index; };
+    const auto ring = [&](const RECT& r, float radius) {
+        RECT around = r;
+        InflateRect(&around, px(2), px(2));
+        c.round_outline(around, radius + pxf(2), p.focus, pxf(2));
+    };
     if (!text_pass) {
         c.round_rect(g.area, pxf(8), p.card, p.card_border, border);
         c.fill({g.footer.left, g.footer.top, g.footer.right, g.footer.top + static_cast<int>(border)}, p.divider);
@@ -587,6 +760,9 @@ void MainWindow::paint_wizard(Canvas& c, HDC dc, bool text_pass) const {
             } else {
                 c.round_rect(r, pxf(8), hovered(Part::WizCard, index) ? p.row_hover : p.card, p.card_border, border);
             }
+            if (focused(Part::WizCard, index)) {
+                ring(r, pxf(8));
+            }
             const TemplateCard& card = snap_.templates[i];
             const RECT mark{r.left + px(14), r.top + px(14), r.left + px(46), r.top + px(46)};
             c.round_rect(mark, pxf(6), card.mark_bg);
@@ -598,6 +774,9 @@ void MainWindow::paint_wizard(Canvas& c, HDC dc, bool text_pass) const {
             const RECT& box = g.fields[i].second;
             c.round_rect(box, pxf(4), hovered(Part::WizField, static_cast<int>(i)) ? p.row_hover : p.input, p.input_border,
                          border);
+            if (focused(Part::WizField, static_cast<int>(i))) {
+                ring(box, pxf(4));
+            }
             const float vx = static_cast<float>(box.right) - pxf(14);
             const float vy = static_cast<float>(box.top + box.bottom) / 2.0F;
             c.line(vx - pxf(4), vy - pxf(2), vx, vy + pxf(2), p.text_subtle, pxf(1.3F));
@@ -610,11 +789,14 @@ void MainWindow::paint_wizard(Canvas& c, HDC dc, bool text_pass) const {
         for (const auto& [rect, part] : {std::pair{g.browse, Part::WizBrowse}, std::pair{g.add_folder, Part::WizAddFolder},
                                          std::pair{g.cancel, Part::WizCancel}, std::pair{g.back, Part::WizBack}}) {
             if (rect.right > rect.left) {
-                paint_button(c, rect, hovered(part, -1), false);
+                paint_button(c, rect, hovered(part, -1), focused(part, -1));
             }
         }
         if (g.next.right > g.next.left) {
             c.round_rect(g.next, pxf(4), p.accent);
+            if (focused(Part::WizNext, -1)) {
+                ring(g.next, pxf(4));
+            }
         }
         if (height_of(g.log_box) > 0) {
             c.round_rect(g.log_box, pxf(6), p.log);
@@ -625,41 +807,16 @@ void MainWindow::paint_wizard(Canvas& c, HDC dc, bool text_pass) const {
     c.clip_text(g.area);
     // The steps, the current one in the accent colour.
     {
-        int x = g.steps.left;
         const bool versions = wizard_.step == 0 || wizard_has_versions();
-        for (const auto& [label, index] : {std::pair{Str::WizardStepTemplate, 0}, std::pair{Str::WizardStepName, 1},
-                                           std::pair{Str::WizardStepVersions, 2}}) {
-            if (index == 2 && !versions) {
-                continue;  // a template with nothing to choose has two steps
-            }
-            const std::wstring s = w(text(lang_, label));
-            const bool current = std::min(wizard_.step, versions ? 2 : 1) == index;
-            const int sw = Canvas::measure(dc, s, (current ? fonts_.button_bold : fonts_.button).get(), rtl_) + px(4);
-            c.text({x, g.steps.top, x + sw, g.steps.bottom}, s, current ? fonts_.button_bold.get() : fonts_.button.get(),
-                   current ? p.accent : p.text_subtle, Align::Start, false);
-            x += sw + px(16);
+        const int current = wizard_strip_step(wizard_.step, versions);
+        const Str labels[] = {Str::WizardStepTemplate, Str::WizardStepName, Str::WizardStepVersions};
+        for (std::size_t k = 0; k < g.step_rects.size() && k < std::size(labels); ++k) {
+            const bool now = static_cast<int>(k) == current;
+            c.text(g.step_rects[k], w(text(lang_, labels[k])), now ? fonts_.button_bold.get() : fonts_.button.get(),
+                   now ? p.accent : p.text_subtle, Align::Start, false);
         }
     }
-    std::string title;
-    switch (wizard_.step) {
-        case 0:
-            title = std::string(text(lang_, Str::WizardWhat));
-            break;
-        case 1:
-            title = std::string(text(lang_, Str::WizardNameTitle));
-            break;
-        case 2:
-            title = std::string(text(lang_, Str::WizardVersionsTitle));
-            break;
-        default:
-            title = snap_.create.state == "done"     ? fill(lang_, Str::WizardDone, {wizard_.name})
-                    : snap_.create.state == "failed" ? fill(lang_, Str::WizardFailed, {""})
-                                                     : fill(lang_, Str::WizardMaking, {wizard_.name});
-            break;
-    }
-    if (wizard_.step == 3 && (snap_.create.state == "failed" || snap_.create.state == "cancelled")) {
-        title = std::string(text(lang_, Str::WizardNotMade));
-    }
+    const std::string title = wizard_title(wizard_.step, snap_.create.state, wizard_.name, lang_);
     c.text(g.title, w(title), fonts_.title.get(), p.text, Align::Start, false);
 
     switch (wizard_.step) {
@@ -690,8 +847,7 @@ void MainWindow::paint_wizard(Canvas& c, HDC dc, bool text_pass) const {
         case 1: {
             c.text(g.name_label, w(text(lang_, Str::WizardName)), fonts_.button_bold.get(), p.text, Align::Start, false);
             const std::string name = wizard_name();
-            const std::string hint = is_project_name(name) ? fill(lang_, Str::WizardAddress, {new_project_address(name, snap_.footer)})
-                                                           : std::string(text(lang_, Str::WizardNameRule));
+            const std::string hint = wizard_name_hint(name, snap_.footer, lang_);
             c.text(g.name_hint, w(hint), fonts_.caption.get(), is_project_name(name) ? p.text_subtle : p.problem.text,
                    Align::Start, false);
             c.text(g.folder_label, w(text(lang_, Str::WizardFolder)), fonts_.button_bold.get(), p.text, Align::Start,
@@ -700,12 +856,7 @@ void MainWindow::paint_wizard(Canvas& c, HDC dc, bool text_pass) const {
             InflateRect(&inner, -px(10), 0);
             c.text(inner, w(wizard_.parent), fonts_.button.get(), p.text, Align::Start, true);
             c.text(g.browse, w(text(lang_, Str::WizardBrowse)), fonts_.button.get(), p.text, Align::Center, false);
-            std::string full = wizard_.parent;
-            if (!full.empty() && full.back() != '\\' && full.back() != '/') {
-                full += '\\';
-            }
-            full += is_project_name(name) ? name : std::string("…");
-            c.paragraph(g.folder_hint, w(fill(lang_, Str::WizardMadeIn, {full})), fonts_.caption.get(), p.text_subtle);
+            c.paragraph(g.folder_hint, w(wizard_made_in(wizard_.parent, name, lang_)), fonts_.caption.get(), p.text_subtle);
             break;
         }
         case 2:

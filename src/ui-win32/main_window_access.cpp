@@ -9,6 +9,7 @@
 
 #include "main_window_layout.h"
 #include "model/main_access.h"
+#include "model/pages_access.h"
 #include "model/runtimes_page.h"
 #include "model/view_model.h"
 
@@ -16,7 +17,9 @@
 #include "floserver/core/project_config.h"
 
 #include <algorithm>
+#include <iterator>
 #include <map>
+#include <tuple>
 #include <utility>
 
 namespace floserver::ui {
@@ -114,15 +117,65 @@ std::string MainWindow::access_id(const Hit& hit) const {
             return "shared/open";
         case Part::SharedGear:
             return "shared/gear";
+        // New project.
+        case Part::WizCard:
+            return index < snap_.templates.size() ? "wizard/card/" + snap_.templates[index].id : std::string();
+        case Part::WizField:
+            return index < wizard_.fields.size() ? "wizard/field/" + wizard_.fields[index].key : std::string();
+        case Part::WizBrowse:
+            return "wizard/browse";
+        case Part::WizAddFolder:
+            return "wizard/add-folder";
+        case Part::WizCancel:
+            return "wizard/cancel";
+        case Part::WizBack:
+            return "wizard/back";
+        case Part::WizNext:
+            return "wizard/next";
+        // The first-run page.
+        case Part::FrLang:
+            return "first-run/lang/" + std::to_string(index);
+        case Part::FrTick:
+            return index < first_run_.offers.size() ? "first-run/offer/" + first_run_.offers[index].name : std::string();
+        case Part::FrCancel:
+            // The rows are first_run_.wanted's, in its order.
+            return index < first_run_.wanted.size() ? "first-run/download/" + first_run_.wanted[index].name + "/cancel"
+                                                     : std::string();
+        case Part::FrRetry:
+            return "first-run/retry";
+        case Part::FrChange:
+            return "first-run/change";
+        case Part::FrCreate:
+            return "first-run/create";
+        case Part::FrAdd:
+            return "first-run/add";
+        case Part::FrBack:
+            return "first-run/back";
+        case Part::FrNext:
+            return "first-run/next";
+        case Part::FrSkipSetup:
+            return "first-run/skip";
+        case Part::FrWithout:
+            return "first-run/without";
         default:
             break;
     }
-    return {};  // the New project and first-run pages: a later step
+    return {};  // the name box is a real EDIT: Windows says when it has the focus
 }
 
 std::string MainWindow::access_focus_id() const {
-    if (hwnd_ == nullptr || GetFocus() != hwnd_ || first_run_open() || wizard_open()) {
+    if (hwnd_ == nullptr || GetFocus() != hwnd_) {
         return {};
+    }
+    if (first_run_open()) {
+        const std::vector<Hit> order = first_run_focus_order();
+        if (first_run_.focus >= 0 && std::cmp_less(first_run_.focus, order.size())) {
+            return access_id(order[static_cast<std::size_t>(first_run_.focus)]);
+        }
+        return {};
+    }
+    if (wizard_open()) {
+        return access_id(wizard_focus());
     }
     if (panel_open() && panel_focus_ >= 0) {
         const std::vector<Hit> order = panel_focus_order();
@@ -152,13 +205,15 @@ AccessTree MainWindow::build_access_tree() const {
     const BannerText status = status_line();
 
     if (first_run_open()) {
-        // The page itself comes with a later step; the service's state at its top now.
+        // The service's state at the page's top, then the page.
         if (!status.text.empty() && shown(banner_rect())) {
             AccessNode n = status_node(status.text, status.clickable);
             n.bounds = ar(banner_rect());
+            n.keys = status.clickable ? "F5" : "";
             n.target = target(Part::Banner, -1, {});
             t.add(-1, std::move(n));
         }
+        add_first_run_access(t);
     } else {
         // The top bar (the search box is a real EDIT and says what it is itself).
         const RECT search = search_box();
@@ -178,13 +233,7 @@ AccessTree MainWindow::build_access_tree() const {
         t.add(-1, std::move(settings));
 
         if (wizard_open()) {
-            // Its steps, cards and fields come with a later step.
-            AccessNode page;
-            page.id = "wizard";
-            page.role = AccessRole::Pane;
-            page.name = std::string(text(lang_, Str::AccessNewProject));
-            page.bounds = ar(wizard_geometry_.area);
-            t.add(-1, std::move(page));
+            add_wizard_access(t);
         } else {
             add_list_access(t);
             add_shared_access(t);
@@ -606,6 +655,376 @@ void MainWindow::add_php_access(AccessTree& t, int content, const AccessRect& cl
     button(Part::PanelPhpSave, std::string(text(lang_, php_saving_ ? Str::PhpSaving : Str::PhpSave)), can_save, g.save);
 }
 
+// --- New project ---------------------------------------------------------------------
+
+void MainWindow::add_wizard_access(AccessTree& t) const {
+    const WizardGeometry& g = wizard_geometry_;
+    if (!shown(g.area)) {
+        return;
+    }
+    const auto target = [](Part part, int index) { return AccessTarget{static_cast<int>(part), index, {}}; };
+    const bool connected = snap_.link == Link::Connected;
+    AccessNode page;
+    page.id = "wizard";
+    page.role = AccessRole::Pane;
+    page.name = std::string(text(lang_, Str::AccessNewProject));
+    page.bounds = ar(g.area);
+    const int pane = t.add(-1, std::move(page));
+    const auto add = [&](int parent, AccessNode n, const RECT& r) {
+        n.bounds = ar(r);
+        return t.add(parent, std::move(n));
+    };
+
+    // The steps, and the title.
+    const bool versions = wizard_.step == 0 || wizard_has_versions();
+    const std::vector<std::string> steps = wizard_step_names(versions, lang_);
+    const int current = wizard_strip_step(wizard_.step, versions);
+    const int strip = add(pane, step_strip_node("wizard/steps", lang_), g.steps);
+    for (std::size_t i = 0; i < steps.size(); ++i) {
+        const int index = static_cast<int>(i);
+        add(strip, step_node("wizard/step/" + std::to_string(i), steps[i], index, current, static_cast<int>(steps.size()), lang_),
+            i < g.step_rects.size() ? g.step_rects[i] : RECT{});
+    }
+    add(pane, heading_node("wizard/title", wizard_title(wizard_.step, snap_.create.state, wizard_.name, lang_)), g.title);
+
+    switch (wizard_.step) {
+        case 0: {
+            if (snap_.templates.empty()) {
+                const std::string message = !snap_.templates_loaded ? std::string(text(lang_, Str::WizardLoading))
+                                            : fill_pattern(text(lang_, Str::WizardNoTemplates), false,
+                                                           {snap_.templates_error.empty() ? std::string("-")
+                                                                                          : snap_.templates_error});
+                add(pane, text_node("wizard/message", message), g.message);
+                break;
+            }
+            // The cards that fit: one list, the chosen one selected.
+            AccessNode list;
+            list.id = "wizard/cards";
+            list.role = AccessRole::List;
+            list.name = std::string(text(lang_, Str::AccessTemplates));
+            RECT all{};
+            for (const RECT& r : g.cards) {
+                UnionRect(&all, &all, &r);
+            }
+            const int cards = add(pane, std::move(list), all);
+            const int count = static_cast<int>(std::min(g.cards.size(), snap_.templates.size()));
+            for (int i = 0; i < count; ++i) {
+                const auto at = static_cast<std::size_t>(i);
+                AccessNode card = template_card_node(snap_.templates[at], at == wizard_.card, i + 1, count, lang_);
+                card.keys = "Enter";
+                card.target = target(Part::WizCard, i);
+                add(cards, std::move(card), g.cards[at]);
+            }
+            break;
+        }
+        case 1: {
+            // The name box is a real EDIT: its name and help are set on it (make_name_edit).
+            AccessNode folder;
+            folder.id = "wizard/folder";
+            folder.role = AccessRole::Edit;
+            folder.name = access_text(text(lang_, Str::WizardFolder));
+            folder.value = access_text(wizard_.parent);
+            folder.help = access_text(wizard_made_in(wizard_.parent, wizard_name(), lang_));
+            add(pane, std::move(folder), g.folder_box);
+            break;
+        }
+        case 2:
+            for (std::size_t i = 0; i < g.fields.size() && i < wizard_.fields.size(); ++i) {
+                const VersionField& f = wizard_.fields[i];
+                const std::size_t pick = wizard_.picks.contains(f.key) ? wizard_.picks.at(f.key) : f.current;
+                AccessNode picker = picker_node(access_id({Part::WizField, static_cast<int>(i), {}}), f, pick);
+                picker.keys = "F4";
+                picker.target = target(Part::WizField, static_cast<int>(i));
+                add(pane, std::move(picker), g.fields[i].second);
+            }
+            add(pane, text_node("wizard/downloads", std::string(text(lang_, Str::WizardDownloads))), g.message);
+            break;
+        default: {
+            // The step it's on, or why it failed; then the commands as they run.
+            const bool ended = snap_.create.state == "failed" || snap_.create.state == "cancelled";
+            const std::string& line = ended ? snap_.create.error : snap_.create.step;
+            if (!line.empty()) {
+                add(pane, text_node("wizard/line", line), g.message);
+            }
+            if (height_of(g.log_box) > px(kLogLineH)) {
+                AccessNode log_group;
+                log_group.id = "wizard/log";
+                log_group.role = AccessRole::Group;
+                log_group.name = std::string(text(lang_, Str::Log));
+                const int log_index = add(pane, std::move(log_group), g.log_box);
+                RECT inner = g.log_box;
+                InflateRect(&inner, -px(10), -px(8));
+                const auto fit = static_cast<std::size_t>(std::max(1, height_of(inner) / px(kLogLineH)));
+                const std::vector<std::string>& log = snap_.create.log;
+                const std::size_t first = log.size() > fit ? log.size() - fit : 0;
+                int y = inner.top;
+                // Known by their words and which of the same words, as the panel's log.
+                std::map<std::string, int> seen;
+                for (std::size_t i = first; i < log.size(); ++i) {
+                    const std::string said = access_text(log[i]);
+                    const int copy = seen[said]++;
+                    add(log_index, text_node("wizard/log/" + said + "#" + std::to_string(copy), said),
+                        RECT{inner.left, y, inner.right, y + px(kLogLineH)});
+                    y += px(kLogLineH);
+                }
+            }
+            break;
+        }
+    }
+
+    // Browse, then the footer's buttons in reading order.
+    const auto button = [&](Part part, Str label, bool enabled, const RECT& r, std::string keys) {
+        if (!shown(r)) {
+            return;
+        }
+        AccessNode b = button_node(access_id({part, -1, {}}), text(lang_, label), enabled);
+        b.focusable = true;
+        b.keys = std::move(keys);
+        b.target = target(part, -1);
+        add(pane, std::move(b), r);
+    };
+    button(Part::WizBrowse, Str::WizardBrowse, true, g.browse, {});
+    button(Part::WizAddFolder, Str::AddExistingFolder, connected, g.add_folder, {});
+    button(Part::WizCancel, Str::WizardCancel, true, g.cancel, "Esc");
+    button(Part::WizBack, Str::WizardBack, true, g.back, {});
+    button(Part::WizNext, g.next_label, true, g.next, "Enter");
+
+    WizardNewsState news;
+    news.step = wizard_.step;
+    news.versions = versions;
+    news.state = snap_.create.state;
+    news.name = wizard_.name;
+    news.error = snap_.create.error;
+    news.templates_error = snap_.templates_loaded ? snap_.templates_error : std::string();
+    t.news = wizard_news(news, lang_);
+}
+
+// --- the first-run page --------------------------------------------------------------
+
+void MainWindow::add_first_run_access(AccessTree& t) const {
+    const FirstRunGeometry& g = first_run_geometry_;
+    if (!shown(g.area)) {
+        return;
+    }
+    const auto target = [](Part part, int index) { return AccessTarget{static_cast<int>(part), index, {}}; };
+    const std::vector<FirstRunRow> rows = first_run_.started ? first_run_rows_now() : std::vector<FirstRunRow>{};
+
+    Str title = Str::FirstRunWelcome;
+    std::string intro;
+    switch (first_run_.step) {
+        case FirstRunStep::Language:
+            intro = std::string(text(lang_, Str::FirstRunIntro));
+            break;
+        case FirstRunStep::Runtimes:
+            if (first_run_.started) {
+                const FirstRunProgress progress = first_run_progress(rows);
+                title = progress.running() ? Str::FirstRunDownloadingTitle : Str::FirstRunDownloadedTitle;
+                intro = fill(lang_, Str::FirstRunDownloadingIntro, {std::to_string(progress.ready), std::to_string(progress.total)});
+            } else {
+                title = Str::FirstRunRuntimesTitle;
+                intro = std::string(text(lang_, Str::FirstRunRuntimesIntro));
+            }
+            break;
+        case FirstRunStep::Ready:
+            title = Str::FirstRunReadyTitle;
+            break;
+    }
+
+    AccessNode page;
+    page.id = "first-run";
+    page.role = AccessRole::Pane;
+    page.name = access_text(text(lang_, title));
+    page.bounds = ar(g.area);
+    const int pane = t.add(-1, std::move(page));
+    const auto add = [&](int parent, AccessNode n, const RECT& r) {
+        n.bounds = ar(r);
+        return t.add(parent, std::move(n));
+    };
+    // In the part that scrolls: what's scrolled out of it is off screen.
+    const AccessRect clip = ar(g.content);
+    const auto add_in = [&](int parent, AccessNode n, const RECT& r) {
+        const AccessRect cut = clip_rect(ar(r), clip);
+        n.offscreen = cut.empty();
+        n.bounds = n.offscreen ? ar(r) : cut;
+        return t.add(parent, std::move(n));
+    };
+    const auto rect_at = [](const std::vector<RECT>& v, std::size_t i) { return i < v.size() ? v[i] : RECT{}; };
+
+    // The steps.
+    const std::vector<std::string> steps = first_run_step_names(lang_);
+    const int current = static_cast<int>(first_run_.step);
+    const int strip = add(pane, step_strip_node("first-run/steps", lang_), g.steps);
+    for (std::size_t i = 0; i < steps.size(); ++i) {
+        add(strip,
+            step_node("first-run/step/" + std::to_string(i), steps[i], static_cast<int>(i), current,
+                      static_cast<int>(steps.size()), lang_),
+            rect_at(g.step_rects, i));
+    }
+    add_in(pane, heading_node("first-run/title", text(lang_, title)), g.title);
+    if (!intro.empty()) {
+        add_in(pane, text_node("first-run/intro", intro), g.intro);
+    }
+
+    switch (first_run_.step) {
+        case FirstRunStep::Language: {
+            // The languages: radio buttons in a group called Language.
+            AccessNode group;
+            group.id = "first-run/langs";
+            group.role = AccessRole::Group;
+            group.name = access_text(text(lang_, Str::GeneralLanguage));
+            const int langs = add_in(pane, std::move(group), g.card);
+            const int count = static_cast<int>(std::min(g.rows.size(), kLangChoices.size()));
+            for (int i = 0; i < count; ++i) {
+                const auto at = static_cast<std::size_t>(i);
+                AccessNode radio = language_radio_node(access_id({Part::FrLang, i, {}}),
+                                                       first_run_language_row(kLangChoices.at(at), first_run_.system_lang, lang_),
+                                                       kLangChoices.at(at) == prefs_.lang, i + 1, count);
+                radio.enabled = !asking_;
+                radio.target = target(Part::FrLang, i);
+                add_in(langs, std::move(radio), g.rows[at]);
+            }
+            add_in(pane, text_node("first-run/lang-note", text(lang_, Str::FirstRunLanguageNote)), g.note);
+            break;
+        }
+        case FirstRunStep::Runtimes:
+            if (first_run_.started) {
+                // The downloads: a group per row, its progress bar and Cancel.
+                AccessNode group;
+                group.id = "first-run/downloads";
+                group.role = AccessRole::Group;
+                group.name = access_text(text(lang_, Str::FirstRunStepRuntimes));
+                const int downloads = add_in(pane, std::move(group), g.card);
+                for (std::size_t i = 0; i < rows.size() && i < g.rows.size(); ++i) {
+                    const FirstRunRow& r = rows[i];
+                    const std::string base = "first-run/download/" + r.name;
+                    const int row = add_in(downloads, download_row_node(base, r, lang_), g.rows[i]);
+                    if (r.state == FirstRunRowState::Running) {
+                        add_in(row, download_progress_node(base + "/progress", r), g.rows[i]);
+                    }
+                    if (const RECT cancel = rect_at(g.cancels, i); shown(cancel)) {
+                        AccessNode b = button_node(access_id({Part::FrCancel, static_cast<int>(i), {}}),
+                                                   access_join(lang_, {std::string(text(lang_, Str::WizardCancel)), r.label}));
+                        b.focusable = true;
+                        b.target = target(Part::FrCancel, static_cast<int>(i));
+                        add_in(row, std::move(b), cancel);
+                    }
+                }
+                if (shown(g.info)) {
+                    add_in(pane, text_node("first-run/trust", first_run_https_line(first_run_.trust, first_run_.trust_error, lang_)),
+                           g.info);
+                }
+                if (shown(g.info_note)) {
+                    add_in(pane, text_node("first-run/trust-note", text(lang_, Str::FirstRunTrustAskingNote)), g.info_note);
+                }
+                break;
+            }
+            switch (first_run_.list) {
+                case FirstRunList::Ready: {
+                    // The runtimes offered: check boxes; nginx is always included.
+                    AccessNode group;
+                    group.id = "first-run/offers";
+                    group.role = AccessRole::Group;
+                    group.name = access_text(text(lang_, Str::FirstRunStepRuntimes));
+                    const int offers = add_in(pane, std::move(group), g.card);
+                    const int count = static_cast<int>(std::min(g.rows.size(), first_run_.offers.size()));
+                    for (int i = 0; i < count; ++i) {
+                        const auto at = static_cast<std::size_t>(i);
+                        const bool ticked = at < first_run_.ticks.size() && first_run_.ticks[at];
+                        AccessNode box = offer_node(access_id({Part::FrTick, i, {}}), first_run_.offers[at], ticked, i + 1,
+                                                    count, lang_);
+                        box.keys = box.enabled ? "Space" : "";
+                        box.target = target(Part::FrTick, i);
+                        add_in(offers, std::move(box), g.rows[at]);
+                    }
+                    if (shown(g.info)) {
+                        add_in(pane, text_node("first-run/cert", text(lang_, Str::FirstRunCertNote)), g.info);
+                    }
+                    break;
+                }
+                case FirstRunList::Failed: {
+                    add_in(pane, text_node("first-run/message", first_run_list_error(first_run_.list_error, lang_)), g.message);
+                    AccessNode retry = button_node(access_id({Part::FrRetry, -1, {}}), text(lang_, Str::FirstRunTryAgain),
+                                                   snap_.link == Link::Connected);
+                    retry.focusable = true;
+                    retry.target = target(Part::FrRetry, -1);
+                    add_in(pane, std::move(retry), g.retry);
+                    break;
+                }
+                case FirstRunList::Idle:
+                case FirstRunList::Loading:
+                    add_in(pane, text_node("first-run/message", text(lang_, Str::FirstRunLoading)), g.message);
+                    break;
+            }
+            break;
+        case FirstRunStep::Ready: {
+            // The summary: what's ready, https, where projects go (and Change…).
+            const std::string runtimes = first_run_runtimes_line(rows, lang_, first_run_.without);
+            const std::string https = first_run_https_line(first_run_.trust, first_run_.trust_error, lang_);
+            const std::string folder = first_run_folder();
+            const std::pair<Str, const std::string*> summary[] = {
+                {Str::SettingsRuntimes, &runtimes}, {Str::FirstRunHttps, &https}, {Str::FirstRunFolderTitle, &folder}};
+            const char* ids[] = {"runtimes", "https", "folder"};
+            for (std::size_t i = 0; i < std::size(summary) && i < g.rows.size(); ++i) {
+                add_in(pane,
+                       text_node(std::string("first-run/summary/") + ids[i],
+                                 access_join(lang_, {std::string(text(lang_, summary[i].first)), *summary[i].second})),
+                       g.rows[i]);
+            }
+            if (shown(g.change)) {
+                AccessNode change = button_node(
+                    access_id({Part::FrChange, -1, {}}),
+                    access_join(lang_, {std::string(text(lang_, Str::FirstRunChange)), std::string(text(lang_, Str::FirstRunFolderTitle))}),
+                    first_run_.folder_ask.empty() && snap_.link == Link::Connected);
+                change.focusable = true;
+                change.target = target(Part::FrChange, -1);
+                add_in(pane, std::move(change), g.change);
+            }
+            // The two big buttons: their heading is the name, the words under it the help.
+            for (const auto& [part, head, note, r] : {std::tuple{Part::FrCreate, Str::FirstRunCreate, Str::FirstRunCreateNote, g.create},
+                                                      std::tuple{Part::FrAdd, Str::FirstRunAddFolder, Str::FirstRunAddFolderNote, g.add}}) {
+                if (!shown(r)) {
+                    continue;
+                }
+                AccessNode b = button_node(access_id({part, -1, {}}), text(lang_, head));
+                b.help = access_text(text(lang_, note));
+                b.focusable = true;
+                b.target = target(part, -1);
+                add_in(pane, std::move(b), r);
+            }
+            break;
+        }
+    }
+
+    // The footer: its words, then Skip setup, Back, Continue without downloading and the step's button.
+    if (shown(g.footer_text)) {
+        add(pane, text_node("first-run/footer-text", first_run_footer_words()), g.footer_text);
+    }
+    const auto button = [&](Part part, Str label, const RECT& r) {
+        if (!shown(r)) {
+            return;
+        }
+        AccessNode b = button_node(access_id({part, -1, {}}), text(lang_, label));
+        b.focusable = true;
+        b.target = target(part, -1);
+        add(pane, std::move(b), r);
+    };
+    button(Part::FrSkipSetup, Str::FirstRunSkipSetup, g.skip);
+    button(Part::FrBack, Str::WizardBack, g.back);
+    button(Part::FrWithout, Str::FirstRunWithout, g.without);
+    button(Part::FrNext, g.next_label, g.next);
+
+    FirstRunNewsState news;
+    news.step = first_run_.step;
+    news.list = first_run_.list;
+    news.list_error = first_run_.list_error;
+    news.started = first_run_.started;
+    news.rows = rows;
+    news.trust = first_run_.trust;
+    news.trust_error = first_run_.trust_error;
+    news.folder = first_run_.folder;
+    t.news = first_run_news(news, lang_);
+}
+
 // --- AccessSource ------------------------------------------------------------------
 
 const AccessTree& MainWindow::access_tree() {
@@ -634,6 +1053,10 @@ void MainWindow::access_after_paint() {
     access_dirty_ = false;
     if (access_said_) {
         access_.raise(access_changes(*access_said_, access_now_));
+        // What's new on a page (its step, a download that ended, the project made): said once.
+        for (const AccessNews& news : access_news(*access_said_, access_now_)) {
+            access_.notify(news.text, news.important, news.key);
+        }
     }
     access_said_ = access_now_;
 }
@@ -678,6 +1101,13 @@ void MainWindow::run_access(const AccessNode& n, AccessAction action) {
         return;
     }
     switch (part) {
+        case Part::WizCard:
+            // Select chooses it, as a click does; Invoke goes on with it, as Enter does.
+            on_click(hit);
+            if (action == AccessAction::Invoke && wizard_open() && wizard_.step == 0) {
+                wizard_next();
+            }
+            return;
         case Part::Row:
             // Opening its panel is what Enter and a click on it do.
             if (const int row = visible_index(hit.project); row >= 0) {
@@ -730,6 +1160,19 @@ void MainWindow::access_focus(const Hit& hit) {
             shared_focused_ = false;
             panel_focus_ = -1;
             ensure_visible(row);
+        }
+    } else if (wizard_open() && (hit.part == Part::WizCard || hit.part == Part::WizField || hit.part == Part::WizBrowse ||
+                                 hit.part == Part::WizAddFolder || hit.part == Part::WizCancel ||
+                                 hit.part == Part::WizBack || hit.part == Part::WizNext)) {
+        const std::vector<Hit> order = wizard_focus_order();
+        if (hit.part == Part::WizCard || std::find(order.begin(), order.end(), hit) != order.end()) {
+            wizard_focus_to(hit, true);  // it takes the window's focus itself
+        }
+        return;
+    } else if (first_run_open()) {
+        const std::vector<Hit> order = first_run_focus_order();
+        if (const auto it = std::find(order.begin(), order.end(), hit); it != order.end()) {
+            first_run_focus_at(static_cast<int>(it - order.begin()));
         }
     } else {
         return;

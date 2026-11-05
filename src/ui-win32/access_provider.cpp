@@ -7,6 +7,7 @@
 #include <oleacc.h>
 #include <uiautomation.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <map>
@@ -18,6 +19,10 @@
 #endif
 #ifndef UIA_SizeOfSetPropertyId
 #define UIA_SizeOfSetPropertyId 30153
+#endif
+// Windows 10 1803.
+#ifndef UIA_HeadingLevelPropertyId
+#define UIA_HeadingLevelPropertyId 30173
 #endif
 
 namespace floserver::ui {
@@ -35,6 +40,7 @@ constexpr int kNotificationActionCompleted = 2;
 constexpr int kNotificationOther = 4;
 constexpr int kProcessingImportantMostRecent = 1;
 constexpr int kProcessingMostRecent = 3;
+constexpr int kHeadingLevel1 = 80051;  // HeadingLevel1; HeadingLevel2 is the next, and so on
 constexpr auto kOptions = static_cast<ProviderOptions>(static_cast<int>(ProviderOptions_ServerSideProvider) |
                                                      static_cast<int>(ProviderOptions_UseComThreading));
 
@@ -131,6 +137,12 @@ int control_type(AccessRole role) {
             return UIA_ComboBoxControlTypeId;
         case AccessRole::Edit:
             return UIA_EditControlTypeId;
+        case AccessRole::CheckBox:
+            return UIA_CheckBoxControlTypeId;
+        case AccessRole::Radio:
+            return UIA_RadioButtonControlTypeId;
+        case AccessRole::Progress:
+            return UIA_ProgressBarControlTypeId;
     }
     return UIA_GroupControlTypeId;
 }
@@ -322,6 +334,7 @@ class AccessElement final : public IRawElementProviderSimple,
                             public ISelectionItemProvider,
                             public ISelectionProvider,
                             public IValueProvider,
+                            public IRangeValueProvider,
                             public IExpandCollapseProvider {
 public:
     AccessElement(std::shared_ptr<AccessBridge> bridge, std::string id) : bridge_(std::move(bridge)), id_(std::move(id)) {}
@@ -348,6 +361,8 @@ public:
             *out = static_cast<ISelectionProvider*>(this);
         } else if (riid == __uuidof(IValueProvider)) {
             *out = static_cast<IValueProvider*>(this);
+        } else if (riid == __uuidof(IRangeValueProvider)) {
+            *out = static_cast<IRangeValueProvider*>(this);
         } else if (riid == __uuidof(IExpandCollapseProvider)) {
             *out = static_cast<IExpandCollapseProvider*>(this);
         } else {
@@ -399,7 +414,10 @@ public:
                 has = selects_items(*tree, *n);
                 break;
             case UIA_ValuePatternId:
-                has = n->role == AccessRole::ComboBox;
+                has = n->role == AccessRole::ComboBox || n->role == AccessRole::Edit;
+                break;
+            case UIA_RangeValuePatternId:
+                has = n->role == AccessRole::Progress && n->progress.has_value();
                 break;
             case UIA_ExpandCollapsePatternId:
                 has = n->expandable;
@@ -462,6 +480,11 @@ public:
             case UIA_SizeOfSetPropertyId:
                 if (n->set_size > 0) {
                     set_int(out, n->set_size);
+                }
+                break;
+            case UIA_HeadingLevelPropertyId:
+                if (n->heading > 0) {
+                    set_int(out, kHeadingLevel1 + std::min(n->heading, 9) - 1);
                 }
                 break;
             case UIA_ProviderDescriptionPropertyId:
@@ -687,7 +710,8 @@ public:
         return S_OK;
     }
 
-    // IValueProvider: a picker's choice, changed through its menu.
+    // IValueProvider: a picker's choice, changed through its menu; a drawn
+    // box's words (New project's folder, changed with Browse).
     HRESULT STDMETHODCALLTYPE SetValue(LPCWSTR /*value*/) override { return kInvalidOperation; }
     HRESULT STDMETHODCALLTYPE get_Value(BSTR* out) override {
         if (out == nullptr) {
@@ -702,6 +726,7 @@ public:
         *out = bstr(n->value);
         return S_OK;
     }
+    // Both IValueProvider's and IRangeValueProvider's: nothing is set from outside.
     HRESULT STDMETHODCALLTYPE get_IsReadOnly(BOOL* out) override {
         if (out == nullptr) {
             return E_POINTER;
@@ -709,6 +734,27 @@ public:
         *out = TRUE;
         return S_OK;
     }
+
+    // IRangeValueProvider: a download's progress, 0 to 100. Read when asked,
+    // never raised: a screen reader isn't told of every step.
+    HRESULT STDMETHODCALLTYPE SetValue(double /*value*/) override { return kInvalidOperation; }
+    HRESULT STDMETHODCALLTYPE get_Value(double* out) override {
+        if (out == nullptr) {
+            return E_POINTER;
+        }
+        *out = 0;
+        const AccessTree* tree = nullptr;
+        const AccessNode* n = node(tree);
+        if (n == nullptr) {
+            return kNotAvailable;
+        }
+        *out = std::clamp(n->progress.value_or(0.0), 0.0, 1.0) * 100.0;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE get_Maximum(double* out) override { return number(out, 100.0); }
+    HRESULT STDMETHODCALLTYPE get_Minimum(double* out) override { return number(out, 0.0); }
+    HRESULT STDMETHODCALLTYPE get_LargeChange(double* out) override { return number(out, 10.0); }
+    HRESULT STDMETHODCALLTYPE get_SmallChange(double* out) override { return number(out, 1.0); }
 
     // IExpandCollapseProvider: the menu is Windows' own and runs until it's closed.
     HRESULT STDMETHODCALLTYPE Expand() override { return act(AccessAction::Expand); }
@@ -723,6 +769,14 @@ public:
 
 private:
     ~AccessElement() = default;  // Release() deletes it
+
+    static HRESULT number(double* out, double value) {
+        if (out == nullptr) {
+            return E_POINTER;
+        }
+        *out = value;
+        return S_OK;
+    }
 
     // The element as the window is now; null when it's gone.
     const AccessNode* node(const AccessTree*& tree) const {
@@ -941,17 +995,17 @@ void AccessRoot::raise(const std::vector<AccessChange>& changes) {
     }
 }
 
-void AccessRoot::notify(std::string_view text, bool important) {
+void AccessRoot::notify(std::string_view text, bool important, std::string_view activity) {
     if (!bridge_ || !bridge_->live() || root_ == nullptr || uia().raise_notification == nullptr || text.empty() ||
         !listening()) {
         return;
     }
     BSTR said = bstr(access_text(text));
-    BSTR activity = SysAllocString(L"FloServer.Message");
+    BSTR kind = bstr("FloServer." + std::string(activity.empty() ? std::string_view("Message") : activity));
     uia().raise_notification(root_, important ? kNotificationOther : kNotificationActionCompleted,
-                             important ? kProcessingImportantMostRecent : kProcessingMostRecent, said, activity);
+                             important ? kProcessingImportantMostRecent : kProcessingMostRecent, said, kind);
     SysFreeString(said);
-    SysFreeString(activity);
+    SysFreeString(kind);
 }
 
 // --- a real control's name ----------------------------------------------------------
@@ -963,12 +1017,15 @@ namespace {
 constexpr GUID kClsidAccPropServices = {0xb5f8350b, 0x0548, 0x48b1, {0xa6, 0xee, 0x88, 0xbd, 0x00, 0xb4, 0xa5, 0xe7}};
 constexpr GUID kIidAccPropServices = {0x6e26e776, 0x04f0, 0x495d, {0x80, 0xe4, 0x33, 0x30, 0x35, 0x2e, 0x31, 0x69}};
 constexpr GUID kPropIdAccName = {0x608d3df8, 0x8128, 0x4aa7, {0xa4, 0x28, 0xf5, 0x5e, 0x49, 0x26, 0x72, 0x91}};
+constexpr GUID kPropIdAccHelp = {0xc831e11f, 0x44db, 0x4a99, {0x97, 0x68, 0xcb, 0x8f, 0x97, 0x8b, 0x72, 0x31}};
 constexpr DWORD kObjIdClient = 0xFFFFFFFCUL;  // OBJID_CLIENT
 constexpr DWORD kChildIdSelf = 0;
 
 }  // namespace
 
-void set_accessible_name(HWND control, std::string_view name) {
+namespace {
+
+void set_hwnd_prop(HWND control, const GUID& prop, std::string_view value) {
     if (control == nullptr) {
         return;
     }
@@ -978,14 +1035,19 @@ void set_accessible_name(HWND control, std::string_view name) {
         services == nullptr) {
         return;
     }
-    if (name.empty()) {
-        MSAAPROPID props[] = {kPropIdAccName};
+    if (value.empty()) {
+        MSAAPROPID props[] = {prop};
         services->ClearHwndProps(control, kObjIdClient, kChildIdSelf, props, 1);
     } else {
-        services->SetHwndPropStr(control, kObjIdClient, kChildIdSelf, kPropIdAccName,
-                                 win::widen(access_text(name)).c_str());
+        services->SetHwndPropStr(control, kObjIdClient, kChildIdSelf, prop, win::widen(access_text(value)).c_str());
     }
     services->Release();
 }
+
+}  // namespace
+
+void set_accessible_name(HWND control, std::string_view name) { set_hwnd_prop(control, kPropIdAccName, name); }
+
+void set_accessible_help(HWND control, std::string_view help) { set_hwnd_prop(control, kPropIdAccHelp, help); }
 
 }  // namespace floserver::ui

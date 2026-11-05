@@ -19,7 +19,8 @@ add_library(floserver_ui_model STATIC
     model/toast.cpp
     model/glyphs.cpp
     model/access_tree.cpp
-    model/main_access.cpp)
+    model/main_access.cpp
+    model/pages_access.cpp)
 target_include_directories(floserver_ui_model PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # Core for paths.h's file helpers (window.json is read and written here, testably).
 target_link_libraries(floserver_ui_model PUBLIC floserver_third_party PRIVATE floserver_core)

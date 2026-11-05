@@ -15,6 +15,7 @@
 #include "main_window.h"
 
 #include "main_window_layout.h"
+#include "model/pages_access.h"
 #include "model/ports_page.h"
 #include "model/theme.h"
 #include "window_prefs.h"
@@ -24,6 +25,7 @@
 #include "floserver/core/trust_store.h"
 
 #include <algorithm>
+#include <iterator>
 #include <string_view>
 #include <utility>
 
@@ -489,19 +491,7 @@ void MainWindow::on_first_run_key(WPARAM key) {
             } else {
                 next = (next + (back ? count - 1 : 1)) % count;
             }
-            first_run_.focus = next;
-            show_focus_ = true;
-            // Into view (the footer's buttons are always in view).
-            const RECT r = first_run_rect_of(order[static_cast<std::size_t>(next)]);
-            const RECT& content = first_run_geometry_.content;
-            if (!is_empty(r) && r.top < first_run_geometry_.footer.top) {
-                if (r.top < content.top) {
-                    first_run_scroll_to(first_run_.scroll - static_cast<int>(content.top - r.top) - px(8));
-                } else if (r.bottom > content.bottom) {
-                    first_run_scroll_to(first_run_.scroll + static_cast<int>(r.bottom - content.bottom) + px(8));
-                }
-            }
-            InvalidateRect(hwnd_, nullptr, FALSE);
+            first_run_focus_at(next);
             return;
         }
         case VK_SPACE:
@@ -520,6 +510,38 @@ void MainWindow::on_first_run_key(WPARAM key) {
         default:
             return;
     }
+}
+
+void MainWindow::first_run_focus_at(int index) {
+    const std::vector<Hit> order = first_run_focus_order();
+    if (index < 0 || index >= static_cast<int>(order.size())) {
+        return;
+    }
+    first_run_.focus = index;
+    show_focus_ = true;
+    // Into view (the footer's buttons are always in view).
+    const RECT r = first_run_rect_of(order[static_cast<std::size_t>(index)]);
+    const RECT& content = first_run_geometry_.content;
+    if (!is_empty(r) && r.top < first_run_geometry_.footer.top) {
+        if (r.top < content.top) {
+            first_run_scroll_to(first_run_.scroll - static_cast<int>(content.top - r.top) - px(8));
+        } else if (r.bottom > content.bottom) {
+            first_run_scroll_to(first_run_.scroll + static_cast<int>(r.bottom - content.bottom) + px(8));
+        }
+    }
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+std::string MainWindow::first_run_footer_words() const {
+    switch (first_run_.step) {
+        case FirstRunStep::Language:
+            return std::string(text(lang_, Str::FirstRunPrivacy));
+        case FirstRunStep::Ready:
+            return std::string(text(lang_, Str::FirstRunNextScreen));
+        case FirstRunStep::Runtimes:
+            break;
+    }
+    return fill(lang_, Str::FirstRunTotal, {size_text(first_run_total(first_run_.offers, first_run_.ticks))});
 }
 
 void MainWindow::first_run_scroll_to(int target) {
@@ -544,6 +566,19 @@ MainWindow::FirstRunGeometry MainWindow::first_run_geometry(HDC dc, int scroll) 
     const RECT banner = banner_rect();
     const int top = banner.bottom > 0 ? banner.bottom + px(12) : px(20);
     g.steps = {x0, top, x1, top + px(20)};
+    {
+        // The steps' words, the current one bold, as many as fit.
+        int x = g.steps.left;
+        for (const FirstRunStep step : {FirstRunStep::Language, FirstRunStep::Runtimes, FirstRunStep::Ready}) {
+            HFONT font = (step == first_run_.step ? fonts_.button_bold : fonts_.button).get();
+            const int sw = Canvas::measure(dc, w(first_run_step_label(step, first_run_.step, lang_)), font, rtl_) + px(4);
+            g.step_rects.push_back({x, g.steps.top, std::min<int>(g.steps.right, x + sw), g.steps.bottom});
+            x += sw + px(28);
+            if (x >= g.steps.right) {
+                break;
+            }
+        }
+    }
 
     // The footer (approved 2 Nov): Skip setup at the reading start, the
     // words after it, Back, Continue without downloading and the step's own
@@ -1145,18 +1180,12 @@ void MainWindow::paint_first_run(Canvas& c, HDC dc, bool text_pass) const {
 
     // The steps, the current one in the accent colour.
     {
-        int x = g.steps.left;
-        for (const FirstRunStep step : {FirstRunStep::Language, FirstRunStep::Runtimes, FirstRunStep::Ready}) {
-            const bool current = step == first_run_.step;
+        const FirstRunStep steps[] = {FirstRunStep::Language, FirstRunStep::Runtimes, FirstRunStep::Ready};
+        for (std::size_t k = 0; k < g.step_rects.size() && k < std::size(steps); ++k) {
+            const bool current = steps[k] == first_run_.step;
             HFONT font = (current ? fonts_.button_bold : fonts_.button).get();
-            const std::wstring s = w(first_run_step_label(step, first_run_.step, lang_));
-            const int sw = Canvas::measure(dc, s, font, rtl_) + px(4);
-            c.text({x, g.steps.top, std::min<int>(g.steps.right, x + sw), g.steps.bottom}, s, font,
+            c.text(g.step_rects[k], w(first_run_step_label(steps[k], first_run_.step, lang_)), font,
                    current ? p.accent : p.text_subtle, Align::Start, false);
-            x += sw + px(28);
-            if (x >= g.steps.right) {
-                break;
-            }
         }
     }
 
@@ -1192,26 +1221,7 @@ void MainWindow::paint_first_run(Canvas& c, HDC dc, bool text_pass) const {
             c.text(g.legend, w(text(lang_, Str::GeneralLanguage)), fonts_.body_bold.get(), p.text, Align::Start, false);
             for (std::size_t i = 0; i < g.rows.size() && i < kLangChoices.size(); ++i) {
                 const RECT& r = g.rows[i];
-                const LangChoice choice = kLangChoices.at(i);
-                std::string label;
-                std::string note;
-                switch (choice) {
-                    case LangChoice::System:
-                        label = std::string(text(lang_, Str::GeneralSameAsWindows));
-                        note = fill_pattern(text(lang_, Str::FirstRunLanguageNow), false,
-                                            {language_name(first_run_.system_lang)});
-                        break;
-                    case LangChoice::En:
-                        label = std::string(language_name(Lang::En));
-                        break;
-                    case LangChoice::Ar:
-                        label = std::string(language_name(Lang::Ar));
-                        break;
-                    case LangChoice::Ku:
-                        label = std::string(language_name(Lang::Ku));
-                        note = std::string(text(lang_, Str::FirstRunSorani));
-                        break;
-                }
+                const auto [label, note] = first_run_language_row(kLangChoices.at(i), first_run_.system_lang, lang_);
                 const int start = r.left + px(16) + px(kBox) + px(12);
                 int end = r.right - px(16);
                 if (!note.empty()) {
@@ -1313,15 +1323,7 @@ void MainWindow::paint_first_run(Canvas& c, HDC dc, bool text_pass) const {
 
     // The footer: its words, then the buttons.
     if (!is_empty(g.footer_text)) {
-        std::string words;
-        if (first_run_.step == FirstRunStep::Language) {
-            words = std::string(text(lang_, Str::FirstRunPrivacy));
-        } else if (first_run_.step == FirstRunStep::Ready) {
-            words = std::string(text(lang_, Str::FirstRunNextScreen));
-        } else {
-            words = fill(lang_, Str::FirstRunTotal, {size_text(first_run_total(first_run_.offers, first_run_.ticks))});
-        }
-        const std::wstring s = w(words);
+        const std::wstring s = w(first_run_footer_words());
         if (Canvas::measure(dc, s, fonts_.button.get(), rtl_) <= width_of(g.footer_text)) {
             c.text(g.footer_text, s, fonts_.button.get(), p.text_subtle, Align::Start, false);
         } else {

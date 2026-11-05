@@ -237,6 +237,7 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
                 return 0;
             }
             if (name_edit_ != nullptr && win::int_to_ptr<HWND>(lparam) == name_edit_ && HIWORD(wparam) == EN_CHANGE) {
+                sync_name_help();
                 InvalidateRect(hwnd_, nullptr, FALSE);  // the address and folder lines follow the name
                 return 0;
             }
@@ -524,6 +525,8 @@ void MainWindow::on_destroy() {
     access_said_.reset();
     access_queue_.clear();
     set_accessible_name(search_, {});
+    set_accessible_name(name_edit_, {});
+    set_accessible_help(name_edit_, {});
     KillTimer(hwnd_, kToastTimer);
     list_bar_.cancel(hwnd_);
     panel_bar_.cancel(hwnd_);
@@ -1443,6 +1446,7 @@ void MainWindow::on_click(const Hit& clicked) {
             show_focus_ = false;
             on_first_run_click(hit);
             break;
+        case Part::WizName:  // a real EDIT: it takes its own clicks
         case Part::None:
             break;
     }
@@ -1472,6 +1476,12 @@ void MainWindow::on_key(WPARAM key) {
         if (!first_run_open() && !wizard_open()) {
             open_wizard();
         }
+        return;
+    }
+    // F5 starts a stopped service from the two pages too (their status line
+    // is clickable, and the screen reader's element for it says F5).
+    if (key == VK_F5 && worker_ && status_line().clickable && (first_run_open() || wizard_open())) {
+        worker_->start_service();
         return;
     }
     if (first_run_open()) {
