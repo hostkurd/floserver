@@ -1,3 +1,8 @@
 #include <windows.h>
 
+// The lowest-numbered icon is the one Explorer, the Start menu and shortcuts
+// show for FloServer.exe. Made by tools/icon/make_app_icon.py, the same
+// drawing as make_app_icon() in canvas.cpp (the window and the tray).
+1 ICON "FloServer.ico"
+
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "FloServer.manifest"
