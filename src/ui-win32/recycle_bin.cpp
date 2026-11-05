@@ -323,6 +323,11 @@ void RecycleBin::check(const std::string& project, const std::string& folder, co
     }
 }
 
+RecycleBin::Result recycle_folder_now(HWND owner, const std::string& folder, const FolderGuard& guard,
+                                      const std::string& refused, const std::string& missing) {
+    return recycle(owner, {}, false, folder, guard, refused, missing);
+}
+
 std::vector<RecycleBin::Check> RecycleBin::take_checks() {
     const std::lock_guard lock(shared_->mutex);
     return std::exchange(shared_->checks, {});

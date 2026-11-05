@@ -753,3 +753,103 @@ TEST_CASE("the projects folder is kept in config.json, with the other keys") {
     CHECK_FALSE(after->projects_dir.has_value());
     CHECK(after->other["from_a_newer_window"]["x"].size() == 2);
 }
+
+// Remove FloServer… (D21): what each "Also delete" box deletes, and what it never does.
+TEST_CASE("remove FloServer: the runtimes box takes the runtimes and caches, the databases box the MariaDB folders") {
+    const FakeData f;
+    write_file(f.d / "state" / "manifest.json", "{}");
+    write_file(f.d / "state" / "manifest.json.sig", "sig");
+    write_file(f.d / "state" / "manifest-state.json", R"({"seq": 4})");
+    write_file(f.d / "data" / "mariadb-11.4" / "data" / "ibdata1", "more rows");
+    write_file(f.d / "data" / "notes.txt", "not a database");
+    write_file(f.d / "data" / "other" / "x", "not MariaDB's");
+
+    const auto runtimes = uninstall_items(f.d, true, false, later());
+    CHECK(runtimes.size() == 5);
+    for (const fs::path& p : {f.d / "runtimes", f.d / "downloads", f.d / "templates", f.d / "state" / "manifest.json",
+                              f.d / "state" / "manifest.json.sig"}) {
+        CAPTURE(p);
+        CHECK(listed(runtimes, p));
+    }
+    CHECK(total_bytes(runtimes) == disk_usage(f.d / "runtimes", later()).bytes +
+                                       disk_usage(f.d / "downloads", later()).bytes +
+                                       disk_usage(f.d / "templates", later()).bytes + 2 + 3);
+
+    const auto databases = uninstall_items(f.d, false, true, later());
+    REQUIRE(databases.size() == 2);
+    CHECK(databases[0].path == f.d / "data" / "mariadb-11.4");
+    CHECK(databases[1].path == f.d / "data" / "mariadb-11.8");
+    CHECK(total_bytes(databases) == disk_usage(f.d / "data" / "mariadb-11.4", later()).bytes +
+                                        disk_usage(f.d / "data" / "mariadb-11.8", later()).bytes);
+    CHECK(uninstall_items(f.d, false, false, later()).empty());
+
+    // Both ticked: both go; everything else stays.
+    auto both = runtimes;
+    both.insert(both.end(), databases.begin(), databases.end());
+    const CleanResult done = remove_uninstall_items(f.d, both);
+    CHECK(done.skipped_items.empty());
+    CHECK(done.done == 7);
+    for (const fs::path& p : {f.d / "runtimes", f.d / "downloads", f.d / "templates", f.d / "state" / "manifest.json",
+                              f.d / "data" / "mariadb-11.8", f.d / "data" / "mariadb-11.4"}) {
+        CAPTURE(p);
+        CHECK_FALSE(fs::exists(p));
+    }
+    for (const fs::path& p : {f.d / "config.json", f.d / "state" / "manifest-state.json", f.d / "data" / "notes.txt",
+                              f.d / "data" / "other" / "x", f.d / "certs" / "ca.key", f.d / "secrets" / "root.txt",
+                              f.d / "web" / "logs" / "nginx-error.log", f.d / "php" / "8.5" / "custom.ini"}) {
+        CAPTURE(p);
+        CHECK(fs::exists(p));
+    }
+    // Nothing left to delete: nothing listed.
+    CHECK(uninstall_items(f.d, true, true, later()).empty());
+}
+
+TEST_CASE("remove FloServer: only its own places, never a protected folder, never through a link") {
+    const FakeData f;
+    // Whatever a list says: not one of its places.
+    const CleanResult refused =
+        remove_uninstall_items(f.d, {{f.d / "config.json", 1, false, true}, {f.d / "certs", 1, true, true},
+                                     {f.d / "data", 1, true, true}, {f.d / "data" / "mariadb-", 0, true, true}});
+    CHECK(refused.done == 0);
+    CHECK(refused.skipped_items.size() == 4);
+    CHECK(fs::exists(f.d / "config.json"));
+    CHECK(fs::exists(f.d / "certs" / "ca.key"));
+    CHECK(fs::exists(f.d / "data" / "mariadb-11.8" / "shop" / "t.ibd"));
+    CHECK(is_uninstall_item(f.d, f.d / "data" / "mariadb-11.8"));
+    CHECK_FALSE(is_uninstall_item(f.d, f.d / "data" / "mariadb-11.8" / "shop"));
+    CHECK_FALSE(is_uninstall_item(f.d, f.d / "state" / "manifest-state.json"));
+
+    // A project kept inside runtimes (set by hand): the runtimes folder stays whole.
+    CleanOptions options;
+    options.protected_dirs = {f.d / "runtimes" / "php" / "8.5.1"};
+    options.protected_kinds = {"project:shop"};
+    const CleanResult kept = remove_uninstall_items(f.d, uninstall_items(f.d, true, false, later()), options);
+    CHECK(fs::exists(f.d / "runtimes" / "php" / "8.5.1" / "php.exe"));
+    CHECK_FALSE(fs::exists(f.d / "downloads"));
+    REQUIRE(kept.skipped_items.size() == 1);
+    CHECK(kept.skipped_items[0].path == "runtimes");
+    CHECK(kept.skipped_items[0].why == "protected");
+
+    // A linked <data>/data: never gone into, nothing listed or deleted there.
+    const TempDir outside;
+    write_file(outside.path() / "mariadb-10.6" / "rows", "someone else's");
+    fs::remove_all(f.d / "data");
+    fs::create_directory_symlink(outside.path(), f.d / "data");
+    CHECK(uninstall_items(f.d, false, true, later()).empty());
+    const CleanResult linked = remove_uninstall_items(f.d, {{f.d / "data" / "mariadb-10.6", 1, true, true}});
+    CHECK(linked.done == 0);
+    REQUIRE(linked.skipped_items.size() == 1);
+    CHECK(linked.skipped_items[0].why == "link");
+    CHECK(fs::exists(outside.path() / "mariadb-10.6" / "rows"));
+
+    // A linked runtimes folder goes as the link; what it points to stays.
+    const TempDir elsewhere;
+    write_file(elsewhere.path() / "php" / "php.exe", "not FloServer's");
+    fs::remove_all(f.d / "runtimes");
+    fs::create_directory_symlink(elsewhere.path(), f.d / "runtimes");
+    const auto items = uninstall_items(f.d, true, false, later());
+    REQUIRE(listed(items, f.d / "runtimes"));
+    (void)remove_uninstall_items(f.d, items);
+    CHECK_FALSE(fs::exists(fs::symlink_status(f.d / "runtimes")));
+    CHECK(fs::exists(elsewhere.path() / "php" / "php.exe"));
+}

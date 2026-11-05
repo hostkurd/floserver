@@ -86,7 +86,9 @@ namespace floserver::ui {
 // its `prefs_message`; the lparam is the choice's index (kLangChoices,
 // kThemeChoices, CloseAction, or 1 for "start in the tray").
 // CodeEditor: the choice is read from prefs() (a program's path doesn't fit an lparam).
-enum class PrefChange : std::uint8_t { Language, Theme, Close, StartInTray, CodeEditor };
+// RemoveFloServer: Remove FloServer… was answered with Remove FloServer; the
+// lparam is uninstall_ticks_bits() of the boxes. FloServer's window does the rest.
+enum class PrefChange : std::uint8_t { Language, Theme, Close, StartInTray, CodeEditor, RemoveFloServer };
 
 class SettingsWindow : public AccessSource {
 public:
@@ -237,6 +239,7 @@ private:
         GeneralEditor,     // row: editor_rows()' index
         GeneralUpdates,
         GeneralLicences,
+        GeneralRemove,     // Remove FloServer…
     };
     enum class Button : std::uint8_t { None, Remove, RemoveDisabled, Download, Cancel };
     struct Hit {
@@ -436,6 +439,10 @@ private:
         RECT updates{};
         RECT licences{};
         RECT updates_note{};
+        RECT remove_card{};  // Remove FloServer (D21)
+        RECT remove_title{};
+        RECT remove_note{};
+        RECT remove{};
     };
     struct FoldersGeometry {
         RECT note{};  // Loading…
@@ -695,6 +702,8 @@ private:
     [[nodiscard]] bool shown_start_tray() const;
     [[nodiscard]] bool run_elsewhere() const;
     void open_licences();
+    // Remove FloServer…: its question, then the answer to FloServer's window.
+    void remove_floserver();
     void paint_general_shapes(Canvas& c) const;
     void paint_general_text(Canvas& c) const;
     void paint_radio(Canvas& c, const ChoiceGeometry& choice, bool on, const Hit& hit) const;
