@@ -5,8 +5,8 @@
 // here and presses Publish: the files are checked (publish.h), the next list
 // is built and signed with the key file picked for this run, and
 // manifest.json + manifest.json.sig are written to a dated folder under
-// Documents\FloServer Publisher. Uploading them and the CloudFront
-// invalidation stay by hand.
+// Documents\FloServer Publisher. Uploading them to the R2 bucket stays by
+// hand; a Cloudflare cache rule keeps manifest.json* out of the cache.
 //
 // The key file's path is kept only while the window is open; its contents
 // are read just before signing and wiped right after.
@@ -364,11 +364,11 @@ void Publisher::create_controls() {
     step_details_text_ = {"New files are compared with their official checksums; the others must still be served",
                           "Next sequence, expires in 90 days, with the built-in templates",
                           "The key is read, used and forgotten",
-                          "manifest.json and manifest.json.sig in a dated folder, opened for you, with the CloudFront paths to copy"};
+                          "manifest.json and manifest.json.sig in a dated folder, opened for you"};
     choose_key_ = make(L"BUTTON", L"Choose key file…", WS_TABSTOP | BS_PUSHBUTTON, IdChooseKey, font_.get());
     key_name_ = label(L"", font_.get(), SS_ENDELLIPSIS);
     open_folder_ = make(L"BUTTON", L"Open folder", WS_TABSTOP | BS_PUSHBUTTON, IdOpenFolder, font_.get());
-    copy_paths_ = make(L"BUTTON", L"Copy invalidation paths", WS_TABSTOP | BS_PUSHBUTTON, IdCopyPaths, font_.get());
+    copy_paths_ = make(L"BUTTON", L"Copy purge URLs", WS_TABSTOP | BS_PUSHBUTTON, IdCopyPaths, font_.get());
     ShowWindow(open_folder_, SW_HIDE);
     ShowWindow(copy_paths_, SW_HIDE);
     publish_ = make(L"BUTTON", L"Publish", WS_TABSTOP | BS_PUSHBUTTON, IdPublish, bold_.get());
@@ -644,7 +644,8 @@ LRESULT Publisher::handle(UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         case IdCopyPaths: {
-            const std::wstring text = L"/manifest.json\r\n/manifest.json.sig\r\n";
+            const std::wstring cdn = widen(std::string(mt::kCdn));
+            const std::wstring text = cdn + L"/manifest.json\r\n" + cdn + L"/manifest.json.sig\r\n";
             if (OpenClipboard(hwnd_)) {
                 EmptyClipboard();
                 const std::size_t bytes = (text.size() + 1) * sizeof(wchar_t);
@@ -1059,26 +1060,19 @@ std::unique_ptr<Outcome> run_publish(HWND target, std::vector<mt::PublishFile> f
     if (live.list->key_id.empty()) {
         return fail(0, "The live list has no key id");
     }
-    // The bucket must refuse direct reads. Any listed file will do; the
-    // smallest published one keeps it quick. S3's Date (never cached, unlike
-    // CloudFront's) is the clock check: the expiry is counted from this clock.
-    const mt::PublishFile* probe = nullptr;
-    for (const mt::PublishFile& f : files) {
-        if (probe == nullptr || (f.published && (!probe->published || f.size < probe->size))) {
-            probe = &f;
-        }
-    }
-    if (probe == nullptr) {
+    if (files.empty()) {
         return fail(0, "There are no files");
     }
-    const mt::S3Check s3 = mt::check_direct_s3(*http, mt::kDirectS3, probe->path, &cancel);
+    // The expiry is counted from this computer's clock, so check it against
+    // Cloudflare's (on a reply no cache can answer).
+    const mt::CdnClock cdn_clock = mt::read_cdn_clock(*http, mt::kCdn, now, &cancel);
     if (cancel) {
         return fail(0, "Stopped");
     }
-    if (!s3.problem.empty()) {
-        return fail(0, s3.problem);
+    if (!cdn_clock.error.empty()) {
+        return fail(0, cdn_clock.error);
     }
-    if (std::string clock = mt::clock_problem(s3.server_date, now); !clock.empty()) {
+    if (std::string clock = mt::clock_problem(cdn_clock.server_date, now); !clock.empty()) {
         return fail(0, clock);
     }
 
@@ -1123,7 +1117,7 @@ std::unique_ptr<Outcome> run_publish(HWND target, std::vector<mt::PublishFile> f
     }
     out->steps.at(0) = StepState::Done;
     out->details.at(0) = std::to_string(matched) + (matched == 1 ? " new file matches" : " new files match") +
-                         " · " + std::to_string(served) + " still served · direct S3 refused";
+                         " · " + std::to_string(served) + " still served";
 
     step(1);
     const mt::BuiltList built = mt::build_next_list(mt::kCdn, files, live_sequence + 1, now);
@@ -1189,13 +1183,16 @@ std::unique_ptr<Outcome> run_publish(HWND target, std::vector<mt::PublishFile> f
     std::string steps_text =
         "FloServer runtime list, sequence " + std::to_string(signed_list.sequence) + ", made " +
         mt::format_utc_time(now) + "\r\n" + out->details.at(1) + "\r\n\r\n" +
-        "1. Upload manifest.json and manifest.json.sig together to the top of the bucket,\r\n"
-        "   replacing the old pair.\r\n"
-        "2. In CloudFront, Invalidations -> Create invalidation, with these paths:\r\n"
-        "   /manifest.json\r\n"
-        "   /manifest.json.sig\r\n"
-        "3. After a minute, press Check live in FloServer Publisher: it must show sequence " +
+        "1. Upload manifest.json and manifest.json.sig together to the top of the R2 bucket\r\n"
+        "   floserver-cdn (Cloudflare -> R2 -> floserver-cdn -> Upload), replacing the old pair.\r\n"
+        "2. Press Check live in FloServer Publisher: it must show sequence " +
         std::to_string(signed_list.sequence) + ".\r\n";
+    steps_text +=
+        "   If it still shows the old one, the cache rule for manifest.json* is missing:\r\n"
+        "   Caching -> Configuration -> Purge cache -> Custom purge, with these URLs\r\n"
+        "   (Copy purge URLs in the Publisher):\r\n"
+        "   https://cdn.floserver.org/manifest.json\r\n"
+        "   https://cdn.floserver.org/manifest.json.sig\r\n";
     if (ec || !write(folder / L"manifest.json", *built.manifest_json) ||
         !write(folder / L"manifest.json.sig", *signed_list.signature_file) ||
         !write(folder / L"upload-steps.txt", steps_text)) {
@@ -1203,8 +1200,7 @@ std::unique_ptr<Outcome> run_publish(HWND target, std::vector<mt::PublishFile> f
     }
     out->steps.at(3) = StepState::Done;
     out->details.at(3) = "Saved in Documents\\FloServer Publisher\\" + narrow(folder.filename().wstring()) +
-                         ". Upload both to the top of the bucket, then invalidate /manifest.json and "
-                         "/manifest.json.sig in CloudFront.";
+                         ". Upload both to the top of the R2 bucket floserver-cdn, then press Check live.";
     out->folder = folder;
     out->sequence = signed_list.sequence;
     return out;
@@ -1243,7 +1239,7 @@ void Publisher::publish() {
         const std::wstring q =
             L"A list with sequence " + std::to_wstring(live_->sequence + 1) + L" was already made:\n" +
             earlier->wstring() +
-            L"\n\nIf it was uploaded, wait for the invalidation and press Check live instead. Make a new one "
+            L"\n\nIf it was uploaded, press Check live instead. Make a new one "
             L"only if that list was never uploaded, and delete its folder afterwards.\n\nMake a new one anyway?";
         if (MessageBoxW(hwnd_, q.c_str(), L"FloServer Publisher", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) !=
             IDYES) {
@@ -1304,7 +1300,7 @@ void Publisher::on_done(std::unique_ptr<Outcome> outcome) {
         signed_sequence_ = outcome->sequence;
         ShowWindow(open_folder_, SW_SHOW);
         ShowWindow(copy_paths_, SW_SHOW);
-        SetWindowTextW(copy_paths_, L"Copy invalidation paths");
+        SetWindowTextW(copy_paths_, L"Copy purge URLs");
         ShellExecuteW(hwnd_, L"explore", last_folder_.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     }
     update_steps();

@@ -1,12 +1,12 @@
 # check-floserver-cdn.ps1
 # Checks every runtime file on cdn.floserver.org:
-#   1. the CDN serves it (HTTP 200, through CloudFront)
+#   1. the CDN serves it (HTTP 200, from the R2 bucket floserver-cdn through Cloudflare)
 #   2. its SHA-256 matches the checksum the official project publishes
 #      (nginx and Apache publish none, so their originals are downloaded and compared)
-# Then checks that the S3 bucket can't be read directly (pass -Bucket).
+# Then checks that Cloudflare doesn't cache manifest.json (the cache rule).
 #
 # Run in PowerShell:
-#   powershell -ExecutionPolicy Bypass -File .\check-floserver-cdn.ps1 -Bucket <bucket-name> -Region <region>
+#   powershell -ExecutionPolicy Bypass -File .\check-floserver-cdn.ps1
 #
 # It downloads about 800 MB into a temporary folder and deletes it at the end.
 # Two reports are saved next to this script:
@@ -18,8 +18,6 @@
 
 param(
     [string]$Cdn = "https://cdn.floserver.org",
-    [string]$Bucket = "",
-    [string]$Region = "",
     [string]$Only = ""   # optional: check only paths containing this text, e.g. "php/"
 )
 
@@ -99,7 +97,7 @@ foreach ($f in $files) {
     try {
         $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -OutFile $local -PassThru -TimeoutSec 900
         $row.Status = [int]$resp.StatusCode
-        $via = $resp.Headers["X-Cache"]
+        $via = $resp.Headers["CF-Cache-Status"]
         if ($via -is [array]) { $via = $via[0] }
         $row.Via = [string]$via
     } catch {
@@ -146,24 +144,20 @@ foreach ($f in $files) {
     $results += New-Object PSObject -Property $row
 }
 
-# The bucket itself must refuse direct reads: only CloudFront may read it.
-$direct = ""
-if ($Bucket -and $Region) {
-    # Any one listed file will do; the smallest keeps it quick.
-    $probe = ($files | Where-Object { $_.Path -like "composer/*" } | Select-Object -First 1)
-    if (-not $probe) { $probe = $files[0] }
-    $s3 = "https://$Bucket.s3.$Region.amazonaws.com/$($probe.Path)"
-    try {
-        $r = Invoke-WebRequest -Uri $s3 -UseBasicParsing -Method Head -TimeoutSec 60
-        $direct = "FAIL: $s3 answered $([int]$r.StatusCode); the bucket is readable without CloudFront"
-    } catch {
-        $code = $null
-        if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
-        if ($code -eq 403) { $direct = "OK: direct S3 access is refused (403)" }
-        else { $direct = "CHECK BY HAND: direct S3 access gave '$code' (expected 403)" }
+# manifest.json must never come from Cloudflare's cache, or a new list could
+# be held back behind the old one: the cache rule for manifest.json* bypasses it.
+$cache = ""
+try {
+    $r = Invoke-WebRequest -Uri "$Cdn/manifest.json" -UseBasicParsing -Method Head -TimeoutSec 60
+    $status = $r.Headers["CF-Cache-Status"]
+    if ($status -is [array]) { $status = $status[0] }
+    if ($status -eq "HIT" -or $status -eq "STALE" -or $status -eq "REVALIDATED" -or $status -eq "UPDATING") {
+        $cache = "FAIL: manifest.json came from the cache ($status); add the Cloudflare cache rule that bypasses manifest.json*"
+    } else {
+        $cache = "OK: manifest.json isn't cached ($status)"
     }
-} else {
-    $direct = "skipped (run with -Bucket <name> -Region <region> to check)"
+} catch {
+    $cache = "CHECK BY HAND: $Cdn/manifest.json didn't answer ($($_.Exception.Message))"
 }
 
 Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue
@@ -180,7 +174,7 @@ foreach ($r in $results) {
     $report += "  official: $($r.Official)"
     $report += ""
 }
-$report += "Direct S3 access: $direct"
+$report += "manifest.json cache: $cache"
 $ok = @($results | Where-Object { $_.Result -eq "OK" }).Count
 $report += "Summary: $ok of $($results.Count) files OK"
 

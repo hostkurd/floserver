@@ -515,21 +515,22 @@ void check_file(CheckContext& ctx, PublishFile& file) {
     }
 }
 
-S3Check check_direct_s3(HttpTransport& http, std::string_view s3_base, std::string_view path,
+CdnClock read_cdn_clock(HttpTransport& http, std::string_view cdn, std::chrono::sys_seconds now,
                         const std::atomic<bool>* cancel) {
     HttpLimits limits;
     limits.max_time = std::chrono::seconds{60};
     limits.cancel = cancel;
-    const HttpReply r = http.get(std::string(s3_base) + "/" + std::string(path), limits,
-                                 [](std::span<const std::uint8_t>) { return false; });
-    S3Check check;
-    check.server_date = r.server_date;
-    if (r.status == 200) {
-        check.problem = "The S3 bucket answers direct reads: make it private, so only CloudFront can read it.";
-    } else if (r.status != 403) {
-        check.problem = "A direct S3 read gave " + describe_failure(r) + " instead of 403; check the bucket by hand.";
+    // R2 ignores the query; Cloudflare's cache keys on it, so this is never a cached reply.
+    const std::string url = std::string(cdn) + "/manifest.json.sig?clock=" +
+                            std::to_string(now.time_since_epoch().count());
+    const HttpReply r = http.get(url, limits, [](std::span<const std::uint8_t>) { return false; });
+    CdnClock clock;
+    if (r.status != 200) {
+        clock.error = "Can't read the time from the CDN (" + describe_failure(r) + "). Try again.";
+        return clock;
     }
-    return check;
+    clock.server_date = r.server_date;
+    return clock;
 }
 
 std::string clock_problem(std::optional<std::chrono::sys_seconds> server_date, std::chrono::sys_seconds now) {

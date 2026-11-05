@@ -26,7 +26,7 @@ downloader (`src/core/src/downloader.cpp`) applies this:
 - https only, TLS 1.2 or newer, at most 5 redirects and never from https to http (WinHTTP on Windows);
 - the list and its signature are capped at 1 MiB and 4 KiB;
 - a list whose signature doesn't match is fetched once more after 3 seconds,
-  in case CloudFront briefly holds one new file and one old one;
+  in case the CDN briefly serves one new file and one old one;
 - each file is tried at its URLs in order (the CDN, then the project's own
   server); the body streams to a `.part` file while its SHA-256 is computed,
   and the transfer stops as soon as it goes past the listed size;
@@ -78,8 +78,20 @@ only); `flo runtimes` lists it and `flo install <name>` installs it.
 
 The list is built from what the CDN actually serves, after each file has been
 compared with the official release. Files live on `https://cdn.floserver.org`
-(S3 bucket `floserver-cdn-origin`, eu-central-1, readable only through
-CloudFront) at `<runtime>/<version>/<original file name>`.
+(Cloudflare R2 bucket `floserver-cdn`, connected as its custom domain) at
+`<runtime>/<version>/<original file name>`.
+
+How the CDN is set up (Cloudflare dashboard, zone `floserver.org`):
+
+- The bucket's public `r2.dev` address is **Disallowed**; files are served
+  only through `cdn.floserver.org`. Nothing in the bucket is secret (every file
+  is public through the CDN), so there is no "direct read" to refuse.
+- A cache rule (Rules -> Cache Rules) matches `cdn.floserver.org` with a URI
+  path starting `/manifest.json` and sets **Bypass cache**, so a new list and
+  its signature are served together as soon as they're uploaded. Runtime
+  files may be cached: each version has its own path and never changes.
+- Bot Fight Mode stays **off**: it would challenge the app's downloads
+  (WinHTTP), curl in CI and the Publisher.
 
 ### With FloServer Publisher (the usual way)
 
@@ -101,14 +113,14 @@ steps 2 to 6 below in one window:
      download (nginx, WordPress). Apache is compared by hand: select it,
      compare the SHA-256 shown with apachelounge.com, tick the box and press
      Publish again;
-   - checks the bucket refuses direct reads (403);
    - builds the list (live sequence + 1, 90 days, built-in templates), signs
      it and checks FloServer's built-in key opens it;
    - writes `manifest.json`, `manifest.json.sig` and `upload-steps.txt` to
      `Documents\FloServer Publisher\<date> sequence <N>` and opens the folder.
-4. Upload both files and invalidate `/manifest.json` and `/manifest.json.sig`
-   (**Copy invalidation paths**), then press **Check live**: it must show the
-   new sequence.
+4. Upload both files to the top of the bucket, then press **Check live**: it
+   must show the new sequence. If it still shows the old one, the cache rule
+   is missing: purge both URLs (**Copy purge URLs**; Caching -> Configuration
+   -> Purge cache -> Custom purge) and add the rule.
 
 ### By hand
 
@@ -119,7 +131,7 @@ steps 2 to 6 below in one window:
    checksum list (or the original download, for nginx and Apache).
 3. **Check** on any computer with internet:
    ```
-   powershell -ExecutionPolicy Bypass -File check-floserver-cdn.ps1 -Bucket floserver-cdn-origin -Region eu-central-1
+   powershell -ExecutionPolicy Bypass -File check-floserver-cdn.ps1
    ```
    Every file must say OK, except Apache: Apache Lounge publishes no
    machine-readable checksum, so it always says CHECK BY HAND. Compare its
@@ -148,7 +160,8 @@ steps 2 to 6 below in one window:
    floserver-manifest verify manifest.json
    ```
 7. **Upload** `manifest.json` and `manifest.json.sig` together to the top of the
-   bucket, then invalidate both paths in CloudFront so users get the new pair.
+   bucket. The cache rule keeps them out of Cloudflare's cache, so users get
+   the new pair at once.
 8. **Re-sign before `expires`**, even when nothing changed: build again with the
    next `--sequence`, sign, upload. Otherwise apps stop accepting the list.
 
