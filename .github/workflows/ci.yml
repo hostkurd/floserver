@@ -385,8 +385,7 @@ jobs:
           $version = (Select-String -Path CMakeLists.txt -Pattern 'VERSION (\d+\.\d+\.\d+)' | Select-Object -First 1).Matches[0].Groups[1].Value
           $msi = "FloServer-$version-x64.msi"
           wix build installer/FloServer.wxs -ext WixToolset.UI.wixext -arch x64 `
-            -d Version=$version -d BinDir=build/bin/Release `
-            -sice ICE38 -sice ICE64 -sice ICE91 -o $msi 2>&1 | Tee-Object -FilePath wix.log
+            -d Version=$version -d BinDir=build/bin/Release -o $msi 2>&1 | Tee-Object -FilePath wix.log
           if ($LASTEXITCODE -ne 0) {
             Get-Content wix.log | Select-String 'error|warning' | Select-Object -First 20 |
               ForEach-Object { "::error title=WiX::$($_.Line.Trim())" }
