@@ -79,6 +79,7 @@ bool SettingsWindow::settle_db_changes(AfterSave then, const std::string& series
     asking_ = true;
     const SaveChoice choice = ask_to_save(hwnd_, lang_, fill(lang_, Str::DbAskSave, {db_series_}));
     asking_ = false;
+    modal_closed();
     if (quit_after_ask_) {
         PostMessageW(owner_, closed_message_, 1, 0);
         return false;
@@ -324,10 +325,14 @@ void SettingsWindow::make_db_edits() {
         db_edits_.push_back(std::move(edit));
     };
     make(text(lang_, Str::DbPortCue));
-    for (std::size_t i = 0; i < settings_db_ini_fields().size(); ++i) {
+    // Screen readers: each box's label, as drawn over it.
+    set_accessible_name(db_edits_.back()->hwnd(), text(lang_, Str::DbPort));
+    for (const DbIniField& field : settings_db_ini_fields()) {
         make(text(lang_, Str::PhpDefaultCue));
+        set_accessible_name(db_edits_.back()->hwnd(), field.label);
     }
     make(text(lang_, Str::DbNewPasswordCue));
+    set_accessible_name(db_edits_.back()->hwnd(), text(lang_, Str::DbNewPassword));
     db_edits_.back()->set_password(true);
     fill_db_edits();
 }
@@ -866,7 +871,7 @@ void SettingsWindow::db_version_menu() {
     ClientToScreen(hwnd_, &at);
     UINT flags = TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTBUTTON | TPM_TOPALIGN;
     flags |= rtl_ ? UINT{TPM_RIGHTALIGN | TPM_LAYOUTRTL} : UINT{TPM_LEFTALIGN};
-    const auto command = static_cast<UINT>(TrackPopupMenuEx(menu.get(), flags, at.x, at.y, hwnd_, nullptr));
+    const auto command = track_menu(menu.get(), flags, at);
     if (command < kFirstChoice || command - kFirstChoice >= versions.size() || hwnd_ == nullptr) {
         return;
     }

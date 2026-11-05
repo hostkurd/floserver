@@ -72,6 +72,7 @@ bool SettingsWindow::settle_apache_changes(AfterSave then) {
     asking_ = true;
     const SaveChoice choice = ask_to_save(hwnd_, lang_, std::string(text(lang_, Str::ApacheAskSave)));
     asking_ = false;
+    modal_closed();
     if (quit_after_ask_) {
         PostMessageW(owner_, closed_message_, 1, 0);
         return false;
@@ -206,6 +207,7 @@ void SettingsWindow::make_apache_edits() {
     auto edit = std::make_unique<FieldEdit>(hwnd_, kApacheEditBase, fonts_.button.get(), rtl_,
                                             [this](WPARAM key) { return on_edit_key(kApacheEditBase, key); });
     edit->set_cue(text(lang_, Str::ApacheFindModule));
+    set_accessible_name(edit->hwnd(), text(lang_, Str::ApacheFindModule));  // the placeholder isn't a label
     edit->set_cue_color(palette(dark_).text_subtle);
     edit->set_text(apache_query_);
     apache_edits_.push_back(std::move(edit));
@@ -533,7 +535,7 @@ void SettingsWindow::apache_version_menu() {
     ClientToScreen(hwnd_, &at);
     UINT flags = TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTBUTTON | TPM_TOPALIGN;
     flags |= rtl_ ? UINT{TPM_RIGHTALIGN | TPM_LAYOUTRTL} : UINT{TPM_LEFTALIGN};
-    const auto command = static_cast<UINT>(TrackPopupMenuEx(menu.get(), flags, at.x, at.y, hwnd_, nullptr));
+    const auto command = track_menu(menu.get(), flags, at);
     if (command < kFirstChoice || command - kFirstChoice >= choices.size() || hwnd_ == nullptr || !apache_) {
         return;
     }

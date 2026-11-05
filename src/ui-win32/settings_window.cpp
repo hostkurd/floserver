@@ -212,6 +212,24 @@ LRESULT CALLBACK SettingsWindow::window_proc(HWND hwnd, UINT msg, WPARAM wparam,
 }
 
 LRESULT SettingsWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
+    if (msg == WM_GETOBJECT) {
+        // UI Automation asking for the window's elements (settings_window_access.cpp).
+        LRESULT result = 0;
+        if (access_.on_get_object(wparam, lparam, result)) {
+            access_asked_ = true;
+            return result;
+        }
+        return DefWindowProcW(hwnd_, msg, wparam, lparam);
+    }
+    // Anything may change what's shown: the elements are made again when next asked for.
+    access_dirty_ = true;
+    // A screen reader's requests that came while a menu or question was open run once it's closed.
+    if (access_deferred_ && modal_ == 0 && !asking_ && !access_running_) {
+        access_deferred_ = false;
+        if (!access_queue_.empty()) {
+            PostMessageW(hwnd_, kAccessMessage, 0, 0);
+        }
+    }
     switch (msg) {
         case WM_CREATE:
             on_create();
@@ -346,6 +364,12 @@ LRESULT SettingsWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
         case WM_MBUTTONDOWN:
             mouse_used();
             break;
+        case kAccessMessage:
+            run_access_requests();
+            return 0;
+        case kSectionMessage:
+            step_section(wparam != 0);
+            return 0;
         case kToastMessage:
             // The popup: information stays while it's read; its close mark.
             toast_event(wparam == kToastCloseClicked  ? ToastEvent::Close
@@ -460,6 +484,7 @@ void SettingsWindow::on_create() {
     SendMessageW(tooltip_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
     SendMessageW(tooltip_, TTM_SETMAXTIPWIDTH, 0, px(360));
 
+    access_.attach(hwnd_, this);
     apply_theme();
     rebuild();
     // Settings opens on General (section_'s start): what open_section()
@@ -471,6 +496,9 @@ void SettingsWindow::on_create() {
 }
 
 void SettingsWindow::on_destroy() {
+    access_.detach();
+    access_said_.reset();
+    access_queue_.clear();
     KillTimer(hwnd_, kToastTimer);
     KillTimer(hwnd_, kScrollTimer);
     edits_.clear();
@@ -627,6 +655,8 @@ void SettingsWindow::rebuild() {
 void SettingsWindow::show_message(std::string message, bool error) {
     // A toast at the bottom (model/toast.h): nothing on the page moves for it.
     toast_ = toast_with(toast_, std::move(message), error ? ToastKind::Error : ToastKind::Info);
+    // Said by a screen reader as it comes, without moving the focus.
+    access_.notify(toast_.text, error);
     sync_toast_timer();
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
@@ -876,8 +906,7 @@ void SettingsWindow::relayout() {
         geometry_ = layout(dc);
     }
     ReleaseDC(hwnd_, dc);
-    const int count = static_cast<int>(focus_order().size());
-    focus_ = std::min(focus_, count - 1);
+    keep_focus();
     update_tip(hover_);
     place_php_edits();
     place_port_edits();
@@ -1158,6 +1187,10 @@ void SettingsWindow::on_key(WPARAM key) {
     const int count = static_cast<int>(order.size());
     const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
     int next = focus_;
+    if (key == VK_TAB && ctrl_only()) {
+        step_section(shift);  // Ctrl+Tab, as a tabbed page's
+        return;
+    }
     switch (key) {
         case VK_TAB:
             next = focus_ < 0 ? (shift ? count - 1 : 0) : (focus_ + (shift ? count - 1 : 1)) % count;
@@ -1303,7 +1336,7 @@ void SettingsWindow::picker_menu(int group) {
     ClientToScreen(hwnd_, &at);
     UINT flags = TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTBUTTON | TPM_TOPALIGN;
     flags |= rtl_ ? UINT{TPM_RIGHTALIGN | TPM_LAYOUTRTL} : UINT{TPM_LEFTALIGN};
-    const auto command = static_cast<UINT>(TrackPopupMenuEx(menu.get(), flags, at.x, at.y, hwnd_, nullptr));
+    const auto command = track_menu(menu.get(), flags, at);
     if (command < kFirstChoice || command - kFirstChoice >= g.picker->choices.size() || hwnd_ == nullptr) {
         return;
     }
@@ -1386,6 +1419,7 @@ void SettingsWindow::on_paint() {
         }
     }
     EndPaint(hwnd_, &ps);
+    access_after_paint();
 }
 
 void SettingsWindow::paint_button(Canvas& c, const RECT& r, bool hover, bool focused, bool enabled) const {
@@ -1638,9 +1672,6 @@ void SettingsWindow::paint_text(Canvas& c) const {
     for (std::size_t i = 0; i < g.groups.size() && i < page_.groups.size(); ++i) {
         const GroupGeometry& gg = g.groups[i];
         const RuntimeGroup& group = page_.groups[i];
-        if (gg.card.bottom < 0 || gg.card.top > height_) {
-            continue;
-        }
         RECT title = gg.title;
         if (!is_empty(gg.picker)) {
             title.right = (is_empty(gg.picker_label) ? gg.picker.left : gg.picker_label.left) - px(kGap);

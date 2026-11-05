@@ -20,7 +20,8 @@ add_library(floserver_ui_model STATIC
     model/glyphs.cpp
     model/access_tree.cpp
     model/main_access.cpp
-    model/pages_access.cpp)
+    model/pages_access.cpp
+    model/settings_access.cpp)
 target_include_directories(floserver_ui_model PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # Core for paths.h's file helpers (window.json is read and written here, testably).
 target_link_libraries(floserver_ui_model PUBLIC floserver_third_party PRIVATE floserver_core)
@@ -57,6 +58,7 @@ add_executable(floserver_ui WIN32
     toast_view.cpp
     settings_folders.cpp
     settings_shared.cpp
+    settings_window_access.cpp
     form_parts.cpp
     scroll_bar.cpp
     window_style.cpp

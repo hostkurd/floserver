@@ -15,7 +15,9 @@
 #include <windows.h>
 
 #include <memory>
+#include <string>
 #include <string_view>
+#include <vector>
 
 namespace floserver::ui {
 
@@ -37,10 +39,21 @@ private:
 
 enum class Align : std::uint8_t { Start, Center, End };
 
+// A piece of text as a paint draws it (logical rectangle, words, font): what
+// a window that draws its own controls tells screen readers it shows.
+struct DrawnText {
+    RECT rect{};
+    std::wstring text;
+    HFONT font = nullptr;
+};
+
 class Canvas {
 public:
     // `dc` is an unmirrored memory DC `width` pixels wide.
     Canvas(HDC dc, int width, bool rtl);
+    // Draws nothing: text() and paragraph() only add what they'd draw to
+    // `record`. For the text pass alone (begin_text() is a no-op).
+    Canvas(std::vector<DrawnText>& record, int width, bool rtl);
     ~Canvas();
     Canvas(const Canvas&) = delete;
     Canvas& operator=(const Canvas&) = delete;
@@ -86,6 +99,7 @@ private:
     bool rtl_;
     std::unique_ptr<Shapes> shapes_;
     int saved_ = 0;
+    std::vector<DrawnText>* record_ = nullptr;
 };
 
 [[nodiscard]] constexpr COLORREF colorref(Rgb c) { return RGB(red(c), green(c), blue(c)); }

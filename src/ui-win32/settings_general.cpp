@@ -347,6 +347,7 @@ void SettingsWindow::choose_editor_program() {
     const auto picked = pick_program(hwnd_, std::string(text(lang_, Str::GeneralEditorPick)),
                                      std::string(text(lang_, Str::GeneralEditorPrograms)));
     asking_ = false;
+    modal_closed();
     if (!picked || picked->empty()) {
         return;  // cancelled (or no picker): the choice stays
     }

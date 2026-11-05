@@ -39,6 +39,9 @@ public:
     // posted message), never inside the call: a menu or a question must not
     // run while the screen reader waits for the answer.
     virtual void access_request(const std::string& id, AccessAction action) = 0;
+    // A screen reader asked a scrolling part (AccessNode::scrollable) to
+    // show `percent` (0 to 100) of the way down; done later, as a request is.
+    virtual void access_scroll_to(const std::string& /*id*/, double /*percent*/) {}
 };
 
 struct AccessBridge;

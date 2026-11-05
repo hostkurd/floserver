@@ -48,6 +48,11 @@ enum class AccessAction : std::uint8_t {
     Select,  // a list item or tab chosen
     Expand,  // a picker's menu opened
     Focus,   // the keyboard focus moved to it
+    ScrollIntoView,  // its page scrolls until it's shown
+    ScrollUp,        // a scrolling part: a line up or down, a page up or down
+    ScrollDown,
+    PageUp,
+    PageDown,
 };
 
 // In the window's client coordinates, logical (from the reading start: a
@@ -95,6 +100,12 @@ struct AccessNode {
     int set_size = 0;
     int heading = 0;                   // a page's title: 1; 0: not a heading
     std::optional<double> progress;    // a progress bar: done, 0 to 1 (unknown: none)
+    bool scroll_item = false;          // inside a scrolling part: it can be scrolled into view
+    // A scrolling part (a page taller than the window): how far down it is,
+    // 0 to 100, and how much of it is shown; below 0: it doesn't scroll now.
+    bool scrollable = false;
+    double scroll_percent = -1;
+    double scroll_view = 100;
     AccessTarget target;
     // Filled by AccessTree::finish(): indexes into the tree's nodes, -1 for none.
     int parent = -1;

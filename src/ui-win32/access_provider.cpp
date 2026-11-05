@@ -41,6 +41,7 @@ constexpr int kNotificationOther = 4;
 constexpr int kProcessingImportantMostRecent = 1;
 constexpr int kProcessingMostRecent = 3;
 constexpr int kHeadingLevel1 = 80051;  // HeadingLevel1; HeadingLevel2 is the next, and so on
+constexpr double kNoScroll = -1.0;     // UIA_ScrollPatternNoScroll
 constexpr auto kOptions = static_cast<ProviderOptions>(static_cast<int>(ProviderOptions_ServerSideProvider) |
                                                      static_cast<int>(ProviderOptions_UseComThreading));
 
@@ -335,7 +336,9 @@ class AccessElement final : public IRawElementProviderSimple,
                             public ISelectionProvider,
                             public IValueProvider,
                             public IRangeValueProvider,
-                            public IExpandCollapseProvider {
+                            public IExpandCollapseProvider,
+                            public IScrollItemProvider,
+                            public IScrollProvider {
 public:
     AccessElement(std::shared_ptr<AccessBridge> bridge, std::string id) : bridge_(std::move(bridge)), id_(std::move(id)) {}
     AccessElement(const AccessElement&) = delete;
@@ -365,6 +368,10 @@ public:
             *out = static_cast<IRangeValueProvider*>(this);
         } else if (riid == __uuidof(IExpandCollapseProvider)) {
             *out = static_cast<IExpandCollapseProvider*>(this);
+        } else if (riid == __uuidof(IScrollItemProvider)) {
+            *out = static_cast<IScrollItemProvider*>(this);
+        } else if (riid == __uuidof(IScrollProvider)) {
+            *out = static_cast<IScrollProvider*>(this);
         } else {
             *out = nullptr;
             return E_NOINTERFACE;
@@ -421,6 +428,12 @@ public:
                 break;
             case UIA_ExpandCollapsePatternId:
                 has = n->expandable;
+                break;
+            case UIA_ScrollItemPatternId:
+                has = n->scroll_item;
+                break;
+            case UIA_ScrollPatternId:
+                has = n->scrollable;
                 break;
             default:
                 break;
@@ -764,6 +777,112 @@ public:
             return E_POINTER;
         }
         *out = ExpandCollapseState_Collapsed;
+        return S_OK;
+    }
+
+    // IScrollItemProvider: its page scrolls to it (after the call, as any request).
+    HRESULT STDMETHODCALLTYPE ScrollIntoView() override {
+        const AccessTree* tree = nullptr;
+        if (node(tree) == nullptr) {
+            return kNotAvailable;
+        }
+        bridge_->source->access_request(id_, AccessAction::ScrollIntoView);
+        return S_OK;
+    }
+
+    // IScrollProvider: a page taller than the window, up and down only.
+    HRESULT STDMETHODCALLTYPE Scroll(ScrollAmount horizontal, ScrollAmount vertical) override {
+        const AccessTree* tree = nullptr;
+        const AccessNode* n = node(tree);
+        if (n == nullptr) {
+            return kNotAvailable;
+        }
+        if (horizontal != ScrollAmount_NoAmount || (vertical != ScrollAmount_NoAmount && n->scroll_percent < 0)) {
+            return kInvalidOperation;
+        }
+        switch (vertical) {
+            case ScrollAmount_LargeDecrement:
+                bridge_->source->access_request(id_, AccessAction::PageUp);
+                break;
+            case ScrollAmount_SmallDecrement:
+                bridge_->source->access_request(id_, AccessAction::ScrollUp);
+                break;
+            case ScrollAmount_LargeIncrement:
+                bridge_->source->access_request(id_, AccessAction::PageDown);
+                break;
+            case ScrollAmount_SmallIncrement:
+                bridge_->source->access_request(id_, AccessAction::ScrollDown);
+                break;
+            default:
+                break;
+        }
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE SetScrollPercent(double horizontal, double vertical) override {
+        const AccessTree* tree = nullptr;
+        const AccessNode* n = node(tree);
+        if (n == nullptr) {
+            return kNotAvailable;
+        }
+        // 0 to 100, or exactly UIA_ScrollPatternNoScroll (-1): that direction stays as it is.
+        const auto valid = [](double v) { return v == kNoScroll || (v >= 0.0 && v <= 100.0); };
+        if (!valid(horizontal) || !valid(vertical)) {
+            return E_INVALIDARG;
+        }
+        if (horizontal != kNoScroll || (vertical != kNoScroll && n->scroll_percent < 0)) {
+            return kInvalidOperation;
+        }
+        if (vertical != kNoScroll) {
+            bridge_->source->access_scroll_to(id_, vertical);
+        }
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE get_HorizontalScrollPercent(double* out) override { return number(out, kNoScroll); }
+    HRESULT STDMETHODCALLTYPE get_VerticalScrollPercent(double* out) override {
+        if (out == nullptr) {
+            return E_POINTER;
+        }
+        *out = kNoScroll;
+        const AccessTree* tree = nullptr;
+        const AccessNode* n = node(tree);
+        if (n == nullptr) {
+            return kNotAvailable;
+        }
+        *out = n->scroll_percent >= 0 ? n->scroll_percent : kNoScroll;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE get_HorizontalViewSize(double* out) override { return number(out, 100.0); }
+    HRESULT STDMETHODCALLTYPE get_VerticalViewSize(double* out) override {
+        if (out == nullptr) {
+            return E_POINTER;
+        }
+        *out = 100.0;
+        const AccessTree* tree = nullptr;
+        const AccessNode* n = node(tree);
+        if (n == nullptr) {
+            return kNotAvailable;
+        }
+        *out = n->scroll_view;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE get_HorizontallyScrollable(BOOL* out) override {
+        if (out == nullptr) {
+            return E_POINTER;
+        }
+        *out = FALSE;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE get_VerticallyScrollable(BOOL* out) override {
+        if (out == nullptr) {
+            return E_POINTER;
+        }
+        *out = FALSE;
+        const AccessTree* tree = nullptr;
+        const AccessNode* n = node(tree);
+        if (n == nullptr) {
+            return kNotAvailable;
+        }
+        *out = n->scroll_percent >= 0 ? TRUE : FALSE;
         return S_OK;
     }
 
