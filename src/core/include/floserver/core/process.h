@@ -65,7 +65,7 @@ public:
 
     // True once the process has ended (or there was none to watch); false if
     // it's still running after `limit`.
-    [[nodiscard]] bool wait(std::chrono::milliseconds limit);
+    [[nodiscard]] bool wait(std::chrono::milliseconds limit) const;
 
 private:
     std::uint32_t pid_ = 0;

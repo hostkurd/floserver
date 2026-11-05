@@ -373,7 +373,7 @@ ProcessExitWatch::~ProcessExitWatch() {
 #endif
 }
 
-bool ProcessExitWatch::wait(std::chrono::milliseconds limit) {
+bool ProcessExitWatch::wait(std::chrono::milliseconds limit) const {
 #ifdef _WIN32
     if (handle_ == nullptr) {
         return true;  // gone already, or never there
