@@ -165,6 +165,19 @@ std::string msiexec_uninstall_args(std::string_view product_code) {
     return "/x " + std::string(product_code);
 }
 
+std::size_t forget_projects_inside(core::AppConfig& config, const std::string& projects_dir) {
+    const std::string root = comparable_path(projects_dir);
+    if (root.empty()) {
+        return 0;
+    }
+    const std::size_t before = config.projects.size();
+    std::erase_if(config.projects, [&root](const core::Project& p) {
+        const std::string dir = p.dir.empty() ? std::string() : comparable_path(shown_path(p.dir));
+        return !dir.empty() && same_or_inside(dir, root);
+    });
+    return before - config.projects.size();
+}
+
 std::vector<UninstallChoiceText> uninstall_choices(const UninstallQuestion& q, const UninstallTicks& ticks) {
     std::vector<UninstallChoiceText> out;
     out.push_back({uninstall_ticks_bits({true, false, false}), q.runtimes, q.runtimes_note, ticks.runtimes});

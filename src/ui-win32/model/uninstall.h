@@ -15,6 +15,8 @@
 #include "model/project_menu.h"
 #include "model/ui_strings.h"
 
+#include "floserver/core/project_registry.h"
+
 #include <cstdint>
 #include <filesystem>
 #include <optional>
@@ -55,6 +57,13 @@ struct UninstallFolders {
 // projects inside it are its own and go with it. A projects folder that is
 // one of Windows' own (Documents, the profile) is refused by `base`.
 [[nodiscard]] FolderGuard projects_folder_guard(FolderGuard base, const UninstallFolders& folders);
+
+// After the projects folder went to the Recycle Bin: the projects whose
+// folders were in it leave the list (config.json), as Remove from
+// FloServer… would have done one by one, so a FloServer installed again
+// doesn't list projects whose folders are gone. Projects added from other
+// folders stay. How many left.
+[[nodiscard]] std::size_t forget_projects_inside(core::AppConfig& config, const std::string& projects_dir);
 
 // The sizes beside the boxes; nothing while they're counted ("…").
 struct UninstallSizes {

@@ -9,6 +9,8 @@
 #include "model/svg_path.h"
 #include "model/uninstall.h"
 
+#include "floserver/core/paths.h"
+
 #include <doctest/doctest.h>
 
 #include <string>
@@ -192,4 +194,26 @@ TEST_CASE("svg path: the app icon's feather, as the setup screens draw it") {
             }
         }
     }
+}
+
+TEST_CASE("uninstall: projects in the recycled projects folder leave the list, others stay") {
+    floserver::core::AppConfig config;
+    const auto project = [](const char* name, const char* dir) {
+        floserver::core::Project p;
+        p.name = name;
+        p.dir = floserver::core::path_from_utf8(dir);
+        return p;
+    };
+    // Windows' paths: the projects folder only exists on Windows for now.
+    const std::string projects = R"(C:\Users\me\FloServer\projects)";
+    config.projects = {project("nodeapp", R"(C:\Users\me\FloServer\Projects\nodeapp)"),
+                       project("shop", R"(C:\work\shop)"),
+                       project("api", R"(C:\Users\me\FloServer\projects\api)"),
+                       project("other", R"(C:\Users\me\FloServer\projects-old\x)")};
+    CHECK(ui::forget_projects_inside(config, projects) == 2);
+    REQUIRE(config.projects.size() == 2);
+    CHECK(config.projects[0].name == "shop");
+    CHECK(config.projects[1].name == "other");  // a folder whose name only starts the same
+    CHECK(ui::forget_projects_inside(config, "") == 0);
+    CHECK(config.projects.size() == 2);
 }

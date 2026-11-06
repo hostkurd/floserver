@@ -344,6 +344,19 @@ void Uninstaller::clean(const UninstallTicks& ticks, const std::string& confirme
             }
             answer.report.projects = moved.outcome;
             answer.report.projects_reason = moved.reason;
+            if (moved.outcome == FolderOutcome::Recycled) {
+                // Its projects leave the list with it (the service is stopped:
+                // nothing else writes config.json now). A list that can't be
+                // saved is said, and the rest goes on.
+                std::string config_error;
+                const fs::path file = core::app_config_file(*data);
+                if (auto config = core::load_app_config(file, config_error)) {
+                    if (forget_projects_inside(*config, folders.projects_dir) > 0 &&
+                        !core::save_app_config(file, *config, config_error)) {
+                        answer.report.skipped.push_back({"config.json", "unsaved", config_error, {}});
+                    }
+                }
+            }
         }
         answer.product_code = installed_product_code();
         return answer;
