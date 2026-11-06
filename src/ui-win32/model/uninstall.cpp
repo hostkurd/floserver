@@ -176,7 +176,7 @@ std::vector<UninstallChoiceText> uninstall_choices(const UninstallQuestion& q, c
 }
 
 std::string remove_program_json(const RemoveProgramPlan& plan) {
-    const nlohmann::json j = {{"product", plan.product}, {"x", plan.x},           {"y", plan.y},
+    const nlohmann::json j = {{"product", plan.product}, {"parent", plan.parent}, {"x", plan.x}, {"y", plan.y},
                               {"deleted", plan.deleted}, {"kept", plan.kept},     {"problems", plan.problems},
                               {"data_dir", plan.data_dir}};
     return j.dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
@@ -221,11 +221,14 @@ std::optional<RemoveProgramPlan> parse_remove_program_json(std::string_view text
     const auto data_dir = str("data_dir");
     const auto kept = list("kept");
     const auto problems = list("problems");
+    const auto parent = j.find("parent");
     const auto x = number("x");
     const auto y = number("y");
-    if (!product || !is_product_code(*product) || !deleted || !data_dir || !kept || !problems || !x || !y) {
+    if (!product || !is_product_code(*product) || !deleted || !data_dir || !kept || !problems || !x || !y ||
+        parent == j.end() || !parent->is_number_unsigned() || parent->get<std::uint64_t>() > 0xFFFFFFFFU) {
         return std::nullopt;
     }
+    plan.parent = static_cast<std::uint32_t>(parent->get<std::uint64_t>());
     plan.product = *product;
     plan.deleted = *deleted;
     plan.data_dir = *data_dir;

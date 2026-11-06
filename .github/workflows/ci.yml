@@ -563,12 +563,10 @@ jobs:
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $dumpbin = & $vswhere -latest -find 'VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
           if (-not $dumpbin) { "::error title=Setup::dumpbin.exe not found"; exit 1 }
-          if ($dumpbin) {
-            foreach ($f in $setup, 'build/bin/Release/floserver-setup.dll') {
-              $deps = & $dumpbin /dependents $f | Select-String '\.dll' | ForEach-Object { $_.Line.Trim() }
-              $bad = $deps | Where-Object { $_ -match '^(vcruntime|msvcp|ucrtbase|api-ms-win-crt)' }
-              if ($bad) { "::error title=Setup::$f needs the Visual C++ runtime: $($bad -join ', ')"; exit 1 }
-            }
+          foreach ($f in $setup, 'build/bin/Release/floserver-setup.dll') {
+            $deps = & $dumpbin /dependents $f | Select-String '\.dll' | ForEach-Object { $_.Line.Trim() }
+            $bad = $deps | Where-Object { $_ -match '^(vcruntime|msvcp|ucrtbase|api-ms-win-crt)' }
+            if ($bad) { "::error title=Setup::$f needs the Visual C++ runtime: $($bad -join ', ')"; exit 1 }
           }
           "SETUP=$setup" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Install, install again and remove with the setup program
@@ -597,6 +595,7 @@ jobs:
           if ($proc.ExitCode -ne 0) { Fail "'$quiet' exited with $($proc.ExitCode)" }
           if (Test-Path $dir) { Fail "$dir is still there after removing" }
           if (Test-Path $arp) { Fail "FloServer's Settings -> Apps entry is still there after removing" }
+          if ((Get-ItemProperty 'HKCU:\Software\HostKurd\FloServer' -ErrorAction SilentlyContinue).AcceptedLicence) { Fail "the accepted licence is still noted after removing" }
           "::notice title=Setup::$env:SETUP installed FloServer quietly without admin, installed it again over itself, and it was removed cleanly"
       - name: Upload the installer
         uses: actions/upload-artifact@v4

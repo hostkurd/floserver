@@ -311,7 +311,7 @@ struct Facts {
 class SetupWindow final : public look::WizardWindow {
 public:
     SetupWindow(HINSTANCE instance, Facts facts)
-        : WizardWindow(instance, kTitle, kPanelNote,
+        : WizardWindow(instance, FLOSERVER_SETUP_WINDOW_CLASS, kTitle, kPanelNote,
                        L"Version " + widen(facts.ours.version.empty() ? "?" : facts.ours.version) +
                            L" · HostKurd\nfloserver.org"),
           facts_(std::move(facts)) {}
@@ -328,7 +328,9 @@ public:
     SetupWindow(SetupWindow&&) = delete;
     SetupWindow& operator=(SetupWindow&&) = delete;
 
-    void show_problem(std::wstring heading, std::wstring text) {
+    // `code`: what the setup ends with (Windows Installer's codes).
+    void show_problem(std::wstring heading, std::wstring text, int code) {
+        exit_code_ = code;
         page_ = Page::Problem;
         problem_heading_ = std::move(heading);
         problem_text_ = std::move(text);
@@ -595,6 +597,7 @@ private:
                 if (page_ == Page::Installing) {
                     cancel_install();
                 } else {
+                    exit_code_ = static_cast<int>(ERROR_INSTALL_USEREXIT);
                     DestroyWindow(hwnd());
                 }
                 break;
@@ -619,6 +622,9 @@ private:
         if (page_ == Page::Installing) {
             cancel_install();  // closes once Windows Installer has put things back
             return false;
+        }
+        if (page_ == Page::Licence || page_ == Page::Update) {
+            exit_code_ = static_cast<int>(ERROR_INSTALL_USEREXIT);  // closed before installing
         }
         return true;
     }
@@ -679,8 +685,9 @@ private:
             return;
         }
         if (result == ERROR_INSTALL_USEREXIT) {
-            show_problem(L"Setup was cancelled", updating() ? L"Nothing was changed: the FloServer you had is as it was."
-                                                           : L"Nothing was installed.");
+            show_problem(L"Setup was cancelled",
+                         updating() ? L"Nothing was changed: the FloServer you had is as it was." : L"Nothing was installed.",
+                         static_cast<int>(result));
             return;
         }
         std::wstring error;
@@ -693,7 +700,8 @@ private:
         }
         show_problem(updating() ? L"FloServer wasn't updated" : L"FloServer wasn't installed",
                      error + L"\n\nWindows put back everything it had changed. If it happens again, run "
-                                    L"the setup with --log setup.log and send us the file.");
+                             L"the setup with --log setup.log and send us the file.",
+                     static_cast<int>(result));
     }
 
     void on_destroyed() override { PostQuitMessage(exit_code_); }
@@ -736,6 +744,7 @@ FLOSERVER_SETUP_API int __stdcall floserver_setup_run(const FloSetupRunArgs* arg
     facts.licence_sha256 = sha256_hex(facts.licence);
     std::wstring problem_heading;
     std::wstring problem_text;
+    int problem_code = static_cast<int>(ERROR_INSTALL_PACKAGE_INVALID);
     if (facts.licence.empty()) {
         problem_heading = L"This setup is incomplete";
         problem_text = L"Its licence is missing. Download FloServer again from floserver.org.";
@@ -750,6 +759,7 @@ FLOSERVER_SETUP_API int __stdcall floserver_setup_run(const FloSetupRunArgs* arg
         const std::string accepted = narrow(accepted_licence());
         facts.licence_changed = !accepted.empty() && accepted != facts.licence_sha256;
         if (facts.mode == setup::SetupMode::Newer) {
+            problem_code = static_cast<int>(ERROR_PRODUCT_VERSION);
             problem_heading = L"A newer FloServer is installed";
             problem_text = L"FloServer " + widen(facts.installed->version) +
                            L" is already installed, which is newer than this setup (" + widen(facts.ours.version) +
@@ -760,8 +770,7 @@ FLOSERVER_SETUP_API int __stdcall floserver_setup_run(const FloSetupRunArgs* arg
 
     if (args->quiet != 0) {
         if (!problem_heading.empty()) {
-            return facts.mode == setup::SetupMode::Newer ? static_cast<int>(ERROR_PRODUCT_VERSION)
-                                                         : static_cast<int>(ERROR_INSTALL_PACKAGE_INVALID);
+            return problem_code;
         }
         setup::MsiRun run;
         const UINT result = setup::msi_install(facts.msi, setup::msi_properties(facts.mode), facts.log, run);
@@ -786,7 +795,7 @@ FLOSERVER_SETUP_API int __stdcall floserver_setup_run(const FloSetupRunArgs* arg
         const setup::SetupMode mode = facts.mode;
         SetupWindow window(setup::dll_instance(), std::move(facts));
         if (!problem_heading.empty()) {
-            window.show_problem(problem_heading, problem_text);
+            window.show_problem(problem_heading, problem_text, problem_code);
         } else {
             window.start_at(mode == setup::SetupMode::Install || licence_first ? Page::Licence : Page::Update);
         }

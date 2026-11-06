@@ -758,8 +758,9 @@ private:
     void on_uninstall();
     // The worker stopped the service (`error`: not within its few seconds): the clean-up next.
     void uninstall_stopped(const std::string& error);
-    // Stopped before anything was deleted: said, and FloServer goes on as it was.
-    void uninstall_failed(const std::string& message);
+    // Stopped: said in the Uninstall window, with `note` on what was (or
+    // wasn't) changed; FloServer goes on.
+    void uninstall_failed(const std::string& message, std::string_view note);
     // The end: Windows' uninstall (or what was left said), then quit.
     void uninstall_done(const Uninstaller::Answer& answer);
     // Windows' own folders and the data folder, never moved to the Recycle Bin.
@@ -862,6 +863,8 @@ private:
     const SetupDll* setup_dll_ = nullptr;    // floserver-setup.dll, once loaded
     FloUninstall* uninstall_window_ = nullptr;  // the Uninstall window, while it's open
     bool quit_after_uninstall_ = false;       // started for it (--uninstall): quit when it closes
+    bool uninstall_finished_ = false;         // the clean-up ended (its last word is on show)
+    unsigned uninstall_pending_ticks_ = 0;    // the boxes Remove was pressed with
     std::string uninstall_offer_dir_;         // the projects folder its box offers
     // The sizes beside its boxes, counted on a thread of their own.
     struct UninstallSizesBox {

@@ -35,6 +35,9 @@ F floserver_setup_proc(HMODULE dll, const char* name) {
     return reinterpret_cast<F>(reinterpret_cast<void (*)()>(GetProcAddress(dll, name)));  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast): GetProcAddress's convention
 }
 
+// The setup window's class: a second setup brings the first one forward.
+#define FLOSERVER_SETUP_WINDOW_CLASS L"FloServerSetupWindow"
+
 // The DLL's file name, next to FloServer.exe (and in the launcher's folder).
 #define FLOSERVER_SETUP_DLL_NAME L"floserver-setup.dll"
 

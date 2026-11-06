@@ -118,6 +118,7 @@ TEST_CASE("svg path: anything it doesn't know draws nothing") {
 TEST_CASE("uninstall: the copy's notes go there and back, and only with a product code") {
     ui::RemoveProgramPlan plan;
     plan.product = "{3AC2E747-DDE1-465C-87CC-277C97C81D0F}";
+    plan.parent = 4242;
     plan.x = -1200;
     plan.y = 80;
     plan.deleted = "Downloaded runtimes and caches were deleted too.";
@@ -132,6 +133,10 @@ TEST_CASE("uninstall: the copy's notes go there and back, and only with a produc
     plan.product = "{3AC2E747} & calc.exe";
     CHECK_FALSE(ui::parse_remove_program_json(ui::remove_program_json(plan)).has_value());
     CHECK_FALSE(ui::parse_remove_program_json(R"({"product":"{3AC2E747-DDE1-465C-87CC-277C97C81D0F}"})").has_value());
+    plan.product = "{3AC2E747-DDE1-465C-87CC-277C97C81D0F}";
+    std::string text = ui::remove_program_json(plan);
+    text.replace(text.find("4242"), 4, "-1");  // not a process id
+    CHECK_FALSE(ui::parse_remove_program_json(text).has_value());
 }
 
 TEST_CASE("uninstall: the Done page's words") {

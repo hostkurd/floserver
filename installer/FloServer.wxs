@@ -140,6 +140,14 @@
     <CustomAction Id="RemoveRunApproval" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec"
                   Execute="immediate" Return="ignore" />
 
+    <!-- The licence the setup program noted as accepted (D25): FloServer's
+         own Uninstall window removes it too; this is for every other way. -->
+    <SetProperty Action="SetRemoveAcceptedLicenceCmd" Id="WixQuietExecCmdLine" Sequence="execute"
+                 Value="&quot;[SystemFolder]reg.exe&quot; delete &quot;HKCU\Software\HostKurd\FloServer&quot; /v AcceptedLicence /f"
+                 Before="RemoveAcceptedLicence" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    <CustomAction Id="RemoveAcceptedLicence" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec"
+                  Execute="immediate" Return="ignore" />
+
     <InstallExecuteSequence>
       <Custom Action="StopFloServer" After="CostFinalize" Condition="Installed OR WIX_UPGRADE_DETECTED" />
       <Custom Action="RemoveCertificate" After="StopFloServer" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
@@ -147,6 +155,7 @@
       <Custom Action="RemoveShims" After="StopFloServerAgain" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
       <Custom Action="RemoveRunEntry" After="RemoveShims" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
       <Custom Action="RemoveRunApproval" After="RemoveRunEntry" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="RemoveAcceptedLicence" After="RemoveRunApproval" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
     </InstallExecuteSequence>
 
     <!-- Two screens (D21 mockups): the licence with Install, then Done with "Open FloServer". -->

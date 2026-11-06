@@ -153,7 +153,7 @@ int WINAPI wWinMain(HINSTANCE /*instance*/, HINSTANCE /*prev*/, PWSTR /*cmd*/, i
     const UniqueHandle single(CreateMutexW(nullptr, FALSE, L"Local\\FloServerSetup"));
     if (single && GetLastError() == ERROR_ALREADY_EXISTS) {
         if (!args.quiet) {
-            if (HWND other = FindWindowW(L"FloServerSetupLook", nullptr); other != nullptr) {
+            if (HWND other = FindWindowW(FLOSERVER_SETUP_WINDOW_CLASS, nullptr); other != nullptr) {
                 if (IsIconic(other) != FALSE) {
                     ShowWindow(other, SW_RESTORE);
                 }

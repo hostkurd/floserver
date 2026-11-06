@@ -22,7 +22,6 @@ namespace floserver::setup::look {
 
 namespace {
 
-constexpr wchar_t kClassName[] = L"FloServerSetupLook";
 constexpr COLORREF kPanel = RGB(0x03, 0x64, 0xB5);
 constexpr COLORREF kPanelText = RGB(0xDC, 0xEE, 0xFF);
 constexpr COLORREF kPanelSmall = RGB(0xCF, 0xE6, 0xFF);
@@ -197,8 +196,13 @@ void draw_text(HDC dc, HFONT font, COLORREF colour, std::wstring_view text, RECT
 
 }  // namespace
 
-WizardWindow::WizardWindow(HINSTANCE instance, std::wstring title, std::wstring panel_note, std::wstring version)
-    : instance_(instance), title_(std::move(title)), panel_note_(std::move(panel_note)), version_(std::move(version)) {}
+WizardWindow::WizardWindow(HINSTANCE instance, std::wstring class_name, std::wstring title, std::wstring panel_note,
+                           std::wstring version)
+    : instance_(instance),
+      class_name_(std::move(class_name)),
+      title_(std::move(title)),
+      panel_note_(std::move(panel_note)),
+      version_(std::move(version)) {}
 
 WizardWindow::~WizardWindow() {
     if (hwnd_ != nullptr) {
@@ -212,7 +216,10 @@ int WizardWindow::px(int dip) const { return MulDiv(dip, static_cast<int>(dpi_),
 RECT WizardWindow::px(RECT dip) const { return {px(dip.left), px(dip.top), px(dip.right), px(dip.bottom)}; }
 
 bool WizardWindow::create(int show, const POINT* at) {
-    static const ATOM atom = [this] {
+    // One class per kind of window (the setup's, the uninstall's), so each can be found on its own.
+    WNDCLASSEXW existing{};
+    existing.cbSize = sizeof existing;
+    if (GetClassInfoExW(instance_, class_name_.c_str(), &existing) == FALSE) {
         WNDCLASSEXW wc{};
         wc.cbSize = sizeof wc;
         wc.style = CS_HREDRAW | CS_VREDRAW;
@@ -223,16 +230,15 @@ bool WizardWindow::create(int show, const POINT* at) {
         wc.hIconSm = static_cast<HICON>(
             LoadImageW(instance_, MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
                        GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
-        wc.lpszClassName = kClassName;
-        return RegisterClassExW(&wc);
-    }();
-    if (atom == 0) {
-        return false;
+        wc.lpszClassName = class_name_.c_str();
+        if (RegisterClassExW(&wc) == 0) {
+            return false;
+        }
     }
     // Its own title row, so no Windows caption (WM_NCCALCSIZE takes it
     // away); WS_CAPTION and WS_SYSMENU keep the taskbar button, Alt+Space
     // and Windows' shadow and round corners.
-    hwnd_ = CreateWindowExW(0, kClassName, title_.c_str(),
+    hwnd_ = CreateWindowExW(0, class_name_.c_str(), title_.c_str(),
                             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN, CW_USEDEFAULT,
                             CW_USEDEFAULT, kWidth, kHeight, nullptr, nullptr, instance_, this);
     if (hwnd_ == nullptr) {

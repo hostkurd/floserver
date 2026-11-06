@@ -6,6 +6,8 @@
 
 #include "setup_dll.h"
 
+#include "uninstall.h"
+
 #include "model/app_update.h"
 #include "model/uninstall.h"
 #include "win_util.h"
@@ -52,7 +54,7 @@ void delete_own_folder_later() {
     std::error_code same;
     if (ec || !is_updater_folder(core::path_to_utf8(folder.filename())) ||
         !fs::equivalent(folder.parent_path(), temp, same) || same ||
-        path.find_first_of(L"\"%^&|<>\r\n") != std::wstring::npos) {
+        path.find_first_of(L"\"%!^&|<>\r\n") != std::wstring::npos) {
         return;
     }
     std::array<wchar_t, MAX_PATH + 1> system{};
@@ -61,8 +63,11 @@ void delete_own_folder_later() {
         return;
     }
     const std::wstring cmd = std::wstring(system.data(), n) + L"\\cmd.exe";
-    // ping waits a moment so this process (and its open files) is gone first.
-    std::wstring command = L"\"" + cmd + L"\" /d /c ping -n 4 127.0.0.1 >nul & rd /s /q \"" + path + L"\"";
+    // Up to ten tries a second apart, so this process (and its open files)
+    // is gone first. /v:off: a "!" can't be expanded (none is let through anyway).
+    const std::wstring quoted = L"\"" + path + L"\"";
+    std::wstring command = L"\"" + cmd + L"\" /d /v:off /c for /l %i in (1,1,10) do @(ping -n 2 127.0.0.1 >nul & if exist " +
+                           quoted + L" rd /s /q " + quoted + L")";
     STARTUPINFOW si{};
     si.cb = sizeof si;
     PROCESS_INFORMATION pi{};
@@ -77,7 +82,18 @@ void delete_own_folder_later() {
 
 int run_remove_program(const std::string& plan_file) {
     const auto text = core::read_small_file(core::path_from_utf8(plan_file), std::size_t{256} * 1024);
-    const auto plan = text ? parse_remove_program_json(*text) : std::nullopt;
+    auto plan = text ? parse_remove_program_json(*text) : std::nullopt;
+    // Only FloServer's own MSI, as installed now: never another product named in the notes.
+    if (plan && plan->product != installed_product_code()) {
+        plan.reset();
+    }
+    // The FloServer.exe that started this copy has its files open until it
+    // has gone; Windows Installer would find them in use.
+    if (plan && plan->parent != 0) {
+        if (const win::UniqueHandle parent(OpenProcess(SYNCHRONIZE, FALSE, plan->parent)); parent) {
+            WaitForSingleObject(parent.get(), 20000);
+        }
+    }
     std::string error;
     const SetupDll* dll = plan ? setup_dll(error) : nullptr;
     int result = 1;
@@ -85,9 +101,14 @@ int run_remove_program(const std::string& plan_file) {
         MessageBoxW(nullptr, L"FloServer's uninstall couldn't go on: its notes are missing or damaged.", L"FloServer",
                     MB_OK | MB_ICONWARNING);
     } else if (dll == nullptr) {
-        const std::wstring message = L"FloServer's uninstall screens can't be opened (" + win::widen(error) +
-                                     L").\n\nRemove FloServer with Windows' Settings → Apps.";
-        MessageBoxW(nullptr, message.c_str(), L"FloServer", MB_OK | MB_ICONWARNING);
+        // Without its screens: Windows' standard uninstall, with its own window.
+        std::string start_error;
+        if (!start_msi_uninstall(nullptr, plan->product, start_error)) {
+            const std::wstring message = L"FloServer's program couldn't be removed (" + win::widen(start_error) + L").";
+            MessageBoxW(nullptr, message.c_str(), L"FloServer", MB_OK | MB_ICONWARNING);
+        } else {
+            result = 0;
+        }
     } else {
         const std::wstring product = win::widen(plan->product);
         const std::wstring deleted = win::widen(plan->deleted);

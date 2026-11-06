@@ -66,7 +66,7 @@ enum class Page : std::uint8_t { Choose, Removing, Done, Message };
 class UninstallWindow final : public look::WizardWindow {
 public:
     UninstallWindow(const FloUninstallHost* host, std::wstring version)
-        : WizardWindow(setup::dll_instance(), kTitle, kPanelNote, L"Version " + version + L" · HostKurd\nfloserver.org") {
+        : WizardWindow(setup::dll_instance(), L"FloServerUninstallWindow", kTitle, kPanelNote, L"Version " + version + L" · HostKurd\nfloserver.org") {
         if (host != nullptr) {
             host_ = *host;
             in_app_ = true;
@@ -308,9 +308,14 @@ private:
             case kClose:
                 DestroyWindow(hwnd());
                 break;
-            case kOpenData:
-                ShellExecuteW(hwnd(), L"open", data_dir_.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            case kOpenData: {
+                // Only a folder is opened (in File Explorer), never anything else named there.
+                const DWORD attributes = GetFileAttributesW(data_dir_.c_str());
+                if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+                    ShellExecuteW(hwnd(), L"explore", data_dir_.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                }
                 break;
+            }
             default:
                 break;
         }

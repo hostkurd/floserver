@@ -115,6 +115,7 @@ struct UninstallChoiceText {
 // read back there (FloServer.exe --remove-program <file>).
 struct RemoveProgramPlan {
     std::string product;
+    std::uint32_t parent = 0;           // the FloServer.exe that wrote it: the copy waits until it has gone
     int x = 0;
     int y = 0;
     std::string deleted;                // one sentence

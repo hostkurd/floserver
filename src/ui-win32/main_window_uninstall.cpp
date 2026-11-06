@@ -39,12 +39,18 @@ constexpr Lang kSetupLang = Lang::En;
 
 enum RemoveStep : int { kStepCertificate = 0, kStepStopping = 1, kStepCleaning = 2 };
 
+// Said after a stop that came before anything was deleted.
+constexpr std::string_view kNothingDeleted = "Nothing was deleted. FloServer goes on as it was.";
+
 }  // namespace
 
 void __stdcall MainWindow::uninstall_remove_pressed(void* context, unsigned ticks) {
     // Not from inside the Uninstall window's own message: posted to this one.
+    // The boxes are kept here; the message only says Remove was pressed, so
+    // nothing posted from elsewhere can choose what's deleted.
     auto* self = static_cast<MainWindow*>(context);
-    PostMessageW(self->hwnd_, kUninstallRemoveMessage, ticks, 0);
+    self->uninstall_pending_ticks_ = ticks;
+    PostMessageW(self->hwnd_, kUninstallRemoveMessage, 0, 0);
 }
 
 void __stdcall MainWindow::uninstall_window_closed(void* context) {
@@ -63,10 +69,28 @@ void MainWindow::open_uninstall(bool quit_on_cancel) {
     std::string error;
     setup_dll_ = setup_dll(error);
     if (setup_dll_ == nullptr) {
-        const std::wstring message =
-            L"FloServer's uninstall screens can't be opened (" + w(error) +
-            L").\n\nInstall FloServer again from floserver.org, or remove it with Windows' Settings → Apps.";
-        MessageBoxW(nullptr, message.c_str(), L"FloServer", MB_OK | MB_ICONWARNING);
+        // Without its screens, Windows' own uninstall of the MSI still
+        // removes the program (FloServer's entry in Settings -> Apps leads
+        // here, so this is the way left there).
+        const std::string product = installed_product_code();
+        if (product.empty()) {
+            const std::wstring message = L"FloServer's uninstall screens can't be opened (" + w(error) + L").";
+            MessageBoxW(nullptr, message.c_str(), L"FloServer", MB_OK | MB_ICONWARNING);
+        } else {
+            const std::wstring message =
+                L"FloServer's uninstall screens can't be opened (" + w(error) +
+                L").\n\nRemove FloServer with Windows' standard uninstall instead? Your projects, databases and "
+                L"downloaded runtimes stay on this computer.";
+            if (MessageBoxW(nullptr, message.c_str(), L"FloServer", MB_OKCANCEL | MB_ICONWARNING) == IDOK) {
+                std::string start_error;
+                if (start_msi_uninstall(nullptr, product, start_error)) {
+                    quit();  // Windows Installer finds nothing of FloServer running
+                    return;
+                }
+                const std::wstring failed = w(fill(kSetupLang, Str::UninstallStartFailed, {start_error}));
+                MessageBoxW(nullptr, failed.c_str(), L"FloServer", MB_OK | MB_ICONWARNING);
+            }
+        }
         if (quit_on_cancel) {
             quit();
         }
@@ -131,7 +155,7 @@ void MainWindow::on_uninstall_window_closed() {
     }
     setup_dll_->close(uninstall_window_);
     uninstall_window_ = nullptr;
-    if (quitting_) {
+    if (uninstall_finished_) {
         // The clean-up ended with a message: the service is already stopped.
         DestroyWindow(hwnd_);
         return;
@@ -147,17 +171,22 @@ bool MainWindow::dialog_message(MSG& msg) {
 }
 
 void MainWindow::start_uninstall(const UninstallTicks& ticks) {
-    if (uninstalling_ || quitting_ || !worker_ || uninstall_window_ == nullptr) {
+    if (uninstalling_ || uninstall_window_ == nullptr) {
+        return;
+    }
+    // Every early stop says so: the Uninstall window is on its Removing page by now.
+    if (quitting_ || !worker_) {
+        uninstall_failed("FloServer is closing.", kNothingDeleted);
         return;
     }
     if (asking_ || (settings_ && settings_->asking())) {
-        uninstall_failed("A question is open in FloServer's window. Answer it, then try again.");
+        uninstall_failed("A question is open in FloServer's window. Answer it, then try again.", kNothingDeleted);
         return;
     }
     // Windows' progress and question for a project's folder belong to this
     // window; the projects folder's move would wait behind it.
     if (recycle_bin_.busy()) {
-        uninstall_failed(std::string(text(kSetupLang, Str::UninstallWait)));
+        uninstall_failed(std::string(text(kSetupLang, Str::UninstallWait)), kNothingDeleted);
         return;
     }
     uninstalling_ = true;
@@ -175,11 +204,15 @@ void MainWindow::start_uninstall(const UninstallTicks& ticks) {
                          std::string(text(kSetupLang, Str::PortsCertUnreadable)));
 }
 
-void MainWindow::uninstall_failed(const std::string& message) {
+void MainWindow::uninstall_failed(const std::string& message, std::string_view note) {
     uninstalling_ = false;
     if (uninstall_window_ != nullptr) {
-        const std::wstring words = w(message) + L"\n\nNothing was deleted. FloServer goes on as it was.";
-        setup_dll_->message(uninstall_window_, L"FloServer wasn't removed", words.c_str(), 0);
+        std::string words = message;
+        if (!note.empty()) {
+            words += "\n\n";
+            words += note;
+        }
+        setup_dll_->message(uninstall_window_, L"FloServer wasn't removed", w(words).c_str(), 0);
     } else {
         show_window();
         show_notice(message, true);
@@ -194,7 +227,7 @@ void MainWindow::on_uninstall() {
         switch (answer.step) {
             case Uninstaller::Step::ReadCa: {
                 if (!answer.error.empty()) {
-                    uninstall_failed(fill(kSetupLang, Str::UninstallFailed, {answer.error}));
+                    uninstall_failed(fill(kSetupLang, Str::UninstallFailed, {answer.error}), kNothingDeleted);
                     break;
                 }
                 if (!answer.ca_der.empty()) {
@@ -207,8 +240,10 @@ void MainWindow::on_uninstall() {
                     const bool removed = core::untrust_ca(answer.ca_der, cancelled, error);
                     asking_ = false;
                     if (!removed) {
+                        // "No" already says nothing was changed.
                         uninstall_failed(cancelled ? std::string(text(kSetupLang, Str::UninstallCaNo))
-                                                   : fill(kSetupLang, Str::UninstallFailed, {error}));
+                                                   : fill(kSetupLang, Str::UninstallFailed, {error}),
+                                         cancelled ? std::string_view() : kNothingDeleted);
                         break;
                     }
                 }
@@ -217,7 +252,9 @@ void MainWindow::on_uninstall() {
             }
             case Uninstaller::Step::RemoveCa:
                 if (!answer.error.empty()) {
-                    uninstall_failed(fill(kSetupLang, Str::UninstallFailed, {answer.error}));
+                    uninstall_failed(fill(kSetupLang, Str::UninstallFailed, {answer.error}),
+                                     "FloServer's certificate was already taken out of Windows' trusted list; "
+                                     "nothing else was deleted. Turn HTTPS on again in Settings > Ports & HTTPS.");
                     break;
                 }
                 // Stopped the way Quit stops it: the worker hangs up first (the
@@ -252,6 +289,7 @@ void MainWindow::uninstall_stopped(const std::string& error) {
 bool MainWindow::hand_over_removal(const Uninstaller::Answer& answer, std::string& error) {
     RemoveProgramPlan plan;
     plan.product = answer.product_code;
+    plan.parent = GetCurrentProcessId();  // the copy waits until this process has gone
     POINT at{};
     if (setup_dll_->place(uninstall_window_, &at) != 0) {
         plan.x = at.x;
@@ -342,6 +380,7 @@ void MainWindow::uninstall_done(const Uninstaller::Answer& answer) {
     if (!message.empty() && uninstall_window_ != nullptr) {
         setup_dll_->message(uninstall_window_, heading.c_str(), w(message).c_str(), done ? 1 : 0);
         quit_after_uninstall_ = true;
+        uninstall_finished_ = true;
         ShowWindow(hwnd_, SW_HIDE);
         quitting_ = true;
         return;

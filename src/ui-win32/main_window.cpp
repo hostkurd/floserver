@@ -446,7 +446,7 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             open_uninstall(false);
             return 0;
         case kUninstallRemoveMessage:
-            start_uninstall(uninstall_ticks_from(static_cast<unsigned>(wparam)));
+            start_uninstall(uninstall_ticks_from(uninstall_pending_ticks_));
             return 0;
         case kUninstallClosedMessage:
             on_uninstall_window_closed();
@@ -845,6 +845,11 @@ void MainWindow::quit() {
     }
     quitting_ = true;
     settings_.reset();
+    // An Uninstall window still asking goes with FloServer (its Remove can't start now).
+    if (uninstall_window_ != nullptr) {
+        setup_dll_->close(uninstall_window_);
+        uninstall_window_ = nullptr;
+    }
     ShowWindow(hwnd_, SW_HIDE);
     worker_->quit_service();
 }

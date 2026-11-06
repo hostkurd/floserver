@@ -68,10 +68,12 @@ enum class MarkKind : std::uint8_t {
 
 class WizardWindow {
 public:
+    // `class_name`: its window class (the setup's and the uninstall's differ);
     // `title`: the window's (taskbar, Alt+Tab, its title row); `panel_note`:
     // the line under "FloServer" in the panel; `version`: shown at the
     // bottom of the panel.
-    WizardWindow(HINSTANCE instance, std::wstring title, std::wstring panel_note, std::wstring version);
+    WizardWindow(HINSTANCE instance, std::wstring class_name, std::wstring title, std::wstring panel_note,
+                 std::wstring version);
     virtual ~WizardWindow();
     WizardWindow(const WizardWindow&) = delete;
     WizardWindow& operator=(const WizardWindow&) = delete;
@@ -174,6 +176,7 @@ private:
     bool request_close();  // true: it closed
 
     HINSTANCE instance_;
+    std::wstring class_name_;
     std::wstring title_;
     std::wstring panel_note_;
     std::wstring version_;
