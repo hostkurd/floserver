@@ -296,11 +296,20 @@ std::string project_database_name(std::string_view project) {
     return out;
 }
 
+std::string project_database_name(const Project& project) {
+    return project.database_name.empty() ? project_database_name(project.name) : project.database_name;
+}
+
 bool reserved_database_name(std::string_view name) {
     static constexpr std::array<std::string_view, 8> kReserved = {
         "root", "mysql", "sys", "performance_schema", "information_schema", "test", "mariadb_sys", "public"};
     return std::find(kReserved.begin(), kReserved.end(), name) != kReserved.end() || name == kSharedDatabaseUser ||
            name.starts_with(kSharedDatabasePrefix);
+}
+
+bool database_follows_rename(std::string_view database) {
+    return reserved_database_name(database) && database != kSharedDatabaseUser &&
+           !database.starts_with(kSharedDatabasePrefix);
 }
 
 EnvStyle env_style(const fs::path& project_dir) {

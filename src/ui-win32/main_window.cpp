@@ -611,6 +611,7 @@ void MainWindow::on_snapshot() {
     }
     open_phpmyadmin_links(s.db);
     const std::vector<Removed> removed = on_remove_answers(s.db);
+    const std::vector<Renamed> renamed = on_rename_answers(s.db);
     on_first_run_answers(s);
     const bool quit_done = s.quit_done;
     const std::string quit_error = s.quit_error;
@@ -624,6 +625,34 @@ void MainWindow::on_snapshot() {
     const UpdateBanner update_before = update_shown();
     snap_ = std::move(s);
     on_update_snapshot(update_before);
+    // Renamed: what was the old name's in the window follows the new one.
+    for (const Renamed& r : renamed) {
+        renamed_[r.from] = r;
+        if (focused == r.from) {
+            focused = r.to;
+        }
+        if (highlighted_ == r.from) {
+            highlighted_ = r.to;
+        }
+        if (selected_ == r.from) {
+            // The panel stays open on it, its PHP part too.
+            selected_ = r.to;
+            if (php_info_project_ == r.from) {
+                php_info_project_ = r.to;
+            }
+            if (worker_) {
+                worker_->select(r.to);
+            }
+        }
+        for (auto* pending : {&pending_, &pending_keep_}) {
+            if (const auto it = pending->find(r.from); it != pending->end()) {
+                (*pending)[r.to] = it->second;
+                pending->erase(it);
+            }
+        }
+        show_notice(rename_outcome(r.from, r.to, r.folder, lang_), false);
+    }
+    apply_renames();
     if (settings_) {
         settings_->on_snapshot(snap_);
         if (copied) {
@@ -661,7 +690,7 @@ void MainWindow::on_snapshot() {
             show_notice(said.text, said.error);
         }
     }
-    if (!removed.empty()) {
+    if (!removed.empty() || !renamed.empty()) {
         update_visible();
         if (worker_) {
             worker_->refresh();
@@ -1741,7 +1770,7 @@ void MainWindow::toggle(int visible_row) {
 }
 
 bool MainWindow::leaving(const std::string& project) const {
-    return removing_.contains(project) || removed_.contains(project);
+    return removing_.contains(project) || removed_.contains(project) || renaming_.contains(project);
 }
 
 void MainWindow::toggle_project(const std::string& project) {

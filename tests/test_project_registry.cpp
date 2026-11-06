@@ -1,5 +1,6 @@
 #include "floserver/core/project_registry.h"
 
+#include "floserver/core/mariadb.h"
 #include "floserver/core/paths.h"
 #include "test_util.h"
 
@@ -168,6 +169,118 @@ TEST_CASE("config.json round-trips and keeps keys it doesn't use") {
         CHECK_FALSE(load_app_config(file, error));
         CHECK(error.find("used twice") != std::string::npos);
         test_util::write_file(file, R"({"projects": "none"})");
+        CHECK_FALSE(load_app_config(file, error));
+    }
+}
+
+TEST_CASE("a renamed project keeps its settings and its database's name (D22)") {
+    const TempDir tmp;
+    fs::create_directories(tmp.path() / "shop");
+    fs::create_directories(tmp.path() / "blog");
+    fs::create_directories(tmp.path() / "root");
+    AppConfig config;
+    std::string error;
+    REQUIRE(add_project(config, tmp.path() / "shop", "my-shop", error));
+    REQUIRE(add_project(config, tmp.path() / "blog", "", error));
+    REQUIRE(add_project(config, tmp.path() / "root", "", error));
+    config.projects[0].on = true;
+    config.projects[0].keep_running = true;
+    config.projects[0].other = {{"colour", "teal"}};
+
+    // Refused: the rules add_project() keeps, taken names, phpMyAdmin's.
+    for (const char* bad : {"", "My-Store", "store_", "-store", "xn--store", "blog", "phpmyadmin", "my-shop"}) {
+        INFO(bad);
+        CHECK_FALSE(rename_project(config, "my-shop", bad, error));
+        CHECK_FALSE(error.empty());
+    }
+    CHECK_FALSE(rename_project(config, "nobody", "store", error));
+    CHECK(error.find("no project") != std::string::npos);
+
+    Project* renamed = rename_project(config, "my-shop", "store", error);
+    REQUIRE(renamed);
+    CHECK(renamed->name == "store");
+    CHECK(renamed->dir == config.projects[0].dir);
+    CHECK(renamed->on);
+    CHECK(renamed->keep_running);
+    CHECK(renamed->other["colour"] == "teal");
+    CHECK(renamed->database_name == "my_shop");
+    CHECK(project_database_name(*renamed) == "my_shop");
+    CHECK(find_project(config, "my-shop") == nullptr);
+
+    // Renamed again, its database still keeps the first name; back to a
+    // name that gives it, nothing is written down.
+    renamed = rename_project(config, "store", "shop", error);
+    REQUIRE(renamed);
+    CHECK(renamed->database_name == "my_shop");
+    renamed = rename_project(config, "shop", "my-shop", error);
+    REQUIRE(renamed);
+    CHECK(renamed->database_name.empty());
+    CHECK(project_database_name(*renamed) == "my_shop");
+    REQUIRE(rename_project(config, "my-shop", "store", error));
+
+    // The name whose database store keeps can't be another project's: not
+    // added under it, not renamed to it, and a name made from a folder moves on.
+    fs::create_directories(tmp.path() / "my-shop");
+    CHECK_FALSE(add_project(config, tmp.path() / "my-shop", "my-shop", error));
+    CHECK(error.find("my_shop") != std::string::npos);
+    const auto made = add_project(config, tmp.path() / "my-shop", "", error);
+    REQUIRE(made);
+    CHECK(made->name == "my-shop-2");
+    CHECK(project_with_database(config, "my_shop")->name == "store");
+    CHECK(project_with_database(config, "my_shop", "store") == nullptr);
+    REQUIRE(remove_project(config, "my-shop-2"));
+
+    // root's database was never made (a reserved name): it follows the new name.
+    renamed = rename_project(config, "root", "admin", error);
+    REQUIRE(renamed);
+    CHECK(renamed->database_name.empty());
+    CHECK(project_database_name(*renamed) == "admin");
+
+    // Shared sites' names were made for projects from before shared sites:
+    // kept, so their .env keeps working and shared sites' guard still sees them.
+    fs::create_directories(tmp.path() / "www-blog");
+    fs::create_directories(tmp.path() / "www");
+    REQUIRE(add_project(config, tmp.path() / "www-blog", "", error));
+    REQUIRE(add_project(config, tmp.path() / "www", "", error));
+    renamed = rename_project(config, "www-blog", "blog-old", error);
+    REQUIRE(renamed);
+    CHECK(renamed->database_name == "www_blog");
+    renamed = rename_project(config, "www", "site", error);
+    REQUIRE(renamed);
+    CHECK(renamed->database_name == "www");
+    CHECK(database_follows_rename("root"));
+    CHECK(database_follows_rename("mysql"));
+    CHECK_FALSE(database_follows_rename("www"));
+    CHECK_FALSE(database_follows_rename("www_blog"));
+    CHECK_FALSE(database_follows_rename("my_shop"));
+    REQUIRE(remove_project(config, "blog-old"));
+    REQUIRE(remove_project(config, "site"));
+
+    // A kept database another project also has (only a config.json made by
+    // hand can say so) is never shared by a rename.
+    {
+        AppConfig twins = config;
+        twins.projects.push_back(twins.projects[0]);
+        twins.projects.back().name = "twin";
+        twins.projects.back().database_name = "my_shop";
+        CHECK_FALSE(rename_project(twins, "store", "other", error));
+        CHECK(error == "the database my_shop is twin's; choose another name");
+    }
+
+    // Written to config.json and read back.
+    const fs::path file = app_config_file(tmp.path());
+    REQUIRE(save_app_config(file, config, error));
+    CHECK(test_util::read_file(file).find(R"("database_name": "my_shop")") != std::string::npos);
+    const auto back = load_app_config(file, error);
+    REQUIRE(back);
+    CHECK(back->projects == config.projects);
+    CHECK_FALSE(back->projects[0].other.contains("database_name"));
+
+    // A database_name that isn't one is refused, as other bad entries are.
+    for (const char* bad : {R"("my-shop")", R"("")", "3", R"("a;drop")"}) {
+        INFO(bad);
+        test_util::write_file(file, R"({"projects": [{"name": "shop", "path": ")" + (tmp.path() / "shop").generic_string() +
+                                        R"(", "database_name": )" + bad + "}]}");
         CHECK_FALSE(load_app_config(file, error));
     }
 }

@@ -1151,11 +1151,17 @@ std::optional<DatabaseLogin> DatabaseService::project_login(const std::string& p
         return std::nullopt;
     }
     DatabaseLogin login;
-    login.database = project_database_name(project);
+    login.database = project_database_name(*p);  // kept through a rename (D22)
     login.user = login.database;
     if (reserved_database_name(login.database)) {
-        refusal = {"reserved_name", "\"" + login.database + "\" is one of MariaDB's or shared sites' names; rename the project "
-                                    "(flo remove " + project + ", then flo add --name <other name>)"};
+        // MariaDB's own name follows a rename; shared sites' is kept by one,
+        // so only a project under another name gets a database of its own.
+        refusal = {"reserved_name", "\"" + login.database + "\" is one of MariaDB's or shared sites' names; " +
+                                        (database_follows_rename(login.database)
+                                             ? "rename the project (flo rename " + project + " <other name>)"
+                                             : "remove the project and add it again under another name (flo remove " +
+                                                   project + ", then flo add --name <other name>; its database " +
+                                                   login.database + " stays)")};
         return std::nullopt;
     }
     // Every installed series has a server, so this works with the project
@@ -1211,13 +1217,10 @@ std::optional<DatabaseLogin> DatabaseService::project_login(const std::string& p
 }
 
 std::optional<std::string> project_sharing_database(const AppConfig& app, const std::string& project) {
-    const std::string database = project_database_name(project);
-    for (const Project& other : app.projects) {
-        if (other.name != project && project_database_name(other.name) == database) {
-            return other.name;
-        }
-    }
-    return std::nullopt;
+    const Project* p = find_project(app, project);
+    const Project* other =
+        project_with_database(app, p != nullptr ? project_database_name(*p) : project_database_name(project), project);
+    return other != nullptr ? std::optional(other->name) : std::nullopt;
 }
 
 DatabaseService::ProjectHold DatabaseService::hold_project(const std::string& project) {
@@ -1252,7 +1255,7 @@ bool DatabaseService::drop_project_database(const std::string& project, ServiceR
         return false;
     }
     // The names are the service's own, as project_login() makes them.
-    const std::string database = project_database_name(project);
+    const std::string database = project_database_name(*p);
     const std::string& user = database;
     if (reserved_database_name(database)) {
         refusal = {"reserved_name", "\"" + database + "\" is one of MariaDB's or shared sites' names, so FloServer never "
@@ -1356,10 +1359,11 @@ std::optional<DatabaseLogin> DatabaseService::shared_login(ServiceRefusal& refus
     // A project from before shared sites had a database (www, www-blog):
     // its data must not become the shared sites'.
     for (const Project& p : app ? app->projects : std::vector<Project>()) {
-        if (reserved_database_name(project_database_name(p.name)) && p.name.starts_with("www")) {
+        const std::string database = project_database_name(p);
+        if (reserved_database_name(database) && database.starts_with("www")) {
             refusal = {"reserved_name", "the project " + p.name + " uses a name shared sites' database needs (" +
                                             std::string(kSharedDatabaseUser) + ", " + std::string(kSharedDatabasePrefix) +
-                                            "...); rename it first (flo remove " + p.name +
+                                            "...); remove it and add it again under another name first (flo remove " + p.name +
                                             ", then flo add --name <other name>)"};
             return std::nullopt;
         }
@@ -1432,7 +1436,7 @@ json DatabaseService::series_status(const std::string& series) const {
     json databases = json::array();
     if (const auto app = load_app_config(app_config_file(config_.data_dir), error)) {
         for (const Project& p : app->projects) {
-            const std::string db = project_database_name(p.name);
+            const std::string db = project_database_name(p);
             if (!reserved_database_name(db) && secrets_.read(std::string("mariadb-").append(series).append("/").append(db))) {
                 databases.push_back(p.name);
             }

@@ -29,6 +29,17 @@
 //                    failed drop keeps the project. Nothing to drop when that
 //                    MariaDB isn't installed. No login makes it again meanwhile.
 //   projects.set     {"name": "shop", "on"?: bool, "keep_running"?: bool} -> the project
+//   projects.rename  {"name": "shop", "new_name": "store", "rename_folder"?: bool}
+//                    -> the project, with "old_name", "old_path" and "old_database_name" (D22)
+//                    Every other setting stays; its database and user keep
+//                    their names ("database_name"), so its .env keeps working
+//                    (only MariaDB's own names, never made, follow the new name).
+//                    Its certificate is made for the new name (the old one is
+//                    deleted) and its logs move. rename_folder: its folder is
+//                    renamed to the new name in the same parent folder,
+//                    refused when one of that name is there, it's in use, or
+//                    Remove would never bin it (a link, the user's or Windows' folders).
+//                    Refused with "busy" while the project's database is being dropped.
 //   certs.status     {} -> {"ca": null or {"common_name", "fingerprint", "not_after",
 //                                          "path", "der" (base64), "trusted": "yes"|"no"|"unsupported",
 //                                          "expires_soon": bool}}
