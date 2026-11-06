@@ -1154,8 +1154,14 @@ std::optional<DatabaseLogin> DatabaseService::project_login(const std::string& p
     login.database = project_database_name(*p);  // kept through a rename (D22)
     login.user = login.database;
     if (reserved_database_name(login.database)) {
-        refusal = {"reserved_name", "\"" + login.database + "\" is one of MariaDB's or shared sites' names; rename the project "
-                                    "(flo rename " + project + " <other name>)"};
+        // MariaDB's own name follows a rename; shared sites' is kept by one,
+        // so only a project under another name gets a database of its own.
+        refusal = {"reserved_name", "\"" + login.database + "\" is one of MariaDB's or shared sites' names; " +
+                                        (database_follows_rename(login.database)
+                                             ? "rename the project (flo rename " + project + " <other name>)"
+                                             : "remove the project and add it again under another name (flo remove " +
+                                                   project + ", then flo add --name <other name>; its database " +
+                                                   login.database + " stays)")};
         return std::nullopt;
     }
     // Every installed series has a server, so this works with the project
@@ -1357,8 +1363,8 @@ std::optional<DatabaseLogin> DatabaseService::shared_login(ServiceRefusal& refus
         if (reserved_database_name(database) && database.starts_with("www")) {
             refusal = {"reserved_name", "the project " + p.name + " uses a name shared sites' database needs (" +
                                             std::string(kSharedDatabaseUser) + ", " + std::string(kSharedDatabasePrefix) +
-                                            "...); rename it first (flo rename " + p.name +
-                                            " <other name>)"};
+                                            "...); remove it and add it again under another name first (flo remove " + p.name +
+                                            ", then flo add --name <other name>)"};
             return std::nullopt;
         }
     }

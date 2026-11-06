@@ -116,9 +116,9 @@ public:
     [[nodiscard]] std::optional<SiteCertificate> ensure_site(const std::string& name, std::string& error);
 
     // Deletes <name>.localhost's certificate, its key and its .json (a
-    // project renamed, D22). `name` must pass project_name_problem(), so
-    // localhost's own is never touched. False (with `error`) when a file
-    // stays.
+    // project renamed, D22). `name` must pass project_name_problem() and
+    // not be phpMyAdmin's (reserved_project_name()), so localhost's and
+    // phpMyAdmin's are never touched. False (with `error`) when a file stays.
     [[nodiscard]] bool remove_site(const std::string& name, std::string& error);
 
     // The certificate for "localhost" itself (shared sites over HTTPS),

@@ -1114,6 +1114,13 @@ constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
           "تحتفظ قاعدة البيانات {0} ومستخدمها باسميهما، لذا يبقى ملف " FLO_LRI ".env" FLO_PDI " صالحًا.",
           "داتابەیسی {0} و بەکارهێنەرەکەی ناوەکانیان دەمێننەوە، بۆیە " FLO_LRI ".env" FLO_PDI
           "ەکەت هەر کار دەکات."},
+    Entry{Str::RenameDatabaseFollows,
+          "FloServer never makes a database called {0} (it's one of MariaDB's names), so its database takes the new "
+          "name: {1}.",
+          "لا ينشئ " FLO_LRI "FloServer" FLO_PDI " قاعدة بيانات باسم {0} (فهو من أسماء " FLO_LRI "MariaDB" FLO_PDI
+          ")، لذا تأخذ قاعدة بياناته الاسم الجديد: {1}.",
+          FLO_LRI "FloServer" FLO_PDI " هەرگیز داتابەیسێک بە ناوی {0} دروست ناکات (یەکێکە لە ناوەکانی " FLO_LRI
+          "MariaDB" FLO_PDI ")، بۆیە داتابەیسەکەی ناوە نوێیەکە وەردەگرێت: {1}."},
     Entry{Str::RenameConfirm, "Rename", "إعادة التسمية", "ناوگۆڕین"},
     Entry{Str::RenameDone, "{0} is now {1}.", "أصبح {0} الآن {1}.", "{0} ئێستا ناوی {1}ـە."},
     Entry{Str::RenameDoneFolder, "{0} is now {1}, and so is its folder.", "أصبح {0} الآن {1}، وكذلك مجلده.",

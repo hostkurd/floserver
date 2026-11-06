@@ -106,8 +106,10 @@ bool remove_project(AppConfig& config, std::string_view name);
 // Renames a project (D22). `new_name` follows add_project()'s rules (and
 // can't share another project's database). Every other setting stays, and
 // its database and user keep their names (database_name), so its .env keeps
-// working; a database named from the old name that FloServer never made (a
-// reserved name, root) follows the new name instead. Nothing (with `error`)
+// working; a database named from the old name that FloServer never makes
+// (MariaDB's own names, root: database_follows_rename()) follows the new name
+// instead. Shared sites' names (www, www_...) are kept: FloServer made them
+// for projects from before shared sites. Nothing (with `error`)
 // when there's no such project or the name can't be used.
 [[nodiscard]] Project* rename_project(AppConfig& config, std::string_view name, std::string_view new_name,
                                       std::string& error);

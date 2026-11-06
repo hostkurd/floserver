@@ -386,6 +386,9 @@ TEST_CASE("the store makes the CA once and project certificates on demand") {
     CHECK_FALSE(fs::exists(certs_dir(data.path()) / "sites" / "old-shop.json"));
     CHECK(store.remove_site("old-shop", error));  // nothing left to remove
     CHECK_FALSE(store.remove_site("_localhost", error));
+    REQUIRE(store.ensure_site("phpmyadmin", error));
+    CHECK_FALSE(store.remove_site("phpmyadmin", error));
+    CHECK(fs::is_regular_file(certs_dir(data.path()) / "sites" / "phpmyadmin.pem"));
     CHECK_FALSE(store.remove_site("../ca", error));
     CHECK(fs::is_regular_file(certs_dir(data.path()) / "sites" / "_localhost.pem"));
     CHECK(fs::is_regular_file(certs_dir(data.path()) / "ca.pem"));

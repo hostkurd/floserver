@@ -26,6 +26,22 @@
 
 namespace floserver::core {
 
+// The folder part of a project's rename (D22): `project`'s folder (as
+// `config` has it) renamed to `new_name` in the same parent folder, then
+// `save` (config.json, with the folder as it's now named); when that fails
+// the folder is renamed back, and the refusal says where it is if it can't
+// be. Refused like Remove's Recycle Bin (model/folder_removal.h): a folder
+// reached through a link, a drive's top folder, the user's own folders (the
+// profile, Desktop, Documents, Downloads, OneDrive, the projects and www
+// folders) or one holding them, anything inside or holding Windows' own
+// folders, AppData or FloServer's data folder, another project's folder
+// (inside it or holding it); and when a folder of that name is there (never
+// replaced) or it's in use. The folder as it's kept after.
+[[nodiscard]] std::optional<std::filesystem::path> rename_project_folder(
+    const AppConfig& config, const Project& project, const std::string& new_name,
+    const std::filesystem::path& data_dir,
+    const std::function<bool(const std::filesystem::path&, ServiceRefusal&)>& save, ServiceRefusal& refusal);
+
 class ProjectService {
 public:
     explicit ProjectService(std::filesystem::path data_dir);
@@ -54,10 +70,17 @@ public:
     // their names (rename_project()). With `rename_folder` its folder is
     // renamed to the new name too, in the same parent folder (refused when
     // a folder of that name is there or it's in use). The reply is that
-    // project, with "old_name" and "old_path" (its folder before).
+    // project, with "old_name", "old_path" (its folder before) and
+    // "old_database_name" (its database's name before: the same unless it
+    // followed the name, database_follows_rename()).
     // Its certificate, logs and what runs are the caller's (the daemon's).
     [[nodiscard]] std::optional<nlohmann::json> rename(const std::string& name, const std::string& new_name,
                                                        bool rename_folder, ServiceRefusal& refusal);
+    // Whether rename() would take the name (it's checked again there): the
+    // config as it is, or nothing with `refusal`. Asked before anything is
+    // stopped for the rename.
+    [[nodiscard]] std::optional<AppConfig> check_rename(const std::string& name, const std::string& new_name,
+                                                        ServiceRefusal& refusal) const;
 
     // Turns a project On or Off, or Keep running on or off.
     [[nodiscard]] std::optional<nlohmann::json> set(const std::string& name, std::optional<bool> on,

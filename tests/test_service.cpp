@@ -168,7 +168,11 @@ TEST_CASE("the real service starts, answers, refuses a second copy and stops") {
     // Renamed (D22): settings and the database's name stay, what was the old
     // name's moves or goes, and the folder is renamed only when asked.
     {
-        const std::filesystem::path blog = data.path() / "my-blog";
+        // Outside the data folder: a folder in it is never renamed.
+        const test_util::TempDir sites;
+        std::string real_error;
+        const std::filesystem::path site_dir = real_folder(sites.path(), real_error).value_or(sites.path());
+        const std::filesystem::path blog = site_dir / "my-blog";
         test_util::write_file(blog / "floserver.json", R"({"php": "8.5", "database": "mariadb-11.4"})");
         const auto add = client->call("projects.add", {{"path", path_to_utf8(blog)}});
         REQUIRE(add.has_value());
@@ -203,18 +207,35 @@ TEST_CASE("the real service starts, answers, refuses a second copy and stops") {
         REQUIRE(log.has_value());
         CHECK(log->result["entries"].size() == 1);
 
+        // A log already under the new name is kept; the old one goes beside it.
+        test_util::write_file(web / "logs" / "sites" / "news.log", "1793306690.000 404 0.001 GET /x\n");
+        // A name that can't be used is refused before anything stops.
+        const auto taken = client->call("projects.rename", {{"name", "blog"}, {"new_name", "Blog!"}, {"rename_folder", true}});
+        REQUIRE(taken.has_value());
+        CHECK(taken->error_code == "bad_params");
         const auto folder = client->call("projects.rename", {{"name", "blog"}, {"new_name", "news"}, {"rename_folder", true}});
         REQUIRE(folder.has_value());
+#ifdef _WIN32
+        // %TEMP% is inside AppData: the folder is never renamed there, and nothing changes.
+        CHECK(folder->error_code == "bad_folder");
+        const std::string last = "blog";
+#else
         REQUIRE_MESSAGE(folder->ok, folder->error_message);
-        CHECK(std::filesystem::is_regular_file(data.path() / "news" / "floserver.json"));
+        CHECK(std::filesystem::is_regular_file(site_dir / "news" / "floserver.json"));
         CHECK_FALSE(std::filesystem::exists(blog));
         CHECK(path_from_utf8(folder->result["path"].get<std::string>()).filename() == "news");
         CHECK(folder->result["database_name"] == "my_blog");
+        CHECK(folder->result["old_database_name"] == "my_blog");
+        CHECK(test_util::read_file(web / "logs" / "sites" / "news.log").find("GET /x") != std::string::npos);
+        CHECK(test_util::read_file(web / "logs" / "sites" / "news.log.old").find("GET /\n") != std::string::npos);
+        CHECK_FALSE(std::filesystem::exists(web / "logs" / "sites" / "blog.log"));
+        const std::string last = "news";
+#endif
         const auto listed_renamed = client->call("projects.list");
         REQUIRE(listed_renamed.has_value());
         REQUIRE(listed_renamed->result["projects"].size() == 1);
-        CHECK(listed_renamed->result["projects"][0]["name"] == "news");
-        REQUIRE(client->call("projects.remove", {{"name", "news"}})->ok);
+        CHECK(listed_renamed->result["projects"][0]["name"] == last);
+        REQUIRE(client->call("projects.remove", {{"name", last}})->ok);
     }
 
     // Settings → Folders over the channel: where projects are made (what

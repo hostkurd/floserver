@@ -586,6 +586,7 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     RenameFolder,
     RenameFolderNote,     // {0}: the folder now, {1}: its new name
     RenameDatabaseNote,   // {0}: its database, "my_shop"
+    RenameDatabaseFollows,  // {0}: the name it would have had ("root"), {1}: the new one
     RenameConfirm,
     RenameDone,           // {0}: the old name, {1}: the new one
     RenameDoneFolder,     // {0}: the old name, {1}: the new one

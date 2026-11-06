@@ -378,10 +378,10 @@ Project* rename_project(AppConfig& config, std::string_view name, std::string_vi
         error = chosen + ".localhost is kept for phpMyAdmin; choose another name";
         return nullptr;
     }
-    // The database keeps its name; one FloServer never made (it refuses
-    // reserved names) has nothing to keep, so it follows the new name.
+    // The database keeps its name; one FloServer never makes (MariaDB's
+    // own, root) has nothing to keep, so it follows the new name.
     std::string database = project_database_name(*project);
-    if (reserved_database_name(database)) {
+    if (database_follows_rename(database)) {
         database = project_database_name(chosen);
     }
     if (const Project* other = project_with_database(config, database, name)) {

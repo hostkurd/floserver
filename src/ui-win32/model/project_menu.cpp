@@ -132,7 +132,14 @@ RenameQuestion rename_question(const ProjectRow& row, std::string_view typed, co
         q.folder_note = fill(lang, Str::RenameFolderNote, {row.path, problem ? std::string("…") : name});
     }
     if (row_has_database(row)) {
-        q.database_note = fill(lang, Str::RenameDatabaseNote, {row_database_name(row)});
+        // Kept, unless it's one of MariaDB's own names (never made): the
+        // service's rule (rename_project()).
+        const std::string database = row_database_name(row);
+        q.database_note =
+            core::database_follows_rename(database)
+                ? fill(lang, Str::RenameDatabaseFollows,
+                       {database, problem ? std::string("…") : core::project_database_name(name)})
+                : fill(lang, Str::RenameDatabaseNote, {database});
     }
     return q;
 }

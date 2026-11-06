@@ -236,6 +236,37 @@ TEST_CASE("a renamed project keeps its settings and its database's name (D22)") 
     CHECK(renamed->database_name.empty());
     CHECK(project_database_name(*renamed) == "admin");
 
+    // Shared sites' names were made for projects from before shared sites:
+    // kept, so their .env keeps working and shared sites' guard still sees them.
+    fs::create_directories(tmp.path() / "www-blog");
+    fs::create_directories(tmp.path() / "www");
+    REQUIRE(add_project(config, tmp.path() / "www-blog", "", error));
+    REQUIRE(add_project(config, tmp.path() / "www", "", error));
+    renamed = rename_project(config, "www-blog", "blog-old", error);
+    REQUIRE(renamed);
+    CHECK(renamed->database_name == "www_blog");
+    renamed = rename_project(config, "www", "site", error);
+    REQUIRE(renamed);
+    CHECK(renamed->database_name == "www");
+    CHECK(database_follows_rename("root"));
+    CHECK(database_follows_rename("mysql"));
+    CHECK_FALSE(database_follows_rename("www"));
+    CHECK_FALSE(database_follows_rename("www_blog"));
+    CHECK_FALSE(database_follows_rename("my_shop"));
+    REQUIRE(remove_project(config, "blog-old"));
+    REQUIRE(remove_project(config, "site"));
+
+    // A kept database another project also has (only a config.json made by
+    // hand can say so) is never shared by a rename.
+    {
+        AppConfig twins = config;
+        twins.projects.push_back(twins.projects[0]);
+        twins.projects.back().name = "twin";
+        twins.projects.back().database_name = "my_shop";
+        CHECK_FALSE(rename_project(twins, "store", "other", error));
+        CHECK(error == "the database my_shop is twin's; choose another name");
+    }
+
     // Written to config.json and read back.
     const fs::path file = app_config_file(tmp.path());
     REQUIRE(save_app_config(file, config, error));

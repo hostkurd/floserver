@@ -88,7 +88,8 @@ struct RenameQuestion {
     bool can_rename = false;    // a usable name other than the one it has: Rename can be pressed
     std::string folder;         // the box, unticked: "Also rename the folder" (empty: no folder)
     std::string folder_note;    // "C:/sites/my-shop → store. Close editors…", under the box
-    std::string database_note;  // the grey note on its database (empty: it has none)
+    std::string database_note;  // the grey note on its database: it keeps its name (or, one of
+                                // MariaDB's own, takes the new one); empty: it has none
     std::string rename;
     std::string cancel;
 };

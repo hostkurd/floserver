@@ -653,7 +653,15 @@ int rename_cmd(const std::vector<std::string>& args) {
     const bool database = p.contains("database") ||
                           (p.contains("wants") && p["wants"].is_object() && p["wants"].contains("database"));
     if (database) {
-        std::cout << "Its database " << text_of(p, "database_name") << " and its user keep their names.\n";
+        const std::string now = text_of(p, "database_name");
+        const std::string before = text_of(p, "old_database_name");
+        if (before.empty() || before == now) {
+            std::cout << "Its database " << now << " and its user keep their names, so its .env keeps working.\n";
+        } else {
+            // MariaDB's own name (root): FloServer never made it, so it follows the new name.
+            std::cout << "FloServer never makes a database called " << before << ", so its database is now " << now
+                      << ".\n";
+        }
     }
     return 0;
 }

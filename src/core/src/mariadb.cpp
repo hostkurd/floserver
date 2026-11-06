@@ -307,6 +307,11 @@ bool reserved_database_name(std::string_view name) {
            name.starts_with(kSharedDatabasePrefix);
 }
 
+bool database_follows_rename(std::string_view database) {
+    return reserved_database_name(database) && database != kSharedDatabaseUser &&
+           !database.starts_with(kSharedDatabasePrefix);
+}
+
 EnvStyle env_style(const fs::path& project_dir) {
     for (const char* name : {".env", ".env.example"}) {
         const auto text = read_small_file(project_dir / name, std::size_t{256} * 1024);

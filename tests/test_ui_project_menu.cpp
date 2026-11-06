@@ -289,6 +289,18 @@ TEST_CASE("rename question: the help follows what's typed (D22)") {
     with_db.wants.database = "mariadb-11.4";
     CHECK(rename_question(with_db, "store", rows, footer, Lang::En).database_note ==
           "The database my_shop and its user keep their names, so your .env keeps working.");
+    // One of MariaDB's own names was never made: it takes the new name, and the note says so.
+    ProjectRow root = with_db;
+    root.name = "root";
+    CHECK(rename_question(root, "admin-site", rows, footer, Lang::En).database_note ==
+          "FloServer never makes a database called root (it's one of MariaDB's names), so its database takes the new "
+          "name: admin_site.");
+    CHECK(rename_question(root, "Bad!", rows, footer, Lang::En).database_note.ends_with("new name: …."));
+    // A shared sites' name (from before shared sites) is kept like any other.
+    ProjectRow www = with_db;
+    www.name = "www-blog";
+    CHECK(rename_question(www, "blog-old", rows, footer, Lang::En).database_note ==
+          "The database www_blog and its user keep their names, so your .env keeps working.");
     // No folder known: no box.
     ProjectRow no_folder = row;
     no_folder.path.clear();
