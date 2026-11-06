@@ -58,7 +58,7 @@
     <ComponentGroup Id="Programs" Directory="INSTALLFOLDER">
       <Files Include="$(StageDir)\**" />
       <!-- FloServer in Settings -> Apps (D25): Uninstall runs FloServer.exe
-           --uninstall, which opens the Uninstall window from
+           with its uninstall switch, which opens the Uninstall window from
            floserver-setup.dll; QuietUninstallString is the plain MSI uninstall
            for tools that remove programs silently. Written by the MSI, so it
            goes with it. -->
