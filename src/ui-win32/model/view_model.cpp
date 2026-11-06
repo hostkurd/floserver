@@ -144,6 +144,7 @@ ProjectRow row_from(const json& p, Lang lang) {
     row.node = node;
     row.python = python;
     row.database = database;
+    row.database_name = text_of(p, "database_name");
     if (p.contains("wants") && p["wants"].is_object()) {
         const json& want = p["wants"];
         row.wants.known = true;

@@ -1084,6 +1084,41 @@ constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
     Entry{Str::AccessNotInstalled, "Not installed", "غير مثبّت", "دانەمەزراوە"},
     Entry{Str::AccessResetField, "Reset {0}", "إعادة تعيين {0}", "گەڕاندنەوەی {0}"},
     Entry{Str::AccessPasswordHidden, "Hidden", "مخفية", "شاراوەیە"},
+    // Renaming a project (D22, approved 5 Nov). Arabic and Kurdish need a native read.
+    Entry{Str::RenameProject, "Rename…", "إعادة التسمية…", "ناوگۆڕین…"},
+    Entry{Str::RenameTitle, "Rename {0}", "إعادة تسمية {0}", "گۆڕینی ناوی {0}"},
+    Entry{Str::RenameNewName, "New name", "الاسم الجديد", "ناوی نوێ"},
+    Entry{Str::RenameHelp, "Letters a–z, digits and -. The address becomes {0}; the old address stops working.",
+          "أحرف " FLO_LRI "a–z" FLO_PDI " وأرقام و" FLO_LRI "-" FLO_PDI ". يصبح العنوان {0}، ويتوقف العنوان القديم عن العمل.",
+          "پیتەکانی " FLO_LRI "a–z" FLO_PDI "، ژمارە و " FLO_LRI "-" FLO_PDI
+          ". ناونیشانەکە دەبێتە {0}؛ ناونیشانە کۆنەکە ئیتر کار ناکات."},
+    Entry{Str::RenameEmpty, "Type the new name.", "اكتب الاسم الجديد.", "ناوە نوێیەکە بنووسە."},
+    Entry{Str::RenameRule, "Use only letters a–z, digits and -, and not - at the start or end.",
+          "استخدم أحرف " FLO_LRI "a–z" FLO_PDI " والأرقام و" FLO_LRI "-" FLO_PDI " فقط، دون " FLO_LRI "-" FLO_PDI
+          " في البداية أو النهاية.",
+          "تەنها پیتەکانی " FLO_LRI "a–z" FLO_PDI "، ژمارە و " FLO_LRI "-" FLO_PDI " بەکاربهێنە، بەبێ " FLO_LRI "-" FLO_PDI
+          " لە سەرەتا یان کۆتاییدا."},
+    Entry{Str::RenameTooLong, "The name can be at most 63 characters.", "يمكن أن يتكوّن الاسم من 63 حرفًا على الأكثر.",
+          "ناوەکە دەتوانێت لە 63 پیت زیاتر نەبێت."},
+    Entry{Str::RenameXn, "The name can't start with xn--.", "لا يمكن أن يبدأ الاسم بـ " FLO_LRI "xn--" FLO_PDI ".",
+          "ناوەکە ناتوانێت بە " FLO_LRI "xn--" FLO_PDI " دەست پێبکات."},
+    Entry{Str::RenameTaken, "There's already a project called {0}.", "يوجد مشروع باسم {0} بالفعل.",
+          "پێشتر پڕۆژەیەک بە ناوی {0} هەیە."},
+    Entry{Str::RenameReserved, "{0} is kept for phpMyAdmin.", "الاسم {0} محجوز لـ " FLO_LRI "phpMyAdmin" FLO_PDI ".",
+          "{0} بۆ " FLO_LRI "phpMyAdmin" FLO_PDI " هەڵگیراوە."},
+    Entry{Str::RenameFolder, "Also rename the folder", "أعد تسمية المجلد أيضًا", "ناوی بوخچەکەش بگۆڕە"},
+    Entry{Str::RenameFolderNote, "{0} → {1}. Close editors and terminals that use it first.",
+          "{0} ← {1}. أغلق أولًا المحررات والطرفيات التي تستخدمه.",
+          "{0} ← {1}. سەرەتا ئەو ئێدیتەر و تێرمیناڵانە دابخە کە بەکاری دەهێنن."},
+    Entry{Str::RenameDatabaseNote, "The database {0} and its user keep their names, so your .env keeps working.",
+          "تحتفظ قاعدة البيانات {0} ومستخدمها باسميهما، لذا يبقى ملف " FLO_LRI ".env" FLO_PDI " صالحًا.",
+          "داتابەیسی {0} و بەکارهێنەرەکەی ناوەکانیان دەمێننەوە، بۆیە " FLO_LRI ".env" FLO_PDI
+          "ەکەت هەر کار دەکات."},
+    Entry{Str::RenameConfirm, "Rename", "إعادة التسمية", "ناوگۆڕین"},
+    Entry{Str::RenameDone, "{0} is now {1}.", "أصبح {0} الآن {1}.", "{0} ئێستا ناوی {1}ـە."},
+    Entry{Str::RenameDoneFolder, "{0} is now {1}, and so is its folder.", "أصبح {0} الآن {1}، وكذلك مجلده.",
+          "{0} ئێستا ناوی {1}ـە، بوخچەکەشی."},
+    Entry{Str::RenameFailed, "Couldn't rename {0}: {1}", "تعذّرت إعادة تسمية {0}: {1}", "نەتوانرا ناوی {0} بگۆڕدرێت: {1}"},
 }};
 
 #undef FLO_LRI

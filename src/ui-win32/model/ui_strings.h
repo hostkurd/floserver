@@ -572,6 +572,24 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     AccessNotInstalled,    // a runtime's row that offers a download: "PHP 8.3.29, Not installed, 30 MB"
     AccessResetField,      // a field's Reset link: "Reset memory_limit"
     AccessPasswordHidden,  // root's password while it's masked with dots
+    // Renaming a project (D22, approved 5 Nov).
+    RenameProject,
+    RenameTitle,          // {0}: the project
+    RenameNewName,
+    RenameHelp,           // {0}: the new address, "https://store.localhost"
+    RenameEmpty,
+    RenameRule,           // a name with other characters, or - at its start or end
+    RenameTooLong,
+    RenameXn,
+    RenameTaken,          // {0}: the name
+    RenameReserved,       // {0}: the name ("phpmyadmin")
+    RenameFolder,
+    RenameFolderNote,     // {0}: the folder now, {1}: its new name
+    RenameDatabaseNote,   // {0}: its database, "my_shop"
+    RenameConfirm,
+    RenameDone,           // {0}: the old name, {1}: the new one
+    RenameDoneFolder,     // {0}: the old name, {1}: the new one
+    RenameFailed,         // {0}: the project, {1}: the service's reason
     Count_,
 };
 

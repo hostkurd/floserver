@@ -383,7 +383,7 @@ private:
     [[nodiscard]] bool switch_value(const ProjectRow& row) const;
     void toggle(int visible_row);
     void toggle_project(const std::string& project);
-    // Being removed, or removed and still in the last list: nothing may change it.
+    // Being removed or renamed, or removed and still in the last list: nothing may change it.
     [[nodiscard]] bool leaving(const std::string& project) const;
     void start_downloads(int visible_row);
     void start_downloads_for(const std::string& project);
@@ -414,6 +414,20 @@ private:
     };
     // projects.remove's answers, taken out of `answers`; the projects removed.
     [[nodiscard]] std::vector<Removed> on_remove_answers(std::vector<Snapshot::DbAnswer>& answers);
+    // Rename… (D22): the dialog (form_parts.h), then projects.rename off the
+    // polling path; its answer comes in on_rename_answers().
+    void ask_rename(const std::string& project);
+    struct Renamed {
+        std::string from;
+        std::string to;
+        std::string path;     // its folder now, as the service gave it
+        bool folder = false;  // the folder was renamed too
+    };
+    // projects.rename's answers, taken out of `answers`; the projects renamed.
+    [[nodiscard]] std::vector<Renamed> on_rename_answers(std::vector<Snapshot::DbAnswer>& answers);
+    // A list asked for before a rename may still have the old name: the row
+    // shows the new one until the list agrees.
+    void apply_renames();
     // The folders a project's folder is never moved with (model/folder_removal.h):
     // Windows' own, FloServer's, the other projects'.
     [[nodiscard]] FolderGuard folder_guard(const std::string& project) const;
@@ -728,6 +742,8 @@ private:
     std::string remove_checking_;     // the project whose remove question waits for its folder's check
     bool quit_after_folder_ = false;  // Quit waits for a folder's move (Windows' question needs its owner)
     std::set<std::string> removed_;         // removed; hidden until the list no longer has them
+    std::set<std::string> renaming_;           // projects.rename on its way, by the old name
+    std::map<std::string, Renamed> renamed_;   // renamed, by the old name, until the list agrees
     Toast toast_;  // the message shown (model/toast.h)
     ToastGeometry toast_geometry_;
     ToastPopup toast_popup_;  // where it's shown: a popup of its own over the content

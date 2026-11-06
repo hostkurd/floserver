@@ -390,7 +390,7 @@ public:
         add_word(9);  // DS_SETFONT: 9 point Segoe UI
         add_text(L"Segoe UI");
     }
-    // `kind`: 0x0080 a button, 0x0082 a static text.
+    // `kind`: 0x0080 a button, 0x0081 an edit box, 0x0082 a static text.
     void add(DWORD style, short x, short y, short cx, short cy, WORD id, WORD kind) {
         while (words_.size() % 2 != 0) {
             add_word(0);  // each item starts on a DWORD
@@ -559,6 +559,217 @@ bool ask_remove_project(HWND owner, Lang lang, const RemoveQuestion& question, b
     }
     drop = d.dropped;
     trash = d.trashed;
+    return true;
+}
+
+namespace {
+
+// The Rename dialog's controls.
+constexpr int kRenameButton = 110;
+constexpr int kRenameTitle = 111;
+constexpr int kNameLabel = 112;
+constexpr int kNameEdit = 113;
+constexpr int kNameHelp = 114;
+constexpr int kFolderBox = 115;
+constexpr int kFolderNote = 116;
+constexpr int kDatabaseNote = 117;
+
+struct RenameDialog {
+    std::function<RenameQuestion(const std::string&)> ask;
+    RenameQuestion first;
+    std::wstring current;
+    std::string name;
+    bool folder = false;
+    bool problem = false;  // the help says what's wrong
+    HFONT bold = nullptr;
+};
+
+std::string dialog_text(HWND dialog, int id) {
+    HWND control = GetDlgItem(dialog, id);
+    const int n = GetWindowTextLengthW(control);
+    std::wstring text(static_cast<std::size_t>(n) + 1, L'\0');
+    GetWindowTextW(control, text.data(), n + 1);
+    text.resize(static_cast<std::size_t>(n));
+    return win::narrow(text);
+}
+
+// The words for what's typed now: the help (or what's wrong), the folder's
+// new name, and whether Rename can be pressed.
+RenameQuestion sync_rename(HWND dialog, RenameDialog& d) {
+    const RenameQuestion q = d.ask(dialog_text(dialog, kNameEdit));
+    SetDlgItemTextW(dialog, kNameHelp, win::widen(q.help).c_str());
+    SetDlgItemTextW(dialog, kFolderNote, win::widen(q.folder_note).c_str());
+    set_accessible_help(GetDlgItem(dialog, kNameEdit), q.help);
+    set_accessible_help(GetDlgItem(dialog, kFolderBox), q.folder_note);
+    EnableWindow(GetDlgItem(dialog, kRenameButton), q.can_rename ? TRUE : FALSE);
+    if (q.problem != d.problem) {
+        d.problem = q.problem;
+        InvalidateRect(GetDlgItem(dialog, kNameHelp), nullptr, TRUE);  // its colour
+    }
+    return q;
+}
+
+bool high_contrast() {
+    HIGHCONTRASTW hc{};
+    hc.cbSize = sizeof hc;
+    return SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof hc, &hc, 0) != FALSE && (hc.dwFlags & HCF_HIGHCONTRASTON) != 0;
+}
+
+INT_PTR CALLBACK rename_dialog_proc(HWND dialog, UINT msg, WPARAM wparam, LPARAM lparam) {
+    auto* d = win::int_to_ptr<RenameDialog*>(GetWindowLongPtrW(dialog, DWLP_USER));
+    switch (msg) {
+        case WM_INITDIALOG: {
+            d = win::int_to_ptr<RenameDialog*>(lparam);
+            SetWindowLongPtrW(dialog, DWLP_USER, lparam);
+            const RenameQuestion& q = d->first;
+            SetWindowTextW(dialog, win::widen(q.window_title).c_str());
+            SetDlgItemTextW(dialog, kRenameTitle, win::widen(q.title).c_str());
+            SetDlgItemTextW(dialog, kNameLabel, win::widen(q.label).c_str());
+            SetDlgItemTextW(dialog, kFolderBox, win::widen(q.folder).c_str());
+            SetDlgItemTextW(dialog, kDatabaseNote, win::widen(q.database_note).c_str());
+            SetDlgItemTextW(dialog, kRenameButton, win::widen(q.rename).c_str());
+            SetDlgItemTextW(dialog, IDCANCEL, win::widen(q.cancel).c_str());
+            HWND edit = GetDlgItem(dialog, kNameEdit);
+            SendMessageW(edit, EM_LIMITTEXT, 63, 0);  // a project name's most
+            SetWindowTextW(edit, d->current.c_str());
+            // Its label is a static before it; said as its name all the same, as New project's box.
+            set_accessible_name(edit, q.label);
+            (void)sync_rename(dialog, *d);
+            // The title in bold, a little larger, as the remove question's.
+            LOGFONTW lf{};
+            if (const auto font = reinterpret_cast<HFONT>(SendMessageW(dialog, WM_GETFONT, 0, 0));
+                font != nullptr && GetObjectW(font, sizeof lf, &lf) != 0) {
+                lf.lfWeight = FW_SEMIBOLD;
+                lf.lfHeight = lf.lfHeight * 4 / 3;
+                d->bold = CreateFontIndirectW(&lf);
+                SendDlgItemMessageW(dialog, kRenameTitle, WM_SETFONT, reinterpret_cast<WPARAM>(d->bold), FALSE);
+            }
+            // Rename is the default (Enter, once the name can be used); Esc is Cancel.
+            SendMessageW(dialog, DM_SETDEFID, kRenameButton, 0);
+            SetFocus(edit);
+            SendMessageW(edit, EM_SETSEL, 0, -1);
+            return FALSE;
+        }
+        case WM_CTLCOLORSTATIC: {
+            // What's wrong with the name in the error colour; the database
+            // note grey. High contrast keeps the system's colours.
+            const auto id = GetDlgCtrlID(win::int_to_ptr<HWND>(static_cast<INT_PTR>(lparam)));
+            if (d == nullptr || high_contrast() || (id != kNameHelp && id != kDatabaseNote) ||
+                (id == kNameHelp && !d->problem)) {
+                break;
+            }
+            auto* dc = win::int_to_ptr<HDC>(static_cast<INT_PTR>(wparam));
+            const Rgb ink = id == kNameHelp ? palette(false).problem.text : palette(false).text_subtle;
+            SetTextColor(dc, colorref(ink));
+            SetBkColor(dc, GetSysColor(COLOR_3DFACE));
+            return reinterpret_cast<INT_PTR>(GetSysColorBrush(COLOR_3DFACE));
+        }
+        case WM_COMMAND:
+            if (d == nullptr) {
+                break;
+            }
+            if (LOWORD(wparam) == kNameEdit && HIWORD(wparam) == EN_CHANGE) {
+                (void)sync_rename(dialog, *d);
+                return TRUE;
+            }
+            if (LOWORD(wparam) == kRenameButton) {
+                // Asked again: Enter reaches here whatever the button's state.
+                if (!sync_rename(dialog, *d).can_rename) {
+                    MessageBeep(MB_OK);
+                    SetFocus(GetDlgItem(dialog, kNameEdit));
+                    return TRUE;
+                }
+                d->name = dialog_text(dialog, kNameEdit);
+                d->folder = IsDlgButtonChecked(dialog, kFolderBox) == BST_CHECKED;
+                EndDialog(dialog, 1);
+                return TRUE;
+            }
+            if (LOWORD(wparam) == IDCANCEL) {
+                EndDialog(dialog, 0);
+                return TRUE;
+            }
+            break;
+        case WM_DESTROY:
+            if (d != nullptr) {
+                set_accessible_name(GetDlgItem(dialog, kNameEdit), {});
+                set_accessible_help(GetDlgItem(dialog, kNameEdit), {});
+                set_accessible_help(GetDlgItem(dialog, kFolderBox), {});
+                if (d->bold != nullptr) {
+                    DeleteObject(d->bold);
+                    d->bold = nullptr;
+                }
+            }
+            break;
+        default:
+            break;
+    }
+    return FALSE;
+}
+
+}  // namespace
+
+bool ask_rename_project(HWND owner, Lang lang, const std::string& current,
+                        const std::function<RenameQuestion(const std::string&)>& question, std::string& new_name,
+                        bool& rename_folder) {
+    new_name.clear();
+    rename_folder = false;
+    RenameDialog d;
+    d.ask = question;
+    d.first = question(current);
+    d.current = win::widen(current);
+    // In dialog units, as the remove question: the title, the box with its
+    // label and help, the folder's box and note (when it has a folder), the
+    // database note (when it has one), then Rename and Cancel.
+    constexpr short kWidth = 280;
+    constexpr short kMargin = 10;
+    constexpr short kInner = kWidth - 2 * kMargin;
+    const bool rtl = is_rtl(lang);
+    short y = kMargin;
+    std::vector<std::tuple<DWORD, short, short, short, short, WORD, WORD>> items;
+    items.emplace_back(SS_LEFT | SS_NOPREFIX, kMargin, y, kInner, 24, kRenameTitle, 0x0082);
+    y += 28;
+    items.emplace_back(SS_LEFT | SS_NOPREFIX, kMargin, y, kInner, 10, kNameLabel, 0x0082);
+    y += 11;
+    // a–z as it's typed, as New project's name box.
+    items.emplace_back(ES_LEFT | ES_AUTOHSCROLL | ES_LOWERCASE | WS_BORDER | WS_TABSTOP, kMargin, y, kInner, 14,
+                       kNameEdit, 0x0081);
+    y += 17;
+    items.emplace_back(SS_LEFT | SS_NOPREFIX, kMargin, y, kInner, 20, kNameHelp, 0x0082);
+    y += 24;
+    if (!d.first.folder.empty()) {
+        items.emplace_back(BS_AUTOCHECKBOX | BS_MULTILINE | BS_TOP | WS_TABSTOP, kMargin, y, kInner, 12, kFolderBox,
+                           0x0080);
+        y += 14;
+        // The folder and its new name, under the box; a long path breaks anywhere.
+        items.emplace_back(SS_LEFT | SS_NOPREFIX | SS_EDITCONTROL, kMargin + 12, y, kInner - 12, 26, kFolderNote,
+                           0x0082);
+        y += 30;
+    }
+    if (!d.first.database_note.empty()) {
+        items.emplace_back(SS_LEFT | SS_NOPREFIX, kMargin, y, kInner, 18, kDatabaseNote, 0x0082);
+        y += 22;
+    }
+    y += 6;
+    constexpr short kButtonW = 60;
+    constexpr short kButtonH = 14;
+    items.emplace_back(BS_DEFPUSHBUTTON | WS_TABSTOP, kWidth - kMargin - 2 * kButtonW - 6, y, kButtonW, kButtonH,
+                       kRenameButton, 0x0080);
+    items.emplace_back(BS_PUSHBUTTON | WS_TABSTOP, kWidth - kMargin - kButtonW, y, kButtonW, kButtonH, IDCANCEL,
+                       0x0080);
+    y += kButtonH + kMargin;
+    // Mirrored in Arabic and Kurdish, as the remove question.
+    DialogTemplate dialog(DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU,
+                          rtl ? WS_EX_LAYOUTRTL | WS_EX_RTLREADING : 0U, kWidth, y);
+    for (const auto& [style, x, iy, cx, cy, id, kind] : items) {
+        dialog.add(style, x, iy, cx, cy, id, kind);
+    }
+    const INT_PTR answer = DialogBoxIndirectParamW(GetModuleHandleW(nullptr), dialog.get(), owner,
+                                                   rename_dialog_proc, reinterpret_cast<LPARAM>(&d));
+    if (answer != 1) {
+        return false;  // Cancel, Esc, closed, or no dialog at all: nothing changes
+    }
+    new_name = d.name;
+    rename_folder = d.folder;
     return true;
 }
 

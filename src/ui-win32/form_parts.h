@@ -104,4 +104,17 @@ enum class SaveChoice : std::uint8_t { Save, DontSave, Cancel };
 // are the boxes.
 [[nodiscard]] bool ask_remove_project(HWND owner, Lang lang, const RemoveQuestion& question, bool& drop, bool& trash);
 
+// The Rename dialog (D22, approved 5 Nov), laid out as the remove question:
+// the New name box (filled with `current`, all of it selected; a–z as
+// typed), its help under it (the rule and the new address, or what's wrong,
+// in the error colour), "Also rename the folder" (unticked) with the folder
+// and its new name under it, the grey note on the database, then Rename
+// (the default, greyed out while the name can't be used) and Cancel (Esc).
+// `question` gives the words for what's typed, asked again on every key;
+// screen readers get the help as the box's. True for Rename, with the name
+// typed and the box.
+[[nodiscard]] bool ask_rename_project(HWND owner, Lang lang, const std::string& current,
+                                      const std::function<RenameQuestion(const std::string&)>& question,
+                                      std::string& new_name, bool& rename_folder);
+
 }  // namespace floserver::ui
