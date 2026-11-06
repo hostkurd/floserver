@@ -224,6 +224,8 @@ RecycleBin::Result recycle(HWND owner, const std::string& project, bool dropped,
 
 }  // namespace
 
+bool folder_has_recycle_bin(const std::wstring& path) { return has_recycle_bin(path); }
+
 FolderGuard real_folder_guard(const FolderGuard& guard) {
     FolderGuard out = guard;
     for (auto* list : {&out.kept, &out.kept_with_contents, &out.other_projects}) {
@@ -321,6 +323,11 @@ void RecycleBin::check(const std::string& project, const std::string& folder, co
     } catch (const std::system_error&) {
         finish(shared_, {project, folder, FolderOffer::None});  // not offered: the project is still removed if asked
     }
+}
+
+RecycleBin::Result recycle_folder_now(HWND owner, const std::string& folder, const FolderGuard& guard,
+                                      const std::string& refused, const std::string& missing) {
+    return recycle(owner, {}, false, folder, guard, refused, missing);
 }
 
 std::vector<RecycleBin::Check> RecycleBin::take_checks() {

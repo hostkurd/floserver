@@ -54,7 +54,11 @@ bool folder_is_free(const fs::path& dir) {
 fs::path free_name(const fs::path& folder, const std::string& base, const std::string& extension) {
     std::error_code ec;
     for (int n = 1; n < 100; ++n) {
-        const std::string name = base + (n == 1 ? std::string() : " " + std::to_string(n)) + extension;
+        std::string name = base;
+        if (n > 1) {
+            name += " " + std::to_string(n);
+        }
+        name += extension;
         const fs::path p = folder / path_from_utf8(name);
         if (fs::symlink_status(p, ec).type() == fs::file_type::not_found) {
             return p;
@@ -353,8 +357,8 @@ std::optional<json> BackupService::job(std::int64_t id) const {
                 {"database", j->database},
                 {"log", j->log},
                 {"cancellable", j->cancellable && j->state == "running"}};
-    if (j->size) {
-        out["size"] = *j->size;
+    if (const auto size = j->size) {
+        out["size"] = *size;
     }
     if (!j->folder.empty()) {
         out["folder"] = j->folder;
@@ -520,7 +524,7 @@ bool BackupService::reinstall(const std::shared_ptr<Job>& job, const fs::path& d
         }
         const auto target = resolve_shim(step.tool, dir, data_dir_, error);
         if (!target) {
-            error = step.tool + ": " + error;
+            error.insert(0, step.tool + ": ");
             return false;
         }
         std::string shown = "$ " + step.tool;
@@ -540,7 +544,7 @@ bool BackupService::reinstall(const std::shared_ptr<Job>& job, const fs::path& d
         options.output_log = work / ("step-" + std::to_string(i + 1) + ".log");
         auto child = ChildProcess::start(options, error);
         if (!child) {
-            error = step.tool + " didn't start: " + error;
+            error.insert(0, step.tool + " didn't start: ");
             return false;
         }
         const auto started = std::chrono::steady_clock::now();
@@ -619,15 +623,21 @@ bool BackupService::check_database_entry(const fs::path& zip, const BackupInfo& 
     return true;
 }
 
+std::string BackupService::database_of(const std::string& project) const {
+    std::string ignored;
+    const auto p = hooks_.project ? hooks_.project(project, ignored) : std::nullopt;
+    return p && !p->database_name.empty() ? p->database_name : project_database_name(project);
+}
+
 bool BackupService::load_from_backup(const std::shared_ptr<Job>& job, const fs::path& zip, const BackupInfo& info,
-                                     const std::string& project, const fs::path& work, std::string& error) {
+                                     const std::string& project, const fs::path& work, std::string& error) const {
     job->set([](Job& j) { j.database = "loading"; });
     job->set_step("Loading the database from the backup…");
     const fs::path main = work / "load.sql";
     const fs::path extras = work / "load-extras.sql";
     // Unpacked straight into the SQL that's run: no other copy of it.
     SqlLoadWriter writer;
-    if (!writer.open(main, extras, project_database_name(project), error)) {
+    if (!writer.open(main, extras, database_of(project), error)) {
         return false;
     }
     std::string why;
@@ -657,11 +667,11 @@ bool BackupService::load_from_backup(const std::shared_ptr<Job>& job, const fs::
 }
 
 bool BackupService::load_saved(const std::string& project, const fs::path& saved, const fs::path& work,
-                               std::string& error) {
+                               std::string& error) const {
     const fs::path main = work / "back.sql";
     const fs::path extras = work / "back-extras.sql";
     bool has_extras = false;
-    if (!prepare_sql_for_load(saved, main, extras, project_database_name(project), has_extras, error)) {
+    if (!prepare_sql_for_load(saved, main, extras, database_of(project), has_extras, error)) {
         return false;
     }
     // Putting today's back is never cancelled (it's bounded by the load's time limit).
@@ -672,7 +682,7 @@ bool BackupService::load_saved(const std::string& project, const fs::path& saved
 }
 
 void BackupService::point_at_database(const std::shared_ptr<Job>& job, const fs::path& dir,
-                                      const std::string& project) {
+                                      const std::string& project) const {
     std::string error;
     const bool has_env = is_regular(dir / ".env");
     const bool has_wp = is_regular(dir / "wp-config.php");
@@ -707,7 +717,7 @@ void BackupService::point_at_database(const std::shared_ptr<Job>& job, const fs:
 std::optional<fs::path> BackupService::unpack_beside(const std::shared_ptr<Job>& job, const fs::path& zip,
                                                      const BackupInfo& info, const fs::path& dir, std::string& error) {
     // A short name beside the folder (Windows' path limit): ".flo-r12".
-    const fs::path temp = dir.parent_path() / path_from_utf8(".flo-r" + std::to_string(job->id));
+    fs::path temp = dir.parent_path() / path_from_utf8(".flo-r" + std::to_string(job->id));
     std::error_code ec;
     fs::remove_all(temp, ec);
     ZipLimits limits;

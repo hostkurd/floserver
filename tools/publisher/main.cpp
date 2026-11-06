@@ -821,6 +821,9 @@ void Publisher::update_selection() {
     if (!f.sha256.empty() && f.detail.find(f.sha256) == std::string::npos) {
         text += "\r\nSHA-256 " + f.sha256;
     }
+    if (!f.notes_url.empty()) {
+        text += "\r\nWhat's new: " + f.notes_url;
+    }
     SetWindowTextW(detail_, widen(text).c_str());
     EnableWindow(remove_, busy_ || live_busy_ ? FALSE : TRUE);
     const bool by_hand = f.state == mt::CheckState::ByHand;

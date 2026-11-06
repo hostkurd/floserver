@@ -124,7 +124,8 @@ void MainWindow::start_restore(const std::string& project) {
     hover_ = {};
     pressed_ = {};
     InvalidateRect(hwnd_, nullptr, FALSE);
-    const auto choice = ask_restore(hwnd_, lang_, project, row_has_database(row), backups_folder());
+    const auto choice = ask_restore(hwnd_, lang_, project, row_has_database(row) ? row_database_name(row) : std::string(),
+                                    backups_folder());
     asking_ = false;
     first_run_after_ask();
     if (quit_after_ask_) {

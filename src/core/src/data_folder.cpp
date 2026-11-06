@@ -844,4 +844,95 @@ CleanResult remove_leftovers(const fs::path& data, const std::vector<CleanItem>&
     return result;
 }
 
+bool is_uninstall_item(const fs::path& data, const fs::path& path) {
+    const fs::path p = path.lexically_normal();
+    for (const fs::path& place : {runtimes_dir(data), downloads_dir(data), updates_dir(data), data / "templates",
+                                  kept_manifest_file(data), kept_signature_file(data)}) {
+        if (p == place.lexically_normal()) {
+            return true;
+        }
+    }
+    // A MariaDB's folder is named after its series: "mariadb-11.4".
+    return p.parent_path() == (data / "data").lexically_normal() && starts_with(p.filename(), "mariadb-") &&
+           p.filename() != "mariadb-";
+}
+
+std::vector<CleanItem> uninstall_items(const fs::path& data, bool runtimes, bool databases,
+                                       Clock::time_point deadline) {
+    std::vector<CleanItem> out;
+    const auto add = [&](const fs::path& p) {
+        std::error_code ec;
+        const fs::file_status st = fs::symlink_status(p, ec);
+        if (ec || !fs::exists(st)) {
+            return;
+        }
+        if (fs::is_directory(st) && !is_link(p, st)) {
+            out.push_back({p, disk_usage(p, deadline).bytes, true, true});
+            return;
+        }
+        // A file, or a link (it goes as the link: what it points to is left alone, and not counted).
+        std::uintmax_t size = 0;
+        out.push_back({p, regular_file(p, size) ? size : 0, fs::is_directory(st), true});
+    };
+    if (runtimes) {
+        for (const fs::path& p : {runtimes_dir(data), downloads_dir(data), updates_dir(data), data / "templates",
+                                  kept_manifest_file(data), kept_signature_file(data)}) {
+            add(p);
+        }
+    }
+    if (databases) {
+        // Only through a plain <data>/data: a linked one leads to somebody else's folder.
+        const fs::path folder = data / "data";
+        std::error_code ec;
+        if (plain_path(data, folder) && fs::is_directory(fs::symlink_status(folder, ec)) && !ec) {
+            std::vector<fs::path> found;
+            for (fs::directory_iterator it(folder, ec), end; !ec && it != end; it.increment(ec)) {
+                if (is_uninstall_item(data, it->path())) {
+                    found.push_back(it->path());
+                }
+            }
+            std::sort(found.begin(), found.end());  // the same order every time
+            for (const fs::path& p : found) {
+                add(p);
+            }
+        }
+    }
+    return out;
+}
+
+CleanResult remove_uninstall_items(const fs::path& data, const std::vector<CleanItem>& items,
+                                   const CleanOptions& options) {
+    const FileOp remove_file = options.remove_file ? options.remove_file : FileOp(real_remove);
+    CleanResult result;
+    for (const CleanItem& item : items) {
+        if (!is_uninstall_item(data, item.path)) {
+            skip(&result.skipped_items, data, item.path, "not_allowed");
+            continue;
+        }
+        if (const Protection guard = protection(item.path, data, options); guard.hit) {
+            skip(&result.skipped_items, data, item.path, "protected", guard.inside);
+            continue;
+        }
+        // Never through a linked <data>/data or <data>/state. The item itself
+        // may be a link: remove_tree takes it away as the link.
+        fs::path linked;
+        if (!plain_path(data, item.path.parent_path(), &linked)) {
+            skip(&result.skipped_items, data, linked.empty() ? item.path : linked, linked.empty() ? "not_allowed" : "link");
+            continue;
+        }
+        switch (remove_tree(item.path, result.freed, remove_file)) {
+            case TreeResult::Removed:
+                ++result.done;
+                break;
+            case TreeResult::Gone:
+                break;  // removed meanwhile: nothing to say
+            case TreeResult::Stayed:
+                skip(&result.skipped_items, data, item.path, "in_use");  // a file in use stays; what could go went
+                break;
+        }
+    }
+    result.skipped = result.skipped_items.size();
+    return result;
+}
+
 }  // namespace floserver::core

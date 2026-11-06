@@ -28,6 +28,7 @@ enum class MenuCommand : std::uint8_t {
     Toggle,       // Turn on / Turn off
     KeepRunning,
     Settings,     // Settings → Shared sites, from the Shared sites row
+    Rename,       // D22
     BackUp,       // Back up as zip… (D22)
     Restore,      // Restore from backup…
     Remove,
@@ -49,8 +50,8 @@ struct ProjectMenuState {
 };
 
 // Open in browser · Open folder · Open terminal · Open in <editor> · Copy
-// address | Turn on (or off) · Keep running | Back up as zip… · Restore
-// from backup… (D22, approved 5 Nov) | Remove from FloServer…
+// address | Turn on (or off) · Keep running | Rename… · Back up as zip… ·
+// Restore from backup… (D22, approved 5 Nov) | Remove from FloServer…
 // (no Project settings…: a click on the row opens its panel).
 // The address items are greyed out when there's nothing to open (off, a
 // problem, needs a download); the changes while the service isn't there or
@@ -73,6 +74,34 @@ struct ProjectMenuState {
 // The project has a MariaDB database (floserver.json asks for one, or the
 // service says what it uses): the question offers to delete it too.
 [[nodiscard]] bool row_has_database(const ProjectRow& row);
+
+// The project's database and user as the service names them: the name it
+// kept through a rename (D22), else the one its name gives.
+[[nodiscard]] std::string row_database_name(const ProjectRow& row);
+
+// The Rename dialog (D22, approved 5 Nov) for what's typed in its New name
+// box, worked out again on every key. `rows` are every project listed (the
+// names taken); `footer` gives the new address its scheme and port.
+struct RenameQuestion {
+    std::string window_title;
+    std::string title;          // "Rename my-shop"
+    std::string label;          // "New name"
+    std::string help;           // the rule and the new address, or what's wrong with the name
+    bool problem = false;       // `help` says what's wrong (shown as an error)
+    bool can_rename = false;    // a usable name other than the one it has: Rename can be pressed
+    std::string folder;         // the box, unticked: "Also rename the folder" (empty: no folder)
+    std::string folder_note;    // "C:/sites/my-shop → store. Close editors…", under the box
+    std::string database_note;  // the grey note on its database: it keeps its name (or, one of
+                                // MariaDB's own, takes the new one); empty: it has none
+    std::string rename;
+    std::string cancel;
+};
+[[nodiscard]] RenameQuestion rename_question(const ProjectRow& row, std::string_view typed,
+                                             const std::vector<ProjectRow>& rows, const FooterText& footer, Lang lang);
+
+// "my-shop is now store." once the service has renamed it.
+[[nodiscard]] std::string rename_outcome(const std::string& old_name, const std::string& new_name, bool folder,
+                                         Lang lang);
 
 // The question before removing: the window's title, "Remove my-shop from
 // FloServer?", what happens to the folder, the buttons, and two boxes, both

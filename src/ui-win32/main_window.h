@@ -18,6 +18,7 @@
 #include "recycle_bin.h"
 #include "scroll_bar.h"
 #include "toast_view.h"
+#include "uninstall.h"
 #include "service_worker.h"
 #include "settings_window.h"
 #include "win_util.h"
@@ -113,6 +114,11 @@ private:
         FrNext,
         FrSkipSetup,  // every step's Skip setup
         FrWithout,    // step 2's Continue without downloading
+        // App updates' banner above the list (Q5).
+        UpdateNotes,   // What's new
+        UpdateCancel,  // stops the download
+        UpdateLater,
+        UpdateNow,
     };
     enum class PanelAction : std::uint8_t { Browser, Folder, Terminal, Editor, Studio, Download };
     // The panel's square icon buttons (approved 3 and 4 Nov), in their order.
@@ -125,6 +131,10 @@ private:
                part == Part::PanelButton || part == Part::PanelField || part == Part::PanelCopyEnv ||
                part == Part::PanelPhpMyAdmin || part == Part::PanelKeep || part == Part::PanelRemove ||
                is_php_part(part);
+    }
+    [[nodiscard]] static constexpr bool is_update_part(Part part) {
+        return part == Part::UpdateNotes || part == Part::UpdateCancel || part == Part::UpdateLater ||
+               part == Part::UpdateNow;
     }
     [[nodiscard]] static constexpr bool is_php_part(Part part) {
         return part == Part::PanelPhpSettings || part == Part::PanelPhpChange || part == Part::PanelPhpField ||
@@ -339,6 +349,19 @@ private:
         Str next_label = Str::WizardNext;
         bool next_primary = true;
     };
+    // App updates' banner above the list (Q5), from the last paint; empty when it isn't shown.
+    struct UpdateGeometry {
+        UpdateBanner kind = UpdateBanner::None;
+        RECT banner{};
+        RECT icon{};
+        RECT title{};
+        RECT line{};
+        RECT bar{};    // downloading: the progress
+        RECT notes{};  // What's new; empty when the list gives none (or there's no room)
+        RECT cancel{};
+        RECT later{};
+        RECT now{};
+    };
     // Step 3 and the job not finished yet (also before its first answer).
     [[nodiscard]] bool wizard_running() const;
     // False for a template with nothing to choose (no Versions page).
@@ -392,7 +415,7 @@ private:
     [[nodiscard]] bool switch_value(const ProjectRow& row) const;
     void toggle(int visible_row);
     void toggle_project(const std::string& project);
-    // Being removed, or removed and still in the last list: nothing may change it.
+    // Being removed or renamed, or removed and still in the last list: nothing may change it.
     [[nodiscard]] bool leaving(const std::string& project) const;
     void start_downloads(int visible_row);
     void start_downloads_for(const std::string& project);
@@ -423,6 +446,20 @@ private:
     };
     // projects.remove's answers, taken out of `answers`; the projects removed.
     [[nodiscard]] std::vector<Removed> on_remove_answers(std::vector<Snapshot::DbAnswer>& answers);
+    // Rename… (D22): the dialog (form_parts.h), then projects.rename off the
+    // polling path; its answer comes in on_rename_answers().
+    void ask_rename(const std::string& project);
+    struct Renamed {
+        std::string from;
+        std::string to;
+        std::string path;     // its folder now, as the service gave it
+        bool folder = false;  // the folder was renamed too
+    };
+    // projects.rename's answers, taken out of `answers`; the projects renamed.
+    [[nodiscard]] std::vector<Renamed> on_rename_answers(std::vector<Snapshot::DbAnswer>& answers);
+    // A list asked for before a rename may still have the old name: the row
+    // shows the new one until the list agrees.
+    void apply_renames();
     // The folders a project's folder is never moved with (model/folder_removal.h):
     // Windows' own, FloServer's, the other projects'.
     [[nodiscard]] FolderGuard folder_guard(const std::string& project) const;
@@ -663,6 +700,44 @@ private:
     void open_settings();
     // Settings > General changed one of the window's preferences (PrefChange, the choice's index).
     void on_pref_change(WPARAM change, LPARAM value);
+
+    // --- App updates (main_window_update.cpp, Q5) ---
+    // The banner the main screen shows now (none on the first-run page and New project).
+    [[nodiscard]] UpdateBanner update_shown() const;
+    [[nodiscard]] RECT update_banner_rect() const;
+    // Where the list and the panel start: under the service's banner or the update's.
+    [[nodiscard]] int content_top() const;
+    [[nodiscard]] UpdateGeometry update_geometry(HDC dc) const;
+    [[nodiscard]] UpdateBannerText update_words() const;
+    [[nodiscard]] std::vector<Part> update_focus_order() const;
+    [[nodiscard]] Hit update_hit_test(int x, int y) const;
+    [[nodiscard]] bool update_part_focused(Part part) const;
+    // After each snapshot: the download's speed, and a ready update said once.
+    void on_update_snapshot(UpdateBanner before);
+    void run_update_part(Part part);
+    void open_update_notes();
+    // Update now (Settings' too): the copy in %TEMP% is started and this window quits.
+    void start_update();
+    void on_update_key(WPARAM key);
+    // The keys to the banner's first (or `last`) button; false when it isn't shown.
+    bool focus_update_banner(bool last);
+    void paint_update_banner(Canvas& c, bool text_pass) const;
+    void add_update_access(AccessTree& t) const;
+
+    // --- Remove FloServer… (main_window_uninstall.cpp, D21) ---
+    // Settings > General's question was answered: Settings closes, and the
+    // steps run in order (uninstall.h), each said here as it starts.
+    void start_uninstall(const UninstallTicks& ticks);
+    // A step finished on its thread: the next one, or what went wrong.
+    void on_uninstall();
+    // The worker stopped the service (`error`: not within its few seconds): the clean-up next.
+    void uninstall_stopped(const std::string& error);
+    // Stopped before anything was deleted: said, and FloServer goes on as it was.
+    void uninstall_failed(const std::string& message);
+    // The end: Windows' uninstall (or what was left said), then quit.
+    void uninstall_done(const Uninstaller::Answer& answer);
+    // Windows' own folders and the data folder, never moved to the Recycle Bin.
+    [[nodiscard]] static FolderGuard windows_folder_guard();
     // Both windows made again in `lang` (its direction set at creation),
     // keeping where they are, what's open and what's typed.
     void change_language(Lang lang);
@@ -754,16 +829,22 @@ private:
     };
     std::map<std::string, Removing> removing_;  // projects.remove on its way, per project
     RecycleBin recycle_bin_;
+    Uninstaller uninstaller_;  // Remove FloServer…'s steps
+    std::string uninstall_projects_dir_;  // the projects folder the user agreed to move
+    bool uninstalling_ = false;  // they're running: no Quit, no Settings meanwhile
+    UninstallTicks uninstall_ticks_;
     std::string highlighted_;  // a row right-clicked while the panel is closed: shown selected
     std::string remove_checking_;     // the project whose remove question waits for its folder's check
     bool quit_after_folder_ = false;  // Quit waits for a folder's move (Windows' question needs its owner)
     std::set<std::string> removed_;         // removed; hidden until the list no longer has them
+    std::set<std::string> renaming_;           // projects.rename on its way, by the old name
+    std::map<std::string, Renamed> renamed_;   // renamed, by the old name, until the list agrees
     std::string backup_planning_;            // the project whose backup.plan is on its way
     std::optional<BackupPlan> backup_plan_;  // its answer: the dialog opens with kBackupMessage
     std::string open_backup_;   // a .zip opened with FloServer, until the service answers
     std::string toast_file_;    // the toast's Show in folder
     bool backup_job_ = false;   // a backup dialog or job is open
-    static constexpr UINT kBackupMessage = WM_APP + 12;
+    static constexpr UINT kBackupMessage = WM_APP + 13;
     Toast toast_;  // the message shown (model/toast.h)
     ToastGeometry toast_geometry_;
     ToastPopup toast_popup_;  // where it's shown: a popup of its own over the content
@@ -784,6 +865,13 @@ private:
     std::string query_;
     std::vector<std::size_t> visible_;  // indexes into snap_.rows that match query_
     mutable std::vector<RowGeometry> geometry_;  // from the last paint
+
+    // App updates (Q5): the banner as last painted, the keys on its buttons
+    // (-1: not there), the download's speed, and Later's choice.
+    mutable UpdateGeometry update_geometry_;
+    int update_focus_ = -1;
+    UpdateRate update_rate_;
+    std::optional<UpdateLater> update_later_;
 
     // Shared sites (D19): the row's geometry and keyboard focus, and the settings page.
     mutable SharedGeometry shared_geometry_;
@@ -862,6 +950,7 @@ private:
     // any message), the one the last events were raised from (only while a
     // screen reader listens), and the requests waiting for kAccessMessage.
     static constexpr UINT kAccessMessage = WM_APP + 11;
+    static constexpr UINT kUninstallMessage = WM_APP + 12;  // a Remove FloServer… step finished
     AccessRoot access_;
     AccessTree access_now_;
     bool access_dirty_ = true;

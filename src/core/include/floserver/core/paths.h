@@ -27,6 +27,8 @@ namespace floserver::core {
 
 [[nodiscard]] std::filesystem::path runtimes_dir(const std::filesystem::path& data);
 [[nodiscard]] std::filesystem::path downloads_dir(const std::filesystem::path& data);
+// FloServer's own installer, downloaded for an update (update_service.h).
+[[nodiscard]] std::filesystem::path updates_dir(const std::filesystem::path& data);
 [[nodiscard]] std::filesystem::path manifest_state_file(const std::filesystem::path& data);
 // The last signed runtime list with templates, kept for offline use (D9).
 [[nodiscard]] std::filesystem::path kept_manifest_file(const std::filesystem::path& data);

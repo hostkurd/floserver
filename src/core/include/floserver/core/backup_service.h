@@ -51,6 +51,8 @@ struct BackupProject {
     std::filesystem::path dir;
     bool on = false;
     bool database = false;  // its floserver.json asks for one
+    // Its database's name, kept through a rename; empty: project_database_name(name).
+    std::string database_name;
 };
 
 struct BackupHooks {
@@ -148,10 +150,10 @@ private:
                    const std::vector<std::string>& left_out, std::string& error);
     // The backup's database loaded into the project's database (Cancel stops it).
     bool load_from_backup(const std::shared_ptr<Job>& job, const std::filesystem::path& zip, const BackupInfo& info,
-                          const std::string& project, const std::filesystem::path& work, std::string& error);
+                          const std::string& project, const std::filesystem::path& work, std::string& error) const;
     // A .sql kept by a restore loaded back.
     bool load_saved(const std::string& project, const std::filesystem::path& saved, const std::filesystem::path& work,
-                    std::string& error);
+                    std::string& error) const;
     // The backup's files unpacked beside `dir` (".flo-r<id>"), or nothing.
     std::optional<std::filesystem::path> unpack_beside(const std::shared_ptr<Job>& job,
                                                        const std::filesystem::path& zip, const BackupInfo& info,
@@ -160,9 +162,11 @@ private:
     bool check_database_entry(const std::filesystem::path& zip, const BackupInfo& info,
                               const std::filesystem::path& work, std::string& error) const;
     [[nodiscard]] std::optional<std::uint64_t> free_space(const std::filesystem::path& folder) const;
+    // The project's own database's name (a renamed one keeps its old one).
+    [[nodiscard]] std::string database_of(const std::string& project) const;
     // .env (or wp-config.php) pointed at the project's database.
     void point_at_database(const std::shared_ptr<Job>& job, const std::filesystem::path& dir,
-                           const std::string& project);
+                           const std::string& project) const;
     [[nodiscard]] std::filesystem::path work_dir(std::int64_t id) const;
 
     std::filesystem::path data_dir_;

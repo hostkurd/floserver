@@ -159,6 +159,37 @@ struct CleanResult {
 [[nodiscard]] CleanResult remove_leftovers(const std::filesystem::path& data, const std::vector<CleanItem>& items,
                                            const CleanOptions& options = {});
 
+// Remove FloServer… (Settings > General, D21): what its "Also delete" boxes
+// delete from the data folder, and nothing else:
+//
+//   Downloaded runtimes and caches:
+//     <data>/runtimes/     every runtime installed (they can be downloaded again)
+//     <data>/downloads/    archives on their way
+//     <data>/updates/      FloServer's own installer, downloaded for an update
+//     <data>/templates/    New project's work folders
+//     <data>/state/manifest.json and manifest.json.sig   the runtime list kept for offline use
+//   Databases:
+//     <data>/data/mariadb-<series>/   each MariaDB's data folder
+//
+// Never: config.json and the other settings, logs, certificates, secrets,
+// the projects folder (the window moves it to the Recycle Bin when asked), a
+// project's files. Links as in the clean-ups: one at the top goes as the
+// link, none is gone into, and no folder above an item may be one. The
+// protected folders of CleanOptions (every project's, the projects folder,
+// the www folder) are never touched, nor an item holding one.
+
+// What the boxes would delete as things are now, with their sizes (counting
+// stops at `deadline`); what isn't there is left out.
+[[nodiscard]] std::vector<CleanItem> uninstall_items(const std::filesystem::path& data, bool runtimes, bool databases,
+                                                     std::chrono::steady_clock::time_point deadline);
+
+// Deletes each of uninstall_items(data, ...), checked again the same way.
+[[nodiscard]] CleanResult remove_uninstall_items(const std::filesystem::path& data, const std::vector<CleanItem>& items,
+                                                 const CleanOptions& options = {});
+
+// Whether `path` is one of the places above (by name only).
+[[nodiscard]] bool is_uninstall_item(const std::filesystem::path& data, const std::filesystem::path& path);
+
 // Whether `path` is one the clean-ups may touch (the places and patterns
 // above; by name only: links and protected folders are checked apart).
 [[nodiscard]] bool is_log_file(const std::filesystem::path& data, const std::filesystem::path& path);

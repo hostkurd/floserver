@@ -128,8 +128,7 @@ bool MainWindow::panel_open() const { return shows_rows() && selected_row() != n
 bool MainWindow::panel_beside_list() const { return width_ >= px(kPanelBesideMinW); }
 
 RECT MainWindow::panel_rect() const {
-    const RECT b = banner_rect();
-    const int top = b.bottom > 0 ? b.bottom + px(8) : px(kTopBarH);
+    const int top = content_top();
     const int bottom = std::max(top, height_ - px(kFooterH) - px(kGap));
     const int left = panel_beside_list() ? width_ - px(kPad) - px(kPanelW) : px(kPad);
     return {left, top, width_ - px(kPad), bottom};
@@ -1415,7 +1414,7 @@ void MainWindow::paint_panel(Canvas& c, HDC dc, bool text_pass) const {
 
     if (g.db_box.right > g.db_box.left) {
         const std::string database = !row->database.empty() ? row->database : row->wants.database;
-        const std::string name = core::project_database_name(row->name);
+        const std::string name = row_database_name(*row);  // kept through a rename (D22)
         const std::uint16_t port = database_port(snap_.databases, database);
         const std::string host = port != 0 ? "127.0.0.1:" + std::to_string(port) : std::string("127.0.0.1");
         c.text(g.db_title, w(fill(lang_, Str::DatabaseTitle, {name})), fonts_.button_bold.get(), p.text, Align::Start,

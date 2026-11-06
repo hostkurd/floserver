@@ -181,6 +181,20 @@ std::optional<WebPorts> WebService::ports_in_use() const {
     return nginx_ ? ports_ : std::nullopt;
 }
 
+WebService::ProjectHold WebService::hold_project(const std::string& project) {
+    const std::lock_guard lock(mutex_);
+    ++held_projects_[project];
+    reload_locked();
+    return {this, project};
+}
+
+void WebService::release_project(const std::string& project) noexcept {
+    const std::lock_guard lock(mutex_);
+    if (const auto it = held_projects_.find(project); it != held_projects_.end() && --it->second <= 0) {
+        held_projects_.erase(it);
+    }
+}
+
 // Runs nginx once in the web folder (-t, -s reload, -s stop) and waits for
 // it. Paths on its command line are relative to that folder: nginx for
 // Windows reads its arguments in the ANSI code page, which can't hold every
@@ -490,10 +504,15 @@ void WebService::reload_locked() {
     remove_expired_signon_tokens(phpmyadmin_paths(config_.data_dir).tokens);
     error_.clear();
     std::string error;
-    const auto app = load_app_config(app_config_file(config_.data_dir), error);
+    auto app = load_app_config(app_config_file(config_.data_dir), error);
     if (!app) {
         error_ = "the project list can't be read: " + error;  // keep running what runs
         return;
+    }
+    for (Project& p : app->projects) {
+        if (held_projects_.contains(p.name)) {
+            p.on = false;  // its folder is being renamed
+        }
     }
     // Settings > Ports & HTTPS (web_settings.h); unusable settings are the defaults.
     std::string settings_error;

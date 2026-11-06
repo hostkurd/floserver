@@ -130,7 +130,7 @@ std::string archive_of(std::string_view file) {
 // Runs the finished list through the app's own checks, signed with a
 // throwaway key, so the tool never writes a list the app would refuse.
 std::optional<std::string> self_check(const std::string& bytes, std::chrono::sys_seconds now,
-                                      std::size_t expected, std::size_t expected_templates) {
+                                      std::size_t expected, std::size_t expected_templates, bool expected_app) {
     std::array<std::uint8_t, 32> seed{};
     seed.fill(0x5a);
     std::array<std::uint8_t, 64> secret{};
@@ -156,12 +156,16 @@ std::optional<std::string> self_check(const std::string& bytes, std::chrono::sys
     if (r.manifest->templates.size() != expected_templates) {
         return "the app reads a different number of templates than were written";
     }
+    if (r.manifest->app.has_value() != expected_app) {
+        return "the app doesn't read the FloServer installer that was written";
+    }
     return std::nullopt;
 }
 
 struct Classified {
     CdnPath parts;
     const CatalogEntry* entry = nullptr;  // set when the list can carry the file
+    bool app = false;                     // FloServer's own installer (the list's "app")
     bool note = false;                    // left out on purpose (not an error)
     std::string message;
 };
@@ -182,6 +186,20 @@ Classified classify(const std::string& path) {
     const std::string& version = c.parts.version;
     const std::string& file = c.parts.file;
 
+    // FloServer's own installer: app/<x.y.z>/FloServer-<x.y.z>-x64.msi, the
+    // name CI gives it. HostKurd's file, so there's no official one to compare
+    // with: its SHA-256 is compared with the CI artifact's by hand.
+    if (name == kAppFolder) {
+        const auto v = Version::parse(version);
+        if (!v || v->parts().size() != 3 || v->to_string() != version) {
+            c.message = join({path, ": \"", version, "\" isn't a FloServer version such as 1.2.0"});
+        } else if (file != app_file_name(version)) {
+            c.message = join({path, ": FloServer's installer is named ", app_file_name(version)});
+        } else {
+            c.app = true;
+        }
+        return c;
+    }
     const auto entry = std::find_if(kCatalog.begin(), kCatalog.end(),
                                      [&](const CatalogEntry& e) { return e.name == name; });
     if (entry == kCatalog.end()) {
@@ -216,9 +234,13 @@ Classified classify(const std::string& path) {
 
 }  // namespace
 
+std::string app_file_name(std::string_view version) {
+    return join({"FloServer-", version, "-x64.msi"});
+}
+
 CdnPath describe_cdn_path(std::string_view path) {
     Classified c = classify(std::string(path));
-    c.parts.listable = c.entry != nullptr;
+    c.parts.listable = c.entry != nullptr || c.app;
     c.parts.problem = std::move(c.message);
     return std::move(c.parts);
 }
@@ -273,6 +295,10 @@ BuildResult build_manifest(std::string_view report_json, const BuildOptions& opt
     std::set<std::string> seen_runtimes;
     std::set<std::string> used_accepts;
     nlohmann::ordered_json runtimes = nlohmann::ordered_json::array();
+    nlohmann::ordered_json app;  // null until the report has FloServer's installer
+    if (!options.app_notes_url.empty() && !is_plain_https_url(options.app_notes_url)) {
+        fail("--app-notes must be a plain https address");
+    }
 
     for (const json& f : report["files"]) {
         if (!f.is_object() || !f.contains("path") || !f["path"].is_string()) {
@@ -286,6 +312,45 @@ BuildResult build_manifest(std::string_view report_json, const BuildOptions& opt
         }
 
         const Classified kind = classify(path);
+        if (kind.app) {
+            const std::string state =
+                f.contains("result") && f["result"].is_string() ? f["result"].get<std::string>() : "";
+            if (state == "unchecked" && options.accepted.contains(path)) {
+                used_accepts.insert(path);
+            } else if (state != "ok") {
+                fail(join({path, ": FloServer's installer is checked by hand: compare its SHA-256 with the CI "
+                                 "artifact's, then pass --accept ", path}));
+                continue;
+            }
+            const std::string sha =
+                f.contains("sha256") && f["sha256"].is_string() ? f["sha256"].get<std::string>() : "";
+            if (!f.contains("size") || !f["size"].is_number_unsigned() || f["size"].get<std::uint64_t>() == 0) {
+                fail(path + ": the report has no size");
+                continue;
+            }
+            if (sha.size() != 64 || !from_hex(sha)) {
+                fail(path + ": the report has no valid sha256");
+                continue;
+            }
+            if (!app.is_null()) {
+                fail(path + ": a second FloServer installer; the list names only the newest");
+                continue;
+            }
+            std::string lower_sha = sha;
+            std::transform(lower_sha.begin(), lower_sha.end(), lower_sha.begin(),
+                           [](char c) { return (c >= 'A' && c <= 'F') ? static_cast<char>(c + 32) : c; });
+            app = nlohmann::ordered_json::object();
+            app["version"] = kind.parts.version;
+            app["platform"] = kAppPlatform;
+            app["urls"] = nlohmann::ordered_json::array({join({cdn, "/", path})});
+            app["size"] = f["size"].get<std::uint64_t>();
+            app["sha256"] = lower_sha;
+            if (!options.app_notes_url.empty()) {
+                app["notes_url"] = options.app_notes_url;
+            }
+            result.app_version = kind.parts.version;
+            continue;
+        }
         if (!kind.entry) {
             if (kind.note) {
                 result.notes.push_back(kind.message);
@@ -363,6 +428,9 @@ BuildResult build_manifest(std::string_view report_json, const BuildOptions& opt
     if (runtimes.empty()) {
         fail("the report has no runtimes to list");
     }
+    if (!options.app_notes_url.empty() && app.is_null()) {
+        fail("--app-notes: the report has no FloServer installer (app/<version>/FloServer-<version>-x64.msi)");
+    }
 
     // Templates: read by the app's own rules, and every runtime they need listed.
     const json templates = json::parse(options.templates_json, nullptr, false);
@@ -398,9 +466,12 @@ BuildResult build_manifest(std::string_view report_json, const BuildOptions& opt
     doc["expires"] = format_utc_time(options.now + std::chrono::days{options.days});
     doc["runtimes"] = runtimes;
     doc["templates"] = nlohmann::ordered_json::parse(options.templates_json);
+    if (!app.is_null()) {
+        doc["app"] = app;
+    }
     std::string bytes = doc.dump(2) + "\n";
 
-    if (auto problem = self_check(bytes, options.now, runtimes.size(), result.template_count)) {
+    if (auto problem = self_check(bytes, options.now, runtimes.size(), result.template_count, !app.is_null())) {
         fail(*problem);
         return result;
     }

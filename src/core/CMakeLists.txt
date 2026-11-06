@@ -73,6 +73,7 @@ add_library(floserver_core STATIC
     src/tar_extract.cpp
     src/templates.cpp
     src/template_service.cpp
+    src/update_service.cpp
     src/zip_extract.cpp
     src/zip_write.cpp
     src/backup.cpp

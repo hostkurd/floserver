@@ -16,6 +16,8 @@ add_library(floserver_ui_model STATIC
     model/project_menu.cpp
     model/code_editor.cpp
     model/folder_removal.cpp
+    model/uninstall.cpp
+    model/app_update.cpp
     model/toast.cpp
     model/glyphs.cpp
     model/access_tree.cpp
@@ -44,6 +46,9 @@ add_executable(floserver_ui WIN32
     main_window_first_run.cpp
     main_window_menu.cpp
     main_window_backup.cpp
+    main_window_uninstall.cpp
+    main_window_update.cpp
+    apply_update.cpp
     main_window_access.cpp
     access_provider.cpp
     canvas.cpp
@@ -57,6 +62,7 @@ add_executable(floserver_ui WIN32
     window_prefs.cpp
     code_editors.cpp
     recycle_bin.cpp
+    uninstall.cpp
     toast_view.cpp
     settings_folders.cpp
     settings_shared.cpp
@@ -68,7 +74,7 @@ add_executable(floserver_ui WIN32
     FloServer.rc)
 set_target_properties(floserver_ui PROPERTIES OUTPUT_NAME FloServer)
 target_link_libraries(floserver_ui PRIVATE floserver_core floserver_ui_model
-    comctl32 dwmapi gdiplus shell32 ole32 oleaut32 uuid advapi32 user32 gdi32)
+    comctl32 dwmapi gdiplus shell32 ole32 oleaut32 uuid advapi32 user32 gdi32 msi)
 # The window starts floserverd the way the CLI does; build it alongside.
 add_dependencies(floserver_ui floserverd)
 if(MINGW)

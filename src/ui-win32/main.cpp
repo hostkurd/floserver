@@ -3,6 +3,7 @@
 // client of floserverd: everything it shows and changes goes through the
 // service (main_window.h, service_worker.h).
 
+#include "apply_update.h"
 #include "canvas.h"
 #include "main_window.h"
 #include "model/ui_strings.h"
@@ -19,6 +20,7 @@
 
 #include <cstdlib>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -51,8 +53,10 @@ bool hand_over_to_running_window(const std::wstring& class_name, const std::stri
     return false;
 }
 
-// FloServer.exe [--tray] [--instance <suffix>], as the Run entry writes it.
-floserver::ui::StartArgs start_args() {
+// FloServer.exe's arguments, without the program: [--tray] [--instance
+// <suffix>] as the Run entry writes them, or --apply-update <msi> ... for
+// the copy that installs an update.
+std::vector<std::string> command_args() {
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (argv == nullptr) {
@@ -63,7 +67,7 @@ floserver::ui::StartArgs start_args() {
         args.push_back(floserver::ui::win::narrow(argv[i]));  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic): argv from Windows
     }
     LocalFree(argv);
-    return floserver::ui::parse_start_args(args);
+    return args;
 }
 
 // COM for this thread, for as long as the window lives.
@@ -90,14 +94,45 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE /*prev*/, PWSTR /*cmd*/, int s
     // Started with Windows (Settings > General's Run entry): --tray makes the
     // window but doesn't show it (the service starts as it always does), and
     // --instance stands for FLOSERVER_INSTANCE, which floserverd inherits.
-    const floserver::ui::StartArgs args = start_args();
+    const std::vector<std::string> command = command_args();
+    // Update now (Q5): this is the copy in %TEMP% that installs the update.
+    // Not one of the windows: it never takes their single-instance mark, so
+    // the FloServer it opens at the end can.
+    if (const auto update = floserver::ui::parse_apply_update_args(command)) {
+        if (!update->instance.empty()) {
+            SetEnvironmentVariableW(L"FLOSERVER_INSTANCE", widen(update->instance).c_str());
+        }
+        INITCOMMONCONTROLSEX icc{};
+        icc.dwSize = sizeof icc;
+        icc.dwICC = ICC_PROGRESS_CLASS | ICC_STANDARD_CLASSES;
+        InitCommonControlsEx(&icc);
+        const floserver::ui::Lang lang =
+            update->lang.value_or(floserver::ui::window_lang(floserver::ui::load_window_prefs()));
+        return floserver::ui::run_apply_update(instance, lang, *update);
+    }
+    const floserver::ui::StartArgs args = floserver::ui::parse_start_args(command);
     const bool tray = args.tray;
     if (!args.instance.empty()) {
         SetEnvironmentVariableW(L"FLOSERVER_INSTANCE", widen(args.instance).c_str());
     }
     const std::string service_instance = floserver::core::ipc::default_instance();
     const std::wstring class_name = L"FloServerWindow." + widen(service_instance);
-    const std::wstring mutex_name = L"Local\\FloServerWindow." + widen(service_instance);
+    const std::wstring mutex_name = floserver::ui::window_mark_name(service_instance);
+
+    // An update is being installed (apply_update.h): no window now, or it
+    // would start floserverd again in the middle. The new one opens by itself.
+    if (const floserver::ui::win::UniqueHandle updating(
+            OpenMutexW(SYNCHRONIZE, FALSE, floserver::ui::updating_mark_name(service_instance).c_str()));
+        updating) {
+        if (!tray) {
+            const floserver::ui::Lang lang = floserver::ui::window_lang(floserver::ui::load_window_prefs());
+            MessageBoxW(nullptr, widen(floserver::ui::text(lang, floserver::ui::Str::UpdateInProgress)).c_str(),
+                        L"FloServer",
+                        MB_OK | MB_ICONINFORMATION |
+                            (floserver::ui::is_rtl(lang) ? UINT{MB_RTLREADING | MB_RIGHT} : 0U));
+        }
+        return 0;
+    }
 
     const floserver::ui::win::UniqueHandle single(CreateMutexW(nullptr, FALSE, mutex_name.c_str()));
     if (single && GetLastError() == ERROR_ALREADY_EXISTS) {

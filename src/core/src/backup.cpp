@@ -218,7 +218,7 @@ std::string shown_text(std::string_view text) {
             ++i;
             continue;
         }
-        std::size_t len = (b & 0xE0U) == 0xC0U ? 2 : (b & 0xF0U) == 0xE0U ? 3 : (b & 0xF8U) == 0xF0U ? 4 : 1;
+        const std::size_t len = (b & 0xE0U) == 0xC0U ? 2 : (b & 0xF0U) == 0xE0U ? 3 : (b & 0xF8U) == 0xF0U ? 4 : 1;
         if (len == 1 || i + len > text.size()) {
             ++i;  // a broken byte: left out
             continue;
@@ -323,7 +323,12 @@ std::optional<fs::path> keep_file(const fs::path& file, const std::vector<fs::pa
         std::error_code ec;
         fs::create_directories(folder, ec);
         for (int n = 1; n < 100; ++n) {
-            const fs::path to = folder / path_from_utf8(base + (n == 1 ? std::string() : " " + std::to_string(n)) + "." + ext);
+            std::string name = base;
+            if (n > 1) {
+                name += " " + std::to_string(n);
+            }
+            name += "." + ext;
+            fs::path to = folder / path_from_utf8(name);
             if (fs::symlink_status(to, ec).type() != fs::file_type::not_found) {
                 continue;
             }
@@ -740,7 +745,8 @@ std::optional<std::string> update_wp_config_text(const std::string& text, const 
         {"DB_HOST", "127.0.0.1:" + std::to_string(login.port)},
     }};
     // Where each one's value is: the characters between its single quotes.
-    std::array<std::optional<std::pair<std::size_t, std::size_t>>, 4> found{};
+    std::array<std::pair<std::size_t, std::size_t>, 4> found{};
+    std::array<bool, 4> seen{};
     const std::size_t n = text.size();
     const auto skip_space = [&](std::size_t i) {
         while (i < n && is_space(text[i])) {
@@ -806,14 +812,15 @@ std::optional<std::string> update_wp_config_text(const std::string& text, const 
             }
             i = j + 1;
         } else if ((c == 'd' || c == 'D') && lower(std::string_view(text).substr(i, 6)) == "define" &&
-                   (i == 0 || !(std::isalnum(static_cast<unsigned char>(text[i - 1])) != 0 || text[i - 1] == '_'))) {
+                   (i == 0 || (std::isalnum(static_cast<unsigned char>(text[i - 1])) == 0 && text[i - 1] != '_'))) {
             std::string key;
             std::pair<std::size_t, std::size_t> value;
             std::size_t end = 0;
             if (define_at(i + 6, key, value, end)) {
                 for (std::size_t k = 0; k < values.size(); ++k) {
-                    if (key == values.at(k).first && !found.at(k)) {
+                    if (key == values.at(k).first && !seen.at(k)) {
                         found.at(k) = value;
+                        seen.at(k) = true;
                     }
                 }
                 i = end;
@@ -824,12 +831,12 @@ std::optional<std::string> update_wp_config_text(const std::string& text, const 
             ++i;
         }
     }
-    if (std::any_of(found.begin(), found.end(), [](const auto& f) { return !f.has_value(); })) {
+    if (std::any_of(seen.begin(), seen.end(), [](bool f) { return !f; })) {
         return std::nullopt;
     }
     // Replaced from the end, so the earlier places stay where they are.
     std::array<std::size_t, 4> order = {0, 1, 2, 3};
-    std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) { return found.at(a)->first > found.at(b)->first; });
+    std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) { return found.at(a).first > found.at(b).first; });
     std::string out = text;
     for (const std::size_t k : order) {
         // The value as a PHP single-quoted string: \ and ' escaped.
@@ -840,7 +847,8 @@ std::optional<std::string> update_wp_config_text(const std::string& text, const 
             }
             quoted += ch;
         }
-        out.replace(found.at(k)->first, found.at(k)->second - found.at(k)->first, quoted);
+        const auto& [from, to] = found.at(k);
+        out.replace(from, to - from, quoted);
     }
     return out;
 }

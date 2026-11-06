@@ -1,7 +1,7 @@
 #include "backup_dialogs.h"
 
 #include "access_provider.h"
-#include "dialog_template.h"
+#include "form_parts.h"
 #include "model/view_model.h"
 #include "win_util.h"
 
@@ -867,12 +867,12 @@ std::optional<FromBackupChoice> ask_from_backup(HWND owner, Lang lang, const Fro
     return d.choice;
 }
 
-std::optional<RestoreChoice> ask_restore(HWND owner, Lang lang, const std::string& project, bool has_database,
+std::optional<RestoreChoice> ask_restore(HWND owner, Lang lang, const std::string& project, const std::string& database,
                                          const std::string& start) {
-    const RestoreForm form = restore_form(project, has_database, lang);
+    const RestoreForm form = restore_form(project, database, lang);
     RestoreDialog d;
     d.lang = lang;
-    d.has_database = has_database;
+    d.has_database = !database.empty();
     d.start = start;
     d.files_note = form.files_note;
     d.database_note = form.database_note;

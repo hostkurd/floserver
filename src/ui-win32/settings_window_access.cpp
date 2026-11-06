@@ -98,7 +98,7 @@ void SettingsWindow::modal_closed() {
 
 std::string SettingsWindow::access_id(const Hit& hit) const {
     // By Part, in its order.
-    static constexpr std::array<std::string_view, static_cast<std::size_t>(Part::GeneralLicences) + 1> kIds = {
+    static constexpr std::array<std::string_view, static_cast<std::size_t>(Part::GeneralRemove) + 1> kIds = {
         "none", "nav", "runtimes/check", "runtimes/picker", "runtimes/button",
         "php/version", "php/runtimes", "php/find", "php/ext", "php/more", "php/edit-ini", "php/final-ini",
         "php/field", "php/reset", "php/discard", "php/save",
@@ -113,7 +113,7 @@ std::string SettingsWindow::access_id(const Hit& hit) const {
         "folders/www/open", "folders/data/open", "folders/clear-logs", "folders/leftovers",
         "shared/switch", "shared/change", "shared/open", "shared/field", "shared/copy-env",
         "general/lang", "general/theme", "general/start", "general/start-mode", "general/close", "general/editor",
-        "general/updates", "general/licences"};
+        "general/updates", "general/update-notes", "general/update-now", "general/licences", "general/remove"};
     static_assert(kIds[static_cast<std::size_t>(Part::PhpVersion)] == "php/version" &&
                       kIds[static_cast<std::size_t>(Part::PortsChoice)] == "ports/choice" &&
                       kIds[static_cast<std::size_t>(Part::DbVersion)] == "db/version" &&
@@ -399,7 +399,11 @@ AccessNode SettingsWindow::access_node(const Hit& hit) const {
             return radio_node(access_id(hit), {}, on);
         }
         case Part::GeneralUpdates:
+            return button(can_check_updates());
+        case Part::GeneralUpdateNotes:
+        case Part::GeneralUpdateNow:
         case Part::GeneralLicences:
+        case Part::GeneralRemove:
             return button(true);
         default:
             break;
@@ -430,7 +434,9 @@ void SettingsWindow::access_parts(std::vector<PageItem>& items) const {
             card("general/card/start", g.general.start_card);
             card("general/card/close", g.general.close_card);
             card("general/card/editor", g.general.editor_card);
+            card("general/card/updates", g.general.updates_card);
             card("general/card/about", g.general.about_card);
+            card("general/card/remove", g.general.remove_card);
             return;
         case Section::Php:
             if (php_) {

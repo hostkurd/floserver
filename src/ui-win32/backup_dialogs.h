@@ -59,10 +59,10 @@ struct RestoreChoice {
     bool database = true;
     bool install = true;
 };
-// `has_database`: the project asks for one. `start` is the folder the
-// picker opens in (Documents\FloServer Backups).
+// `database`: the project's database's name; empty: it has none. `start`
+// is the folder the picker opens in (Documents\FloServer Backups).
 [[nodiscard]] std::optional<RestoreChoice> ask_restore(HWND owner, Lang lang, const std::string& project,
-                                                       bool has_database, const std::string& start);
+                                                       const std::string& database, const std::string& start);
 
 // Starts a job with `method` and `params` on a connection of its own and
 // shows it until it ends; Cancel asks the service to stop it (once it's

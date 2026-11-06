@@ -79,6 +79,14 @@ std::vector<GlyphShape> glyph_shapes(Glyph glyph) {
             line(out, 7.0F, 6.5F, 7.0F, 11.5F);
             line(out, 9.0F, 6.5F, 9.0F, 11.5F);
             break;
+        case Glyph::Download:  // an arrow down onto a tray (the update banner)
+            line(out, 8.0F, 1.5F, 8.0F, 10.0F);
+            path(out, {{4.5F, 6.75F}, {8.0F, 10.25F}, {11.5F, 6.75F}});
+            path(out, {{2.0F, 10.5F}, {2.0F, 14.0F}, {14.0F, 14.0F}, {14.0F, 10.5F}});
+            break;
+        case Glyph::Tick:  // ready (the update banner)
+            path(out, {{2.5F, 8.5F}, {6.25F, 12.25F}, {13.5F, 4.0F}});
+            break;
     }
     return out;
 }

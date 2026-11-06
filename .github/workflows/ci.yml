@@ -560,7 +560,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install tools
-        run: sudo apt-get update && sudo apt-get install -y ninja-build mingw-w64
+        # An Ubuntu mirror that stops answering held this step until the job's
+        # 30-minute limit (twice on 5-6 Nov): each try is time-limited, with
+        # network timeouts, and tried up to three times.
+        run: |
+          apt_opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+          for try in 1 2 3; do
+            if timeout 300 sudo apt-get $apt_opts update &&
+               timeout 300 sudo apt-get $apt_opts install -y ninja-build mingw-w64; then
+              exit 0
+            fi
+            echo "::warning title=apt::try $try didn't finish; trying again"
+            sleep 10
+          done
+          exit 1
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=MinSizeRel -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64.cmake
       - name: Build

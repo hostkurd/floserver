@@ -108,7 +108,8 @@ struct RestoreForm {
     std::string restore;
     std::string cancel;
 };
-[[nodiscard]] RestoreForm restore_form(const std::string& project, bool has_database, Lang lang);
+// `database`: the project's database's name (row_database_name()); empty: it has none.
+[[nodiscard]] RestoreForm restore_form(const std::string& project, const std::string& database, Lang lang);
 // "Backed up 2026-11-05 14:30 · with its database"
 [[nodiscard]] std::string restore_backed_up(const BackupSummary& backup, Lang lang);
 

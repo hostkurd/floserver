@@ -73,6 +73,14 @@ std::string MainWindow::access_id(const Hit& hit) const {
             return "top/settings";
         case Part::Banner:
             return "status";
+        case Part::UpdateNotes:
+            return "update/notes";
+        case Part::UpdateCancel:
+            return "update/cancel";
+        case Part::UpdateLater:
+            return "update/later";
+        case Part::UpdateNow:
+            return "update/now";
         case Part::PanelClose:
             return panel + "close";
         case Part::PanelAddress:
@@ -176,6 +184,12 @@ std::string MainWindow::access_focus_id() const {
     if (wizard_open()) {
         return access_id(wizard_focus());
     }
+    if (update_focus_ >= 0) {
+        const std::vector<Part> order = update_focus_order();
+        return std::cmp_less(update_focus_, order.size())
+                   ? access_id({order[static_cast<std::size_t>(update_focus_)], -1, {}})
+                   : std::string();
+    }
     if (panel_open() && panel_focus_ >= 0) {
         const std::vector<Hit> order = panel_focus_order();
         if (std::cmp_less(panel_focus_, order.size())) {
@@ -234,6 +248,7 @@ AccessTree MainWindow::build_access_tree() const {
         if (wizard_open()) {
             add_wizard_access(t);
         } else {
+            add_update_access(t);
             add_list_access(t);
             add_shared_access(t);
             add_panel_access(t);
@@ -515,7 +530,7 @@ void MainWindow::add_panel_access(AccessTree& t) const {
     // Database.
     if (shown(g.db_box)) {
         const std::string database = !row->database.empty() ? row->database : row->wants.database;
-        const std::string name = core::project_database_name(p);
+        const std::string name = row_database_name(*row);  // kept through a rename (D22)
         const std::uint16_t port = database_port(snap_.databases, database);
         const std::string host = port != 0 ? "127.0.0.1:" + std::to_string(port) : std::string("127.0.0.1");
         words("db-title", fill(lang_, Str::DatabaseTitle, {name}), g.db_title);
@@ -1162,7 +1177,15 @@ void MainWindow::run_access(const AccessNode& n, AccessAction action) {
 }
 
 void MainWindow::access_focus(const Hit& hit) {
-    if (is_panel_part(hit.part)) {
+    if (is_update_part(hit.part)) {
+        const std::vector<Part> order = update_focus_order();
+        if (const auto it = std::find(order.begin(), order.end(), hit.part); it != order.end()) {
+            update_focus_ = static_cast<int>(it - order.begin());
+            focus_ = -1;
+            shared_focused_ = false;
+            panel_focus_ = -1;
+        }
+    } else if (is_panel_part(hit.part)) {
         const std::vector<Hit> order = panel_focus_order();
         if (const auto it = std::find(order.begin(), order.end(), hit); it != order.end()) {
             panel_focus_ = static_cast<int>(it - order.begin());

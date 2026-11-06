@@ -439,6 +439,9 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
         case kFirstRunTrustMessage:
             first_run_trust_now();
             return 0;
+        case kUninstallMessage:
+            on_uninstall();
+            return 0;
         case kRecycledMessage:
             on_recycled();
             return 0;
@@ -523,6 +526,7 @@ void MainWindow::on_create() {
         SendMessageW(tooltip_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
     }
     recycle_bin_.retarget(hwnd_, kRecycledMessage);  // made again in another language: the new window
+    uninstaller_.retarget(hwnd_, kUninstallMessage);
     toast_popup_.attach(hwnd_, kToastMessage);
     // A move or check that finished while the old window was going is taken now.
     PostMessageW(hwnd_, kRecycledMessage, 0, 0);
@@ -634,6 +638,7 @@ void MainWindow::on_snapshot() {
     }
     open_phpmyadmin_links(s.db);
     const std::vector<Removed> removed = on_remove_answers(s.db);
+    const std::vector<Renamed> renamed = on_rename_answers(s.db);
     on_backup_answers(s.db);
     on_first_run_answers(s);
     const bool quit_done = s.quit_done;
@@ -645,7 +650,37 @@ void MainWindow::on_snapshot() {
     if (focus_ >= 0 && focus_ < static_cast<int>(visible_.size())) {
         focused = snap_.rows[visible_[static_cast<std::size_t>(focus_)]].name;
     }
+    const UpdateBanner update_before = update_shown();
     snap_ = std::move(s);
+    on_update_snapshot(update_before);
+    // Renamed: what was the old name's in the window follows the new one.
+    for (const Renamed& r : renamed) {
+        renamed_[r.from] = r;
+        if (focused == r.from) {
+            focused = r.to;
+        }
+        if (highlighted_ == r.from) {
+            highlighted_ = r.to;
+        }
+        if (selected_ == r.from) {
+            // The panel stays open on it, its PHP part too.
+            selected_ = r.to;
+            if (php_info_project_ == r.from) {
+                php_info_project_ = r.to;
+            }
+            if (worker_) {
+                worker_->select(r.to);
+            }
+        }
+        for (auto* pending : {&pending_, &pending_keep_}) {
+            if (const auto it = pending->find(r.from); it != pending->end()) {
+                (*pending)[r.to] = it->second;
+                pending->erase(it);
+            }
+        }
+        show_notice(rename_outcome(r.from, r.to, r.folder, lang_), false);
+    }
+    apply_renames();
     if (settings_) {
         settings_->on_snapshot(snap_);
         if (copied) {
@@ -689,7 +724,7 @@ void MainWindow::on_snapshot() {
             show_notice(said.text, said.error);
         }
     }
-    if (!removed.empty()) {
+    if (!removed.empty() || !renamed.empty()) {
         update_visible();
         if (worker_) {
             worker_->refresh();
@@ -748,6 +783,10 @@ void MainWindow::on_snapshot() {
     }
     InvalidateRect(hwnd_, nullptr, FALSE);
 
+    if (quit_done && uninstalling_) {
+        uninstall_stopped(quit_error);  // Remove FloServer… goes on: the clean-up
+        return;
+    }
     if (quit_done) {
         if (!quit_error.empty()) {
             const std::wstring message = w(fill(lang_, Str::ServiceFailed, {quit_error}));
@@ -760,7 +799,8 @@ void MainWindow::on_snapshot() {
 }
 
 void MainWindow::quit() {
-    if (quitting_ || !worker_) {
+    // Remove FloServer… quits by itself once its last step is done.
+    if (quitting_ || !worker_ || uninstalling_) {
         return;
     }
     // Quitting with the first-run page open leaves it for good, as closing does.
@@ -794,7 +834,7 @@ void MainWindow::open_settings() {
         settings_->bring_to_front();  // one at a time
         return;
     }
-    if (!worker_ || quitting_) {
+    if (!worker_ || quitting_ || uninstalling_) {
         return;
     }
     // An earlier open's answers mustn't show before this one's arrive.
@@ -812,6 +852,14 @@ void MainWindow::open_settings() {
 }
 
 void MainWindow::on_pref_change(WPARAM change, LPARAM value) {
+    if (static_cast<PrefChange>(change) == PrefChange::RemoveFloServer) {
+        start_uninstall(uninstall_ticks_from(static_cast<unsigned>(value)));  // not a preference: nothing saved
+        return;
+    }
+    if (static_cast<PrefChange>(change) == PrefChange::UpdateNow) {
+        start_update();  // Settings > General's Update now: not a preference either
+        return;
+    }
     const auto index = static_cast<std::size_t>(value);
     const WindowPrefs before = prefs_;
     switch (static_cast<PrefChange>(change)) {
@@ -837,6 +885,9 @@ void MainWindow::on_pref_change(WPARAM change, LPARAM value) {
             }
             forget_editor();  // looked for again with the new choice
             break;
+        case PrefChange::RemoveFloServer:
+        case PrefChange::UpdateNow:
+            break;  // handled above
     }
     if (prefs_ == before) {
         return;
@@ -1054,8 +1105,7 @@ RECT MainWindow::banner_rect() const {
 }
 
 RECT MainWindow::card_rect() const {
-    const RECT b = banner_rect();
-    const int top = b.bottom > 0 ? b.bottom + px(8) : px(kTopBarH);
+    const int top = content_top();
     const int bottom = std::max(top, height_ - px(kFooterH) - px(kGap));
     if (panel_open()) {
         if (!panel_beside_list()) {
@@ -1323,6 +1373,9 @@ MainWindow::Hit MainWindow::hit_test(int x, int y) const {
     if (contains(banner_rect(), x, y)) {
         return {Part::Banner, -1, {}};
     }
+    if (contains(update_geometry_.banner, x, y)) {
+        return update_hit_test(x, y);
+    }
     if (wizard_open()) {
         return contains(wizard_geometry_.area, x, y) ? wizard_hit_test(x, y) : Hit{};
     }
@@ -1389,6 +1442,10 @@ void MainWindow::on_click(const Hit& clicked) {
         if (hit.row < 0) {
             return;
         }
+    }
+    // Anywhere but the update banner, the keys leave its buttons.
+    if (!is_update_part(hit.part)) {
+        update_focus_ = -1;
     }
     // In the panel, the keys carry on from what was clicked.
     if (is_panel_part(hit.part)) {
@@ -1495,6 +1552,22 @@ void MainWindow::on_click(const Hit& clicked) {
             show_focus_ = false;
             on_first_run_click(hit);
             break;
+        case Part::UpdateNotes:
+        case Part::UpdateCancel:
+        case Part::UpdateLater:
+        case Part::UpdateNow: {
+            // The keys follow the mouse to the banner.
+            const std::vector<Part> order = update_focus_order();
+            if (const auto it = std::find(order.begin(), order.end(), hit.part); it != order.end()) {
+                update_focus_ = static_cast<int>(it - order.begin());
+                focus_ = -1;
+                shared_focused_ = false;
+                panel_focus_ = -1;
+                show_focus_ = false;
+            }
+            run_update_part(hit.part);
+            break;
+        }
         case Part::WizName:  // a real EDIT: it takes its own clicks
         case Part::None:
             break;
@@ -1539,6 +1612,10 @@ void MainWindow::on_key(WPARAM key) {
     }
     if (wizard_open()) {
         on_wizard_key(key);
+        return;
+    }
+    if (update_focus_ >= 0) {
+        on_update_key(key);
         return;
     }
     if (panel_open() && (panel_focus_ >= 0 || !panel_beside_list())) {
@@ -1603,6 +1680,10 @@ void MainWindow::on_key(WPARAM key) {
                 InvalidateRect(hwnd_, nullptr, FALSE);
                 return;
             }
+            // Shift+Tab: back to the update banner above the list, when it's there.
+            if ((GetKeyState(VK_SHIFT) & 0x8000) != 0 && focus_update_banner(true)) {
+                return;
+            }
             SetFocus(search_);
             return;
         case VK_F5:
@@ -1656,6 +1737,10 @@ LRESULT CALLBACK MainWindow::search_proc(HWND hwnd, UINT msg, WPARAM wparam, LPA
                 } else {
                     SetFocus(self->hwnd_);
                 }
+                return 0;
+            }
+            // Tab: the update banner's buttons first, when it's there.
+            if (wparam == VK_TAB && (GetKeyState(VK_SHIFT) & 0x8000) == 0 && self->focus_update_banner(false)) {
                 return 0;
             }
             if (wparam == VK_DOWN || wparam == VK_TAB || wparam == VK_RETURN) {
@@ -1720,7 +1805,7 @@ void MainWindow::toggle(int visible_row) {
 }
 
 bool MainWindow::leaving(const std::string& project) const {
-    return removing_.contains(project) || removed_.contains(project);
+    return removing_.contains(project) || removed_.contains(project) || renaming_.contains(project);
 }
 
 void MainWindow::toggle_project(const std::string& project) {
@@ -1986,6 +2071,7 @@ void MainWindow::on_paint() {
             place_panel_tips();
             wizard_geometry_ = wizard_open() ? wizard_geometry(mem.get()) : WizardGeometry{};
             shared_geometry_ = !wizard_open() && !first_run_open() ? shared_geometry(mem.get()) : SharedGeometry{};
+            update_geometry_ = update_geometry(mem.get());
             first_run_geometry_ = FirstRunGeometry{};
             if (first_run_open()) {
                 first_run_geometry_ = first_run_geometry(mem.get(), first_run_.scroll);
@@ -2015,6 +2101,7 @@ void MainWindow::on_paint() {
                     }
                     paint_top_bar(canvas, mem.get(), text_pass);
                     paint_banner(canvas, text_pass);
+                    paint_update_banner(canvas, text_pass);
                     if (wizard_open()) {
                         paint_wizard(canvas, mem.get(), text_pass);
                     } else {

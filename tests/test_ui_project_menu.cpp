@@ -15,6 +15,14 @@ namespace {
 const std::string kLri{'\xE2', '\x80', '\xAA'};
 const std::string kPdi{'\xE2', '\x80', '\xAC'};
 
+// A value as the strings embed it: left to right.
+std::string ltr(std::string_view s) {
+    std::string out = kLri;
+    out += s;
+    out += kPdi;
+    return out;
+}
+
 ProjectRow served() {
     ProjectRow row;
     row.name = "my-shop";
@@ -51,8 +59,8 @@ TEST_CASE("project menu: the items, in the approved order") {
     const auto menu = project_menu(served(), {true, false, true, false});
     using enum MenuCommand;
     CHECK(commands(menu) == std::vector<MenuCommand>{OpenBrowser, OpenFolder, OpenTerminal, OpenEditor, CopyAddress,
-                                                     None, Toggle, KeepRunning, None, BackUp, Restore, None,
-                                                     Remove});
+                                                     None, Toggle, KeepRunning, None, Rename, BackUp, Restore,
+                                                     None, Remove});
     for (const MenuItem& i : menu) {
         CAPTURE(static_cast<int>(i.command));
         CHECK(i.enabled);
@@ -64,6 +72,7 @@ TEST_CASE("project menu: the items, in the approved order") {
     CHECK(item(menu, OpenBrowser).label == Str::OpenInBrowser);
     CHECK(item(menu, KeepRunning).label == Str::KeepRunning);
     CHECK(text(Lang::En, item(menu, Remove).label) == "Remove from FloServer…");
+    CHECK(text(Lang::En, item(menu, Rename).label) == "Rename…");
     CHECK(text(Lang::En, item(menu, BackUp).label) == "Back up as zip…");
     CHECK(text(Lang::En, item(menu, Restore).label) == "Restore from backup…");
     // Its icons: the panel's, and a tick for Keep running.
@@ -229,4 +238,104 @@ TEST_CASE("remove question: its words, and the database box only with a database
     q = remove_question(row, Lang::Ku);
     CHECK(q.title.find(kLri + "my-shop" + kPdi) != std::string::npos);
     CHECK(q.title.find(kLri + "FloServer" + kPdi) != std::string::npos);
+}
+
+TEST_CASE("remove question: a renamed project's database keeps its name (D22)") {
+    ProjectRow row = served();
+    row.name = "store";
+    row.wants.database = "mariadb-11.4";
+    CHECK(row_database_name(row) == "store");  // an older service says nothing: from the name
+    row.database_name = "my_shop";
+    CHECK(row_database_name(row) == "my_shop");
+    CHECK(remove_question(row, Lang::En).drop == "Also delete its database my_shop and its user (this can't be undone)");
+}
+
+TEST_CASE("rename question: the help follows what's typed (D22)") {
+    const ProjectRow row = served();
+    ProjectRow blog;
+    blog.name = "blog";
+    const std::vector<ProjectRow> rows{row, blog};
+    FooterText footer;
+
+    RenameQuestion q = rename_question(row, "my-shop", rows, footer, Lang::En);
+    CHECK(q.window_title == "FloServer");
+    CHECK(q.title == "Rename my-shop");
+    CHECK(q.label == "New name");
+    CHECK(q.rename == "Rename");
+    CHECK(q.cancel == "Cancel");
+    CHECK_FALSE(q.problem);
+    CHECK_FALSE(q.can_rename);  // its own name: nothing to do
+    CHECK(q.help ==
+          "Letters a–z, digits and -. The address becomes https://my-shop.localhost; the old address stops working.");
+    CHECK(q.folder == "Also rename the folder");
+    CHECK(q.folder_note == "C:/sites/my-shop → my-shop. Close editors and terminals that use it first.");
+    CHECK(q.database_note.empty());  // no database
+
+    q = rename_question(row, "store", rows, footer, Lang::En);
+    CHECK(q.can_rename);
+    CHECK_FALSE(q.problem);
+    CHECK(q.help.find("https://store.localhost;") != std::string::npos);
+    CHECK(q.folder_note.starts_with("C:/sites/my-shop → store."));
+    // nginx on other ports: the address the project will really have.
+    footer.http_port = 8080;
+    footer.https_port = 8443;
+    footer.tls = true;
+    CHECK(rename_question(row, "store", rows, footer, Lang::En).help.find("https://store.localhost:8443;") !=
+          std::string::npos);
+
+    // What's wrong, said instead of the help; Rename can't be pressed.
+    const auto said = [&](std::string_view typed) {
+        const RenameQuestion r = rename_question(row, typed, rows, footer, Lang::En);
+        CHECK(r.problem);
+        CHECK_FALSE(r.can_rename);
+        CHECK(r.folder_note.starts_with("C:/sites/my-shop → …."));
+        return r.help;
+    };
+    CHECK(said("") == "Type the new name.");
+    CHECK(said("My Store") == "Use only letters a–z, digits and -, and not - at the start or end.");
+    CHECK(said("store-") == "Use only letters a–z, digits and -, and not - at the start or end.");
+    CHECK(said("my_store") == "Use only letters a–z, digits and -, and not - at the start or end.");
+    CHECK(said(std::string(64, 'a')) == "The name can be at most 63 characters.");
+    CHECK(said("xn--store") == "The name can't start with xn--.");
+    CHECK(said("blog") == "There's already a project called blog.");
+    CHECK(said("phpmyadmin") == "phpmyadmin is kept for phpMyAdmin.");
+
+    // Its database keeps its name: said in a grey note.
+    ProjectRow with_db = row;
+    with_db.wants.database = "mariadb-11.4";
+    CHECK(rename_question(with_db, "store", rows, footer, Lang::En).database_note ==
+          "The database my_shop and its user keep their names, so your .env keeps working.");
+    // One of MariaDB's own names was never made: it takes the new name, and the note says so.
+    ProjectRow root = with_db;
+    root.name = "root";
+    CHECK(rename_question(root, "admin-site", rows, footer, Lang::En).database_note ==
+          "FloServer never makes a database called root (it's one of MariaDB's names), so its database takes the new "
+          "name: admin_site.");
+    CHECK(rename_question(root, "Bad!", rows, footer, Lang::En).database_note.ends_with("new name: …."));
+    // A shared sites' name (from before shared sites) is kept like any other.
+    ProjectRow www = with_db;
+    www.name = "www-blog";
+    CHECK(rename_question(www, "blog-old", rows, footer, Lang::En).database_note ==
+          "The database www_blog and its user keep their names, so your .env keeps working.");
+    // No folder known: no box.
+    ProjectRow no_folder = row;
+    no_folder.path.clear();
+    q = rename_question(no_folder, "store", rows, footer, Lang::En);
+    CHECK(q.folder.empty());
+    CHECK(q.folder_note.empty());
+
+    // In Arabic and Kurdish the names, the address and the folder read left to right.
+    for (const Lang lang : {Lang::Ar, Lang::Ku}) {
+        q = rename_question(with_db, "store", rows, footer, lang);
+        CHECK(q.title.find(ltr("my-shop")) != std::string::npos);
+        CHECK(q.help.find(ltr("https://store.localhost:8443")) != std::string::npos);
+        CHECK(q.folder_note.find(ltr("C:/sites/my-shop")) != std::string::npos);
+        CHECK(q.database_note.find(ltr("my_shop")) != std::string::npos);
+        CHECK(q.cancel == text(lang, Str::WizardCancel));
+        CHECK(rename_question(with_db, "blog", rows, footer, lang).problem);
+    }
+
+    CHECK(rename_outcome("my-shop", "store", false, Lang::En) == "my-shop is now store.");
+    CHECK(rename_outcome("my-shop", "store", true, Lang::En) == "my-shop is now store, and so is its folder.");
+    CHECK(rename_outcome("my-shop", "store", false, Lang::Ar).find(kLri + "store" + kPdi) != std::string::npos);
 }

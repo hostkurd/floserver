@@ -241,7 +241,9 @@ void ServiceWorker::database_call(const std::string& method, const nlohmann::jso
     // an earlier one is told apart (and dropped there).
     // projects.remove from the window: dropping its database may start
     // MariaDB first (a minute, its first time). One at a time per project.
-    if (method == "folders.get" || method == "folders.clean" || method == "projects.remove") {
+    // projects.rename reloads the web server and may wait for a folder.
+    if (method == "folders.get" || method == "folders.clean" || method == "projects.remove" ||
+        method == "projects.rename") {
         start_side_call(method, params, purpose.empty() ? method : purpose);
         return;
     }
@@ -294,6 +296,19 @@ void ServiceWorker::load_defaults() {
 void ServiceWorker::select(const std::string& project) {
     push({Command::Kind::Select, project, false, {}, std::nullopt, {}, {}});
 }
+void ServiceWorker::check_updates() {
+    {
+        // "checking now…" at once, not at the next poll.
+        const std::lock_guard lock(mutex_);
+        if (latest_.updates.state != UpdateState::Downloading && latest_.updates.available &&
+            latest_.updates.state != UpdateState::Unknown) {
+            latest_.updates.state = UpdateState::Checking;
+            publish();
+        }
+    }
+    push({Command::Kind::CheckUpdates, {}, false, {}, std::nullopt, {}, {}});
+}
+void ServiceWorker::cancel_update() { push({Command::Kind::CancelUpdate, {}, false, {}, std::nullopt, {}, {}}); }
 void ServiceWorker::start_service() { push({Command::Kind::Start, {}, false, {}, std::nullopt, {}, {}}); }
 void ServiceWorker::refresh() { push({Command::Kind::Refresh, {}, false, {}, std::nullopt, {}, {}}); }
 void ServiceWorker::quit_service() { push({Command::Kind::Quit, {}, false, {}, std::nullopt, {}, {}}); }
@@ -894,6 +909,14 @@ void ServiceWorker::run(const std::stop_token& stop) {
                     defaults = got && got->ok ? defaults_from_list(got->result) : Defaults{};
                     break;
                 }
+                case Command::Kind::CheckUpdates:
+                case Command::Kind::CancelUpdate:
+                    // What came of it is in the next updates.status, asked below.
+                    if (client && !client->call(c.kind == Command::Kind::CheckUpdates ? "updates.check"
+                                                                                       : "updates.cancel")) {
+                        client.reset();
+                    }
+                    break;
                 case Command::Kind::Select:
                 case Command::Kind::Start:
                 case Command::Kind::Refresh:
@@ -909,6 +932,7 @@ void ServiceWorker::run(const std::stop_token& stop) {
         std::optional<core::protocol::Reply> installed;
         std::optional<core::protocol::Reply> log;
         std::optional<core::protocol::Reply> shared;
+        std::optional<core::protocol::Reply> updates;
         if (client) {
             list = client->call("projects.list");
             status = list ? client->call("status") : std::nullopt;
@@ -923,7 +947,9 @@ void ServiceWorker::run(const std::stop_token& stop) {
             }
             // Shared sites' settings and state, never their folders.
             shared = databases ? client->call("shared.get", {{"folders", false}}) : std::nullopt;
-            if (!databases || !shared) {
+            // App updates (Q5): an older service doesn't know it, and nothing is shown.
+            updates = shared ? client->call("updates.status") : std::nullopt;
+            if (!databases || !shared || !updates) {
                 client.reset();
             }
             ++polls;
@@ -1120,6 +1146,7 @@ void ServiceWorker::run(const std::stop_token& stop) {
             latest_.databases = databases->ok ? databases->result : nlohmann::json();
             // An older service doesn't know shared.get: the row isn't shown.
             latest_.shared = shared && shared->ok ? shared_from_reply(shared->result) : SharedSites{};
+            latest_.updates = updates && updates->ok ? update_status_from(updates->result) : UpdateStatus{};
             if (installed && installed->ok) {
                 latest_.installed = installed_from_list(installed->result);
                 latest_.has_installed = true;

@@ -370,3 +370,109 @@ TEST_CASE("UTC times are read strictly") {
         CHECK_FALSE(parse_utc_time(bad).has_value());
     }
 }
+
+namespace {
+
+nlohmann::json app_entry() {
+    return {{"version", "1.2.0"},
+            {"platform", "windows-x86_64"},
+            {"urls", {"https://cdn.floserver.org/app/1.2.0/FloServer-1.2.0-x64.msi"}},
+            {"size", 9437184},
+            {"sha256", kHash},
+            {"notes_url", "https://floserver.org/news/1.2.0"}};
+}
+
+}  // namespace
+
+TEST_CASE("the app entry (Q5): read when it's there, fine when it isn't") {
+    // A list without it opens as before.
+    const auto without = open_signed(good_doc());
+    REQUIRE(without.manifest.has_value());
+    CHECK_FALSE(without.manifest->app.has_value());
+
+    nlohmann::json doc = good_doc();
+    doc["app"] = app_entry();
+    const auto r = open_signed(doc);
+    REQUIRE(r.manifest.has_value());
+    CHECK(r.warnings.empty());
+    REQUIRE(r.manifest->app.has_value());
+    const AppRelease& app = *r.manifest->app;
+    CHECK(app.version == "1.2.0");
+    CHECK(app.platform == kAppPlatform);
+    CHECK(app.size == 9437184);
+    CHECK(to_hex(app.sha256) == kHash);
+    CHECK(app.urls == std::vector<std::string>{"https://cdn.floserver.org/app/1.2.0/FloServer-1.2.0-x64.msi"});
+    CHECK(app.notes_url == "https://floserver.org/news/1.2.0");
+    CHECK(r.manifest->runtimes.size() == 4);  // the runtimes are untouched
+
+    // notes_url is optional.
+    doc["app"].erase("notes_url");
+    const auto plain = open_signed(doc);
+    REQUIRE(plain.manifest.has_value());
+    REQUIRE(plain.manifest->app.has_value());
+    CHECK(plain.manifest->app->notes_url.empty());
+
+    // As a file for the downloader: one file, the list's size and hash.
+    const RuntimeFile file = app_download_entry(app);
+    CHECK(file.archive == "file");
+    CHECK(file.size == app.size);
+    CHECK(file.sha256 == app.sha256);
+    CHECK(file.urls == app.urls);
+}
+
+TEST_CASE("a bad app entry is skipped with a warning; the list still opens") {
+    const auto with = [](const char* key, const nlohmann::json& value) {
+        nlohmann::json doc = good_doc();
+        doc["app"] = app_entry();
+        if (value.is_null()) {
+            doc["app"].erase(key);
+        } else {
+            doc["app"][key] = value;
+        }
+        return open_signed(doc);
+    };
+    const std::vector<std::pair<const char*, nlohmann::json>> bad = {
+        {"version", "1.2"},  // always x.y.z
+        {"version", "1.2.0.1"},
+        {"version", "01.2.0"},
+        {"version", "1.2.0-beta"},
+        {"version", nullptr},
+        {"platform", "Windows x64"},
+        {"size", 0},
+        {"size", -5},
+        {"sha256", "abc"},
+        {"urls", nlohmann::json::array()},
+        {"urls", {"http://cdn.floserver.org/app/1.2.0/FloServer-1.2.0-x64.msi"}},  // https only
+        {"urls", {"https://cdn.floserver.org/app/1.2.0/FloServer-1.2.0-x64.exe"}},  // an .msi only
+        {"urls", {"https://user@cdn.floserver.org/a.msi"}},
+        {"notes_url", "http://floserver.org/news"},
+        {"notes_url", "https://floserver.org/news#top"},
+        {"notes_url", 5},
+    };
+    for (const auto& [key, value] : bad) {
+        CAPTURE(key);
+        CAPTURE(value.dump());
+        const auto r = with(key, value);
+        REQUIRE(r.manifest.has_value());
+        CHECK_FALSE(r.manifest->app.has_value());
+        REQUIRE(r.warnings.size() == 1);
+        CHECK(r.warnings.front().starts_with("the app entry "));
+        CHECK(r.manifest->runtimes.size() == 4);
+    }
+    nlohmann::json doc = good_doc();
+    doc["app"] = "1.2.0";
+    const auto r = open_signed(doc);
+    REQUIRE(r.manifest.has_value());
+    CHECK_FALSE(r.manifest->app.has_value());
+    CHECK(r.warnings.size() == 1);
+}
+
+TEST_CASE("keys the app entry doesn't know yet are ignored") {
+    nlohmann::json doc = good_doc();
+    doc["app"] = app_entry();
+    doc["app"]["channel"] = "stable";
+    const auto r = open_signed(doc);
+    REQUIRE(r.manifest.has_value());
+    CHECK(r.manifest->app.has_value());
+    CHECK(r.warnings.empty());
+}

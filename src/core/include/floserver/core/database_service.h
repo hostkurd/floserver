@@ -58,8 +58,9 @@ inline constexpr Port kFirstInternalDatabasePort = 33100;
 [[nodiscard]] std::chrono::seconds database_tool_limit();
 
 // Another registered project whose database has the same name as
-// `project`'s (project_database_name()), or nothing. Names can't have '_',
-// so it shouldn't happen; a drop checks anyway.
+// `project`'s (project_database_name(), kept through a rename), or nothing.
+// Names can't have '_' and add_project() and rename_project() refuse a
+// clash, so it shouldn't happen; a drop checks anyway.
 [[nodiscard]] std::optional<std::string> project_sharing_database(const AppConfig& app, const std::string& project);
 
 class DatabaseService {

@@ -23,7 +23,7 @@ json plan_reply() {
              json::array({{{"name", "vendor"}, {"bytes", 41 * kMb}, {"tool", "composer"}},
                           {{"name", "node_modules"}, {"bytes", 50 * kMb}, {"tool", "npm"}}})},
             {"database", {{"name", "my_shop"}, {"bytes", 2 * kMb}}},
-            {"default_file", "C:\\Users\\me\\Documents\\FloServer Backups\\my-shop 2026-11-05 1430.zip"}};
+            {"default_file", R"(C:\Users\me\Documents\FloServer Backups\my-shop 2026-11-05 1430.zip)"}};
 }
 
 }  // namespace
@@ -102,7 +102,7 @@ TEST_CASE("New project from a backup and Restore: the words") {
     CHECK(from_backup_where("C:\\Users\\me\\FloServer\\projects", "my-shop-copy", Lang::En) ==
           "It goes in C:\\Users\\me\\FloServer\\projects\\my-shop-copy and opens at my-shop-copy.localhost.");
 
-    const RestoreForm r = restore_form("my-shop", true, Lang::En);
+    const RestoreForm r = restore_form("my-shop", "my_shop", Lang::En);
     CHECK(r.title == "Restore my-shop from a backup?");
     CHECK(r.files == "Replace the project's files");
     CHECK(r.database == "Replace its database my_shop");
@@ -110,9 +110,11 @@ TEST_CASE("New project from a backup and Restore: the words") {
     CHECK(r.restore == "Restore");
     CHECK(r.files_note == "Today's files are moved aside first, to a folder beside it.");
     CHECK(r.foreign == "Made on another computer: installing runs the packages' own scripts as you.");
-    CHECK(restore_form("my-shop", false, Lang::En).database.empty());
+    CHECK(restore_form("my-shop", {}, Lang::En).database.empty());
+    // A renamed project keeps its database's name.
+    CHECK(restore_form("my-store", "my_shop", Lang::En).database == "Replace its database my_shop");
     for (const Lang lang : {Lang::En, Lang::Ar, Lang::Ku}) {
-        const RestoreForm any = restore_form("my-shop", true, lang);
+        const RestoreForm any = restore_form("my-shop", "my_shop", lang);
         CHECK_FALSE(any.files_note.empty());
         CHECK_FALSE(any.database_note.empty());
         CHECK_FALSE(from_backup_form(lang).database_note.empty());
@@ -142,7 +144,7 @@ TEST_CASE("a backup job's progress line and how it ends") {
 
     // Done: the file and its size under the headline, and the file to show.
     const json done = {{"kind", "backup"}, {"state", "done"}, {"size", 12 * kMb},
-                       {"file", "C:\\Users\\me\\Documents\\FloServer Backups\\my-shop 2026-11-05 1430.zip"}};
+                       {"file", R"(C:\Users\me\Documents\FloServer Backups\my-shop 2026-11-05 1430.zip)"}};
     BackupOutcome o = backup_outcome("backup", "my-shop", done, {}, Lang::En);
     CHECK(o.text == "Backed up my-shop\nmy-shop 2026-11-05 1430.zip · 12 MB");
     CHECK_FALSE(o.error);

@@ -171,15 +171,15 @@ std::string from_backup_where(const std::string& projects_dir, const std::string
     return fill(lang, Str::FromBackupWhere, {folder + name, name + ".localhost"});
 }
 
-RestoreForm restore_form(const std::string& project, bool has_database, Lang lang) {
+RestoreForm restore_form(const std::string& project, const std::string& database, Lang lang) {
     RestoreForm f;
     f.title = fill(lang, Str::RestoreTitle, {project});
     f.backup = std::string(text(lang, Str::FromBackupBackup));
     f.choose = std::string(text(lang, Str::FromBackupChoose));
     f.files = std::string(text(lang, Str::RestoreFiles));
     f.files_note = std::string(text(lang, Str::RestoreFilesNote));
-    if (has_database) {
-        f.database = fill(lang, Str::RestoreDatabase, {core::project_database_name(project)});
+    if (!database.empty()) {
+        f.database = fill(lang, Str::RestoreDatabase, {database});
         f.database_note = std::string(text(lang, Str::RestoreDatabaseNote));
     }
     f.install = std::string(text(lang, Str::BackupInstall));

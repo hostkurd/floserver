@@ -438,8 +438,6 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     GeneralCloseQuitNote,
     GeneralAbout,
     GeneralVersion,          // {0}: "0.9.0"
-    GeneralCheckUpdates,
-    GeneralUpdatesNote,      // {0}: "floserver.org"
     GeneralLicences,
     GeneralLicencesOpened,
     GeneralLicencesFailed,   // {0}: the reason
@@ -572,6 +570,106 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     AccessNotInstalled,    // a runtime's row that offers a download: "PHP 8.3.29, Not installed, 30 MB"
     AccessResetField,      // a field's Reset link: "Reset memory_limit"
     AccessPasswordHidden,  // root's password while it's masked with dots
+    // Settings > General: Remove FloServer… (D21).
+    GeneralRemoveTitle,
+    GeneralRemoveNote,
+    GeneralRemoveButton,
+    UninstallTitle,
+    UninstallText,
+    UninstallAlsoDelete,
+    UninstallRuntimes,
+    UninstallRuntimesNote,    // {0}: their size, "1.4 GB" (or "…" while it's counted)
+    UninstallDatabases,
+    UninstallDatabasesNote,   // {0}: their size
+    UninstallProjects,
+    UninstallProjectsNote,    // {0}: the projects folder
+    UninstallConfirm,
+    UninstallRemovingCa,
+    UninstallStopping,
+    UninstallCleaning,
+    UninstallCaNo,
+    UninstallFailed,          // {0}: why
+    UninstallStopFailed,      // {0}: why
+    UninstallLeft,            // {0}: what stayed and why (skipped_list_text)
+    UninstallProjectsStayed,  // {0}: Windows' reason
+    UninstallProjectsCancelled,
+    UninstallProjectsDeleted,
+    UninstallDevBuild,
+    UninstallNext,
+    UninstallStartFailed,     // {0}: why
+    UninstallWait,
+    // App updates (Q5, approved 5 Nov). Arabic and Kurdish need a native read.
+    UpdateDownloading,          // {0}: the version
+    UpdateProgressLine,         // {0} done, {1} total (MB numbers), {2}: UpdateSecondsLeft and the like
+    UpdateProgressLineNoTime,   // {0} done, {1} total
+    UpdateSecondsLeft,          // {0}: seconds
+    UpdateMinuteLeft,
+    UpdateMinutesLeft,          // {0}: minutes
+    UpdateReadyTitle,           // {0}: the version
+    UpdateReadyLine,            // {0}: its size, "9.4 MB"
+    UpdateWhatsNew,
+    UpdateCancel,
+    UpdateLater,
+    UpdateNow,
+    UpdateCancelled,
+    UpdateStartFailed,          // {0}: why
+    UpdatesTitle,
+    UpdatesSummary,             // {0}: this version, {1}: UpdatesCheckedToday and the like
+    UpdatesNote,
+    UpdatesCheckedToday,        // {0}: "09:12"
+    UpdatesCheckedYesterday,    // {0}: "18:40"
+    UpdatesCheckedOn,           // {0}: "2026-11-02"
+    UpdatesNotChecked,
+    UpdatesCheckingNow,
+    UpdatesCheckNow,
+    UpdatesRowDownloading,      // {0} done, {1} total
+    UpdatesReadyLine,           // {0}: its size
+    UpdatesFailed,              // {0}: why
+    UpdatesUnavailable,
+    // The updating dialog (FloServer.exe --apply-update).
+    UpdatingWindowTitle,
+    UpdatingTitle,              // {0}: the version
+    UpdatingText,
+    UpdateStepChecked,
+    UpdateStepStopped,
+    UpdateStepInstalling,
+    UpdateStepOpen,
+    UpdateMarkDone,             // a step's mark, for screen readers
+    UpdateMarkNow,
+    UpdateMarkWaiting,
+    UpdateMarkFailed,
+    UpdateFailed,               // {0}: why
+    UpdateFailedNote,
+    UpdateOpenInstaller,
+    UpdateClose,
+    UpdateErrNotReady,
+    UpdateErrChanged,
+    UpdateErrStop,              // {0}: the service's reason
+    UpdateErrInstall,           // {0}: Windows Installer's error number
+    UpdateErrOpen,              // {0}: why
+    UpdateErrWindow,
+    UpdateErrBusy,
+    UpdateRestartNeeded,        // {0}: the version
+    UpdateInProgress,           // FloServer.exe opened while an update installs
+    // Renaming a project (D22, approved 5 Nov).
+    RenameProject,
+    RenameTitle,          // {0}: the project
+    RenameNewName,
+    RenameHelp,           // {0}: the new address, "https://store.localhost"
+    RenameEmpty,
+    RenameRule,           // a name with other characters, or - at its start or end
+    RenameTooLong,
+    RenameXn,
+    RenameTaken,          // {0}: the name
+    RenameReserved,       // {0}: the name ("phpmyadmin")
+    RenameFolder,
+    RenameFolderNote,     // {0}: the folder now, {1}: its new name
+    RenameDatabaseNote,   // {0}: its database, "my_shop"
+    RenameDatabaseFollows,  // {0}: the name it would have had ("root"), {1}: the new one
+    RenameConfirm,
+    RenameDone,           // {0}: the old name, {1}: the new one
+    RenameDoneFolder,     // {0}: the old name, {1}: the new one
+    RenameFailed,         // {0}: the project, {1}: the service's reason
     // Backups (D22, approved 5 Nov): back up, new project from a backup, restore.
     MenuBackUp,
     MenuRestore,

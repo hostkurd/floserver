@@ -215,12 +215,15 @@ TEST_CASE("a backup's names in any language, but never unsafe ones") {
     CHECK(safe_entry_path(reinterpret_cast<const char*>(u8"صور/a.txt"), true) == fs::path(u8"صور") / "a.txt");
     CHECK(safe_entry_path(reinterpret_cast<const char*>(u8"صور/a.txt"), false).empty());  // runtimes: ASCII only
     for (const char* bad : {"../x", "a/../../x", "/etc/passwd", "C:/x", "a\\..\\x", "nul.txt", "a:b", "x.", "a\x01",
-                            "\xC0\xAF", "\xED\xA0\x80", "a\xE2\x80\xAE.txt", "\xC2\x85", "COM\xC2\xB9", "lpt\xC2\xB3.txt",
+                            "\xC0\xAF", "\xED\xA0\x80", "\xC2\x85", "COM\xC2\xB9", "lpt\xC2\xB3.txt",
                             "Com\xC2\xB2.log"}) {
         CAPTURE(bad);
         CHECK(safe_entry_path(bad, true).empty());
     }
     CHECK_FALSE(safe_entry_path("COM10", true).empty());
+    // A direction override (U+202E), made byte by byte: as a literal it would
+    // turn the source's own text round.
+    CHECK(safe_entry_path("a" + std::string{'\xE2', '\x80', '\xAE'} + ".txt", true).empty());
 }
 
 namespace {
@@ -272,10 +275,12 @@ TEST_CASE("this computer's id, and text from a backup made safe to show") {
 
     // A terminal's escapes, control characters and direction marks go.
     CHECK(shown_text("ok\x1b[31m red\x07\r\nnext\tline") == "ok[31m red  next line");
-    CHECK(shown_text("a\xE2\x80\xAE" "b\xE2\x81\xA6" "c\xC2\x9B" "d\xEF\xBB\xBF") == "abcd");
+    const std::string rlo{'\xE2', '\x80', '\xAE'};  // U+202E, byte by byte (see above)
+    const std::string lri{'\xE2', '\x81', '\xA6'};  // U+2066
+    CHECK(shown_text("a" + rlo + "b" + lri + "c\xC2\x9B" "d\xEF\xBB\xBF") == "abcd");
     CHECK(shown_text(reinterpret_cast<const char*>(u8"صور")) == reinterpret_cast<const char*>(u8"صور"));
     const auto parsed =
-        parse_backup_info("{\"format\": 1, \"name\": \"shop\", \"date\": \"2026\\u001b[2J\", \"versions\": {\"php\": \"8.5\\u202e\"}}", error);
+        parse_backup_info(R"({"format": 1, "name": "shop", "date": "2026\u001b[2J", "versions": {"php": "8.5\u202e"}})", error);
     REQUIRE_MESSAGE(parsed, error);
     CHECK(parsed->date == "2026[2J");
     CHECK(parsed->versions.at("php") == "8.5");
@@ -596,7 +601,7 @@ struct Fakes {
         };
         h.add_project = [this](const fs::path& dir, const std::string& name,
                                std::string&) -> std::optional<std::string> {
-            projects[name] = BackupProject{name, dir, true, true};
+            projects[name] = BackupProject{name, dir, true, true, {}};
             return name;
         };
         h.set_on = [this](const std::string& name, bool on, std::string&) {
@@ -629,7 +634,7 @@ struct Restorable {
 
     Restorable() {
         dir = make_project(tmp.path());
-        fakes.projects["shop"] = BackupProject{"shop", dir, true, true};
+        fakes.projects["shop"] = BackupProject{"shop", dir, true, true, {}};
         service = std::make_unique<BackupService>(data, fakes.hooks());
         ServiceRefusal refusal;
         const auto id = service->backup({"shop", zip, true, std::nullopt}, refusal);
@@ -655,7 +660,7 @@ TEST_CASE("backup and new project from the backup, as jobs") {
     const fs::path data = tmp.path() / "data";
     const fs::path dir = make_project(tmp.path());
     Fakes fakes;
-    fakes.projects["shop"] = BackupProject{"shop", dir, true, true};
+    fakes.projects["shop"] = BackupProject{"shop", dir, true, true, {}};
     BackupService service(data, fakes.hooks());
     ServiceRefusal refusal;
 
@@ -732,7 +737,7 @@ TEST_CASE("a backup made on another computer installs nothing unless asked") {
     const test_util::TempDir tmp;
     const fs::path dir = make_project(tmp.path());
     Fakes fakes;
-    fakes.projects["shop"] = BackupProject{"shop", dir, false, false};
+    fakes.projects["shop"] = BackupProject{"shop", dir, false, false, {}};
     const fs::path zip = tmp.path() / "shop.zip";
     {
         BackupService elsewhere(tmp.path() / "other-data", fakes.hooks());
@@ -923,4 +928,13 @@ TEST_CASE("stop() ends a load that's running") {
     r.service->stop();
     CHECK(std::chrono::steady_clock::now() - started < 5s);
     CHECK(r.today() == "<?php echo 'today';");
+}
+
+TEST_CASE("restore: a renamed project's database keeps its name") {
+    Restorable r;
+    r.fakes.projects["shop"].database_name = "old_shop";  // renamed from old-shop (Rename, D22)
+    const auto j = r.restore(false, true);
+    REQUIRE_MESSAGE(j.at("state") == "done", j.dump());
+    REQUIRE(r.fakes.loaded.size() == 1);
+    CHECK(r.fakes.loaded[0].starts_with("DROP DATABASE IF EXISTS `old_shop`;"));
 }

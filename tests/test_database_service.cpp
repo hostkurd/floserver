@@ -216,6 +216,16 @@ TEST_CASE("a project's database runs on the real MariaDB, sleeps when idle and w
         REQUIRE(save_app_config(app_config_file(data), app, error));
         CHECK_FALSE(db.shared_login(refusal));
         CHECK(refusal.code == "reserved_name");
+        // Renamed (D22), it keeps www_blog: still refused, by the database it kept.
+        REQUIRE(rename_project(app, "www-blog", "blog", error));
+        CHECK(find_project(app, "blog")->database_name == "www_blog");
+        REQUIRE(save_app_config(app_config_file(data), app, error));
+        CHECK_FALSE(db.shared_login(refusal));
+        CHECK(refusal.code == "reserved_name");
+        CHECK(refusal.message.find("the project blog") != std::string::npos);
+        REQUIRE(remove_project(app, "blog"));
+        REQUIRE(save_app_config(app_config_file(data), app, error));
+        CHECK(db.shared_login(refusal));
     }
 
     SUBCASE("logins") {
@@ -369,6 +379,44 @@ TEST_CASE("a project's database runs on the real MariaDB, sleeps when idle and w
         const auto again = db.project_login("my-shop", refusal);
         REQUIRE_MESSAGE(again, refusal.message);
         CHECK(again->password != login->password);
+    }
+
+    SUBCASE("a renamed project keeps its database, its user and its password (D22)") {
+        ServiceRefusal refusal;
+        const auto login = db.project_login("my-shop", refusal);
+        REQUIRE_MESSAGE(login, refusal.message);
+        REQUIRE(query(port, "my_shop", login->password, "USE my_shop; CREATE TABLE t (x INT); SHOW TABLES") == "t");
+        REQUIRE(rename_project(app, "my-shop", "store", error));
+        REQUIRE(save_app_config(app_config_file(data), app, error));
+        const auto again = db.project_login("store", refusal);
+        REQUIRE_MESSAGE(again, refusal.message);
+        CHECK(again->database == "my_shop");
+        CHECK(again->user == "my_shop");
+        CHECK(again->password == login->password);  // the .env lines still work
+        CHECK(query(port, "my_shop", again->password, "USE my_shop; SHOW TABLES") == "t");
+        CHECK(db.series_status("10.11")["databases"] == nlohmann::json{"store"});
+        CHECK(db.reload()["servers"][0]["projects"] == nlohmann::json{"store", "root"});
+
+        // A twin with the same kept name (only a config.json made by hand) stops a drop.
+        AppConfig twins = app;
+        twins.projects.push_back(*find_project(app, "plain"));
+        twins.projects.back().name = "twin";
+        twins.projects.back().database_name = "my_shop";
+        CHECK(project_sharing_database(twins, "store") == std::optional<std::string>("twin"));
+        CHECK_FALSE(project_sharing_database(app, "store"));
+        REQUIRE(save_app_config(app_config_file(data), twins, error));
+        bool dropped = false;
+        CHECK_FALSE(db.drop_project_database("store", refusal, dropped));
+        CHECK(refusal.code == "database_shared");
+        REQUIRE(save_app_config(app_config_file(data), app, error));
+
+        // Dropped by the name it kept, never the new name's.
+        REQUIRE_MESSAGE(db.drop_project_database("store", refusal, dropped), refusal.message);
+        CHECK(dropped);
+        const auto root = secrets.read("mariadb-10.11/root");
+        REQUIRE(root);
+        CHECK(query(port, "root", *root, "SHOW DATABASES LIKE 'my\\_shop'").empty());
+        CHECK_FALSE(secrets.read("mariadb-10.11/my_shop"));
     }
 
     SUBCASE("a lost root password is replaced") {
@@ -751,7 +799,12 @@ TEST_CASE("backups on the real MariaDB: a project's database dumped with its own
     cfg.data_dir = data;
     cfg.idle_after = 30s;
     cfg.reload_every = 1s;
-    cfg.probe = [](Port p) { return p != 3306 && can_listen_on_loopback(p); };
+    // Internal ports clear of the ones the tests before used: a server of
+    // theirs may still be letting go of one.
+    cfg.probe = [](Port p) {
+        return p != 3306 && (p < kFirstInternalDatabasePort || p >= kFirstInternalDatabasePort + 50) &&
+               can_listen_on_loopback(p);
+    };
     DatabaseService db(cfg, secrets);
     db.start();
     REQUIRE(eventually([&] { return server_status(db).is_object(); }, 10s));
@@ -815,10 +868,10 @@ TEST_CASE("backups on the real MariaDB: a project's database dumped with its own
     const std::atomic<bool> stop{true};
     CHECK_FALSE(db.load_project_database("shop-copy", work / "slow.sql", stop, refusal));
     CHECK(refusal.code == "cancelled");
-    ::setenv("FLOSERVER_DB_TOOL_SECONDS", "1", 1);
+    ::setenv("FLOSERVER_DB_TOOL_SECONDS", "1", 1);  // NOLINT(concurrency-mt-unsafe): nothing else reads it meanwhile
     const auto started = std::chrono::steady_clock::now();
     CHECK_FALSE(db.load_project_database("shop-copy", work / "slow.sql", go, refusal));
-    ::unsetenv("FLOSERVER_DB_TOOL_SECONDS");
+    ::unsetenv("FLOSERVER_DB_TOOL_SECONDS");  // NOLINT(concurrency-mt-unsafe): as above
     CHECK(refusal.message.find("didn't finish in 1 seconds") != std::string::npos);
     CHECK(std::chrono::steady_clock::now() - started < 10s);
     db.stop();

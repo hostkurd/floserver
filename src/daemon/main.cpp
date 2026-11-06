@@ -1,8 +1,9 @@
 // floserverd: the background service in the user's session (D2).
 //
 // The private channel, the runtimes (the signed list, installs as jobs,
-// removal), the project list, the local certificate authority, and running
-// the projects: nginx and the PHP pools that sleep when idle.
+// removal), the project list, the local certificate authority, running
+// the projects (nginx and the PHP pools that sleep when idle), and the
+// app's own updates (downloaded here, installed by the window).
 
 #include "floserver/core/apache_settings.h"
 #include "floserver/core/backup_service.h"
@@ -25,6 +26,7 @@
 #include "floserver/core/runtime_service.h"
 #include "floserver/core/runtime_store.h"
 #include "floserver/core/trust_store.h"
+#include "floserver/core/update_service.h"
 #include "floserver/core/database_service.h"
 #include "floserver/core/mariadb_settings.h"
 #include "floserver/core/mariadb.h"
@@ -45,6 +47,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string_view>
 #include <system_error>
 #include <thread>
@@ -127,7 +130,8 @@ private:
 };
 
 // The runtime work, or nothing when there's no data folder to keep it in.
-std::unique_ptr<floserver::core::RuntimeService> make_runtimes() {
+std::unique_ptr<floserver::core::RuntimeService> make_runtimes(
+    const std::shared_ptr<floserver::core::HttpTransport>& transport) {
     namespace core = floserver::core;
     const auto data = core::data_dir();
     if (!data) {
@@ -147,7 +151,29 @@ std::unique_ptr<floserver::core::RuntimeService> make_runtimes() {
             config.vc_runtime_dir = vc;
         }
     }
-    return std::make_unique<core::RuntimeService>(std::move(config), core::make_system_transport());
+    return std::make_unique<core::RuntimeService>(std::move(config), transport);
+}
+
+// The app's updates (Q5): the same signed list, read again by the runtimes.
+std::unique_ptr<floserver::core::UpdateService> make_updates(
+    floserver::core::RuntimeService& runtimes, const std::shared_ptr<floserver::core::HttpTransport>& transport) {
+    namespace core = floserver::core;
+    const auto data = core::data_dir();
+    if (!data) {
+        return nullptr;
+    }
+    core::UpdateServiceConfig config;
+    config.data_dir = *data;
+    config.current_version = core::kVersion;
+    config.fetch_list = [&runtimes](std::string& error) { return runtimes.fresh_list(error); };
+    // FLOSERVER_UPDATE_DELAY (seconds): the first check sooner or later, for tests and dev copies.
+    if (const auto delay = core::get_env("FLOSERVER_UPDATE_DELAY")) {
+        try {
+            config.first_delay = std::chrono::seconds(std::max(0L, std::stol(*delay)));
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): ignored, the usual delay is used
+        }
+    }
+    return std::make_unique<core::UpdateService>(std::move(config), transport);
 }
 
 // FLOSERVER_WEB_PORTS ("18080,18443"), FLOSERVER_IDLE_SECONDS and
@@ -207,6 +233,7 @@ std::optional<bool> bool_param(const json& params, const char* key) {
 struct Service {
     std::shared_ptr<ipc::Server> server;
     std::unique_ptr<floserver::core::RuntimeService> runtimes;
+    std::unique_ptr<floserver::core::UpdateService> updates;
     std::unique_ptr<floserver::core::ProjectService> projects;
     std::unique_ptr<floserver::core::CertStore> certs;
     std::unique_ptr<floserver::core::WebService> web;
@@ -235,6 +262,37 @@ struct Service {
                 error);
         } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): tried again in 5 s
         }
+    }
+
+    // Projects a rename (D22) or a removal with its database is working on,
+    // by name: one at a time on each, so a drop never meets a rename half-way.
+    mutable std::mutex busy_mutex;
+    mutable std::set<std::string> busy;
+    class BusyHold {
+    public:
+        BusyHold(const Service& service, std::string project) : service_(&service), project_(std::move(project)) {
+            const std::lock_guard lock(service_->busy_mutex);
+            held_ = service_->busy.insert(project_).second;
+        }
+        BusyHold(const BusyHold&) = delete;
+        BusyHold& operator=(const BusyHold&) = delete;
+        BusyHold(BusyHold&&) = delete;
+        BusyHold& operator=(BusyHold&&) = delete;
+        ~BusyHold() {
+            if (held_) {
+                const std::lock_guard lock(service_->busy_mutex);
+                service_->busy.erase(project_);
+            }
+        }
+        [[nodiscard]] bool held() const { return held_; }
+
+    private:
+        const Service* service_;
+        std::string project_;
+        bool held_ = false;
+    };
+    [[nodiscard]] static std::string busy_error(const protocol::Request& r, const std::string& project) {
+        return protocol::make_error(r.id, "busy", project + " is being renamed or removed just now; try again in a moment");
     }
 
     // Wakes the integration thread when the service quits.
@@ -368,6 +426,24 @@ struct Service {
         return protocol::make_result(r.id, {{"cancelled", runtimes->cancel(*id)}});
     }
 
+    // The reply to one updates.* request (Q5).
+    [[nodiscard]] std::string update_request(const protocol::Request& r) const {
+        if (!updates) {
+            return protocol::make_error(r.id, "no_data_folder",
+                                        "FloServer can't find a folder to keep the update in (LOCALAPPDATA or HOME)");
+        }
+        if (r.method == "updates.cancel") {
+            return protocol::make_result(r.id, {{"cancelled", updates->cancel()}});
+        }
+        if (r.method == "updates.check") {
+            std::string error;
+            if (!updates->check(error)) {
+                return protocol::make_error(r.id, "updates_unavailable", error);
+            }
+        }
+        return protocol::make_result(r.id, updates->status());
+    }
+
     // The reply to one projects.* request.
     [[nodiscard]] std::string project_request(const protocol::Request& r) const {
         namespace core = floserver::core;
@@ -431,6 +507,9 @@ struct Service {
             }
             return protocol::make_result(r.id, {{"entries", std::move(entries)}});
         }
+        if (r.method == "projects.rename") {
+            return rename_request(r, name);
+        }
         if (r.method == "projects.add") {
             const std::filesystem::path dir = core::path_from_utf8(string_param(r.params, "path"));
             if (!dir.is_absolute()) {
@@ -456,6 +535,14 @@ struct Service {
                 if (!databases) {
                     return protocol::make_error(r.id, "no_data_folder",
                                                 "FloServer can't find a folder to keep its settings in (LOCALAPPDATA or HOME)");
+                }
+            }
+            // Never while it's being renamed (D22): the drop names its database by the project.
+            std::optional<BusyHold> busy_hold;
+            if (drop) {
+                busy_hold.emplace(*this, name);
+                if (!busy_hold->held()) {
+                    return busy_error(r, name);
                 }
             }
             // No login makes its database again between the drop and the removal.
@@ -515,6 +602,93 @@ struct Service {
             (void)databases->reload();
         }
         return result ? protocol::make_result(r.id, *result) : protocol::make_error(r.id, refusal.code, refusal.message);
+    }
+
+    // projects.rename {name, new_name, rename_folder?} (D22). The reply is
+    // the project under its new name, with "old_name", "old_path" and
+    // "old_database_name". What
+    // was the old name's goes with it: its certificate (the new one is made
+    // by the reload), its request log and its own server's log. With
+    // rename_folder, nothing of FloServer's runs in the folder while it's
+    // renamed (its own server is stopped first).
+    [[nodiscard]] std::string rename_request(const protocol::Request& r, const std::string& name) const {
+        namespace core = floserver::core;
+        namespace fs = std::filesystem;
+        const std::string new_name = string_param(r.params, "new_name");
+        bool rename_folder = false;
+        if (r.params.is_object() && r.params.contains("rename_folder")) {
+            if (!r.params["rename_folder"].is_boolean()) {
+                return protocol::make_error(r.id, "bad_params", "rename_folder is true or false");
+            }
+            rename_folder = r.params["rename_folder"].get<bool>();
+        }
+        core::ServiceRefusal refusal;
+        // A name that can't be used is refused before anything stops.
+        if (!projects->check_rename(name, new_name, refusal)) {
+            return protocol::make_error(r.id, refusal.code, refusal.message);
+        }
+        // Not while its database is being dropped (projects.remove), and no
+        // login makes it meanwhile: the project's name is changing.
+        const BusyHold busy_hold(*this, name);
+        if (!busy_hold.held()) {
+            return busy_error(r, name);
+        }
+        const core::DatabaseService::ProjectHold database_hold =
+            databases ? databases->hold_project(name) : core::DatabaseService::ProjectHold();
+        std::optional<json> result;
+        {
+            const core::WebService::ProjectHold hold =
+                rename_folder && web ? web->hold_project(name) : core::WebService::ProjectHold();
+            result = projects->rename(name, new_name, rename_folder, refusal);
+        }
+        if (!result) {
+            if (rename_folder && web) {
+                (void)web->reload();  // served again at once, as it was
+            }
+            return protocol::make_error(r.id, refusal.code, refusal.message);
+        }
+        // A log takes the new name when there's none under it yet (or only
+        // an empty one, which nginx makes when it reloads); else it's kept
+        // beside it as <new>.log.old. Tried before the reload (nginx keeps
+        // writing a renamed file) and after it (the old name's own server
+        // has stopped by then).
+        const auto move_log = [](const fs::path& from, const fs::path& to) {
+            std::error_code ec;
+            if (!fs::exists(from, ec)) {
+                return;
+            }
+            if (fs::exists(to, ec) && fs::file_size(to, ec) > 0 && !ec) {
+                fs::path aside = to;
+                aside += ".old";
+                fs::rename(from, aside, ec);
+                return;
+            }
+            fs::rename(from, to, ec);
+        };
+        const auto move_logs = [&] {
+            if (!data) {
+                return;
+            }
+            const fs::path web_folder = core::web_dir(*data);
+            move_log(core::request_log_file(web_folder, name), core::request_log_file(web_folder, new_name));
+            move_log(web_folder / "apps" / core::path_from_utf8(name + ".log"),
+                     web_folder / "apps" / core::path_from_utf8(new_name + ".log"));
+        };
+        move_logs();
+        if (web) {
+            const json sites = web->reload()["sites"];
+            add_run_state(*result, sites);
+        }
+        move_logs();
+        // nginx has the new name's certificate now; the old one goes.
+        if (certs) {
+            std::string ignored;
+            (void)certs->remove_site(name, ignored);
+        }
+        if (databases) {
+            (void)databases->reload();
+        }
+        return protocol::make_result(r.id, *result);
     }
 
     // The reply to one php.* request: Settings → PHP (D20), per series.
@@ -1065,7 +1239,8 @@ struct Service {
             return std::nullopt;
         }
         const core::ConfigResult parsed = core::read_project_config_file(*p);
-        return core::BackupProject{p->name, p->dir, p->on, parsed.config && parsed.config->database};
+        return core::BackupProject{p->name, p->dir, p->on, parsed.config && parsed.config->database,
+                                   core::project_database_name(*p)};
     }
 
     // Backups (D22, backup_service.h):
@@ -1120,14 +1295,15 @@ struct Service {
             if (!project) {
                 return protocol::make_error(r.id, "unknown_project", error);
             }
+            const core::BackupProject* plan = &*project;  // checked just above
             // Walked now, for this request only (on the window's side thread),
             // each given up after a few seconds.
             const auto deadline = Clock::now() + std::chrono::seconds(8);
-            const core::DiskUsage all = core::disk_usage(project->dir, deadline);
+            const core::DiskUsage all = core::disk_usage(plan->dir, deadline);
             json folders = json::array();
-            for (const std::string& f : core::leavable_folders(project->dir)) {
+            for (const std::string& f : core::leavable_folders(plan->dir)) {
                 const core::DiskUsage usage =
-                    core::disk_usage(project->dir / core::path_from_utf8(f), Clock::now() + std::chrono::seconds(4));
+                    core::disk_usage(plan->dir / core::path_from_utf8(f), Clock::now() + std::chrono::seconds(4));
                 std::string tool;
                 for (const core::LeavableFolder& l : core::kLeavableFolders) {
                     if (l.folder == f) {
@@ -1137,13 +1313,13 @@ struct Service {
                 folders.push_back({{"name", f}, {"bytes", usage.bytes}, {"tool", tool}});
             }
             json database = nullptr;
-            if (project->database) {
-                database = {{"name", core::project_database_name(project->name)},
-                            {"bytes", databases ? databases->project_database_bytes(project->name).value_or(0) : 0}};
+            if (plan->database) {
+                database = {{"name", plan->database_name},
+                            {"bytes", databases ? databases->project_database_bytes(plan->name).value_or(0) : 0}};
             }
-            const auto file = default_file(project->name);
-            return protocol::make_result(r.id, {{"name", project->name},
-                                                {"path", core::path_to_utf8(project->dir)},
+            const auto file = default_file(plan->name);
+            return protocol::make_result(r.id, {{"name", plan->name},
+                                                {"path", core::path_to_utf8(plan->dir)},
                                                 {"bytes", all.bytes},
                                                 {"complete", all.complete},
                                                 {"folders", std::move(folders)},
@@ -1283,7 +1459,7 @@ struct Service {
             } else if (request->method == "projects.list" || request->method == "projects.add" ||
                        request->method == "projects.remove" || request->method == "projects.set" ||
                        request->method == "projects.use" || request->method == "projects.log" ||
-                       request->method == "projects.php" ||
+                       request->method == "projects.php" || request->method == "projects.rename" ||
                        request->method == "shared.get" || request->method == "shared.set") {
                 reply = project_request(*request);
             } else if (request->method == "php.get" || request->method == "php.set" ||
@@ -1315,6 +1491,9 @@ struct Service {
             } else if (request->method == "templates.list" || request->method == "projects.create" ||
                        request->method == "create.get" || request->method == "create.cancel") {
                 reply = template_request(*request);
+            } else if (request->method == "updates.status" || request->method == "updates.check" ||
+                       request->method == "updates.cancel") {
+                reply = update_request(*request);
             } else if (request->method.starts_with("backup.") || request->method == "projects.from_backup") {
                 reply = backup_request(*request);
             } else if (request->method == "quit") {
@@ -1504,7 +1683,15 @@ int run() {
     auto service = std::make_shared<Service>();
     std::thread integration_thread;
     service->server = std::move(server);
-    service->runtimes = make_runtimes();
+    // One transport for the runtimes and the app's updates.
+    const std::shared_ptr<floserver::core::HttpTransport> transport = floserver::core::make_system_transport();
+    service->runtimes = make_runtimes(transport);
+    if (service->runtimes) {
+        service->updates = make_updates(*service->runtimes, transport);
+        if (service->updates) {
+            service->updates->start();
+        }
+    }
     if (const auto data = floserver::core::data_dir()) {
         service->projects = std::make_unique<floserver::core::ProjectService>(*data);
         service->certs = std::make_unique<floserver::core::CertStore>(*data);
@@ -1589,6 +1776,10 @@ int run() {
     if (integration_thread.joinable()) {
         integration_thread.join();
     }
+    // The app's download first: its check reads the list through the runtimes.
+    if (service->updates) {
+        service->updates->stop();
+    }
     // Backups and templates first: their jobs use the databases and add projects.
     if (service->backups) {
         service->backups->stop();
@@ -1615,6 +1806,7 @@ int run() {
     }
     // Waits for the cancelled install to wind down (a moment: the transfer
     // ends as soon as it's cancelled).
+    service->updates.reset();
     service->runtimes.reset();
     return 0;
 }
