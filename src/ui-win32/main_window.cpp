@@ -2119,6 +2119,10 @@ void MainWindow::on_paint() {
     }
     EndPaint(hwnd_, &ps);
     access_after_paint();
+    if (first_paint_) {
+        const std::function<void(HWND)> hook = std::exchange(first_paint_, nullptr);
+        hook(hwnd_);
+    }
 }
 
 void MainWindow::paint_top_bar(Canvas& c, HDC /*dc*/, bool text_pass) const {
