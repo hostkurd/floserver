@@ -510,14 +510,14 @@ int stop(const std::vector<std::string>& args) {
     return 0;
 }
 
-int add_from_backup(const fs::path& zip, const std::string& name, bool install);
+int add_from_backup(const fs::path& zip, const std::string& name, std::optional<bool> install);
 
 int add(const std::vector<std::string>& args, const std::vector<fs::path>& paths) {
     std::optional<fs::path> folder;
     std::optional<fs::path> backup_zip;
     std::string name;
     bool as_json = false;
-    bool install = true;
+    std::optional<bool> install;
     for (std::size_t i = 1; i < args.size(); ++i) {
         if (args[i] == "--name" && i + 1 < args.size()) {
             name = args[++i];
@@ -525,19 +525,21 @@ int add(const std::vector<std::string>& args, const std::vector<fs::path>& paths
             backup_zip = paths[++i];
         } else if (args[i] == "--no-install") {
             install = false;
+        } else if (args[i] == "--install") {
+            install = true;
         } else if (args[i] == "--json") {
             as_json = true;
         } else if (!folder && !args[i].starts_with("--")) {
             folder = paths[i];
         } else {
             std::cerr << "Usage: flo add [folder] [--name <name>] [--json]\n"
-                      << "       flo add --from-backup <backup.zip> [--name <name>] [--no-install]\n";
+                      << "       flo add --from-backup <backup.zip> [--name <name>] [--install | --no-install]\n";
             return 2;
         }
     }
     if (backup_zip) {
         if (folder || as_json) {
-            std::cerr << "Usage: flo add --from-backup <backup.zip> [--name <name>] [--no-install]\n"
+            std::cerr << "Usage: flo add --from-backup <backup.zip> [--name <name>] [--install | --no-install]\n"
                       << "(the new project goes in the projects folder: see Settings → Folders)\n";
             return 2;
         }
@@ -622,6 +624,22 @@ int remove_cmd(const std::vector<std::string>& args) {
               << (dropped ? ", and its database is deleted" : drop ? " (it had no database to delete)" : "")
               << ". Its files are untouched.\n";
     return 0;
+}
+
+// Whether to install what a backup left out: as asked, else only for a
+// backup made on this computer (the packages' own scripts run as you).
+bool install_for(const nlohmann::json& inspected, std::optional<bool> asked) {
+    if (asked) {
+        return *asked;
+    }
+    if (inspected.value("made_here", false)) {
+        return true;
+    }
+    if (inspected.contains("left_out") && inspected["left_out"].is_array() && !inspected["left_out"].empty()) {
+        std::cout << "This backup was made on another computer, so the packages it left out aren't installed\n"
+                  << "(installing runs the packages' own scripts as you). Add --install to install them.\n";
+    }
+    return false;
 }
 
 // Follows a backup job (backup.get) until it ends, a progress line on one
@@ -743,7 +761,7 @@ int restore(const std::vector<std::string>& args, const std::vector<fs::path>& p
     std::optional<fs::path> zip;
     bool files = true;
     bool database = true;
-    bool install = true;
+    std::optional<bool> install;
     bool yes = false;
     bool bad = false;
     for (std::size_t i = 1; i < args.size(); ++i) {
@@ -753,6 +771,8 @@ int restore(const std::vector<std::string>& args, const std::vector<fs::path>& p
             files = false;
         } else if (args[i] == "--no-install") {
             install = false;
+        } else if (args[i] == "--install") {
+            install = true;
         } else if (args[i] == "--yes" || args[i] == "-y") {
             yes = true;
         } else if (name.empty() && !args[i].starts_with("-")) {
@@ -764,7 +784,8 @@ int restore(const std::vector<std::string>& args, const std::vector<fs::path>& p
         }
     }
     if (name.empty() || !zip || bad || (!files && !database)) {
-        std::cerr << "Usage: flo restore <project> <backup.zip> [--files-only | --database-only] [--no-install] [--yes]\n";
+        std::cerr << "Usage: flo restore <project> <backup.zip> [--files-only | --database-only] [--install | --no-install]"
+                     " [--yes]\n";
         return 2;
     }
     std::error_code ec;
@@ -781,7 +802,7 @@ int restore(const std::vector<std::string>& args, const std::vector<fs::path>& p
     if (!yes) {
         std::cout << "Restore " << name << " from the backup of " << info->result.value("date", std::string()) << "?\n";
         if (files) {
-            std::cout << "  Its files are replaced; today's are kept in a folder beside it.\n";
+            std::cout << "  Its files are replaced; today's are moved to a folder beside it.\n";
         }
         if (database && has_database) {
             std::cout << "  Its database " << floserver::core::project_database_name(name)
@@ -796,7 +817,7 @@ int restore(const std::vector<std::string>& args, const std::vector<fs::path>& p
     }
     const auto started = client->call(
         "backup.restore",
-        {{"name", name}, {"file", shown(file)}, {"files", files}, {"database", database && has_database}, {"install", install}});
+        {{"name", name}, {"file", shown(file)}, {"files", files}, {"database", database && has_database}, {"install", files && install_for(info->result, install)}});
     if (!started || !started->ok || !started->result.contains("job")) {
         return print_refusal(started);
     }
@@ -823,14 +844,18 @@ int restore(const std::vector<std::string>& args, const std::vector<fs::path>& p
     return 1;
 }
 
-int add_from_backup(const fs::path& zip, const std::string& name, bool install) {
+int add_from_backup(const fs::path& zip, const std::string& name, std::optional<bool> install) {
     std::error_code ec;
     const fs::path file = fs::absolute(zip, ec).lexically_normal();
     auto client = connect_or_start(std::chrono::seconds(200));
     if (!client) {
         return 1;
     }
-    nlohmann::json params = {{"file", shown(file)}, {"install", install}};
+    const auto info = client->call("backup.inspect", {{"file", shown(file)}});
+    if (!info || !info->ok || !info->result.is_object()) {
+        return print_refusal(info);
+    }
+    nlohmann::json params = {{"file", shown(file)}, {"install", install_for(info->result, install)}};
     if (!name.empty()) {
         params["name"] = name;
     }

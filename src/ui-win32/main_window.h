@@ -442,16 +442,14 @@ private:
     void start_backup(const std::string& project);
     // backup.plan's answers, taken out of `answers`.
     void on_backup_answers(std::vector<Snapshot::DbAnswer>& answers);
-    // Restore from backup…: the question; the folder to the Recycle Bin
-    // first when its files are replaced (on_recycled()), then the job.
+    // Restore from backup…: the question, then the job (the service moves
+    // today's folder aside itself, once the backup has been checked).
     void start_restore(const std::string& project);
     void run_restore(const std::string& project, const RestoreChoice& choice);
-    // A restore's folder that went to the Recycle Bin (or didn't): true when `r` was one.
-    bool on_restore_recycled(const RecycleBin::Result& r);
     // New project from a backup: the dialog (with `file` when one was opened), then the job.
     void start_from_backup(const std::string& file);
-    // What waits for kBackupMessage: a plan's dialog, a restore whose
-    // folder has gone, a .zip opened before the service answered.
+    // What waits for kBackupMessage: a plan's dialog, a .zip opened before
+    // the service answered.
     void run_backup_steps();
     // Shows what a job's end says.
     void show_backup_outcome(const std::string& kind, const std::string& project, const JobResult& result);
@@ -762,8 +760,6 @@ private:
     std::set<std::string> removed_;         // removed; hidden until the list no longer has them
     std::string backup_planning_;            // the project whose backup.plan is on its way
     std::optional<BackupPlan> backup_plan_;  // its answer: the dialog opens with kBackupMessage
-    std::map<std::string, RestoreChoice> restore_recycling_;            // restores whose folder is on its way to the Recycle Bin
-    std::vector<std::pair<std::string, RestoreChoice>> restore_ready_;  // ...and has gone
     std::string open_backup_;   // a .zip opened with FloServer, until the service answers
     std::string toast_file_;    // the toast's Show in folder
     bool backup_job_ = false;   // a backup dialog or job is open

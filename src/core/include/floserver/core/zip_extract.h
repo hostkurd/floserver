@@ -40,8 +40,13 @@ struct ZipOptions {
     // Names may be any UTF-8 (a backup of a project with Arabic file
     // names); otherwise printable ASCII only.
     bool unicode_names = false;
-    // Files at the archive's top left where they are (a backup's own).
+    // Files left in the archive, by their names there (a backup's own:
+    // "floserver-backup.json", ".floserver/database.sql").
     std::vector<std::string> skip;
+    // The free space where `target` is made; set, an archive that needs
+    // more than it holds, and a tenth more, is refused before anything is
+    // written (ZipResult::no_space). Nothing: it can't be told.
+    std::function<std::optional<std::uint64_t>(const std::filesystem::path& folder)> free_space;
     // After each file: how many are done and how many there are. False
     // stops the unpacking (ZipResult::cancelled).
     std::function<bool(std::uint64_t done, std::uint64_t total)> progress;
@@ -50,6 +55,7 @@ struct ZipOptions {
 struct ZipResult {
     bool ok = false;
     bool cancelled = false;
+    bool no_space = false;
     std::string message;  // why it failed, plain English
     std::uint64_t files = 0;
     std::uint64_t bytes = 0;
@@ -60,7 +66,7 @@ struct ZipResult {
 [[nodiscard]] ZipResult extract_zip(const std::filesystem::path& archive, const std::filesystem::path& target,
                                     const ZipLimits& limits = {}, const ZipOptions& options = {});
 
-// One file at the archive's top, by its exact name, when it's there, is a
+// One file of the archive, by its exact name there, when it's there, is a
 // plain file and is at most `max_bytes`; else nothing, with `error` saying
 // why (empty when it just isn't there).
 [[nodiscard]] std::optional<std::string> read_zip_entry(const std::filesystem::path& archive, std::string_view name,
@@ -68,6 +74,14 @@ struct ZipResult {
 // The same, written to `file` (a backup's database.sql, which may be large).
 [[nodiscard]] bool extract_zip_entry(const std::filesystem::path& archive, std::string_view name,
                                      const std::filesystem::path& file, std::string& error);
+// The same, handed to `sink` piece by piece as it unpacks (false from it
+// stops); `size`, when given, is told the entry's size first.
+[[nodiscard]] bool stream_zip_entry(const std::filesystem::path& archive, std::string_view name,
+                                    const std::function<bool(std::string_view piece)>& sink, std::string& error,
+                                    std::uint64_t* size = nullptr);
+// The unpacked size of a file in the archive, or nothing when it isn't there.
+[[nodiscard]] std::optional<std::uint64_t> zip_entry_size(const std::filesystem::path& archive, std::string_view name,
+                                                          std::string& error);
 
 // The relative path an entry name is unpacked to, or empty when the name is
 // refused. Exposed for tests.

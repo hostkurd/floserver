@@ -108,12 +108,16 @@ TEST_CASE("New project from a backup and Restore: the words") {
     CHECK(r.database == "Replace its database my_shop");
     CHECK(r.note == "The project stops while it's restored, then starts again.");
     CHECK(r.restore == "Restore");
+    CHECK(r.files_note == "Today's files are moved aside first, to a folder beside it.");
+    CHECK(r.foreign == "Made on another computer: installing runs the packages' own scripts as you.");
     CHECK(restore_form("my-shop", false, Lang::En).database.empty());
     for (const Lang lang : {Lang::En, Lang::Ar, Lang::Ku}) {
         const RestoreForm any = restore_form("my-shop", true, lang);
         CHECK_FALSE(any.files_note.empty());
         CHECK_FALSE(any.database_note.empty());
         CHECK_FALSE(from_backup_form(lang).database_note.empty());
+        CHECK_FALSE(from_backup_form(lang).foreign.empty());
+        CHECK_FALSE(any.foreign.empty());
     }
 }
 

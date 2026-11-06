@@ -157,6 +157,7 @@ FromBackupForm from_backup_form(Lang lang) {
     f.name = std::string(text(lang, Str::FromBackupName));
     f.database_note = std::string(text(lang, Str::FromBackupDatabaseNote));
     f.install = std::string(text(lang, Str::BackupInstall));
+    f.foreign = std::string(text(lang, Str::BackupForeignNote));
     f.create = std::string(text(lang, Str::FromBackupCreate));
     f.cancel = std::string(text(lang, Str::WizardCancel));
     return f;
@@ -182,6 +183,7 @@ RestoreForm restore_form(const std::string& project, bool has_database, Lang lan
         f.database_note = std::string(text(lang, Str::RestoreDatabaseNote));
     }
     f.install = std::string(text(lang, Str::BackupInstall));
+    f.foreign = std::string(text(lang, Str::BackupForeignNote));
     f.note = std::string(text(lang, Str::RestoreNote));
     f.restore = std::string(text(lang, Str::RestoreConfirm));
     f.cancel = std::string(text(lang, Str::WizardCancel));

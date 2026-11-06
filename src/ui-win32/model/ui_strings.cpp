@@ -1154,8 +1154,9 @@ constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
           "{0} لە پاشەکەوتێکەوە بگەڕێنرێتەوە؟"},
     Entry{Str::RestoreBackedUp, "Backed up {0}", "نُسخ احتياطيًا في {0}", "لە {0} پاشەکەوت کراوە"},
     Entry{Str::RestoreFiles, "Replace the project's files", "استبدال ملفات المشروع", "فایلەکانی پڕۆژەکە بگۆڕە"},
-    Entry{Str::RestoreFilesNote, "Today's files go to the Recycle Bin first.", "تذهب ملفات اليوم إلى سلة المحذوفات أولًا.",
-          "فایلەکانی ئەمڕۆ سەرەتا دەچنە سەبەتەی خۆڵ."},
+    Entry{Str::RestoreFilesNote, "Today's files are moved aside first, to a folder beside it.",
+          "تُنقل ملفات اليوم جانبًا أولًا، إلى مجلد بجانبه.",
+          "فایلەکانی ئەمڕۆ سەرەتا دەگوازرێنەوە بۆ بوخچەیەک لە تەنیشتیەوە."},
     Entry{Str::RestoreDatabase, "Replace its database {0}", "استبدال قاعدة بياناته {0}", "داتابەیسی {0} بگۆڕە"},
     Entry{Str::RestoreDatabaseNote, "Today's database is saved first, as a .sql next to the backup.",
           "تُحفظ قاعدة بيانات اليوم أولًا كملف " FLO_LRI ".sql" FLO_PDI " بجانب النسخة الاحتياطية.",
@@ -1181,6 +1182,9 @@ constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
     Entry{Str::RestoreNothing, "Tick what to restore: its files, its database or both.",
           "حدّد ما تريد استعادته: ملفاته أو قاعدة بياناته أو كليهما.",
           "دیاری بکە چی بگەڕێنرێتەوە: فایلەکانی، داتابەیسەکەی یان هەردووکیان."},
+    Entry{Str::BackupForeignNote, "Made on another computer: installing runs the packages' own scripts as you.",
+          "صُنعت على حاسوب آخر: التثبيت يشغّل نصوص الحزم البرمجية الخاصة بها باسمك.",
+          "لە کۆمپیوتەرێکی تر دروست کراوە: دامەزراندن سکریپتەکانی خودی پاکێجەکان بە ناوی تۆوە کار پێ دەکات."},
 }};
 
 #undef FLO_LRI

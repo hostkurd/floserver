@@ -634,6 +634,7 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     RestoreCancelled,         // {0}: the project
     RestoreNotRecycled,       // {0}: the project, {1}: why
     RestoreNothing,
+    BackupForeignNote,        // under Install the packages, for a backup made on another computer
     Count_,
 };
 

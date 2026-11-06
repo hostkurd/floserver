@@ -50,6 +50,13 @@ struct DatabaseServiceConfig {
 
 inline constexpr Port kFirstInternalDatabasePort = 33100;
 
+// Backups (D22): what the mariadb program gets when it loads a backup's SQL
+// (`force`: routines and events, going on past errors), and mariadb-dump.
+[[nodiscard]] std::vector<std::string> mariadb_load_args(bool force);
+[[nodiscard]] std::vector<std::string> mariadb_dump_args(const std::string& database, const std::string& file);
+// How long a dump or a load may run: 30 minutes, or FLOSERVER_DB_TOOL_SECONDS.
+[[nodiscard]] std::chrono::seconds database_tool_limit();
+
 // Another registered project whose database has the same name as
 // `project`'s (project_database_name()), or nothing. Names can't have '_',
 // so it shouldn't happen; a drop checks anyway.
@@ -109,8 +116,13 @@ public:
     // The mariadb program runs `sql` (backup.h's prepare_sql_for_load(): it
     // empties the database first) with the project's own login, so it can
     // only change that database.
+    // `extras` (routines and events, when there are any) runs after it, with
+    // --force: what the login may not make is a `warning`, not a failure.
+    // Then the project's own password is set again (a dump may change it).
+    // Both stop when `cancel` is set, and after database_tool_limit().
     bool load_project_database(const std::string& project, const std::filesystem::path& sql,
-                               const std::atomic<bool>& cancel, ServiceRefusal& refusal);
+                               const std::atomic<bool>& cancel, ServiceRefusal& refusal,
+                               const std::filesystem::path& extras = {}, std::string* warning = nullptr);
     // How much the project's database takes on disk; nothing when it has
     // none yet (or no database at all). Read from its folder: nothing starts.
     [[nodiscard]] std::optional<std::uint64_t> project_database_bytes(const std::string& project) const;

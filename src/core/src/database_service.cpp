@@ -4,6 +4,7 @@
 
 #include "floserver/core/mariadb_settings.h"
 #include "floserver/core/paths.h"
+#include "floserver/core/process.h"
 #include "floserver/core/project_registry.h"
 #include "floserver/core/runtime_store.h"
 #include "floserver/core/site_plan.h"
@@ -526,11 +527,15 @@ public:
             return false;
         }
         std::optional<int> code;
+        const auto limit = database_tool_limit();
+        const auto started = Clock::now();
         while (!(code = child->wait(250ms))) {
             touch();  // it's busy: no sleep meanwhile
-            if (cancel) {
+            if (cancel || Clock::now() - started > limit) {
                 child->kill();
-                error = "cancelled";
+                error = cancel ? std::string("cancelled")
+                               : path_to_utf8(program.filename()) + " didn't finish in " +
+                                     std::to_string(limit.count()) + " seconds and was stopped";
                 fs::remove(o.output_log, ec);
                 return false;
             }
@@ -1282,6 +1287,31 @@ std::shared_ptr<DatabaseService::Server> DatabaseService::project_server(const s
     return server;
 }
 
+std::vector<std::string> mariadb_load_args(bool force) {
+    // --binary-mode: no client commands but DELIMITER (and NUL bytes kept);
+    // --local-infile=0: LOAD DATA LOCAL can't read this computer's files.
+    std::vector<std::string> out = {"--batch", "--binary-mode", "--local-infile=0", "--default-character-set=utf8mb4"};
+    if (force) {
+        out.emplace_back("--force");
+    }
+    return out;
+}
+
+std::vector<std::string> mariadb_dump_args(const std::string& database, const std::string& file) {
+    return {"--single-transaction", "--triggers", "--routines", "--events", "--hex-blob",
+            "--default-character-set=utf8mb4", "--result-file=" + file, database};
+}
+
+std::chrono::seconds database_tool_limit() {
+    if (const auto text = get_env("FLOSERVER_DB_TOOL_SECONDS")) {
+        try {
+            return std::chrono::seconds(std::max(1L, std::stol(*text)));
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the usual limit
+        }
+    }
+    return std::chrono::minutes(30);
+}
+
 bool DatabaseService::run_project_tool(const std::string& project, bool dump, const fs::path& work,
                                        const fs::path& input, const std::atomic<bool>& cancel,
                                        ServiceRefusal& refusal) {
@@ -1301,18 +1331,16 @@ bool DatabaseService::run_project_tool(const std::string& project, bool dump, co
         refusal = {"database_failed", error};
         return false;
     }
-    const bool ok =
-        dump ? server->run_as(server->files().dump, *login,
-                              {"--single-transaction", "--triggers", "--hex-blob", "--default-character-set=utf8mb4",
-                               "--result-file=" + std::string(kDumpFileName), login->database},
-                              work, {}, cancel, error)
-             : server->run_as(server->files().client, *login,
-                              {"--batch", "--binary-mode", "--default-character-set=utf8mb4"}, work, input, cancel,
-                              error);
+    const bool ok = dump ? server->run_as(server->files().dump, *login,
+                                          mariadb_dump_args(login->database, std::string(kDumpFileName)), work, {},
+                                          cancel, error)
+                         : server->run_as(server->files().client, *login, mariadb_load_args(false), work, input,
+                                          cancel, error);
     if (!ok) {
         refusal = {cancel ? "cancelled" : "database_failed", error};
+        return false;
     }
-    return ok;
+    return true;
 }
 
 bool DatabaseService::dump_project_database(const std::string& project, const fs::path& work,
@@ -1321,8 +1349,37 @@ bool DatabaseService::dump_project_database(const std::string& project, const fs
 }
 
 bool DatabaseService::load_project_database(const std::string& project, const fs::path& sql,
-                                            const std::atomic<bool>& cancel, ServiceRefusal& refusal) {
-    return run_project_tool(project, false, sql.parent_path(), sql, cancel, refusal);
+                                            const std::atomic<bool>& cancel, ServiceRefusal& refusal,
+                                            const fs::path& extras, std::string* warning) {
+    const bool ok = run_project_tool(project, false, sql.parent_path(), sql, cancel, refusal);
+    // Routines and events on their own, going on past one its login may not make.
+    if (ok && !extras.empty() && !cancel) {
+        ServiceRefusal why;
+        const auto login = project_login(project, why, true);
+        const auto server = login ? project_server(project, why) : nullptr;
+        std::string error;
+        bool extras_ok = false;
+        if (server) {
+            server->connection_opened();
+            const AtExit closed([&server] { server->connection_closed(); });
+            extras_ok = server->ensure_running(error) &&
+                        server->run_as(server->files().client, *login, mariadb_load_args(true), extras.parent_path(),
+                                       extras, cancel, error);
+        } else {
+            error = why.message;
+        }
+        if (!extras_ok && warning != nullptr) {
+            *warning = "some of its routines or events couldn't be made with the project's own login: " + error;
+        }
+    }
+    // A dump can change its user's password (SET PASSWORD): the one kept is
+    // set again, so the project's .env still works. After a failed load too.
+    ServiceRefusal reset;
+    if (!project_login(project, reset, true) && ok) {
+        refusal = reset;
+        return false;
+    }
+    return ok;
 }
 
 std::optional<std::uint64_t> DatabaseService::project_database_bytes(const std::string& project) const {

@@ -70,6 +70,7 @@ struct BackupSummary {
     nlohmann::json versions = nlohmann::json::object();
     bool database = false;
     std::vector<std::string> left_out;
+    bool made_here = false;  // on this computer: its left-out packages are installed again by default
 };
 // "PHP 8.5 · MariaDB 11.4": the versions it was made with, as the panel names them.
 [[nodiscard]] std::string backup_versions_text(const nlohmann::json& versions);
@@ -84,6 +85,7 @@ struct FromBackupForm {
     std::string name;
     std::string database_note;
     std::string install;
+    std::string foreign;  // under Install, for a backup made on another computer
     std::string create;
     std::string cancel;
 };
@@ -101,6 +103,7 @@ struct RestoreForm {
     std::string database;  // empty: the project has no database
     std::string database_note;
     std::string install;
+    std::string foreign;
     std::string note;
     std::string restore;
     std::string cancel;

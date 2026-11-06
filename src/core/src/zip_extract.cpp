@@ -9,6 +9,7 @@
 #include <cctype>
 #include <fstream>
 #include <optional>
+#include <set>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -37,8 +38,13 @@ bool is_reserved_device(std::string_view component) {
     if (std::find(kNames.begin(), kNames.end(), base) != kNames.end()) {
         return true;
     }
-    return base.size() == 4 && (base.starts_with("COM") || base.starts_with("LPT")) && base[3] >= '0' &&
-           base[3] <= '9';
+    if (!base.starts_with("COM") && !base.starts_with("LPT")) {
+        return false;
+    }
+    // COM1, and COM¹ COM² COM³ (U+00B9, U+00B2, U+00B3), which Windows takes as devices too.
+    const std::string_view digit = std::string_view(base).substr(3);
+    return (digit.size() == 1 && digit[0] >= '0' && digit[0] <= '9') || digit == "\xC2\xB9" ||
+           digit == "\xC2\xB2" || digit == "\xC2\xB3";
 }
 
 // The code point starting at `i` in well-formed UTF-8 (shortest form, no
@@ -326,6 +332,75 @@ bool extract_zip_entry(const fs::path& archive, std::string_view name, const fs:
     return true;
 }
 
+namespace {
+
+struct Sink {
+    const std::function<bool(std::string_view)>* sink = nullptr;
+    std::uint64_t written = 0;
+    std::uint64_t expected = 0;
+    bool stopped = false;
+};
+
+std::size_t to_sink(void* opaque, mz_uint64 offset, const void* buffer, std::size_t n) {
+    auto* s = static_cast<Sink*>(opaque);
+    if (offset != s->written || n > s->expected - s->written) {
+        return 0;
+    }
+    if (!(*s->sink)(std::string_view(static_cast<const char*>(buffer), n))) {
+        s->stopped = true;
+        return 0;
+    }
+    s->written += n;
+    return n;
+}
+
+}  // namespace
+
+bool stream_zip_entry(const fs::path& archive, std::string_view name,
+                      const std::function<bool(std::string_view piece)>& sink, std::string& error,
+                      std::uint64_t* size) {
+    error.clear();
+    Reader reader;
+    Archive a;
+    if (!open_archive(archive, reader, a, error)) {
+        return false;
+    }
+    std::uint64_t bytes = 0;
+    const auto index = top_file(a, name, bytes, error);
+    if (!index) {
+        if (error.empty()) {
+            error = "the archive has no " + std::string(name);
+        }
+        return false;
+    }
+    if (size != nullptr) {
+        *size = bytes;
+    }
+    Sink s{&sink, 0, bytes, false};
+    const bool ok = mz_zip_reader_extract_to_callback(&a.zip, *index, to_sink, &s, 0) != 0;
+    if (!ok || s.written != bytes) {
+        if (!s.stopped || error.empty()) {
+            error = s.stopped ? "stopped" : "can't unpack " + std::string(name) + ": " + zip_error(a.zip);
+        }
+        return false;
+    }
+    return true;
+}
+
+std::optional<std::uint64_t> zip_entry_size(const fs::path& archive, std::string_view name, std::string& error) {
+    error.clear();
+    Reader reader;
+    Archive a;
+    if (!open_archive(archive, reader, a, error)) {
+        return std::nullopt;
+    }
+    std::uint64_t bytes = 0;
+    if (!top_file(a, name, bytes, error)) {
+        return std::nullopt;
+    }
+    return bytes;
+}
+
 ZipResult extract_zip(const fs::path& archive, const fs::path& target, const ZipLimits& limits,
                       const ZipOptions& options) {
     ZipResult result;
@@ -396,14 +471,47 @@ ZipResult extract_zip(const fs::path& archive, const fs::path& target, const Zip
         }
     }
     // The archive's own files stay in it.
+    const auto joined = [](const Entry& e) {
+        std::string out;
+        for (const std::string& p : e.parts) {
+            out += (out.empty() ? "" : "/") + p;
+        }
+        return out;
+    };
     std::erase_if(entries, [&](const Entry& e) {
-        return !e.folder && e.parts.size() == 1 &&
-               std::find(options.skip.begin(), options.skip.end(), e.parts.front()) != options.skip.end();
+        return !e.folder && std::find(options.skip.begin(), options.skip.end(), joined(e)) != options.skip.end();
     });
-    const auto files_total =
-        static_cast<std::uint64_t>(std::count_if(entries.begin(), entries.end(), [](const Entry& e) {
-            return !e.folder;
-        }));
+    // The same name twice (in any case: Windows takes them as one) is refused
+    // before anything is written.
+    std::set<std::string> names;
+    std::uint64_t files_total = 0;
+    std::uint64_t bytes_total = 0;
+    for (const Entry& e : entries) {
+        if (e.folder) {
+            continue;
+        }
+        std::string key = joined(e);
+        std::transform(key.begin(), key.end(), key.begin(),
+                       [](char c) { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c; });
+        if (!names.insert(key).second) {
+            result.message = "the archive has the same file twice: " + joined(e);
+            return result;
+        }
+        ++files_total;
+        bytes_total += e.size;
+    }
+    // Room for it all, and a tenth more.
+    if (options.free_space) {
+        const auto free = options.free_space(target.parent_path());
+        const std::uint64_t needed = bytes_total + bytes_total / 10;
+        if (free && *free < needed) {
+            result.no_space = true;
+            result.message = "there isn't enough free space on the drive: it needs " +
+                             std::to_string((needed + (1U << 20U) - 1) >> 20U) + " MB and has " +
+                             std::to_string(*free >> 20U) + " MB";
+            return result;
+        }
+    }
 
     fs::create_directories(target, ec);
     if (ec) {

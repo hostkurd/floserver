@@ -25,8 +25,8 @@ namespace {
 constexpr std::size_t kMaxRunningJobs = 2;
 constexpr std::size_t kKeptFinishedJobs = 8;
 constexpr auto kStepTimeLimit = 20min;
-// A backup unpacks to at most this much (a project, its database included).
-constexpr std::uint64_t kMaxRestoreBytes = std::uint64_t{64} * 1024 * 1024 * 1024;
+// A backup unpacks to at most this much (its files; its database on its own).
+constexpr std::uint64_t kMaxRestoreBytes = std::uint64_t{20} * 1024 * 1024 * 1024;
 constexpr std::uint64_t kMaxRestoreEntries = 2'000'000;
 
 // The same folder, by Windows' rules on Windows (case doesn't count).
@@ -105,17 +105,18 @@ struct BackupService::Job {
     std::string error;
     bool cancellable = true;
 
+    // Lines may hold what a program printed or a backup said: made safe to show.
     void add_line(const std::string& line) {
         const std::lock_guard lock(mutex);
-        log.push_back(line);
+        log.push_back(shown_text(line));
         while (log.size() > kLogLines) {
             log.pop_front();
         }
     }
     void set_step(const std::string& s) {
         const std::lock_guard lock(mutex);
-        step = s;
-        log.push_back(s);
+        step = shown_text(s);
+        log.push_back(step);
         while (log.size() > kLogLines) {
             log.pop_front();
         }
@@ -127,7 +128,7 @@ struct BackupService::Job {
     void finish(const std::string& final_state, const std::string& message) {
         const std::lock_guard lock(mutex);
         state = final_state;
-        error = message;
+        error = shown_text(message);
     }
     // Asked for, and still possible: the job ends as cancelled.
     bool cancelled() {
@@ -460,7 +461,9 @@ void BackupService::run_backup(const std::shared_ptr<Job>& job, const BackupRequ
     info.versions = backup_versions(project->dir);
     info.left_out = left_out;
     info.database = with_database;
-    info.database_file = contents->database_file;
+    if (const auto id = computer_id(data_dir_, error)) {
+        info.computer = *id;
+    }
     fs::create_directories(request.to.parent_path(), ec);
     const fs::path part = request.to.parent_path() / path_from_utf8(path_to_utf8(request.to.filename()) + ".part");
     job->set_step("Packing the files…");
@@ -481,8 +484,8 @@ void BackupService::run_backup(const std::shared_ptr<Job>& job, const BackupRequ
         }
         return;
     }
-    // The finished zip takes the name (replacing one there: the user said so in the save dialog).
-    fs::remove(request.to, ec);
+    // The finished zip takes the name, replacing one there (the user said so
+    // in the save dialog); the old one stays until the new one is whole.
     fs::rename(part, request.to, ec);
     if (ec) {
         job->finish("failed", "the backup was made as " + path_to_utf8(part) + " but couldn't be renamed: " +
@@ -586,27 +589,86 @@ bool BackupService::reinstall(const std::shared_ptr<Job>& job, const fs::path& d
     return true;
 }
 
+std::optional<std::uint64_t> BackupService::free_space(const fs::path& folder) const {
+    if (hooks_.free_space) {
+        return hooks_.free_space(folder);
+    }
+    std::error_code ec;
+    const fs::space_info s = fs::space(folder, ec);
+    return ec ? std::nullopt : std::optional<std::uint64_t>(s.available);
+}
+
+bool BackupService::check_database_entry(const fs::path& zip, const BackupInfo& info, const fs::path& work,
+                                         std::string& error) const {
+    const auto size = zip_entry_size(zip, info.database_file, error);
+    if (!size) {
+        error = "the backup's database can't be read" + (error.empty() ? std::string() : ": " + error);
+        return false;
+    }
+    if (*size > kMaxRestoreBytes) {
+        error = "the backup's database is larger than FloServer restores";
+        return false;
+    }
+    // Its SQL is written once, ready to load, where the work is done.
+    const std::uint64_t needed = *size + *size / 10;
+    if (const auto free = free_space(work); free && *free < needed) {
+        error = "there isn't enough free space for the backup's database: it needs " +
+                std::to_string((needed >> 20U) + 1) + " MB and has " + std::to_string(*free >> 20U) + " MB";
+        return false;
+    }
+    return true;
+}
+
 bool BackupService::load_from_backup(const std::shared_ptr<Job>& job, const fs::path& zip, const BackupInfo& info,
                                      const std::string& project, const fs::path& work, std::string& error) {
     job->set([](Job& j) { j.database = "loading"; });
     job->set_step("Loading the database from the backup…");
-    const fs::path raw = work / "backup.sql";
-    const fs::path ready = work / "load.sql";
-    if (!extract_zip_entry(zip, info.database_file, raw, error)) {
+    const fs::path main = work / "load.sql";
+    const fs::path extras = work / "load-extras.sql";
+    // Unpacked straight into the SQL that's run: no other copy of it.
+    SqlLoadWriter writer;
+    if (!writer.open(main, extras, project_database_name(project), error)) {
         return false;
     }
-    if (!prepare_sql_for_load(raw, ready, project_database_name(project), error)) {
+    std::string why;
+    const bool unpacked = stream_zip_entry(
+        zip, info.database_file,
+        [&](std::string_view piece) { return !job->cancel && writer.feed(piece, why); }, error);
+    if (!unpacked || !writer.finish(why)) {
+        error = job->cancel ? std::string("cancelled") : !why.empty() ? why : error;
         return false;
+    }
+    std::string warning;
+    if (!hooks_.load_database ||
+        !hooks_.load_database(project, main, writer.has_extras() ? extras : fs::path(), job->cancel, warning, error)) {
+        if (job->cancel) {
+            error = "cancelled";
+        }
+        return false;
+    }
+    if (!warning.empty()) {
+        job->add_line("Warning: " + warning);
     }
     std::error_code ec;
-    fs::remove(raw, ec);
-    // Never cancelled halfway: an empty database is worse than waiting.
-    static const std::atomic<bool> never{false};
-    if (!hooks_.load_database || !hooks_.load_database(project, ready, never, error)) {
-        return false;
-    }
+    fs::remove(main, ec);
+    fs::remove(extras, ec);
     job->set([](Job& j) { j.database = "loaded"; });
     return true;
+}
+
+bool BackupService::load_saved(const std::string& project, const fs::path& saved, const fs::path& work,
+                               std::string& error) {
+    const fs::path main = work / "back.sql";
+    const fs::path extras = work / "back-extras.sql";
+    bool has_extras = false;
+    if (!prepare_sql_for_load(saved, main, extras, project_database_name(project), has_extras, error)) {
+        return false;
+    }
+    // Putting today's back is never cancelled (it's bounded by the load's time limit).
+    static const std::atomic<bool> never{false};
+    std::string warning;
+    return hooks_.load_database && hooks_.load_database(project, main, has_extras ? extras : fs::path(), never,
+                                                        warning, error);
 }
 
 void BackupService::point_at_database(const std::shared_ptr<Job>& job, const fs::path& dir,
@@ -642,15 +704,10 @@ void BackupService::point_at_database(const std::shared_ptr<Job>& job, const fs:
     }
 }
 
-namespace {
-
-// Unpacks a backup's files (not its own two) beside `dir`; the folder it
-// made, or nothing. `progress` gets each file done.
-std::optional<fs::path> unpack_beside(const fs::path& zip, const BackupInfo& info, const fs::path& dir,
-                                      std::int64_t id, const std::function<bool(std::uint64_t, std::uint64_t)>& progress,
-                                      bool& cancelled, std::string& error) {
-    const fs::path temp = dir.parent_path() / path_from_utf8("." + path_to_utf8(dir.filename()) + ".restoring-" +
-                                                             std::to_string(id));
+std::optional<fs::path> BackupService::unpack_beside(const std::shared_ptr<Job>& job, const fs::path& zip,
+                                                     const BackupInfo& info, const fs::path& dir, std::string& error) {
+    // A short name beside the folder (Windows' path limit): ".flo-r12".
+    const fs::path temp = dir.parent_path() / path_from_utf8(".flo-r" + std::to_string(job->id));
     std::error_code ec;
     fs::remove_all(temp, ec);
     ZipLimits limits;
@@ -663,23 +720,27 @@ std::optional<fs::path> unpack_beside(const fs::path& zip, const BackupInfo& inf
     if (info.database) {
         options.skip.push_back(info.database_file);
     }
-    options.progress = progress;
+    options.free_space = [this](const fs::path& folder) { return free_space(folder); };
+    options.progress = [&job](std::uint64_t done, std::uint64_t total) {
+        job->set([&](Job& j) {
+            j.files = done;
+            j.total_files = total;
+        });
+        return !job->cancel;
+    };
     const ZipResult r = extract_zip(zip, temp, limits, options);
     if (!r.ok) {
         fs::remove_all(temp, ec);
-        cancelled = r.cancelled;
         // A backup of an empty folder has nothing but its own files.
         if (!r.cancelled && r.message == "the archive has no files") {
             fs::create_directories(temp, ec);
             return temp;
         }
-        error = "the backup can't be unpacked: " + r.message;
+        error = r.cancelled ? std::string("cancelled") : "the backup can't be unpacked: " + r.message;
         return std::nullopt;
     }
     return temp;
 }
-
-}  // namespace
 
 // ------------------------------------------------------------------ restore
 
@@ -692,153 +753,228 @@ void BackupService::run_restore(const std::shared_ptr<Job>& job, const RestoreRe
     }
     const auto info = read_backup_info(request.from, error);
     if (!info) {
-        job->finish("failed", error);
+        job->finish("failed", error + "; nothing was changed");
         return;
     }
     const bool database = request.database && info->database && project->database;
+    const bool install = request.install.value_or(made_here(*info, data_dir_));
     const fs::path work = work_dir(job->id);
     std::error_code ec;
     fs::remove_all(work, ec);
     fs::create_directories(work, ec);
     const RemoveOnExit remove_work(work);
     const std::tm now = local_time_now();
+    const fs::path dir = project->dir;
 
-    // It stops meanwhile; it starts again however the restore ends.
+    // What was changed, said with every ending.
+    fs::path aside;      // today's folder, moved aside
+    fs::path saved;      // today's database, kept
+    bool files_in = false;
+    bool database_replaced = false;
+    const auto where = [&] {
+        std::string out;
+        if (request.files) {
+            out += !aside.empty() ? " Today's files are in " + path_to_utf8(aside) + "."
+                                  : " Today's files are where they were.";
+        }
+        if (!saved.empty()) {
+            out += " Today's database is kept in " + path_to_utf8(saved) +
+                   (database_replaced ? std::string(".") : std::string(", and is still the project's."));
+        } else if (database) {
+            out += " Its database wasn't changed.";
+        }
+        return out;
+    };
+    const auto end = [&](const std::string& state, const std::string& message) {
+        job->set([&](Job& j) {
+            j.saved_database = saved.empty() ? std::string() : path_to_utf8(saved);
+            j.set_aside = aside.empty() ? std::string() : path_to_utf8(aside);
+        });
+        job->finish(state, message + where());
+    };
+    const auto cancelled = [&] {
+        if (job->cancel) {
+            end("cancelled", "cancelled; nothing was changed.");
+            return true;
+        }
+        return false;
+    };
+
+    // 1. The backup checked and unpacked beside the folder: nothing is touched yet.
+    std::optional<fs::path> unpacked;
+    if (request.files) {
+        job->set_step("Unpacking the files…");
+        unpacked = unpack_beside(job, request.from, *info, dir, error);
+        if (!unpacked) {
+            if (!cancelled()) {
+                end("failed", error + "; nothing was changed.");
+            }
+            return;
+        }
+    }
+    struct Unpacked {
+        std::optional<fs::path>& path;
+        Unpacked(const Unpacked&) = delete;
+        Unpacked& operator=(const Unpacked&) = delete;
+        Unpacked(Unpacked&&) = delete;
+        Unpacked& operator=(Unpacked&&) = delete;
+        explicit Unpacked(std::optional<fs::path>& p) : path(p) {}
+        ~Unpacked() {
+            if (path) {
+                std::error_code ignored;
+                fs::remove_all(*path, ignored);
+            }
+        }
+    } const unpacked_goes(unpacked);
+    if (database && !check_database_entry(request.from, *info, work, error)) {
+        end("failed", error + "; nothing was changed.");
+        return;
+    }
+    if (cancelled()) {
+        return;
+    }
+
+    // 2. It stops meanwhile; it starts again however the restore ends, as
+    // long as it has a folder.
     const bool was_on = project->on;
     if (was_on && hooks_.set_on) {
         job->set_step("Stopping " + project->name + "…");
         if (!hooks_.set_on(project->name, false, error)) {
-            job->finish("failed", project->name + " couldn't be stopped: " + error);
+            end("failed", project->name + " couldn't be stopped, so nothing was changed: " + error + ".");
             return;
         }
     }
     struct StartAgain {
         const BackupHooks& hooks;
         std::string name;
+        fs::path dir;
         bool on;
-        StartAgain(const BackupHooks& h, std::string n, bool o) : hooks(h), name(std::move(n)), on(o) {}
+        StartAgain(const BackupHooks& h, std::string n, fs::path d, bool o)
+            : hooks(h), name(std::move(n)), dir(std::move(d)), on(o) {}
         StartAgain(const StartAgain&) = delete;
         StartAgain& operator=(const StartAgain&) = delete;
         StartAgain(StartAgain&&) = delete;
         StartAgain& operator=(StartAgain&&) = delete;
         ~StartAgain() {
-            if (on && hooks.set_on) {
-                std::string ignored;
-                (void)hooks.set_on(name, true, ignored);
+            std::error_code ignored;
+            if (on && hooks.set_on && fs::is_directory(dir, ignored)) {
+                std::string why;
+                (void)hooks.set_on(name, true, why);
             }
         }
-    } const start_again(hooks_, project->name, was_on);
+    } const start_again(hooks_, project->name, dir, was_on);
 
-    // 1. Today's database, kept next to the backup.
+    // 3. Today's database, kept next to the backup (or in FloServer's own
+    // folder when that one can't be written).
     if (database) {
         job->set([](Job& j) { j.database = "saving"; });
         job->set_step("Saving today's database…");
         if (!hooks_.dump_database || !hooks_.dump_database(project->name, work, job->cancel, error)) {
-            if (!job->cancelled()) {
-                job->finish("failed", "today's database couldn't be saved, so nothing was changed: " + error);
+            if (!cancelled()) {
+                end("failed", "today's database couldn't be saved, so nothing was changed: " + error + ".");
             }
             return;
         }
-        const fs::path kept = free_name(request.from.parent_path(), project->name + " before restore " + backup_stamp(now), ".sql");
-        fs::copy_file(work / "database.sql", kept, ec);
-        if (ec) {
-            job->finish("failed", "today's database couldn't be kept next to the backup (" + path_to_utf8(kept) +
-                                      "), so nothing was changed: " + error_text(ec));
+        const auto kept = keep_file(work / "database.sql", {request.from.parent_path(), data_dir_ / "backups-saved"},
+                                    project->name + " before restore " + backup_stamp(now), "sql", error);
+        if (!kept) {
+            end("failed", "today's database couldn't be kept, so nothing was changed: " + error + ".");
             return;
         }
-        fs::remove(work / "database.sql", ec);
-        job->set([&](Job& j) {
-            j.saved_database = path_to_utf8(kept);
-            j.database = "saved";
-        });
-        job->add_line("Today's database is kept in " + path_to_utf8(kept));
+        saved = *kept;
+        job->set([](Job& j) { j.database = "saved"; });
+        job->add_line("Today's database is kept in " + path_to_utf8(saved));
     }
-
-    // 2. The files, unpacked beside the folder.
-    std::optional<fs::path> unpacked;
-    if (request.files) {
-        job->set_step("Unpacking the files…");
-        bool cancelled = false;
-        unpacked = unpack_beside(
-            request.from, *info, project->dir, job->id,
-            [&job](std::uint64_t done, std::uint64_t total) {
-                job->set([&](Job& j) {
-                    j.files = done;
-                    j.total_files = total;
-                });
-                return !job->cancel;
-            },
-            cancelled, error);
-        if (!unpacked) {
-            if (!job->cancelled()) {
-                job->finish("failed", error + "; nothing was changed");
-            }
-            return;
-        }
-    }
-    if (job->cancelled()) {
-        if (unpacked) {
-            fs::remove_all(*unpacked, ec);
-        }
+    if (cancelled()) {
         return;
     }
 
-    // From here on nothing is cancelled: it's replaced.
-    job->set([](Job& j) { j.cancellable = false; });
-    if (database) {
-        if (!load_from_backup(job, request.from, *info, project->name, work, error)) {
-            if (unpacked) {
-                fs::remove_all(*unpacked, ec);
-            }
-            const std::string kept = [&] {
-                const std::lock_guard lock(job->mutex);
-                return job->saved_database;
-            }();
-            job->finish("failed", "the database couldn't be loaded from the backup: " + error +
-                                      ". Today's database is in " + kept);
-            return;
-        }
-    }
+    // 4. Today's folder moved aside (never deleted), the backup's put in its place.
     if (unpacked) {
         job->set_step("Putting the files in place…");
-        if (!folder_is_free(project->dir)) {
-            // The window moves it to the Recycle Bin first; a folder still
-            // there (flo restore) is renamed, never deleted.
-            const fs::path aside =
-                free_name(project->dir.parent_path(), path_to_utf8(project->dir.filename()) + " before restore " +
-                                                          backup_stamp(now),
-                          "");
-            fs::rename(project->dir, aside, ec);
+        if (!folder_is_free(dir)) {
+            const fs::path to = free_name(dir.parent_path(), path_to_utf8(dir.filename()) + " before restore " +
+                                                                 backup_stamp(now),
+                                          "");
+            fs::rename(dir, to, ec);
             if (ec) {
-                fs::remove_all(*unpacked, ec);
-                job->finish("failed", "the project's folder couldn't be moved aside (is a file in it open?): " +
-                                          error_text(ec));
+                end("failed", "the project's folder couldn't be moved aside (is a file in it open?), so nothing "
+                              "was changed: " + error_text(ec) + ".");
                 return;
             }
-            job->set([&](Job& j) { j.set_aside = path_to_utf8(aside); });
+            aside = to;
             job->add_line("Today's files are in " + path_to_utf8(aside));
         } else {
-            fs::remove(project->dir, ec);  // an empty folder, or none
+            fs::remove(dir, ec);  // an empty folder, or none
         }
-        fs::rename(*unpacked, project->dir, ec);
+        fs::rename(*unpacked, dir, ec);
         if (ec) {
-            job->finish("failed", "the restored files are in " + path_to_utf8(*unpacked) +
-                                      " but couldn't be renamed to the project's folder: " + error_text(ec));
+            const std::string why = error_text(ec);
+            if (!aside.empty()) {
+                fs::rename(aside, dir, ec);
+                if (!ec) {
+                    aside.clear();
+                }
+            }
+            end("failed", "the backup's files couldn't be put in place: " + why + ".");
             return;
         }
-        job->set([&](Job& j) { j.folder = path_to_utf8(project->dir); });
+        unpacked.reset();
+        files_in = true;
+        job->set([&](Job& j) { j.folder = path_to_utf8(dir); });
     }
+
+    // 5. The database, once the files are in place. A failure (or Cancel)
+    // puts today's files and database back.
     if (database) {
-        point_at_database(job, project->dir, project->name);
-    }
-    if (request.install && request.files) {
-        if (!reinstall(job, project->dir, info->left_out, error)) {
-            job->finish("failed", "the project is restored, but " + error);
+        if (!load_from_backup(job, request.from, *info, project->name, work, error)) {
+            const bool stopped = job->cancel;
+            std::string undone;
+            if (files_in) {
+                const fs::path restored = dir.parent_path() / path_from_utf8(".flo-u" + std::to_string(job->id));
+                fs::rename(dir, restored, ec);
+                if (!ec && !aside.empty()) {
+                    fs::rename(aside, dir, ec);
+                    if (!ec) {
+                        aside.clear();
+                    }
+                }
+                if (!ec) {
+                    fs::remove_all(restored, ec);
+                    undone += " Today's files are back in place.";
+                } else {
+                    undone += " The backup's files are still in " + path_to_utf8(dir) + ".";
+                }
+            }
+            std::string again;
+            if (load_saved(project->name, saved, work, again)) {
+                undone += " Today's database was loaded back.";
+            } else {
+                database_replaced = true;
+                undone += " Today's database couldn't be loaded back (" + again + ").";
+            }
+            end(stopped ? "cancelled" : "failed",
+                (stopped ? std::string("cancelled while the database was loaded.")
+                         : "the database couldn't be loaded from the backup: " + error + ".") + undone);
             return;
         }
+        database_replaced = true;
+    }
+    job->set([](Job& j) { j.cancellable = false; });
+    if (database) {
+        point_at_database(job, dir, project->name);
+    }
+    if (request.files && install) {
+        if (!reinstall(job, dir, info->left_out, error)) {
+            end("failed", "the project is restored, but " + error + ".");
+            return;
+        }
+    } else if (request.files && !info->left_out.empty() && !made_here(*info, data_dir_)) {
+        job->add_line("Made on another computer: the packages that were left out weren't installed");
     }
     job->set_step("Done");
-    job->finish("done", {});
+    end("done", {});
+    job->set([](Job& j) { j.error.clear(); });
 }
 
 // ------------------------------------------------------------------ new project
@@ -850,6 +986,7 @@ void BackupService::run_create(const std::shared_ptr<Job>& job, const FromBackup
         job->finish("failed", error);
         return;
     }
+    const bool install = request.install.value_or(made_here(*info, data_dir_));
     const fs::path dir = request.parent / path_from_utf8(request.name);
     const std::string dir_text = path_to_utf8(dir);
     job->set([&](Job& j) { j.folder = dir_text; });
@@ -860,21 +997,16 @@ void BackupService::run_create(const std::shared_ptr<Job>& job, const FromBackup
     const RemoveOnExit remove_work(work);
 
     job->set_step("Unpacking the files…");
-    bool cancelled = false;
-    const auto unpacked = unpack_beside(
-        request.from, *info, dir, job->id,
-        [&job](std::uint64_t done, std::uint64_t total) {
-            job->set([&](Job& j) {
-                j.files = done;
-                j.total_files = total;
-            });
-            return !job->cancel;
-        },
-        cancelled, error);
+    const auto unpacked = unpack_beside(job, request.from, *info, dir, error);
     if (!unpacked) {
         if (!job->cancelled()) {
             job->finish("failed", error);
         }
+        return;
+    }
+    if (info->database && !check_database_entry(request.from, *info, work, error)) {
+        fs::remove_all(*unpacked, ec);
+        job->finish("failed", error);
         return;
     }
     if (!folder_is_free(dir)) {
@@ -892,7 +1024,7 @@ void BackupService::run_create(const std::shared_ptr<Job>& job, const FromBackup
     const std::string left_note = " The folder " + dir_text + " is left as it is.";
     // The packages before it's turned on (a Node project's own start would
     // run npm install too).
-    if (request.install && !reinstall(job, dir, info->left_out, error)) {
+    if (install && !reinstall(job, dir, info->left_out, error)) {
         if (job->cancel) {
             job->finish("cancelled", "cancelled." + left_note);
         } else {
@@ -900,10 +1032,13 @@ void BackupService::run_create(const std::shared_ptr<Job>& job, const FromBackup
         }
         return;
     }
-    if (job->cancelled()) {
+    if (!install && !info->left_out.empty() && !made_here(*info, data_dir_)) {
+        job->add_line("Made on another computer: the packages that were left out weren't installed");
+    }
+    if (job->cancel) {
+        job->finish("cancelled", "cancelled." + left_note);
         return;
     }
-    job->set([](Job& j) { j.cancellable = false; });
     job->set_step("Adding the project…");
     const auto name = hooks_.add_project ? hooks_.add_project(dir, request.name, error) : std::nullopt;
     if (!name) {
@@ -913,11 +1048,14 @@ void BackupService::run_create(const std::shared_ptr<Job>& job, const FromBackup
     job->set([&](Job& j) { j.project = *name; });
     if (info->database) {
         if (!load_from_backup(job, request.from, *info, *name, work, error)) {
-            job->finish("failed", "the project was made, but its database couldn't be loaded: " + error);
+            job->finish(job->cancel ? "cancelled" : "failed",
+                        "the project was made, but its database couldn't be loaded from the backup (" + error +
+                            "): it's empty.");
             return;
         }
         point_at_database(job, dir, *name);
     }
+    job->set([](Job& j) { j.cancellable = false; });
     job->set_step("Done");
     job->finish("done", {});
 }

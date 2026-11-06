@@ -1,8 +1,9 @@
 // Backups in the window (D22, mockups approved 5 Nov): Back up as zip… and
 // Restore from backup… in a project row's menu, From a backup… on New
 // project's first page, and a .zip opened with FloServer. The dialogs are
-// backup_dialogs.cpp's; the service does the work as a job, which a dialog
-// of its own follows. As with removing a project, the dialogs run their own
+// backup_dialogs.cpp's; the service does all the work as a job (a restore
+// checks the backup before it touches today's files, and moves them aside
+// itself), which a dialog of its own follows. As with removing a project, the dialogs run their own
 // message loop: a quit or a new language waits for them (asking_).
 
 #include "main_window.h"
@@ -22,16 +23,10 @@ namespace {
 
 constexpr std::string_view kPlanPurpose = "backup-plan\n";
 
-bool folder_exists(const std::string& path) {
-    const DWORD attributes = GetFileAttributesW(win::widen(path).c_str());
-    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-}
-
 }  // namespace
 
 bool MainWindow::backup_busy() const {
-    return backup_job_ || asking_ || quitting_ || !backup_planning_.empty() || !restore_recycling_.empty() ||
-           !remove_checking_.empty();
+    return backup_job_ || asking_ || quitting_ || !backup_planning_.empty() || !remove_checking_.empty();
 }
 
 void MainWindow::open_backup(std::string file) {
@@ -97,10 +92,6 @@ void MainWindow::run_backup_steps() {
         if (choice) {
             show_backup_outcome("backup", plan.name, result);
         }
-    } else if (!restore_ready_.empty()) {
-        const auto [project, choice] = restore_ready_.front();
-        restore_ready_.erase(restore_ready_.begin());
-        run_restore(project, choice);
     } else if (!open_backup_.empty() && worker_ && snap_.link == Link::Connected) {
         const std::string file = std::exchange(open_backup_, {});
         start_from_backup(file);
@@ -114,7 +105,7 @@ void MainWindow::run_backup_steps() {
         return;
     }
     // Whatever else waits.
-    if (backup_plan_ || !restore_ready_.empty() || !open_backup_.empty()) {
+    if (backup_plan_ || !open_backup_.empty()) {
         PostMessageW(hwnd_, kBackupMessage, 0, 0);
     }
 }
@@ -144,41 +135,7 @@ void MainWindow::start_restore(const std::string& project) {
     if (!choice || !worker_ || snap_.link != Link::Connected || leaving(project)) {
         return;
     }
-    // Today's files go to the Recycle Bin first; the service unpacks the
-    // backup's only once they're gone (on_restore_recycled()).
-    if (choice->files && !row.path.empty() && folder_exists(row.path)) {
-        restore_recycling_[project] = *choice;
-        recycle_bin_.start(project, false, row.path, folder_guard(project),
-                           std::string(text(lang_, Str::RemoveFolderRefused)), {});
-        SetCursor(LoadCursorW(nullptr, IDC_APPSTARTING));
-        return;
-    }
     run_restore(project, *choice);
-}
-
-bool MainWindow::on_restore_recycled(const RecycleBin::Result& r) {
-    const auto it = restore_recycling_.find(r.project);
-    if (it == restore_recycling_.end()) {
-        return false;
-    }
-    const RestoreChoice choice = it->second;
-    restore_recycling_.erase(it);
-    switch (r.outcome) {
-        case FolderOutcome::Recycled:
-        case FolderOutcome::Deleted:
-        case FolderOutcome::Gone:
-            restore_ready_.emplace_back(r.project, choice);
-            PostMessageW(hwnd_, kBackupMessage, 0, 0);
-            break;
-        case FolderOutcome::Cancelled:
-            show_notice(fill(lang_, Str::RestoreCancelled, {r.project}), false);
-            break;
-        case FolderOutcome::Stayed:
-        case FolderOutcome::NotAsked:
-            show_notice(fill(lang_, Str::RestoreNotRecycled, {r.project, r.reason}), true);
-            break;
-    }
-    return true;
 }
 
 void MainWindow::run_restore(const std::string& project, const RestoreChoice& choice) {

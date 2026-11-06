@@ -51,6 +51,7 @@ constexpr WORD kFilesNote = 117;
 constexpr WORD kNote = 118;
 constexpr WORD kLine = 119;
 constexpr WORD kBar = 120;
+constexpr WORD kForeignNote = 121;
 constexpr WORD kFolderBox = 130;   // + i
 constexpr WORD kFolderNote = 150;  // + i
 constexpr WORD kConfirm = IDOK;
@@ -266,8 +267,11 @@ struct Inspected {
 Inspected inspect(const std::string& file) {
     Inspected out;
     const auto info = core::read_backup_info(core::path_from_utf8(file), out.error);
+    out.error = core::shown_text(out.error);  // it may quote a name from the zip
     if (info) {
-        out.summary = BackupSummary{info->name, info->date, info->versions, info->database, info->left_out};
+        const auto data = core::data_dir();
+        out.summary = BackupSummary{info->name, info->date, info->versions, info->database, info->left_out,
+                                    data && core::made_here(*info, *data)};
     }
     return out;
 }
@@ -391,6 +395,7 @@ void from_backup_load(HWND dialog, FromBackupDialog& d, const std::string& file)
         set_item(dialog, kDescribed, fill(d.lang, Str::BackupNotUsable, {found.error}));
         show_item(dialog, kDatabaseNote, false);
         show_item(dialog, kInstallBox, false);
+        show_item(dialog, kForeignNote, false);
         EnableWindow(GetDlgItem(dialog, kConfirm), FALSE);
         return;
     }
@@ -400,7 +405,10 @@ void from_backup_load(HWND dialog, FromBackupDialog& d, const std::string& file)
     d.setting_name = false;
     show_item(dialog, kDatabaseNote, found.summary->database);
     show_item(dialog, kInstallBox, !found.summary->left_out.empty());
-    CheckDlgButton(dialog, kInstallBox, BST_CHECKED);
+    // Ticked for a backup made here; one from elsewhere would run its
+    // packages' own scripts, so the user ticks it (the note says why).
+    CheckDlgButton(dialog, kInstallBox, found.summary->made_here ? BST_CHECKED : BST_UNCHECKED);
+    show_item(dialog, kForeignNote, !found.summary->left_out.empty() && !found.summary->made_here);
     from_backup_check_name(dialog, d);
 }
 
@@ -418,6 +426,7 @@ INT_PTR CALLBACK from_backup_proc(HWND dialog, UINT msg, WPARAM wparam, LPARAM l
             } else {
                 show_item(dialog, kDatabaseNote, false);
                 show_item(dialog, kInstallBox, false);
+                show_item(dialog, kForeignNote, false);
                 EnableWindow(GetDlgItem(dialog, kConfirm), FALSE);
                 SetFocus(GetDlgItem(dialog, kFileButton));
             }
@@ -499,6 +508,9 @@ void restore_load(HWND dialog, RestoreDialog& d, const std::string& file) {
     if (found.summary && found.summary->database && d.has_database) {
         CheckDlgButton(dialog, kDatabaseBox, BST_CHECKED);
     }
+    const bool made_here = found.summary && found.summary->made_here;
+    CheckDlgButton(dialog, kInstallBox, made_here ? BST_CHECKED : BST_UNCHECKED);
+    show_item(dialog, kForeignNote, found.summary && !made_here && !found.summary->left_out.empty());
     restore_update(dialog, d);
 }
 
@@ -536,7 +548,7 @@ INT_PTR CALLBACK restore_proc(HWND dialog, UINT msg, WPARAM wparam, LPARAM lpara
             SetWindowLongPtrW(dialog, DWLP_USER, lparam);
             d->common.open(dialog);
             CheckDlgButton(dialog, kFilesBox, BST_CHECKED);
-            CheckDlgButton(dialog, kInstallBox, BST_CHECKED);
+            show_item(dialog, kForeignNote, false);
             // What each box does, said with it.
             set_accessible_help(GetDlgItem(dialog, kFilesBox), d->files_note);
             if (HWND box = GetDlgItem(dialog, kDatabaseBox); box != nullptr) {
@@ -841,8 +853,9 @@ std::optional<FromBackupChoice> ask_from_backup(HWND owner, Lang lang, const Fro
     text_item(kNameProblem, {}, 9, 0, 2);
     text_item(kWhere, {}, 18, 0, 4);
     text_item(kDatabaseNote, form.database_note, 18, 0, 4);
-    layout.add(BS_AUTOCHECKBOX | WS_TABSTOP, 10, kInstallBox, DialogTemplate::kButton, 0, 4);
+    layout.add(BS_AUTOCHECKBOX | WS_TABSTOP, 10, kInstallBox, DialogTemplate::kButton, 0, 1);
     d.common.texts.emplace_back(kInstallBox, w(form.install));
+    text_item(kForeignNote, form.foreign, 18, kIndent, 4);
     layout.buttons(BS_DEFPUSHBUTTON, BS_PUSHBUTTON);
     d.common.texts.emplace_back(kConfirm, w(form.create));
     d.common.texts.emplace_back(static_cast<WORD>(IDCANCEL), w(form.cancel));
@@ -883,8 +896,9 @@ std::optional<RestoreChoice> ask_restore(HWND owner, Lang lang, const std::strin
         d.common.texts.emplace_back(kDatabaseBox, w(form.database));
         text_item(kDatabaseNote, form.database_note, 9, kIndent, 5);
     }
-    layout.add(BS_AUTOCHECKBOX | WS_TABSTOP, 10, kInstallBox, DialogTemplate::kButton, 0, 6);
+    layout.add(BS_AUTOCHECKBOX | WS_TABSTOP, 10, kInstallBox, DialogTemplate::kButton, 0, 1);
     d.common.texts.emplace_back(kInstallBox, w(form.install));
+    text_item(kForeignNote, form.foreign, 18, kIndent, 6);
     text_item(kNote, form.note, 9, 0, 4);
     // Restore in red; Cancel is the default and has the keys: Enter and Esc keep everything.
     layout.buttons(BS_OWNERDRAW, BS_DEFPUSHBUTTON);

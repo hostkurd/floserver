@@ -283,8 +283,8 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             return 0;
         case WM_SETCURSOR:
             if (LOWORD(lparam) == HTCLIENT && win::int_to_ptr<HWND>(wparam) == hwnd_ &&
-                (!remove_checking_.empty() || !backup_planning_.empty() || !restore_recycling_.empty())) {
-                // The remove question, the Back up dialog or a restore is on its way.
+                (!remove_checking_.empty() || !backup_planning_.empty())) {
+                // The remove question or the Back up dialog is on its way.
                 SetCursor(LoadCursorW(nullptr, IDC_APPSTARTING));
                 return TRUE;
             }
@@ -660,8 +660,7 @@ void MainWindow::on_snapshot() {
     update_visible();
     // A .zip opened with FloServer before the service answered, or a backup
     // step that waited for another question to be answered.
-    const bool backup_waits = (!open_backup_.empty() && snap_.link == Link::Connected) || backup_plan_ ||
-                              !restore_ready_.empty();
+    const bool backup_waits = (!open_backup_.empty() && snap_.link == Link::Connected) || backup_plan_;
     if (backup_waits && !asking_ && !backup_job_) {
         PostMessageW(hwnd_, kBackupMessage, 0, 0);
     }

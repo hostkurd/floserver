@@ -1204,6 +1204,8 @@ struct Service {
             json out = core::backup_info_json(*info);
             std::error_code ec;
             out["path"] = core::path_to_utf8(file);
+            // Its left-out packages are installed again by default only when it was made here.
+            out["made_here"] = core::made_here(*info, *data);
             out["bytes"] = std::filesystem::file_size(file, ec);
             const std::string fresh = core::copy_name(info->name, taken);
             out["new_name"] = fresh;
@@ -1217,7 +1219,7 @@ struct Service {
             request.from = file;
             request.files = bool_param(r.params, "files").value_or(true);
             request.database = bool_param(r.params, "database").value_or(true);
-            request.install = bool_param(r.params, "install").value_or(true);
+            request.install = bool_param(r.params, "install");
             const auto id = backups->restore(request, refusal);
             return id ? protocol::make_result(r.id, {{"job", *id}})
                       : protocol::make_error(r.id, refusal.code, refusal.message);
@@ -1229,7 +1231,7 @@ struct Service {
         core::FromBackupRequest request;
         request.from = file;
         request.parent = *parent;
-        request.install = bool_param(r.params, "install").value_or(true);
+        request.install = bool_param(r.params, "install");
         request.name = name;
         if (request.name.empty()) {
             const auto info = core::read_backup_info(file, error);
@@ -1434,9 +1436,11 @@ floserver::core::BackupHooks backup_hooks(const std::shared_ptr<Service>& servic
         return true;
     };
     hooks.load_database = [s](const std::string& project, const std::filesystem::path& sql,
-                              const std::atomic<bool>& cancel, std::string& error) {
+                              const std::filesystem::path& extras, const std::atomic<bool>& cancel,
+                              std::string& warning, std::string& error) {
         core::ServiceRefusal refusal;
-        if (!s->databases || !s->databases->load_project_database(project, sql, cancel, refusal)) {
+        if (!s->databases ||
+            !s->databases->load_project_database(project, sql, cancel, refusal, extras, &warning)) {
             error = s->databases ? refusal.message : std::string("there's no database service");
             return false;
         }

@@ -7,13 +7,17 @@
 //   backup   the project keeps running: its database is dumped first
 //            (--single-transaction), then its files go into "<to>.part",
 //            renamed to <to> once the zip is whole;
-//   restore  the project stops; today's database is saved next to the
-//            backup ("<name> before restore <date>.sql") and the files are
-//            unpacked beside the folder, and only then is anything replaced:
-//            the database loaded from the backup, the folder swapped in
-//            (one the window didn't move to the Recycle Bin is renamed
-//            "<folder> before restore <date>", never deleted), .env updated,
-//            the left-out packages installed. Then it starts again;
+//   restore  the backup is checked and its files unpacked beside the folder
+//            (every name, the sizes, the free space) before anything is
+//            touched; then the project stops, today's database is saved
+//            next to the backup ("<name> before restore <date>.sql", or in
+//            <data>/backups-saved when that folder can't be written), today's
+//            folder is renamed "<folder> before restore <date>" (never
+//            deleted) and the backup's put in its place, and only then is
+//            the database loaded. A load that fails or is cancelled puts
+//            today's files and database back. .env is updated, the left-out
+//            packages installed, and it starts again (if it has a folder).
+//            Every ending says what was changed and where today's are;
 //   create   a new project from a backup: unpacked into the projects
 //            folder, its packages installed, added and turned on, its own
 //            database made from the backup and .env (or wp-config.php)
@@ -55,10 +59,15 @@ struct BackupHooks {
     std::function<bool(const std::string& project, const std::filesystem::path& work, const std::atomic<bool>& cancel,
                        std::string& error)>
         dump_database;
-    // Runs prepared SQL (prepare_sql_for_load) with the project's own login.
-    std::function<bool(const std::string& project, const std::filesystem::path& sql, const std::atomic<bool>& cancel,
+    // Runs prepared SQL (SqlLoadWriter) with the project's own login, its
+    // routines and events (`extras`, when not empty) after, where a refusal
+    // is a `warning`. Stops when `cancel` is set.
+    std::function<bool(const std::string& project, const std::filesystem::path& sql,
+                       const std::filesystem::path& extras, const std::atomic<bool>& cancel, std::string& warning,
                        std::string& error)>
         load_database;
+    // The free space in a folder; empty: the file system's own answer.
+    std::function<std::optional<std::uint64_t>(const std::filesystem::path& folder)> free_space;
     // The project's database login (made the first time).
     std::function<std::optional<DatabaseLogin>(const std::string& project, std::string& error)> database_login;
     // Registers the folder as a project, turned on; its name, or nothing.
@@ -77,19 +86,22 @@ struct BackupRequest {
     std::optional<std::vector<std::string>> leave_out;
 };
 
+// `install`: run what brings back the left-out folders (composer install...:
+// the packages' own scripts run as the user). Nothing: only for a backup
+// made on this computer.
 struct RestoreRequest {
     std::string project;
     std::filesystem::path from;
     bool files = true;
     bool database = true;
-    bool install = true;
+    std::optional<bool> install;
 };
 
 struct FromBackupRequest {
     std::filesystem::path from;
     std::string name;              // the new project's
     std::filesystem::path parent;  // where its folder is made (absolute)
-    bool install = true;
+    std::optional<bool> install;
 };
 
 class BackupService {
@@ -117,7 +129,8 @@ public:
     [[nodiscard]] std::optional<nlohmann::json> job(std::int64_t id) const;
     bool cancel(std::int64_t id);
     [[nodiscard]] bool busy() const;
-    // Cancels every job and waits for them.
+    // Cancels every job and waits for them: what they run is stopped
+    // (a dump, a load, composer...), and a load is bounded by its time limit.
     void stop();
 
     static constexpr std::size_t kLogLines = 400;
@@ -133,9 +146,20 @@ private:
     // The commands that bring back what was left out; false (with `error`) when one fails.
     bool reinstall(const std::shared_ptr<Job>& job, const std::filesystem::path& dir,
                    const std::vector<std::string>& left_out, std::string& error);
-    // The backup's database.sql loaded into the project's database.
+    // The backup's database loaded into the project's database (Cancel stops it).
     bool load_from_backup(const std::shared_ptr<Job>& job, const std::filesystem::path& zip, const BackupInfo& info,
                           const std::string& project, const std::filesystem::path& work, std::string& error);
+    // A .sql kept by a restore loaded back.
+    bool load_saved(const std::string& project, const std::filesystem::path& saved, const std::filesystem::path& work,
+                    std::string& error);
+    // The backup's files unpacked beside `dir` (".flo-r<id>"), or nothing.
+    std::optional<std::filesystem::path> unpack_beside(const std::shared_ptr<Job>& job,
+                                                       const std::filesystem::path& zip, const BackupInfo& info,
+                                                       const std::filesystem::path& dir, std::string& error);
+    // Its database is there, not too large, and fits where it's prepared.
+    bool check_database_entry(const std::filesystem::path& zip, const BackupInfo& info,
+                              const std::filesystem::path& work, std::string& error) const;
+    [[nodiscard]] std::optional<std::uint64_t> free_space(const std::filesystem::path& folder) const;
     // .env (or wp-config.php) pointed at the project's database.
     void point_at_database(const std::shared_ptr<Job>& job, const std::filesystem::path& dir,
                            const std::string& project);

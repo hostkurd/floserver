@@ -481,9 +481,6 @@ FolderGuard MainWindow::folder_guard(const std::string& project) const {
 
 void MainWindow::on_recycled() {
     for (const RecycleBin::Result& r : recycle_bin_.take()) {
-        if (on_restore_recycled(r)) {
-            continue;  // a restore's folder: the restore goes on (or says why not)
-        }
         const RemoveOutcome said = remove_outcome(r.project, r.database_dropped, r.outcome, r.reason, lang_);
         show_notice(said.text, said.error);
     }
