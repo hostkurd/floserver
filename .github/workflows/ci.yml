@@ -90,6 +90,86 @@ jobs:
             ForEach-Object { "{0,-16} {1,10:N0} bytes" -f $_.Name, $_.Length }
           "vcruntime/:"
           Get-ChildItem build/bin/Release/vcruntime | ForEach-Object { "  {0,-28} {1,10:N0} bytes" -f $_.Name, $_.Length }
+      # D15: the service's memory with nothing running, and the window's
+      # memory and time to its first paint (FloServer.exe --measure, the
+      # median of three starts). Over a budget fails the PR; the numbers are
+      # in src/ui-win32/model/start_measure.h too.
+      - name: Check memory and start-time budgets (D15)
+        shell: pwsh
+        env:
+          FLOSERVER_DATA_DIR: ${{ runner.temp }}\floserver-budgets
+          FLOSERVER_INSTANCE: budgets
+          FLOSERVER_WEB_PORTS: "18180,18543"
+          FLOSERVER_UPDATE_DELAY: "3600"  # no update check while it's measured
+        run: |
+          $bin = "build/bin/Release"
+          $ErrorActionPreference = "Continue"
+          trap {
+            Write-Host "::error title=Budgets::script error at line $($_.InvocationInfo.ScriptLineNumber): $($_.Exception.Message)"
+            & "$bin/flo.exe" service stop 2>&1 | Out-Null
+            exit 1
+          }
+          function Fail([string]$what, [string]$output) {
+            $flat = ($output -replace "`r?`n", " | ").Trim()
+            if ($flat.Length -gt 3000) { $flat = $flat.Substring(0, 3000) }
+            Write-Host "::error title=Budgets::$what :: $flat"
+            & "$bin/flo.exe" service stop 2>&1 | Out-Null
+            exit 1
+          }
+          # The budgets (D15): MiB and ms.
+          $serviceBudget = 10MB
+          $windowBudget = 20MB
+          $startBudget = 300
+          New-Item -ItemType Directory -Force -Path $env:FLOSERVER_DATA_DIR | Out-Null
+
+          $out = & "$bin/flo.exe" service start 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { Fail "flo service start (exit $LASTEXITCODE)" $out }
+          Start-Sleep -Seconds 3   # idle, with an empty data folder
+          $statusText = & "$bin/flo.exe" status --json 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { Fail "flo status --json (exit $LASTEXITCODE)" $statusText }
+          $serviceBytes = ($statusText | ConvertFrom-Json).memory_bytes
+          if ($null -eq $serviceBytes) { Fail "flo status gave no memory_bytes" $statusText }
+
+          # Three starts of the window, each to its first paint and ~2 s on.
+          $runs = @()
+          foreach ($i in 1..3) {
+            $file = Join-Path $env:RUNNER_TEMP "measure-$i.json"
+            Remove-Item $file -ErrorAction SilentlyContinue
+            $p = Start-Process "$bin/FloServer.exe" -ArgumentList '--measure', "`"$file`"", '--instance', $env:FLOSERVER_INSTANCE -PassThru
+            $null = $p.Handle   # kept, or ExitCode reads empty once it has gone
+            if (-not $p.WaitForExit(30000)) {
+              Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+              Fail "FloServer.exe --measure (start $i) didn't close within 30 s" ""
+            }
+            if ($p.ExitCode -ne 0 -or -not (Test-Path $file)) {
+              Fail "FloServer.exe --measure (start $i) exited with $($p.ExitCode) and no measurement" ""
+            }
+            $runs += Get-Content $file -Raw | ConvertFrom-Json
+          }
+          function Median([double[]]$values) { ($values | Sort-Object)[[int][math]::Floor($values.Count / 2)] }
+          $startMs = Median ($runs | ForEach-Object { $_.first_window_ms })
+          $windowBytes = Median ($runs | ForEach-Object { $_.private_bytes })
+          $workingSet = Median ($runs | ForEach-Object { $_.working_set_bytes })
+
+          $alive = (& "$bin/flo.exe" status 2>&1 | Out-String)
+          if ($LASTEXITCODE -ne 0) { Fail "the service stopped when the measured window closed" $alive }
+          & "$bin/flo.exe" service stop 2>&1 | Out-Null
+
+          "{0,-34} {1,12} {2,12}" -f "", "measured", "budget"
+          "{0,-34} {1,8:N1} MiB {2,8:N1} MiB" -f "service, private bytes (idle)", ($serviceBytes / 1MB), ($serviceBudget / 1MB)
+          "{0,-34} {1,8:N1} MiB {2,8:N1} MiB" -f "window, private bytes", ($windowBytes / 1MB), ($windowBudget / 1MB)
+          "{0,-34} {1,8:N1} MiB {2,12}" -f "window, working set", ($workingSet / 1MB), "-"
+          "{0,-34} {1,9:N0} ms {2,9:N0} ms" -f "first window shown", $startMs, $startBudget
+          "runs (ms / private MiB): " + (($runs | ForEach-Object { "{0} / {1:N1}" -f $_.first_window_ms, ($_.private_bytes / 1MB) }) -join ", ")
+          "::notice title=Budgets (D15)::service {0:N1} MiB idle, window {1:N1} MiB private ({2:N1} MiB working set), first window {3:N0} ms (median of 3)" -f ($serviceBytes / 1MB), ($windowBytes / 1MB), ($workingSet / 1MB), $startMs
+
+          $broken = @()
+          if ($serviceBytes -gt $serviceBudget) { $broken += "the service uses {0:N1} MiB with nothing running, over {1:N0} MiB" -f ($serviceBytes / 1MB), ($serviceBudget / 1MB) }
+          if ($windowBytes -gt $windowBudget) { $broken += "the window uses {0:N1} MiB, over {1:N0} MiB" -f ($windowBytes / 1MB), ($windowBudget / 1MB) }
+          if ($startMs -gt $startBudget) { $broken += "the first window took {0:N0} ms, over {1} ms" -f $startMs, $startBudget }
+          foreach ($b in $broken) { "::error title=Budgets (D15)::$b" }
+          if ($broken.Count -gt 0) { exit 1 }
+          exit 0
       # Real downloads from cdn.floserver.org through WinHTTP, into a
       # throwaway data folder: the signed list, then nginx (a zip that needs
       # the VC++ DLLs, so `nginx -v` proves they were added), Composer (a

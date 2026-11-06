@@ -27,11 +27,13 @@
 #include <shellapi.h>
 
 #include <array>
+#include <functional>
 #include <map>
 #include <optional>
 #include <memory>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace floserver::ui {
@@ -51,6 +53,8 @@ public:
     MainWindow& operator=(MainWindow&&) = delete;
 
     [[nodiscard]] bool create(int show);
+    // Called once, after the first paint finishes (FloServer.exe --measure, D15).
+    void on_first_paint(std::function<void(HWND)> hook) { first_paint_ = std::move(hook); }
 
 private:
     enum class Part : std::uint8_t {
@@ -864,6 +868,8 @@ private:
     // Settings (D20): only while it's open; where it was, for next time.
     std::unique_ptr<SettingsWindow> settings_;
     std::optional<WINDOWPLACEMENT> settings_placement_;
+
+    std::function<void(HWND)> first_paint_;  // on_first_paint()
 
     int scroll_ = 0;
     // The list's and the panel's scroll bars (scroll_bar.h), placed from the

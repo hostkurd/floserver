@@ -48,7 +48,7 @@ void print_help(std::ostream& out) {
     out << "FloServer " << floserver::core::kVersion << "\n\n"
         << "Usage: floserver <command>   (or: flo <command>)\n\n"
         << "Commands:\n"
-        << "  status                     Show whether FloServer is running\n"
+        << "  status [--json]            Show whether FloServer is running\n"
         << "  service start              Start FloServer in the background\n"
         << "  service stop               Stop FloServer and everything it runs\n"
         << "  start [project]            Start FloServer, or turn a project on and show its address\n"
@@ -106,7 +106,7 @@ std::string human_duration(std::int64_t seconds) {
     return out.str();
 }
 
-int status() {
+int status(bool as_json) {
     std::string error;
     auto client = floserver::core::ServiceClient::connect(floserver::core::ipc::default_instance(), error);
     if (!client) {
@@ -123,6 +123,11 @@ int status() {
         return 1;
     }
     const auto& r = reply->result;
+    if (as_json) {
+        // As the service says it: memory_bytes is private bytes on Windows (CI's budget, D15).
+        std::cout << r.dump(2, ' ', false, nlohmann::json::error_handler_t::replace) << "\n";
+        return 0;
+    }
     std::cout << "FloServer " << r.value("version", std::string("?")) << " is running (pid "
               << r.value("pid", 0) << ", up " << human_duration(r.value("uptime_s", std::int64_t{0}));
     if (r.contains("memory_bytes") && r["memory_bytes"].is_number_unsigned()) {
@@ -1432,7 +1437,11 @@ int run_command(const std::vector<std::string>& args, const std::vector<fs::path
         return 0;
     }
     if (args[0] == "status") {
-        return status();
+        if (args.size() > 2 || (args.size() == 2 && args[1] != "--json")) {
+            std::cerr << "Usage: flo status [--json]\n";
+            return 2;
+        }
+        return status(args.size() == 2);
     }
     if (args[0] == "start") {
         return start(args);

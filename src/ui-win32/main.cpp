@@ -6,20 +6,26 @@
 #include "apply_update.h"
 #include "canvas.h"
 #include "main_window.h"
+#include "model/start_measure.h"
 #include "model/ui_strings.h"
 #include "win_util.h"
 #include "window_prefs.h"
 #include "window_style.h"
 
 #include "floserver/core/ipc.h"
+#include "floserver/core/paths.h"
 
 #include <windows.h>
 #include <commctrl.h>
 #include <shellapi.h>
 #include <objbase.h>
+#include <psapi.h>
 
+#include <cstdint>
 #include <cstdlib>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -44,8 +50,8 @@ bool hand_over_to_running_window(const std::wstring& class_name) {
 }
 
 // FloServer.exe's arguments, without the program: [--tray] [--instance
-// <suffix>] as the Run entry writes them, or --apply-update <msi> ... for
-// the copy that installs an update.
+// <suffix>] as the Run entry writes them, --measure <file> for CI (D15), or
+// --apply-update <msi> ... for the copy that installs an update.
 std::vector<std::string> command_args() {
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -78,6 +84,73 @@ private:
     bool ok_;
 };
 
+std::uint64_t ticks(const FILETIME& t) { return (std::uint64_t{t.dwHighDateTime} << 32U) | t.dwLowDateTime; }
+
+// FloServer.exe --measure <file> (D15, checked in CI): the time from this
+// process's start to the window's first finished paint, then, a moment
+// later, its memory, written to <file>. Then the window closes; the service
+// keeps running (this isn't the tray's Quit). Nothing of it on a normal start.
+class StartMeter {
+public:
+    explicit StartMeter(std::string file) : file_(std::move(file)) {}
+
+    void painted(HWND window) {
+        window_ = window;
+        FILETIME created{};
+        FILETIME exited{};
+        FILETIME kernel{};
+        FILETIME user{};
+        FILETIME now{};
+        GetSystemTimePreciseAsFileTime(&now);
+        if (GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user) != FALSE) {
+            measure_.first_window_ms = floserver::ui::filetime_ms_between(ticks(created), ticks(now));
+        }
+        // A thread timer: no window of its own, so it can't reach the window's.
+        timer_ = SetTimer(nullptr, 0, static_cast<UINT>(floserver::ui::kMeasureSettle.count()), nullptr);
+        if (timer_ == 0) {
+            finish();
+        }
+    }
+
+    // The timer's WM_TIMER, which has no window: the message loop hands it here.
+    [[nodiscard]] bool takes(const MSG& msg) const {
+        return timer_ != 0 && msg.hwnd == nullptr && msg.message == WM_TIMER && msg.wParam == timer_;
+    }
+
+    void finish() {
+        if (timer_ != 0) {
+            KillTimer(nullptr, timer_);
+            timer_ = 0;
+        }
+        PROCESS_MEMORY_COUNTERS_EX counters{};
+        counters.cb = sizeof counters;
+        if (K32GetProcessMemoryInfo(GetCurrentProcess(),
+                                    reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&counters),  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast): the _EX form, as its cb says
+                                    sizeof counters) != FALSE) {
+            measure_.private_bytes = counters.PrivateUsage;
+            measure_.working_set_bytes = counters.WorkingSetSize;
+            std::string error;
+            written_ = floserver::core::write_file_atomically(floserver::core::path_from_utf8(file_),
+                                                              floserver::ui::measure_text(measure_), error);
+        }
+        // DestroyWindow, not WM_CLOSE: closing may be set to quit, service and all.
+        if (IsWindow(window_) != FALSE) {
+            DestroyWindow(window_);  // its WM_DESTROY ends the message loop
+        } else {
+            PostQuitMessage(1);
+        }
+    }
+
+    [[nodiscard]] bool written() const { return written_; }
+
+private:
+    std::string file_;
+    HWND window_ = nullptr;
+    UINT_PTR timer_ = 0;
+    floserver::ui::StartMeasure measure_;
+    bool written_ = false;
+};
+
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE /*prev*/, PWSTR /*cmd*/, int show) {
@@ -101,7 +174,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE /*prev*/, PWSTR /*cmd*/, int s
         return floserver::ui::run_apply_update(instance, lang, *update);
     }
     const floserver::ui::StartArgs args = floserver::ui::parse_start_args(command);
-    const bool tray = args.tray;
+    std::optional<StartMeter> meter;
+    if (auto file = floserver::ui::parse_measure_args(command)) {
+        meter.emplace(std::move(*file));
+    }
+    const bool tray = args.tray && !meter;  // measured: always shown
     if (!args.instance.empty()) {
         SetEnvironmentVariableW(L"FLOSERVER_INSTANCE", widen(args.instance).c_str());
     }
@@ -150,14 +227,24 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE /*prev*/, PWSTR /*cmd*/, int s
     const floserver::ui::WindowPrefs prefs = floserver::ui::load_window_prefs();
     floserver::ui::set_theme_choice(prefs.theme);
     floserver::ui::MainWindow window(instance, floserver::ui::window_lang(prefs), prefs, class_name);
+    if (meter) {
+        window.on_first_paint([&meter](HWND hwnd) { meter->painted(hwnd); });
+    }
     if (!window.create(tray ? SW_HIDE : show)) {
         return 1;
     }
 
     MSG msg{};
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (meter && meter->takes(msg)) {
+            meter->finish();
+            continue;
+        }
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
+    }
+    if (meter && !meter->written()) {
+        return 1;
     }
     return static_cast<int>(msg.wParam);
 }
