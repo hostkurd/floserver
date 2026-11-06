@@ -6,6 +6,7 @@
 // floserverd through ServiceWorker.
 
 #include "access_provider.h"
+#include "backup_dialogs.h"
 #include "canvas.h"
 #include "form_parts.h"
 #include "model/code_editor.h"
@@ -50,6 +51,12 @@ public:
     MainWindow& operator=(MainWindow&&) = delete;
 
     [[nodiscard]] bool create(int show);
+    // A .zip opened with FloServer (D22): New project from a backup, with it,
+    // once the service answers.
+    void open_backup(std::string file);
+
+    // WM_COPYDATA's dwData when a second FloServer.exe hands over a .zip to open.
+    static constexpr ULONG_PTR kOpenBackupData = 0x464C4231;  // "FLB1"
 
 private:
     enum class Part : std::uint8_t {
@@ -84,6 +91,7 @@ private:
         WizName,  // the name box (a real EDIT): a stop in the page's keyboard order
         WizBrowse,
         WizAddFolder,
+        WizFromBackup,  // "From a backup…" (D22)
         WizCancel,
         WizBack,
         WizNext,
@@ -219,6 +227,7 @@ private:
         RECT back{};
         RECT cancel{};
         RECT add_folder{};
+        RECT from_backup{};
         RECT message{};
         std::vector<RECT> cards;
         RECT name_label{};
@@ -424,6 +433,29 @@ private:
     void settle(const std::vector<std::string>& keys);
     // A toast (model/toast.h): information goes by itself, an error stays until closed.
     void show_notice(std::string text, bool error);
+    // One with a button that shows `file` in its folder (a backup made).
+    void show_notice_with_file(std::string text, const std::string& file);
+
+    // --- backups (D22, main_window_backup.cpp) ---
+    // Back up as zip…: backup.plan first (it counts the folder's size, off
+    // this thread), then the dialog (kBackupMessage), then the job.
+    void start_backup(const std::string& project);
+    // backup.plan's answers, taken out of `answers`.
+    void on_backup_answers(std::vector<Snapshot::DbAnswer>& answers);
+    // Restore from backup…: the question; the folder to the Recycle Bin
+    // first when its files are replaced (on_recycled()), then the job.
+    void start_restore(const std::string& project);
+    void run_restore(const std::string& project, const RestoreChoice& choice);
+    // A restore's folder that went to the Recycle Bin (or didn't): true when `r` was one.
+    bool on_restore_recycled(const RecycleBin::Result& r);
+    // New project from a backup: the dialog (with `file` when one was opened), then the job.
+    void start_from_backup(const std::string& file);
+    // What waits for kBackupMessage: a plan's dialog, a restore whose
+    // folder has gone, a .zip opened before the service answered.
+    void run_backup_steps();
+    // Shows what a job's end says.
+    void show_backup_outcome(const std::string& kind, const std::string& project, const JobResult& result);
+    [[nodiscard]] bool backup_busy() const;
     // An error shown from before goes as the user tries again.
     void dismiss_error();
     void toast_event(ToastEvent event);
@@ -728,6 +760,14 @@ private:
     std::string remove_checking_;     // the project whose remove question waits for its folder's check
     bool quit_after_folder_ = false;  // Quit waits for a folder's move (Windows' question needs its owner)
     std::set<std::string> removed_;         // removed; hidden until the list no longer has them
+    std::string backup_planning_;            // the project whose backup.plan is on its way
+    std::optional<BackupPlan> backup_plan_;  // its answer: the dialog opens with kBackupMessage
+    std::map<std::string, RestoreChoice> restore_recycling_;            // restores whose folder is on its way to the Recycle Bin
+    std::vector<std::pair<std::string, RestoreChoice>> restore_ready_;  // ...and has gone
+    std::string open_backup_;   // a .zip opened with FloServer, until the service answers
+    std::string toast_file_;    // the toast's Show in folder
+    bool backup_job_ = false;   // a backup dialog or job is open
+    static constexpr UINT kBackupMessage = WM_APP + 12;
     Toast toast_;  // the message shown (model/toast.h)
     ToastGeometry toast_geometry_;
     ToastPopup toast_popup_;  // where it's shown: a popup of its own over the content

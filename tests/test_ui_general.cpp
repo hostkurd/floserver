@@ -164,6 +164,9 @@ TEST_CASE("the Run entry of a copy that isn't the default carries its instance")
     CHECK(both.tray);
     CHECK(both.instance == "dev");
     CHECK(parse_start_args({}).instance.empty());
+    // A backup opened with FloServer.
+    CHECK(parse_start_args({"C:\\Users\\me\\shop 2026-11-05 1430.ZIP"}).open == "C:\\Users\\me\\shop 2026-11-05 1430.ZIP");
+    CHECK(parse_start_args({"--tray", "notes.txt"}).open.empty());
     CHECK_FALSE(parse_start_args({}).tray);
     CHECK(parse_start_args({"--instance"}).instance.empty());           // no value
     CHECK(parse_start_args({"--instance", "Dev!"}).instance.empty());   // not an instance name

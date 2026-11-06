@@ -43,6 +43,7 @@ add_executable(floserver_ui WIN32
     main_window_wizard.cpp
     main_window_first_run.cpp
     main_window_menu.cpp
+    main_window_backup.cpp
     main_window_access.cpp
     access_provider.cpp
     canvas.cpp
@@ -61,6 +62,7 @@ add_executable(floserver_ui WIN32
     settings_shared.cpp
     settings_window_access.cpp
     form_parts.cpp
+    backup_dialogs.cpp
     scroll_bar.cpp
     window_style.cpp
     FloServer.rc)

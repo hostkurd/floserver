@@ -25,8 +25,9 @@ namespace {
 using floserver::ui::win::widen;
 
 // One window per user session and service instance: a second FloServer.exe
-// brings the first one forward and ends.
-bool hand_over_to_running_window(const std::wstring& class_name) {
+// brings the first one forward and ends, handing over a .zip it was opened
+// with (New project from a backup there).
+bool hand_over_to_running_window(const std::wstring& class_name, const std::string& open) {
     // The first copy may still be opening its window; give it a moment.
     for (int attempt = 0; attempt < 20; ++attempt) {
         if (HWND existing = FindWindowW(class_name.c_str(), nullptr); existing != nullptr) {
@@ -34,6 +35,15 @@ bool hand_over_to_running_window(const std::wstring& class_name) {
             GetWindowThreadProcessId(existing, &pid);
             AllowSetForegroundWindow(pid);
             PostMessageW(existing, floserver::ui::kShowWindowMessage, 0, 0);
+            if (!open.empty()) {
+                COPYDATASTRUCT data{};
+                data.dwData = floserver::ui::MainWindow::kOpenBackupData;
+                data.cbData = static_cast<DWORD>(open.size());
+                data.lpData = const_cast<char*>(open.data());  // NOLINT(cppcoreguidelines-pro-type-const-cast): only read
+                DWORD_PTR ignored = 0;
+                SendMessageTimeoutW(existing, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&data), SMTO_ABORTIFHUNG, 5000,
+                                    &ignored);
+            }
             return true;
         }
         Sleep(100);
@@ -94,7 +104,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE /*prev*/, PWSTR /*cmd*/, int s
         if (tray) {
             return 0;  // already running: nothing to bring forward at sign-in
         }
-        return hand_over_to_running_window(class_name) ? 0 : 1;
+        return hand_over_to_running_window(class_name, args.open) ? 0 : 1;
     }
 
     // Opening an address goes through the shell, which may use COM.
@@ -117,6 +127,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE /*prev*/, PWSTR /*cmd*/, int s
     floserver::ui::MainWindow window(instance, floserver::ui::window_lang(prefs), prefs, class_name);
     if (!window.create(tray ? SW_HIDE : show)) {
         return 1;
+    }
+    if (!args.open.empty()) {
+        window.open_backup(args.open);
     }
 
     MSG msg{};

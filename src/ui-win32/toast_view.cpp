@@ -28,7 +28,12 @@ ToastGeometry toast_geometry(HDC dc, const Toast& toast, HFONT font, int window_
     const int close = px(24, dpi);
     const int gap = px(8, dpi);
     const int most = std::min(window_w - px(32, dpi), toast_max_width(window_w, px(240, dpi)));
-    const int text_most = std::max(px(40, dpi), most - 2 * pad_x - close - gap);
+    // Its button, as wide as its words.
+    const int action_w = toast.action.empty()
+                             ? 0
+                             : Canvas::measure(dc, win::widen(toast.action), font, rtl) + 2 * px(12, dpi);
+    const int action_gap = action_w > 0 ? gap : 0;
+    const int text_most = std::max(px(40, dpi), most - 2 * pad_x - close - gap - action_w - action_gap);
     const int one_line = Canvas::measure(dc, text, font, rtl);
     const int text_w = std::min(one_line + px(2, dpi), text_most);
     // Its height, wrapped as the canvas wraps it, at most kToastMaxLines lines.
@@ -40,7 +45,7 @@ ToastGeometry toast_geometry(HDC dc, const Toast& toast, HFONT font, int window_
     DrawTextW(dc, text.c_str(), static_cast<int>(text.size()), &measured,
               DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL | (rtl ? UINT{DT_RTLREADING} : 0U));
     const int text_h = std::clamp(static_cast<int>(measured.bottom - measured.top), line_h, line_h * kToastMaxLines);
-    const int card_w = text_w + 2 * pad_x + close + gap;
+    const int card_w = text_w + 2 * pad_x + close + gap + action_w + action_gap;
     const int card_h = std::max(text_h + 2 * pad_y, close + px(8, dpi));
     const int left = (window_w - card_w) / 2;
     g.card = {left, bottom - card_h, left + card_w, bottom};
@@ -48,11 +53,15 @@ ToastGeometry toast_geometry(HDC dc, const Toast& toast, HFONT font, int window_
               g.card.top + (card_h - text_h) / 2 + text_h};
     const int cy = (g.card.top + g.card.bottom) / 2;
     g.close = {g.card.right - px(6, dpi) - close, cy - close / 2, g.card.right - px(6, dpi), cy - close / 2 + close};
+    if (action_w > 0) {
+        const int h = px(26, dpi);
+        g.action = {g.text.right + action_gap, cy - h / 2, g.text.right + action_gap + action_w, cy - h / 2 + h};
+    }
     return g;
 }
 
 void paint_toast(Canvas& c, const ToastGeometry& g, const Toast& toast, HFONT font, bool dark, UINT dpi,
-                 bool close_hover, bool text_pass) {
+                 bool close_hover, bool text_pass, bool action_hover) {
     if (g.card.right <= g.card.left || toast.text.empty()) {
         return;
     }
@@ -60,8 +69,12 @@ void paint_toast(Canvas& c, const ToastGeometry& g, const Toast& toast, HFONT fo
     const bool error = toast.kind == ToastKind::Error;
     const Rgb fill = error ? p.banner_error.fill : p.card;
     const Rgb ink = error ? p.banner_error.text : p.text;
+    const bool action = !toast.action.empty() && g.action.right > g.action.left;
     if (text_pass) {
         c.paragraph(g.text, win::widen(toast.text), font, ink);
+        if (action) {
+            c.text(g.action, win::widen(toast.action), font, ink, Align::Center, false);
+        }
         return;
     }
     // Opaque, edge to edge (the popup's own region rounds its corners), with a border.
@@ -72,6 +85,11 @@ void paint_toast(Canvas& c, const ToastGeometry& g, const Toast& toast, HFONT fo
         c.round_outline(g.close, pxf(4, dpi), ink, std::max(1.0F, pxf(1.0F, dpi)));
     } else if (close_hover) {
         c.round_rect(g.close, pxf(4, dpi), p.row_hover);
+    }
+    if (action) {
+        // A plain button: outlined, filled while the mouse is over it.
+        c.round_rect(g.action, pxf(4, dpi), action_hover ? p.row_hover : fill, error ? ink : p.card_border,
+                     std::max(1.0F, pxf(1.0F, dpi)));
     }
     const float cx = static_cast<float>(g.close.left + g.close.right) / 2.0F;
     const float cy = static_cast<float>(g.close.top + g.close.bottom) / 2.0F;
@@ -106,6 +124,7 @@ void ToastPopup::attach(HWND owner, UINT message) {
     region_dpi_ = 0;
     tracking_ = false;
     close_hover_ = false;
+    action_hover_ = false;
     owner_ = owner;
     message_ = message;
 }
@@ -137,6 +156,7 @@ void ToastPopup::show(const Toast& toast, const ToastGeometry& g, HFONT font, bo
         }
         SetWindowLongPtrW(hwnd_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
         close_hover_ = false;
+        action_hover_ = false;
         tracking_ = false;
         toast_.text.clear();  // named below
     }
@@ -149,7 +169,7 @@ void ToastPopup::show(const Toast& toast, const ToastGeometry& g, HFONT font, bo
     const int w = g.card.right - g.card.left;
     const int h = g.card.bottom - g.card.top;
     local_ = g;
-    for (RECT* r : {&local_.card, &local_.text, &local_.close}) {
+    for (RECT* r : {&local_.card, &local_.text, &local_.close, &local_.action}) {
         OffsetRect(r, -g.card.left, -g.card.top);
     }
     // A font of its own, made like the window's: the window's may be made
@@ -186,6 +206,7 @@ void ToastPopup::hide() {
     }
     toast_ = {};
     close_hover_ = false;
+    action_hover_ = false;
     // The mouse can't be over a hidden card: the window's information toast
     // must not wait for a leave that never comes.
     if (tracking_ && owner_ != nullptr) {
@@ -215,14 +236,18 @@ void ToastPopup::place() {
     }
 }
 
-bool ToastPopup::over_close(LPARAM lparam) const {
+bool ToastPopup::over(const RECT& r, LPARAM lparam) const {
     int x = static_cast<short>(LOWORD(lparam));
     const int y = static_cast<short>(HIWORD(lparam));
     if (rtl_) {
         x = size_.cx - x;
     }
-    return x >= local_.close.left && x < local_.close.right && y >= local_.close.top && y < local_.close.bottom;
+    return x >= r.left && x < r.right && y >= r.top && y < r.bottom;
 }
+
+bool ToastPopup::over_close(LPARAM lparam) const { return over(local_.close, lparam); }
+
+bool ToastPopup::over_action(LPARAM lparam) const { return !toast_.action.empty() && over(local_.action, lparam); }
 
 void ToastPopup::paint() {
     PAINTSTRUCT ps{};
@@ -236,9 +261,9 @@ void ToastPopup::paint() {
             const win::Selected selected(mem.get(), bitmap.get());
             {
                 Canvas canvas(mem.get(), w, rtl_);
-                paint_toast(canvas, local_, toast_, font_, dark_, dpi_, close_hover_, false);
+                paint_toast(canvas, local_, toast_, font_, dark_, dpi_, close_hover_, false, action_hover_);
                 canvas.begin_text();
-                paint_toast(canvas, local_, toast_, font_, dark_, dpi_, close_hover_, true);
+                paint_toast(canvas, local_, toast_, font_, dark_, dpi_, close_hover_, true, action_hover_);
             }
             BitBlt(hdc, 0, 0, w, h, mem.get(), 0, 0, SRCCOPY);
         }
@@ -278,16 +303,20 @@ LRESULT ToastPopup::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
                 tracking_ = TrackMouseEvent(&tme) != FALSE;
                 PostMessageW(owner_, message_, kToastMouseEntered, 0);
             }
-            if (const bool over = over_close(lparam); over != close_hover_) {
-                close_hover_ = over;
+            const bool on_close = over_close(lparam);
+            const bool on_action = over_action(lparam);
+            if (on_close != close_hover_ || on_action != action_hover_) {
+                close_hover_ = on_close;
+                action_hover_ = on_action;
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
             return 0;
         }
         case WM_MOUSELEAVE:
             tracking_ = false;
-            if (close_hover_) {
+            if (close_hover_ || action_hover_) {
                 close_hover_ = false;
+                action_hover_ = false;
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
             PostMessageW(owner_, message_, kToastMouseLeft, 0);
@@ -295,6 +324,8 @@ LRESULT ToastPopup::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
         case WM_LBUTTONUP:
             if (over_close(lparam)) {
                 PostMessageW(owner_, message_, kToastCloseClicked, 0);
+            } else if (over_action(lparam)) {
+                PostMessageW(owner_, message_, kToastActionClicked, 0);
             }
             return 0;
         case WM_NCDESTROY: {

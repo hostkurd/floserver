@@ -315,6 +315,12 @@ void MainWindow::run_project_command(const std::string& project, MenuCommand com
         case MenuCommand::Remove:
             ask_remove(project);
             break;
+        case MenuCommand::BackUp:
+            start_backup(project);
+            break;
+        case MenuCommand::Restore:
+            start_restore(project);
+            break;
         case MenuCommand::None:
             break;
     }
@@ -475,6 +481,9 @@ FolderGuard MainWindow::folder_guard(const std::string& project) const {
 
 void MainWindow::on_recycled() {
     for (const RecycleBin::Result& r : recycle_bin_.take()) {
+        if (on_restore_recycled(r)) {
+            continue;  // a restore's folder: the restore goes on (or says why not)
+        }
         const RemoveOutcome said = remove_outcome(r.project, r.database_dropped, r.outcome, r.reason, lang_);
         show_notice(said.text, said.error);
     }

@@ -1120,12 +1120,14 @@ struct Service {
             if (!project) {
                 return protocol::make_error(r.id, "unknown_project", error);
             }
-            // Walked now, for this request only, and given up after a few seconds.
+            // Walked now, for this request only (on the window's side thread),
+            // each given up after a few seconds.
             const auto deadline = Clock::now() + std::chrono::seconds(8);
             const core::DiskUsage all = core::disk_usage(project->dir, deadline);
             json folders = json::array();
             for (const std::string& f : core::leavable_folders(project->dir)) {
-                const core::DiskUsage usage = core::disk_usage(project->dir / core::path_from_utf8(f), deadline);
+                const core::DiskUsage usage =
+                    core::disk_usage(project->dir / core::path_from_utf8(f), Clock::now() + std::chrono::seconds(4));
                 std::string tool;
                 for (const core::LeavableFolder& l : core::kLeavableFolders) {
                     if (l.folder == f) {
@@ -1143,7 +1145,7 @@ struct Service {
             return protocol::make_result(r.id, {{"name", project->name},
                                                 {"path", core::path_to_utf8(project->dir)},
                                                 {"bytes", all.bytes},
-                                                {"complete", all.complete && Clock::now() < deadline},
+                                                {"complete", all.complete},
                                                 {"folders", std::move(folders)},
                                                 {"database", std::move(database)},
                                                 {"default_file", file ? json(core::path_to_utf8(*file)) : json(nullptr)}});
