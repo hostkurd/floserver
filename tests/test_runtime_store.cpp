@@ -59,6 +59,7 @@ TEST_CASE("a runtime installs, with the VC++ DLLs next to its programs, and is l
     write_file(vc / "vcruntime140.dll", "vc");
     write_file(vc / "msvcp140.dll", "cpp");
     write_file(vc / "readme.txt", "not a dll");
+    write_file(vc / "other.dll", "a DLL that isn't the VC++ runtime's");
     const auto archive = tmp.path() / "php.zip";
     write_file(archive, make_zip({{"php-cgi.exe", "MZ cgi"},
                                   {"msvcp140.dll", "php's own copy"},
@@ -76,6 +77,7 @@ TEST_CASE("a runtime installs, with the VC++ DLLs next to its programs, and is l
     CHECK(read_file(r.dir / "vcruntime140.dll") == "vc");
     CHECK(read_file(r.dir / "msvcp140.dll") == "php's own copy");
     CHECK_FALSE(fs::exists(r.dir / "readme.txt"));
+    CHECK_FALSE(fs::exists(r.dir / "other.dll"));
     CHECK_FALSE(fs::exists(r.dir / "ext" / "vcruntime140.dll"));  // no programs there
     CHECK(is_installed(root, e));
 

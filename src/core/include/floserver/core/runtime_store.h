@@ -47,8 +47,10 @@ struct InstallResult {
 };
 
 // Installs from a downloaded archive that already matched the list. With a
-// non-empty `vc_runtime_dir`, its *.dll files are copied next to the
-// runtime's programs where those DLLs aren't already present.
+// non-empty `vc_runtime_dir`, the Visual C++ runtime DLLs in it
+// (vcruntime140*.dll, msvcp140*.dll, concrt140.dll, vccorlib140.dll; no
+// other files) are copied next to the runtime's programs where those DLLs
+// aren't already present.
 [[nodiscard]] InstallResult install_runtime(const RuntimeFile& entry, const std::filesystem::path& archive,
                                             const std::filesystem::path& runtimes_root,
                                             const std::filesystem::path& vc_runtime_dir);
