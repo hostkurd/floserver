@@ -25,11 +25,19 @@
 //         "urls": ["https://mirror.hostkurd.net/...", "https://windows.php.net/..."]
 //       }
 //     ],
-//     "templates": [...]                    // project templates, see templates.h
+//     "templates": [...],                   // project templates, see templates.h
+//     "app": {                              // optional: the newest Windows app (Q5)
+//       "version": "1.2.0",                 // x.y.z
+//       "platform": "windows-x86_64",
+//       "urls": ["https://cdn.floserver.org/app/1.2.0/FloServer-1.2.0-x64.msi"],
+//       "size": 9437184, "sha256": "<64 hex>",
+//       "notes_url": "https://floserver.org/..."   // optional: what's new
+//     }
 //   }
 //
-// Unknown keys are ignored so newer manifests still open in older apps. An
-// entry that fails its checks is skipped with a warning, not the whole file.
+// Unknown keys are ignored so newer manifests still open in older apps (one
+// from before "app" never reads it). An entry that fails its checks is
+// skipped with a warning, not the whole file; so is an "app" that fails.
 
 #include "floserver/core/sha256.h"
 #include "floserver/core/templates.h"
@@ -65,11 +73,24 @@ struct RuntimeFile {
     std::vector<std::string> urls;  // https only, in the order to try
 };
 
+// The Windows app's installer: the MSI an update downloads and installs.
+struct AppRelease {
+    std::string version;            // "1.2.0": always three numbers
+    std::string platform;           // kAppPlatform
+    std::vector<std::string> urls;  // https only, each naming an .msi
+    std::uint64_t size = 0;
+    Sha256Digest sha256{};
+    std::string notes_url;  // what's new: https, or empty
+};
+
+inline constexpr std::string_view kAppPlatform = "windows-x86_64";
+
 struct Manifest {
     std::int64_t sequence = 0;
     std::chrono::sys_seconds expires;
     std::vector<RuntimeFile> runtimes;
     std::vector<ProjectTemplate> templates;  // "templates" (D9), in card order
+    std::optional<AppRelease> app;           // "app", when the list has a usable one
 };
 
 enum class ManifestError : std::uint8_t {
@@ -118,6 +139,18 @@ inline constexpr std::int64_t kMaxSequenceJump = 100'000;
 [[nodiscard]] std::vector<RuntimeFile> runtimes_for(const Manifest& manifest,
                                                     std::string_view name,
                                                     std::string_view platform);
+
+// https://host[:port]/path, as every address in the list must be: a plain
+// lower-case host, no user info, fragment, quotes, spaces or NUL.
+[[nodiscard]] bool is_plain_https_url(std::string_view url);
+
+// The "app" entry, checked as open_manifest() checks it: why it can't be
+// used, or nothing (and `out` filled) when it can.
+[[nodiscard]] std::optional<std::string> read_app_release(const nlohmann::json& entry, AppRelease& out);
+
+// The installer as a file for download_file(): one file, not unpacked,
+// kept only at the list's size and SHA-256.
+[[nodiscard]] RuntimeFile app_download_entry(const AppRelease& app);
 
 // True when a downloaded file matches its manifest entry.
 [[nodiscard]] bool matches_entry(const RuntimeFile& entry, std::uint64_t size,

@@ -45,6 +45,7 @@ add_executable(floserver_tests
     test_web_service.cpp
     test_web_settings.cpp
     test_tar.cpp
+    test_update_service.cpp
     test_templates.cpp
     test_version.cpp
     test_zip.cpp)

@@ -11,6 +11,11 @@
 //   3. build the next list (live sequence + 1, 90 days) from those results;
 //   4. sign it (signing.h).
 // Uploading (to the R2 bucket behind the CDN) stays by hand.
+//
+// FloServer's own installer (app/<x.y.z>/FloServer-<x.y.z>-x64.msi, the
+// list's "app", Q5) is one of the files: checked by hand, as Apache is
+// (compare its SHA-256 with the CI artifact's and tick it), with its "What's
+// new" page typed after its path when it's added.
 
 #include "floserver/core/http.h"
 #include "floserver/core/manifest.h"
@@ -38,6 +43,7 @@ struct LiveList {
     std::vector<core::RuntimeFile> runtimes;
     std::size_t template_count = 0;
     std::string templates_json;  // the live "templates", compact JSON
+    std::optional<core::AppRelease> app;  // the live "app"
 };
 
 struct LiveResult {
@@ -66,18 +72,22 @@ struct PublishFile {
     CheckState state = CheckState::NotRun;
     std::string detail;      // what the check found, for the window
     bool accepted = false;   // a ByHand file the user compared and ticked
+    std::string notes_url;   // FloServer's installer: its "What's new" page, or empty
 };
 
-// The live list's files, in its order. A runtime whose first address isn't
-// on `cdn` can't be carried over and is left out with a note.
+// The live list's files, in its order, then its FloServer installer. One
+// whose first address isn't on `cdn` can't be carried over and is left out
+// with a note.
 [[nodiscard]] std::vector<PublishFile> files_from_live(const LiveList& live, std::string_view cdn,
                                                        std::vector<std::string>& notes);
 
-// "PHP 8.5.13" for php/8.5.13/...
+// "PHP 8.5.13" for php/8.5.13/..., "FloServer 1.2.0" for app/1.2.0/...
 [[nodiscard]] std::string runtime_title(std::string_view runtime, std::string_view version);
 
 // A new file to add: trims spaces, a leading '/' and a CDN address the user
-// pasted with it. Fails when the catalog can't carry it or it's already there.
+// pasted with it. FloServer's installer may have its "What's new" address
+// after it, past a space. Fails when the catalog can't carry it or it's
+// already there (one installer only: the one listed goes first).
 struct AddResult {
     std::optional<PublishFile> file;
     std::string error;

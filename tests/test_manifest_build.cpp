@@ -307,3 +307,72 @@ TEST_CASE("the built-in templates go into the list, and their runtimes must be t
         CHECK(has_error_with(build_manifest(report.dump(), o), "aren't a JSON array"));
     }
 }
+
+TEST_CASE("FloServer's installer becomes the list's app entry, checked by hand") {
+    const std::string msi = "app/1.2.0/FloServer-1.2.0-x64.msi";
+    const std::string sha = "AB" + std::string(62, 'c');
+    auto report = real_report();
+    report["files"].push_back({{"path", msi}, {"size", 9437184}, {"sha256", sha}, {"result", "unchecked"}});
+
+    // Not compared by hand yet: it isn't listed.
+    auto r = build_manifest(report.dump(), options());
+    CHECK_FALSE(r.manifest_json.has_value());
+    CHECK(has_error_with(r, "compare its SHA-256 with the CI artifact's, then pass --accept " + msi));
+
+    auto o = options();
+    o.accepted.insert(msi);
+    o.app_notes_url = "https://floserver.org/news/1.2.0";
+    r = build_manifest(report.dump(), o);
+    REQUIRE_MESSAGE(r.manifest_json, (r.errors.empty() ? "" : r.errors.front()));
+    CHECK(r.runtime_count == 7);  // not a runtime
+    CHECK(r.app_version == "1.2.0");
+    const auto doc = json::parse(*r.manifest_json);
+    REQUIRE(doc.contains("app"));
+    CHECK(doc["app"] == json{{"version", "1.2.0"},
+                             {"platform", "windows-x86_64"},
+                             {"urls", {"https://cdn.floserver.org/" + msi}},
+                             {"size", 9437184},
+                             {"sha256", "ab" + std::string(62, 'c')},
+                             {"notes_url", "https://floserver.org/news/1.2.0"}});
+
+    // Without a What's new page there's no notes_url.
+    o.app_notes_url.clear();
+    r = build_manifest(report.dump(), o);
+    REQUIRE(r.manifest_json.has_value());
+    CHECK_FALSE(json::parse(*r.manifest_json)["app"].contains("notes_url"));
+
+    // A list without the installer has no "app" (older apps never notice either way).
+    r = build_manifest(real_report().dump(), options());
+    REQUIRE(r.manifest_json.has_value());
+    CHECK_FALSE(json::parse(*r.manifest_json).contains("app"));
+    CHECK(r.app_version.empty());
+}
+
+TEST_CASE("the installer's path, its notes and a second installer are checked") {
+    auto o = options();
+    const auto with = [&](const char* path) {
+        auto report = real_report();
+        report["files"].push_back({{"path", path}, {"size", 10}, {"sha256", std::string(64, 'a')}, {"result", "ok"}});
+        return build_manifest(report.dump(), o);
+    };
+    CHECK(has_error_with(with("app/1.2/FloServer-1.2-x64.msi"), "isn't a FloServer version such as 1.2.0"));
+    CHECK(has_error_with(with("app/1.2.0/FloServer-1.2.1-x64.msi"), "named FloServer-1.2.0-x64.msi"));
+    CHECK(has_error_with(with("app/1.2.0/FloServer.msi"), "named FloServer-1.2.0-x64.msi"));
+    CHECK(with("app/1.2.0/FloServer-1.2.0-x64.msi").manifest_json.has_value());
+
+    CHECK(describe_cdn_path("app/1.2.0/FloServer-1.2.0-x64.msi").listable);
+    CHECK(describe_cdn_path("app/1.2.0/FloServer-1.2.0-x64.msi").runtime == "app");
+    CHECK_FALSE(describe_cdn_path("app/1.2.0/setup.exe").listable);
+
+    o.app_notes_url = "http://floserver.org/news";
+    CHECK(has_error_with(with("app/1.2.0/FloServer-1.2.0-x64.msi"), "--app-notes must be a plain https address"));
+    o.app_notes_url = "https://floserver.org/news";
+    CHECK(has_error_with(build_manifest(real_report().dump(), o), "--app-notes: the report has no FloServer installer"));
+
+    o = options();
+    auto report = real_report();
+    for (const char* path : {"app/1.2.0/FloServer-1.2.0-x64.msi", "app/1.3.0/FloServer-1.3.0-x64.msi"}) {
+        report["files"].push_back({{"path", path}, {"size", 10}, {"sha256", std::string(64, 'a')}, {"result", "ok"}});
+    }
+    CHECK(has_error_with(build_manifest(report.dump(), o), "a second FloServer installer"));
+}
