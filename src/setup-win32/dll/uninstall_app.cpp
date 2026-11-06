@@ -191,14 +191,14 @@ private:
                  look::TextKind::Note, look::kGreyCard, look::kText2);
         add_text({look::kContentX, 234, look::kContentR, 254}, L"Also delete", look::TextKind::NoteBold);
         const int top = 256;
-        const int row = 64;
+        const int row = 72;  // a note may take three lines (a long projects folder)
         add_card({look::kContentX, top, look::kContentR, top + (row * static_cast<int>(choices_.size())) + 4}, look::kWhite,
                  look::kBorder);
         for (std::size_t i = 0; i < choices_.size(); ++i) {
             const int y = top + 10 + (row * static_cast<int>(i));
             add_check(kChoiceFirst + static_cast<int>(i), {look::kContentX + 16, y, look::kContentR - 16, y + 24},
                       choices_[i].label, choices_[i].checked);
-            note_texts_.push_back(add_text({look::kContentX + 42, y + 24, look::kContentR - 16, y + 58}, choices_[i].note,
+            note_texts_.push_back(add_text({look::kContentX + 42, y + 24, look::kContentR - 16, y + 66}, choices_[i].note,
                                            look::TextKind::Note, look::kWhite, look::kMuted));
         }
         int x = look::kContentR - 96;

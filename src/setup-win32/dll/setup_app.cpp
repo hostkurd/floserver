@@ -449,8 +449,8 @@ private:
         add_text({look::kContentX + 18, 186, look::kContentR - 18, 208}, L"What happens", look::TextKind::BodyBold);
         const std::array<std::wstring_view, 3> lines{
             L"Running projects stop for a moment, then start again.",
-            L"Your projects, databases, runtimes and settings stay as they are.",
-            L"FloServer opens again when it's done, if you leave that ticked.",
+            L"Your projects, databases and settings stay as they are.",
+            L"FloServer opens again by itself when it's done.",
         };
         int y = 216;
         for (const std::wstring_view line : lines) {
@@ -515,13 +515,14 @@ private:
         if (restart_) {
             sub += L" Restart Windows to finish.";
         }
-        add_text({look::kContentX, 228, look::kContentR - 40, 272}, sub, look::TextKind::Sub, look::kWhite, look::kMuted);
-        add_card({look::kContentX, 290, look::kContentR - 40, 342}, look::kTintCard, look::kAccentSoft);
-        add_mark(look::kContentX + 14, 306, look::MarkKind::Info);
-        add_text({look::kContentX + 40, 304, look::kContentR - 54, 330},
+        // Up to three lines (an update that needs Windows to restart).
+        add_text({look::kContentX, 228, look::kContentR - 40, 288}, sub, look::TextKind::Sub, look::kWhite, look::kMuted);
+        add_card({look::kContentX, 290, look::kContentR - 40, 356}, look::kTintCard, look::kAccentSoft);
+        add_mark(look::kContentX + 14, 304, look::MarkKind::Info);
+        add_text({look::kContentX + 40, 302, look::kContentR - 54, 346},  // room for two lines
                  L"In a new terminal, type flo to manage your projects from the command line.", look::TextKind::Body,
                  look::kTintCard, look::kText);
-        add_check(kOpenNow, {look::kContentX, 362, look::kContentR, 388}, L"Open FloServer now", open_now_);
+        add_check(kOpenNow, {look::kContentX, 374, look::kContentR, 400}, L"Open FloServer now", open_now_);
         const int x = look::kContentR - 96;
         add_button(kFinish, {x, look::kButtonY, x + 96, look::kButtonY + look::kButtonH}, L"Finish",
                    look::ButtonKind::Primary);
