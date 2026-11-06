@@ -30,6 +30,7 @@
 
 #include <windows.h>
 
+#include <filesystem>
 #include <string>
 
 namespace floserver::ui {
@@ -39,6 +40,12 @@ namespace floserver::ui {
 // window opens meanwhile, so nothing starts floserverd mid-install).
 [[nodiscard]] std::wstring window_mark_name(const std::string& service_instance);
 [[nodiscard]] std::wstring updating_mark_name(const std::string& service_instance);
+
+// FloServer.exe and the DLLs beside it (floserver-setup.dll among them),
+// copied into a new folder of their own under %TEMP%
+// ("FloServer-update-<hex>"; earlier ones are cleaned up first). The copy's
+// path; false with `error`. Update now and Remove FloServer use it.
+[[nodiscard]] bool copy_floserver_to_temp(std::filesystem::path& copy, std::string& error);
 
 // Runs the dialog to its end; the process's exit code.
 [[nodiscard]] int run_apply_update(HINSTANCE instance, Lang lang, const ApplyUpdateArgs& args);

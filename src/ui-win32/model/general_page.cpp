@@ -350,6 +350,8 @@ StartArgs parse_start_args(const std::vector<std::string>& args) {
     for (std::size_t i = 0; i < args.size(); ++i) {
         if (args[i] == kTrayFlag) {
             out.tray = true;
+        } else if (args[i] == kUninstallFlag) {
+            out.uninstall = true;
         } else if (args[i] == kInstanceFlag && i + 1 < args.size() && !args[i + 1].starts_with('-')) {
             ++i;
             out.instance = usable_suffix(args[i]) ? args[i] : std::string();

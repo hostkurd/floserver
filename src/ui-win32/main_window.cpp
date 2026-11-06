@@ -442,6 +442,26 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
         case kUninstallMessage:
             on_uninstall();
             return 0;
+        case kShowUninstallMessage:
+            open_uninstall(false);
+            return 0;
+        case kUninstallRemoveMessage:
+            start_uninstall(uninstall_ticks_from(static_cast<unsigned>(wparam)));
+            return 0;
+        case kUninstallClosedMessage:
+            on_uninstall_window_closed();
+            return 0;
+        case kUninstallSizesMessage: {
+            std::optional<UninstallSizes> sizes;
+            {
+                const std::lock_guard lock(uninstall_sizes_->mutex);
+                sizes = uninstall_sizes_->sizes;
+            }
+            if (sizes) {
+                push_uninstall_choices(*sizes);
+            }
+            return 0;
+        }
         case kRecycledMessage:
             on_recycled();
             return 0;
@@ -853,7 +873,8 @@ void MainWindow::open_settings() {
 
 void MainWindow::on_pref_change(WPARAM change, LPARAM value) {
     if (static_cast<PrefChange>(change) == PrefChange::RemoveFloServer) {
-        start_uninstall(uninstall_ticks_from(static_cast<unsigned>(value)));  // not a preference: nothing saved
+        (void)value;
+        open_uninstall(false);  // not a preference: nothing saved
         return;
     }
     if (static_cast<PrefChange>(change) == PrefChange::UpdateNow) {

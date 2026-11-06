@@ -85,11 +85,12 @@ jobs:
       - name: Report sizes
         shell: pwsh
         run: |
-          Get-ChildItem build -Recurse -Include FloServer.exe,floserverd.exe,flo.exe |
+          Get-ChildItem build -Recurse -Include FloServer.exe,floserverd.exe,flo.exe,floserver-setup.dll |
             Where-Object { $_.FullName -match '\\Release\\' } |
-            ForEach-Object { "{0,-16} {1,10:N0} bytes" -f $_.Name, $_.Length }
+            ForEach-Object { "{0,-20} {1,10:N0} bytes" -f $_.Name, $_.Length }
           "Visual C++ runtime:"
-          Get-ChildItem build/bin/Release -Filter *.dll | ForEach-Object { "  {0,-28} {1,10:N0} bytes" -f $_.Name, $_.Length }
+          Get-ChildItem build/bin/Release -Filter *.dll | Where-Object { $_.Name -ne 'floserver-setup.dll' } |
+            ForEach-Object { "  {0,-28} {1,10:N0} bytes" -f $_.Name, $_.Length }
       # D15: the service's memory with nothing running, and the window's
       # memory and time to its first paint (FloServer.exe --measure, the
       # median of three starts). Over a budget fails the PR; the numbers are
@@ -451,9 +452,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: FloServer-windows-x64-${{ github.sha }}
+          # FloServer-Setup.exe has no MSI inside yet here: it's built below, after the MSI.
           path: |
             build/bin/Release/*.exe
             build/bin/Release/*.dll
+            !build/bin/Release/FloServer-Setup.exe
           retention-days: 14
       # The installer (D21): WiX 5, pinned (WiX 6+ asks companies that earn
       # money with it for a fee). Built from the Release programs above.
@@ -496,9 +499,17 @@ jobs:
           $dir = Join-Path $env:LOCALAPPDATA 'Programs\FloServer'
           $proc = Start-Process msiexec -ArgumentList '/i', $env:MSI, '/qn', '/l*v', 'install.log' -Wait -PassThru
           if ($proc.ExitCode -ne 0) { Get-Content install.log -Tail 40; Fail "install exited with $($proc.ExitCode)" }
-          foreach ($f in 'FloServer.exe', 'floserverd.exe', 'flo.exe', 'floserver-shim.exe', 'vcruntime140.dll') {
+          foreach ($f in 'FloServer.exe', 'floserverd.exe', 'flo.exe', 'floserver-shim.exe', 'floserver-setup.dll', 'vcruntime140.dll') {
             if (-not (Test-Path (Join-Path $dir $f))) { Fail "$f isn't in $dir" }
           }
+          if (Test-Path (Join-Path $dir 'FloServer-Setup.exe')) { Fail "the setup program was installed" }
+          # D25: FloServer's own entry in Settings -> Apps opens its Uninstall window.
+          $arp = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\FloServer'
+          $entry = Get-ItemProperty $arp -ErrorAction SilentlyContinue
+          if (-not $entry) { Fail "no FloServer entry under $arp" }
+          if ($entry.UninstallString -ne ('"' + (Join-Path $dir 'FloServer.exe') + '" --uninstall')) { Fail "its UninstallString is '$($entry.UninstallString)'" }
+          if ($entry.QuietUninstallString -notmatch '^MsiExec\.exe /X\{[0-9A-F-]{36}\} /qn$') { Fail "its QuietUninstallString is '$($entry.QuietUninstallString)'" }
+          if ($entry.Publisher -ne 'HostKurd' -or -not $entry.DisplayVersion) { Fail "its Publisher or DisplayVersion is missing" }
           if (Test-Path (Join-Path $dir 'vcruntime')) { Fail "a second copy of the Visual C++ runtime (vcruntime\) was installed" }
           if (Test-Path (Join-Path $dir 'floserver-publisher.exe')) { Fail "the Publisher (HostKurd's tool) was installed" }
           $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -526,12 +537,74 @@ jobs:
           $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
           if ((($userPath -split ';') -contains $dir) -or (($userPath -split ';') -contains "$dir\")) { Fail "$dir is still on the user's Path" }
           if (Test-Path $shortcut) { Fail "the Start menu shortcut is still there" }
+          if (Test-Path $arp) { Fail "FloServer's Settings -> Apps entry is still there" }
           "::notice title=MSI::$env:MSI installed per user without admin, ran flo and the service, and uninstalled cleanly (service stopped, files, Path entry and shortcut gone)"
+      # D25: FloServer-Setup-<version>.exe, the download: a small launcher
+      # carrying floserver-setup.dll and the MSI above. Built now that the MSI
+      # exists, then installed with --quiet as CI and companies would, run
+      # again over itself (the same build: installed again), and removed.
+      - name: Build the setup program
+        shell: pwsh
+        run: |
+          $version = [regex]::Match((Get-Content CMakeLists.txt -Raw), 'project\(FloServer\s+VERSION\s+(\d+\.\d+\.\d+)').Groups[1].Value
+          cmake -S . -B build -A x64 "-DFLOSERVER_SETUP_MSI=$((Resolve-Path $env:MSI).Path)" | Out-Null
+          cmake --build build --config Release --target floserver_setup 2>&1 | Tee-Object -FilePath setup-build.log
+          if ($LASTEXITCODE -ne 0) {
+            Get-Content setup-build.log | Select-String ': (fatal )?error ' | Select-Object -First 20 |
+              ForEach-Object { "::error title=Setup::$($_.Line.Trim())" }
+            exit 1
+          }
+          $setup = "FloServer-Setup-$version.exe"
+          Copy-Item build/bin/Release/FloServer-Setup.exe $setup
+          $bytes = (Get-Item $setup).Length
+          "{0}: {1:N0} bytes ({2:N1} MB); floserver-setup.dll {3:N0} bytes" -f $setup, $bytes, ($bytes / 1MB), (Get-Item build/bin/Release/floserver-setup.dll).Length
+          if ($bytes -gt 15MB) { "::warning title=Installer size::$setup is {0:N1} MB, above the 15 MB alarm (D15)" -f ($bytes / 1MB) }
+          # Only Windows' own DLLs: it must start on a PC without the Visual C++ runtime.
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $dumpbin = & $vswhere -latest -find 'VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
+          if (-not $dumpbin) { "::error title=Setup::dumpbin.exe not found"; exit 1 }
+          if ($dumpbin) {
+            foreach ($f in $setup, 'build/bin/Release/floserver-setup.dll') {
+              $deps = & $dumpbin /dependents $f | Select-String '\.dll' | ForEach-Object { $_.Line.Trim() }
+              $bad = $deps | Where-Object { $_ -match '^(vcruntime|msvcp|ucrtbase|api-ms-win-crt)' }
+              if ($bad) { "::error title=Setup::$f needs the Visual C++ runtime: $($bad -join ', ')"; exit 1 }
+            }
+          }
+          "SETUP=$setup" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Install, install again and remove with the setup program
+        shell: pwsh
+        run: |
+          function Fail($what) { "::error title=Setup::$what"; exit 1 }
+          $dir = Join-Path $env:LOCALAPPDATA 'Programs\FloServer'
+          $arp = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\FloServer'
+          foreach ($round in 'install', 'install again') {
+            $proc = Start-Process ".\$env:SETUP" -ArgumentList '--quiet', '--log', "$PWD\setup-$($round -replace ' ', '-').log" -Wait -PassThru
+            if ($proc.ExitCode -ne 0) { Get-Content "setup-$($round -replace ' ', '-').log" -Tail 40; Fail "$round exited with $($proc.ExitCode)" }
+            foreach ($f in 'FloServer.exe', 'floserverd.exe', 'flo.exe', 'floserver-setup.dll') {
+              if (-not (Test-Path (Join-Path $dir $f))) { Fail "after '$round', $f isn't in $dir" }
+            }
+            if (-not (Test-Path $arp)) { Fail "after '$round', no FloServer entry in Settings -> Apps" }
+          }
+          $accepted = (Get-ItemProperty 'HKCU:\Software\HostKurd\FloServer' -ErrorAction SilentlyContinue).AcceptedLicence
+          if ($accepted -notmatch '^[0-9a-f]{64}$') { Fail "the accepted licence wasn't noted: '$accepted'" }
+          # No setup files left in %TEMP%.
+          $left = @(Get-ChildItem $env:TEMP -Directory -Filter 'FloServer-setup-*' -ErrorAction SilentlyContinue)
+          if ($left.Count -ne 0) { Fail "the setup left $($left.Count) folder(s) in %TEMP%" }
+          # Removed as tools that remove programs silently do: QuietUninstallString.
+          $quiet = (Get-ItemProperty $arp).QuietUninstallString
+          $exe, $rest = $quiet -split ' ', 2
+          $proc = Start-Process $exe -ArgumentList $rest -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { Fail "'$quiet' exited with $($proc.ExitCode)" }
+          if (Test-Path $dir) { Fail "$dir is still there after removing" }
+          if (Test-Path $arp) { Fail "FloServer's Settings -> Apps entry is still there after removing" }
+          "::notice title=Setup::$env:SETUP installed FloServer quietly without admin, installed it again over itself, and it was removed cleanly"
       - name: Upload the installer
         uses: actions/upload-artifact@v4
         with:
           name: FloServer-installer-${{ github.sha }}
-          path: FloServer-*-x64.msi
+          path: |
+            FloServer-*-x64.msi
+            FloServer-Setup-*.exe
           retention-days: 14
 
   linux-sanitizers:

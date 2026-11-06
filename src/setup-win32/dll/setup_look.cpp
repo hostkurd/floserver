@@ -18,7 +18,7 @@ using std::min;  // NOLINT(misc-unused-using-decls)
 #include <gdiplus.h>
 #include <windowsx.h>
 
-namespace floserver::ui::setup_look {
+namespace floserver::setup::look {
 
 namespace {
 
@@ -946,4 +946,4 @@ void WizardWindow::draw_button(const DRAWITEMSTRUCT& item) const {
     BitBlt(dc, r.left, r.top, local.right, local.bottom, mem.get(), 0, 0, SRCCOPY);
 }
 
-}  // namespace floserver::ui::setup_look
+}  // namespace floserver::setup::look

@@ -86,8 +86,8 @@ namespace floserver::ui {
 // its `prefs_message`; the lparam is the choice's index (kLangChoices,
 // kThemeChoices, CloseAction, or 1 for "start in the tray").
 // CodeEditor: the choice is read from prefs() (a program's path doesn't fit an lparam).
-// RemoveFloServer: Remove FloServer… was answered with Remove FloServer; the
-// lparam is uninstall_ticks_bits() of the boxes. FloServer's window does the rest.
+// RemoveFloServer: Remove FloServer… was pressed; FloServer's window opens
+// the Uninstall window (D25), which asks and does the rest.
 // RemoveFloServer and UpdateNow aren't preferences: FloServer's window runs them.
 enum class PrefChange : std::uint8_t { Language, Theme, Close, StartInTray, CodeEditor, RemoveFloServer, UpdateNow };
 
@@ -718,7 +718,7 @@ private:
     [[nodiscard]] std::string updates_summary_text() const;
     // Check now: not while a check or a download is on its way, or where there are no updates.
     [[nodiscard]] bool can_check_updates() const;
-    // Remove FloServer…: its question, then the answer to FloServer's window.
+    // Remove FloServer…: FloServer's window opens the Uninstall window.
     void remove_floserver();
     void paint_general_shapes(Canvas& c) const;
     void paint_general_text(Canvas& c) const;

@@ -100,9 +100,9 @@ std::string format_size(std::uint64_t bytes) {
     constexpr std::uint64_t kMb = kKb * 1024;
     std::array<char, 32> buf{};
     if (bytes >= kMb) {
-        std::snprintf(buf.data(), buf.size(), "%.1f MB", static_cast<double>(bytes) / static_cast<double>(kMb));
+        (void)std::snprintf(buf.data(), buf.size(), "%.1f MB", static_cast<double>(bytes) / static_cast<double>(kMb));
     } else {
-        std::snprintf(buf.data(), buf.size(), "%llu KB",
+        (void)std::snprintf(buf.data(), buf.size(), "%llu KB",
                       static_cast<unsigned long long>((bytes + kKb - 1) / kKb));  // NOLINT(google-runtime-int): printf's %llu
     }
     return buf.data();

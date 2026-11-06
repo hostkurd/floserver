@@ -13,7 +13,7 @@
 #include <string_view>
 #include <vector>
 
-namespace floserver::ui {
+namespace floserver::setup {
 
 struct PathPoint {
     double x = 0;
@@ -30,4 +30,4 @@ struct PathFigure {
 
 [[nodiscard]] std::optional<std::vector<PathFigure>> parse_svg_path(std::string_view data);
 
-}  // namespace floserver::ui
+}  // namespace floserver::setup

@@ -1,20 +1,20 @@
-// FloServer-Setup-<version>.exe (D25, approved with its mockups 6 Nov):
-// FloServer's own setup program, with FloServer's MSI inside it. It shows
-// its own screens and runs the MSI with Windows Installer's own screens
-// off, its progress on the setup's bar. The MSI is the same one D21 ships
-// (per user, no admin): what it installs and removes doesn't change.
+// The setup screens (D25, approved with its mockups 6 Nov), in
+// floserver-setup.dll: FloServer-Setup-<version>.exe writes this DLL and
+// FloServer's MSI into a folder under %TEMP% and calls floserver_setup_run().
+// It shows its own screens and runs the MSI with Windows Installer's own
+// screens off, its progress on our bar. The MSI is the one D21 ships (per
+// user, no admin): what it installs and removes doesn't change.
 //
 //   new install:     Licence -> Installing -> Done
 //   older installed: Update (or Licence first, when it changed) -> Installing -> Done
 //   same build:      Install again -> Installing -> Done
 //   newer installed: says so, nothing else
 //
-// Built with the static C runtime and only Windows' own DLLs, so it runs on
-// a PC that has never had the Visual C++ runtime; FloServer's core isn't in
-// it. English only (D21). --quiet installs with no window (for CI and
-// companies), accepting the licence as msiexec /qn does.
+// English only (D21). Quiet installs with no window (for CI and companies),
+// accepting the licence as msiexec /qn does.
 
-#include "model/msi_progress.h"
+#include "common.h"
+#include "floserver/setup_api.h"
 #include "model/setup_model.h"
 #include "setup_look.h"
 #include "win_util.h"
@@ -50,33 +50,16 @@ using std::min;  // NOLINT(misc-unused-using-decls)
 #include <objidl.h>
 #include <gdiplus.h>
 
-#if defined(__MINGW32__)
-// In msi.lib, but not in MinGW-w64's msi.h (Windows Installer 3.1 and later).
-extern "C" UINT WINAPI MsiSetExternalUIRecord(INSTALLUI_HANDLER_RECORD handler, DWORD filter, LPVOID context,
-                                              PINSTALLUI_HANDLER_RECORD previous);
-#endif
-#ifndef INSTALLLOGMODE_RMFILESINUSE
-#define INSTALLLOGMODE_RMFILESINUSE (1 << (INSTALLMESSAGE_RMFILESINUSE / (1 << 24)))
-#endif
-
 namespace {
 
 namespace setup = floserver::setup;
-namespace look = floserver::ui::setup_look;
-using floserver::ui::MsiProgress;
+namespace look = floserver::setup::look;
 using floserver::ui::win::narrow;
 using floserver::ui::win::widen;
 
 constexpr wchar_t kUpgradeCode[] = L"{3AC2E747-DDE1-465C-87CC-277C97C81D0F}";
-constexpr wchar_t kRegistryKey[] = L"Software\\HostKurd\\FloServer";
-constexpr wchar_t kAcceptedValue[] = L"AcceptedLicence";
 constexpr wchar_t kTitle[] = L"FloServer Setup";
 constexpr wchar_t kPanelNote[] = L"PHP, Node.js, Python and MariaDB on your PC, each project at its own https://name.localhost.";
-
-// From the install's thread to the window.
-constexpr UINT kProgressMessage = WM_APP + 1;  // wparam: per mille
-constexpr UINT kStepMessage = WM_APP + 2;      // wparam: the step under way
-constexpr UINT kDoneMessage = WM_APP + 3;      // wparam: Windows Installer's result
 
 // The window's controls.
 enum : int {
@@ -91,37 +74,6 @@ enum : int {
     kClose,
     kNext,
 };
-
-std::string last_error_text(DWORD code) {
-    wchar_t* buf = nullptr;
-    const DWORD n = FormatMessageW(
-        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, code, 0,
-        reinterpret_cast<LPWSTR>(&buf), 0, nullptr);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast): FORMAT_MESSAGE_ALLOCATE_BUFFER's convention
-    std::wstring text = n > 0 && buf != nullptr ? std::wstring(buf, n) : std::wstring();
-    if (buf != nullptr) {
-        LocalFree(buf);
-    }
-    while (!text.empty() && (text.back() == L'\r' || text.back() == L'\n' || text.back() == L' ' || text.back() == L'.')) {
-        text.pop_back();
-    }
-    return text.empty() ? "error " + std::to_string(code) : narrow(text);
-}
-
-// --- what the setup carries ---
-
-std::span<const std::uint8_t> resource(const wchar_t* name) {
-    HRSRC res = FindResourceW(nullptr, name, MAKEINTRESOURCEW(10) /* RT_RCDATA */);
-    if (res == nullptr) {
-        return {};
-    }
-    HGLOBAL loaded = LoadResource(nullptr, res);
-    const DWORD size = SizeofResource(nullptr, res);
-    const void* data = loaded != nullptr ? LockResource(loaded) : nullptr;
-    if (data == nullptr || size == 0) {
-        return {};
-    }
-    return {static_cast<const std::uint8_t*>(data), size};
-}
 
 std::string sha256_hex(std::span<const std::uint8_t> data) {
     BCRYPT_ALG_HANDLE alg = nullptr;
@@ -149,23 +101,10 @@ std::string sha256_hex(std::span<const std::uint8_t> data) {
     return out;
 }
 
-std::wstring env(const wchar_t* name) {
-    std::wstring value(32767, L'\0');
-    const DWORD n = GetEnvironmentVariableW(name, value.data(), static_cast<DWORD>(value.size()));
-    value.resize(n < value.size() ? n : 0);
-    return value;
-}
-
-// Where the MSI installs (D21): %LOCALAPPDATA%\Programs\FloServer.
-std::wstring install_folder() {
-    const std::wstring local = env(L"LOCALAPPDATA");
-    return local.empty() ? std::wstring() : local + L"\\Programs\\FloServer";
-}
-
 std::wstring accepted_licence() {
     std::array<wchar_t, 128> buf{};
     DWORD size = static_cast<DWORD>(sizeof buf);
-    if (RegGetValueW(HKEY_CURRENT_USER, kRegistryKey, kAcceptedValue, RRF_RT_REG_SZ, nullptr, buf.data(), &size) !=
+    if (RegGetValueW(HKEY_CURRENT_USER, setup::kRegistryKey, setup::kAcceptedLicenceValue, RRF_RT_REG_SZ, nullptr, buf.data(), &size) !=
         ERROR_SUCCESS) {
         return {};
     }
@@ -174,93 +113,15 @@ std::wstring accepted_licence() {
 
 void remember_licence(const std::string& sha256) {
     HKEY key = nullptr;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, kRegistryKey, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) !=
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, setup::kRegistryKey, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) !=
         ERROR_SUCCESS) {
         return;
     }
     const std::wstring value = widen(sha256);
-    RegSetValueExW(key, kAcceptedValue, 0, REG_SZ, reinterpret_cast<const BYTE*>(value.c_str()),  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast): the registry takes bytes
+    RegSetValueExW(key, setup::kAcceptedLicenceValue, 0, REG_SZ, reinterpret_cast<const BYTE*>(value.c_str()),  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast): the registry takes bytes
                    static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t)));
     RegCloseKey(key);
 }
-
-// The MSI, written out of the setup into a folder of its own under %TEMP%,
-// then opened so that it can only be read while it's there. Removed with
-// its folder when this goes.
-class ExtractedMsi {
-public:
-    ExtractedMsi() = default;
-    ExtractedMsi(const ExtractedMsi&) = delete;
-    ExtractedMsi& operator=(const ExtractedMsi&) = delete;
-    ExtractedMsi(ExtractedMsi&&) = delete;
-    ExtractedMsi& operator=(ExtractedMsi&&) = delete;
-    ~ExtractedMsi() {
-        guard_.reset();
-        if (!file_.empty()) {
-            DeleteFileW(file_.c_str());
-        }
-        if (!folder_.empty()) {
-            RemoveDirectoryW(folder_.c_str());
-        }
-    }
-
-    bool write(std::span<const std::uint8_t> data, std::string& error) {
-        std::array<wchar_t, MAX_PATH + 1> temp{};
-        const DWORD n = GetTempPathW(static_cast<DWORD>(temp.size()), temp.data());
-        if (n == 0 || n > MAX_PATH) {
-            error = "no folder for temporary files";
-            return false;
-        }
-        std::random_device random;
-        for (int attempt = 0; attempt < 8 && folder_.empty(); ++attempt) {
-            std::array<wchar_t, 32> name{};
-            swprintf_s(name.data(), name.size(), L"FloServer-setup-%08x%08x", random(), random());
-            std::wstring candidate = std::wstring(temp.data()) + name.data();
-            if (CreateDirectoryW(candidate.c_str(), nullptr) != FALSE) {
-                folder_ = std::move(candidate);
-            } else if (GetLastError() != ERROR_ALREADY_EXISTS) {
-                error = last_error_text(GetLastError());
-                return false;
-            }
-        }
-        if (folder_.empty()) {
-            error = "no new folder for temporary files";
-            return false;
-        }
-        const std::wstring file = folder_ + L"\\FloServer.msi";
-        {
-            const floserver::ui::win::UniqueHandle out(
-                CreateFileW(file.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
-            if (!out || out.get() == INVALID_HANDLE_VALUE) {
-                error = last_error_text(GetLastError());
-                return false;
-            }
-            file_ = file;
-            DWORD written = 0;
-            if (WriteFile(out.get(), data.data(), static_cast<DWORD>(data.size()), &written, nullptr) == FALSE ||
-                written != data.size()) {
-                error = last_error_text(GetLastError());
-                return false;
-            }
-        }
-        // Read-only from here on, for everyone, until it's deleted.
-        HANDLE h = CreateFileW(file.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
-                               nullptr);
-        if (h == INVALID_HANDLE_VALUE) {
-            error = last_error_text(GetLastError());
-            return false;
-        }
-        guard_.reset(h);
-        return true;
-    }
-
-    [[nodiscard]] const std::wstring& path() const { return file_; }
-
-private:
-    std::wstring folder_;
-    std::wstring file_;
-    floserver::ui::win::UniqueHandle guard_;
-};
 
 struct MsiHandle {
     MSIHANDLE h = 0;
@@ -342,95 +203,6 @@ std::optional<setup::Product> installed_product() {
     return setup::Product{narrow(code.data()), narrow(version.data())};
 }
 
-// --- running Windows Installer ---
-
-struct Shared {
-    std::mutex mutex;
-    HWND window = nullptr;
-    MsiProgress progress;
-    int last_permille = -1;
-    int step = -1;
-    std::string error;
-    std::atomic<bool> cancel{false};
-
-    void post(UINT message, WPARAM wparam) {
-        const std::lock_guard lock(mutex);
-        if (window != nullptr) {
-            PostMessageW(window, message, wparam, 0);
-        }
-    }
-};
-
-int WINAPI msi_handler(LPVOID context, UINT type, MSIHANDLE record) {
-    auto* shared = static_cast<Shared*>(context);
-    const UINT kind = type & 0xFF000000U;
-    if (kind == static_cast<UINT>(INSTALLMESSAGE_RMFILESINUSE)) {
-        return IDOK;  // FloServer's window (or anything else holding its files) is asked to close
-    }
-    if (kind == static_cast<UINT>(INSTALLMESSAGE_PROGRESS) || kind == static_cast<UINT>(INSTALLMESSAGE_ACTIONDATA)) {
-        int permille = 0;
-        {
-            const std::lock_guard lock(shared->mutex);
-            if (kind == static_cast<UINT>(INSTALLMESSAGE_PROGRESS)) {
-                shared->progress.on_record(MsiRecordGetInteger(record, 1), MsiRecordGetInteger(record, 2),
-                                           MsiRecordGetInteger(record, 3), MsiRecordGetInteger(record, 4));
-            } else {
-                shared->progress.on_action_data();
-            }
-            permille = static_cast<int>(shared->progress.fraction() * 1000);
-        }
-        if (permille != shared->last_permille) {
-            shared->last_permille = permille;
-            shared->post(kProgressMessage, static_cast<WPARAM>(permille));
-        }
-        return shared->cancel ? IDCANCEL : 0;
-    }
-    if (kind == static_cast<UINT>(INSTALLMESSAGE_ACTIONSTART)) {
-        std::array<wchar_t, 128> name{};
-        DWORD size = static_cast<DWORD>(name.size());
-        bool script = false;
-        {
-            const std::lock_guard lock(shared->mutex);
-            script = shared->progress.writing_script();
-        }
-        if (!script && MsiRecordGetStringW(record, 1, name.data(), &size) == ERROR_SUCCESS) {
-            if (const auto step = setup::step_for_action(narrow(name.data()))) {
-                const int index = static_cast<int>(*step);
-                if (index > shared->step) {
-                    shared->step = index;
-                    shared->post(kStepMessage, static_cast<WPARAM>(index));
-                }
-            }
-        }
-        return shared->cancel ? IDCANCEL : 0;
-    }
-    if (kind == static_cast<UINT>(INSTALLMESSAGE_ERROR) || kind == static_cast<UINT>(INSTALLMESSAGE_FATALEXIT)) {
-        std::array<wchar_t, 1024> buf{};
-        DWORD size = static_cast<DWORD>(buf.size());
-        if (MsiFormatRecordW(0, record, buf.data(), &size) == ERROR_SUCCESS) {
-            const std::lock_guard lock(shared->mutex);
-            shared->error = narrow(buf.data());
-        }
-        return 0;  // nothing is asked: Windows Installer decides
-    }
-    return 0;
-}
-
-// Installs; Windows Installer's result (0, 3010 when Windows must restart, else an error).
-UINT run_install(const std::wstring& msi, setup::SetupMode mode, const std::string& log, Shared& shared) {
-    MsiSetInternalUI(INSTALLUILEVEL_NONE, nullptr);
-    if (!log.empty()) {
-        MsiEnableLogW(INSTALLLOGMODE_VERBOSE, widen(log).c_str(), 0);
-    }
-    const DWORD filter = INSTALLLOGMODE_PROGRESS | INSTALLLOGMODE_ACTIONDATA | INSTALLLOGMODE_ACTIONSTART |
-                         INSTALLLOGMODE_ERROR | INSTALLLOGMODE_FATALEXIT | INSTALLLOGMODE_RMFILESINUSE;
-    MsiSetExternalUIRecord(&msi_handler, filter, &shared, nullptr);
-    const std::wstring properties = setup::msi_properties(mode);
-    const UINT result = MsiInstallProductW(msi.c_str(), properties.c_str());
-    MsiSetExternalUIRecord(nullptr, 0, nullptr, nullptr);
-    return result;
-}
-
 // --- the licence box ---
 
 struct StreamSource {
@@ -503,7 +275,7 @@ void print_licence(HWND owner, HWND rich) {
 
 // Opens the installed FloServer.exe, not elevated, as the user started it.
 void open_floserver() {
-    const std::wstring folder = install_folder();
+    const std::wstring folder = setup::install_folder();
     if (folder.empty()) {
         return;
     }
@@ -533,7 +305,7 @@ struct Facts {
     std::string licence_sha256;
     bool licence_changed = false;  // an update whose licence isn't the one accepted last time
     std::wstring msi;
-    std::string log;
+    std::wstring log;
 };
 
 class SetupWindow final : public look::WizardWindow {
@@ -545,10 +317,7 @@ public:
           facts_(std::move(facts)) {}
 
     ~SetupWindow() override {
-        {
-            const std::lock_guard lock(shared_->mutex);
-            shared_->window = nullptr;
-        }
+        shared_->detach();
         if (worker_.joinable()) {
             shared_->cancel = true;
             worker_.join();
@@ -642,7 +411,7 @@ private:
         if (facts_.installed_bytes > 0) {
             note += L" · " + widen(setup::format_size(facts_.installed_bytes));
         }
-        note += L" · " + install_folder() + L". Runtimes are downloaded when FloServer first opens.";
+        note += L" · " + setup::install_folder() + L". Runtimes are downloaded when FloServer first opens.";
         add_text({look::kContentX + 24, 438, look::kContentR, 500}, note, look::TextKind::Note, look::kWhite, look::kMuted);
 
         add_button(kPrint, {look::kContentX, look::kButtonY, look::kContentX + 96, look::kButtonY + look::kButtonH},
@@ -872,8 +641,8 @@ private:
         }
         rebuild();
         worker_ = std::thread([shared = shared_, msi = facts_.msi, mode = facts_.mode, log = facts_.log] {
-            const UINT result = run_install(msi, mode, log, *shared);
-            shared->post(kDoneMessage, result);
+            const UINT result = setup::msi_install(msi, setup::msi_properties(mode), log, *shared);
+            shared->post(setup::kDoneMessage, result);
         });
     }
 
@@ -881,17 +650,17 @@ private:
         if (page_ != Page::Installing) {
             return;
         }
-        if (message == kProgressMessage) {
+        if (message == setup::kProgressMessage) {
             permille_ = static_cast<int>(wparam);
             set_progress(static_cast<double>(permille_) / 1000);
             set_text(percent_, percent_text());
-        } else if (message == kStepMessage) {
+        } else if (message == setup::kStepMessage) {
             step_ = static_cast<int>(wparam);
             for (int i = 0; i < setup::kInstallSteps; ++i) {
                 set_mark(marks_.at(static_cast<std::size_t>(i)), mark_for(i));
             }
             rebuild();  // the names' weights and colours
-        } else if (message == kDoneMessage) {
+        } else if (message == setup::kDoneMessage) {
             if (worker_.joinable()) {
                 worker_.join();
             }
@@ -914,16 +683,16 @@ private:
                                                            : L"Nothing was installed.");
             return;
         }
-        std::string error;
+        std::wstring error;
         {
             const std::lock_guard lock(shared_->mutex);
             error = shared_->error;
         }
         if (error.empty()) {
-            error = last_error_text(result);
+            error = setup::error_words(result);
         }
         show_problem(updating() ? L"FloServer wasn't updated" : L"FloServer wasn't installed",
-                     widen(error) + L"\n\nWindows put back everything it had changed. If it happens again, run "
+                     error + L"\n\nWindows put back everything it had changed. If it happens again, run "
                                     L"the setup with --log setup.log and send us the file.");
     }
 
@@ -946,63 +715,34 @@ private:
     std::array<HWND, setup::kInstallSteps> step_texts_{};
     std::wstring problem_heading_;
     std::wstring problem_text_;
-    std::shared_ptr<Shared> shared_ = std::make_shared<Shared>();
+    std::shared_ptr<setup::MsiRun> shared_ = std::make_shared<setup::MsiRun>();
     std::thread worker_;
 };
 
-std::vector<std::string> command_args() {
-    int argc = 0;
-    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (argv == nullptr) {
-        return {};
-    }
-    std::vector<std::string> args;
-    for (int i = 1; i < argc; ++i) {
-        args.push_back(narrow(argv[i]));  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic): argv from Windows
-    }
-    LocalFree(argv);
-    return args;
-}
+
+// The setup's licence: the EULA (installer/License.rtf), in the DLL.
+constexpr wchar_t kLicenceResource[] = L"LICENCE_RTF";
 
 }  // namespace
 
-int WINAPI wWinMain(HINSTANCE instance, HINSTANCE /*prev*/, PWSTR /*cmd*/, int show) {
-    const setup::SetupArgs args = setup::parse_setup_args(command_args());
-
-    // One setup at a time: a second one brings the first forward.
-    const floserver::ui::win::UniqueHandle single(CreateMutexW(nullptr, FALSE, L"Local\\FloServerSetup"));
-    if (single && GetLastError() == ERROR_ALREADY_EXISTS) {
-        if (!args.quiet) {
-            if (HWND other = FindWindowW(L"FloServerSetupLook", kTitle); other != nullptr) {
-                if (IsIconic(other) != FALSE) {
-                    ShowWindow(other, SW_RESTORE);
-                }
-                SetForegroundWindow(other);
-            }
-        }
-        return static_cast<int>(ERROR_INSTALL_ALREADY_RUNNING);
+FLOSERVER_SETUP_API int __stdcall floserver_setup_run(const FloSetupRunArgs* args) {
+    if (args == nullptr || args->size < sizeof(FloSetupRunArgs) || args->msi == nullptr) {
+        return static_cast<int>(ERROR_INVALID_PARAMETER);
     }
-
     Facts facts;
-    facts.log = args.log;
-    facts.licence = resource(L"LICENCE_RTF");
+    facts.msi = args->msi;
+    facts.log = args->log != nullptr ? args->log : L"";
+    facts.licence = setup::dll_resource(kLicenceResource);
     facts.licence_sha256 = sha256_hex(facts.licence);
     std::wstring problem_heading;
     std::wstring problem_text;
-    ExtractedMsi msi;
-    const std::span<const std::uint8_t> payload = resource(L"FLOSERVER_MSI");
-    std::string error;
-    if (payload.empty() || facts.licence.empty()) {
+    if (facts.licence.empty()) {
         problem_heading = L"This setup is incomplete";
-        problem_text = L"It has no FloServer installer inside it. Download FloServer again from floserver.org.";
-    } else if (!msi.write(payload, error)) {
-        problem_heading = L"FloServer couldn't be installed";
-        problem_text = L"The installer couldn't be written to the folder for temporary files: " + widen(error);
-    } else if (const auto package = read_package(msi.path()); !package) {
+        problem_text = L"Its licence is missing. Download FloServer again from floserver.org.";
+    } else if (const auto package = read_package(facts.msi); !package) {
         problem_heading = L"This setup is damaged";
         problem_text = L"The FloServer installer inside it can't be read. Download FloServer again from floserver.org.";
     } else {
-        facts.msi = msi.path();
         facts.ours = package->product;
         facts.installed_bytes = package->installed_bytes;
         facts.installed = installed_product();
@@ -1014,17 +754,17 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE /*prev*/, PWSTR /*cmd*/, int s
             problem_text = L"FloServer " + widen(facts.installed->version) +
                            L" is already installed, which is newer than this setup (" + widen(facts.ours.version) +
                            L"). To go back to " + widen(facts.ours.version) +
-                           L", remove FloServer first in Windows' Settings → Apps.";
+                           L", remove FloServer first in Windows' Settings \u2192 Apps.";
         }
     }
 
-    if (args.quiet) {
+    if (args->quiet != 0) {
         if (!problem_heading.empty()) {
             return facts.mode == setup::SetupMode::Newer ? static_cast<int>(ERROR_PRODUCT_VERSION)
                                                          : static_cast<int>(ERROR_INSTALL_PACKAGE_INVALID);
         }
-        Shared shared;
-        const UINT result = run_install(facts.msi, facts.mode, facts.log, shared);
+        setup::MsiRun run;
+        const UINT result = setup::msi_install(facts.msi, setup::msi_properties(facts.mode), facts.log, run);
         if (result == ERROR_SUCCESS || result == ERROR_SUCCESS_REBOOT_REQUIRED) {
             remember_licence(facts.licence_sha256);
         }
@@ -1038,36 +778,31 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE /*prev*/, PWSTR /*cmd*/, int s
     ULONG_PTR gdiplus = 0;
     const Gdiplus::GdiplusStartupInput input;
     if (Gdiplus::GdiplusStartup(&gdiplus, &input, nullptr) != Gdiplus::Ok) {
-        return 1;
+        return static_cast<int>(ERROR_INSTALL_FAILURE);
     }
     int code = 0;
     {
-        const bool licence_first =
-            setup::licence_needed(facts.mode, narrow(accepted_licence()), facts.licence_sha256);
-        const bool problem = !problem_heading.empty();
+        const bool licence_first = setup::licence_needed(facts.mode, narrow(accepted_licence()), facts.licence_sha256);
         const setup::SetupMode mode = facts.mode;
-        SetupWindow window(instance, std::move(facts));
-        if (problem) {
-            window.start_at(Page::Problem);
+        SetupWindow window(setup::dll_instance(), std::move(facts));
+        if (!problem_heading.empty()) {
+            window.show_problem(problem_heading, problem_text);
         } else {
             window.start_at(mode == setup::SetupMode::Install || licence_first ? Page::Licence : Page::Update);
         }
-        if (!window.create(show)) {
-            Gdiplus::GdiplusShutdown(gdiplus);
-            return 1;
-        }
-        if (problem) {
-            window.show_problem(problem_heading, problem_text);
-        }
-        MSG m{};
-        while (GetMessageW(&m, nullptr, 0, 0) > 0) {
-            if (window.dialog_message(m)) {
-                continue;
+        if (window.create(args->show)) {
+            MSG m{};
+            while (GetMessageW(&m, nullptr, 0, 0) > 0) {
+                if (window.dialog_message(m)) {
+                    continue;
+                }
+                TranslateMessage(&m);
+                DispatchMessageW(&m);
             }
-            TranslateMessage(&m);
-            DispatchMessageW(&m);
+            code = window.exit_code();
+        } else {
+            code = static_cast<int>(ERROR_INSTALL_FAILURE);
         }
-        code = window.exit_code();
     }
     Gdiplus::GdiplusShutdown(gdiplus);
     return code;

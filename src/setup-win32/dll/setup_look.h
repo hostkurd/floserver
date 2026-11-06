@@ -7,9 +7,9 @@
 // footer. Windows' own title bar is replaced by the window's own row (the
 // window can still be moved, minimised and closed as usual, Alt+Space too).
 //
-// Used by the setup program (src/setup-win32) and by FloServer.exe's
-// Uninstall window, so it needs only Win32, GDI+ and win_util.h: the setup
-// program is built without FloServer's core. English only, light only (D21).
+// Part of floserver-setup.dll, which holds every setup and uninstall screen
+// and their pictures, so FloServer.exe stays small: it needs only Win32,
+// GDI+ and win_util.h, never FloServer's core. English only, light only (D21).
 //
 // A page is built from real controls where someone reads or presses
 // something (texts, buttons, check boxes: screen readers and the keyboard
@@ -17,7 +17,7 @@
 // marks, progress bar). Coordinates are in device-independent pixels inside
 // the 880 x 580 window; build_page() runs again after a DPI change.
 
-#include "win_util.h"
+#include "win_util.h"  // src/ui-win32: header-only helpers
 
 #include <windows.h>
 
@@ -27,7 +27,9 @@
 #include <string_view>
 #include <vector>
 
-namespace floserver::ui::setup_look {
+namespace floserver::setup::look {
+
+namespace win = floserver::ui::win;
 
 inline constexpr int kWidth = 880;
 inline constexpr int kHeight = 580;
@@ -169,7 +171,7 @@ private:
     void draw_button(const DRAWITEMSTRUCT& item) const;
     void caption_buttons();
     [[nodiscard]] HBRUSH brush_for(COLORREF colour);
-    [[nodiscard]] bool request_close();
+    bool request_close();  // true: it closed
 
     HINSTANCE instance_;
     std::wstring title_;
@@ -195,4 +197,4 @@ private:
     int cancel_id_ = 0;
 };
 
-}  // namespace floserver::ui::setup_look
+}  // namespace floserver::setup::look

@@ -29,6 +29,10 @@
     <Property Id="ARPPRODUCTICON" Value="FloServer.ico" />
     <Property Id="ARPURLINFOABOUT" Value="https://floserver.org" />
     <!-- ARPNOMODIFY comes from WixUI_Minimal. -->
+    <!-- D25: the MSI's own entry in Settings -> Apps is hidden; FloServer's
+         own entry (UninstallEntry below) opens FloServer's Uninstall window
+         instead, with its choices. msiexec /x still removes it as before. -->
+    <Property Id="ARPSYSTEMCOMPONENT" Value="1" />
 
     <!-- %LOCALAPPDATA%\Programs\FloServer, named outright: per user, never
          Program Files, so no admin rights (D5). (Windows Installer's ICE38,
@@ -49,9 +53,29 @@
          (PHP, nginx, Apache): one copy, no vcruntime\ folder (an upgrade
          removes the one older versions installed). No floserver.exe on
          Windows: it would be FloServer.exe, the window. Not the Publisher
-         (HostKurd's tool). -->
+         (HostKurd's tool). floserver-setup.dll (D25) holds the Uninstall
+         window; FloServer.exe loads it only to uninstall. -->
     <ComponentGroup Id="Programs" Directory="INSTALLFOLDER">
       <Files Include="$(StageDir)\**" />
+      <!-- FloServer in Settings -> Apps (D25): Uninstall runs FloServer.exe
+           --uninstall, which opens the Uninstall window from
+           floserver-setup.dll; QuietUninstallString is the plain MSI uninstall
+           for tools that remove programs silently. Written by the MSI, so it
+           goes with it. -->
+      <Component Id="UninstallEntry" Guid="5C7E2A41-8B3D-4F6E-9A10-2D4B6C8E0F31">
+        <RegistryKey Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\FloServer">
+          <RegistryValue Name="DisplayName" Type="string" Value="FloServer" KeyPath="yes" />
+          <RegistryValue Name="DisplayVersion" Type="string" Value="[ProductVersion]" />
+          <RegistryValue Name="Publisher" Type="string" Value="HostKurd" />
+          <RegistryValue Name="DisplayIcon" Type="string" Value="[INSTALLFOLDER]FloServer.exe,0" />
+          <RegistryValue Name="InstallLocation" Type="string" Value="[INSTALLFOLDER]" />
+          <RegistryValue Name="URLInfoAbout" Type="string" Value="https://floserver.org" />
+          <RegistryValue Name="UninstallString" Type="string" Value="&quot;[INSTALLFOLDER]FloServer.exe&quot; --uninstall" />
+          <RegistryValue Name="QuietUninstallString" Type="string" Value="MsiExec.exe /X[ProductCode] /qn" />
+          <RegistryValue Name="NoModify" Type="integer" Value="1" />
+          <RegistryValue Name="NoRepair" Type="integer" Value="1" />
+        </RegistryKey>
+      </Component>
       <!-- The folder on the user's Path, so flo works in new terminals. -->
       <Component Id="PathEntry" Guid="9D1E2B5C-6F0A-4C1E-9B2D-5A7E3C4F8B10">
         <Environment Id="FloOnPath" Name="PATH" Value="[INSTALLFOLDER]" Part="last" Action="set" System="no" Permanent="no" />

@@ -96,6 +96,50 @@ struct UninstallReport {
 // files were left because FloServer wasn't installed by its installer.
 [[nodiscard]] std::string uninstall_done_text(const UninstallReport& report, bool installed, Lang lang);
 
+// --- the Uninstall window (D25, in floserver-setup.dll) ---
+
+// The "Also delete" boxes: each one's bit (uninstall_ticks_bits), its words
+// and its note, from uninstall_question()'s.
+struct UninstallChoiceText {
+    unsigned bit = 0;
+    std::string label;
+    std::string note;
+    bool checked = false;
+};
+[[nodiscard]] std::vector<UninstallChoiceText> uninstall_choices(const UninstallQuestion& q,
+                                                                 const UninstallTicks& ticks);
+
+// What FloServer.exe's copy in %TEMP% is told to do once the clean-up is
+// done: remove the MSI with this product code, at the window's place, then
+// say what was deleted, kept and left. Written as JSON beside the copy and
+// read back there (FloServer.exe --remove-program <file>).
+struct RemoveProgramPlan {
+    std::string product;
+    int x = 0;
+    int y = 0;
+    std::string deleted;                // one sentence
+    std::vector<std::string> kept;      // "Databases: C:\..."
+    std::vector<std::string> problems;  // what couldn't be done
+    std::string data_dir;               // "Open the data folder"; empty: no link
+    bool operator==(const RemoveProgramPlan&) const = default;
+};
+[[nodiscard]] std::string remove_program_json(const RemoveProgramPlan& plan);
+// Nothing when it isn't one, or its product isn't a product code.
+[[nodiscard]] std::optional<RemoveProgramPlan> parse_remove_program_json(std::string_view text);
+
+// The Done page's words: what was deleted too (as ticked), and what stayed
+// where (the boxes not ticked, with their folders).
+[[nodiscard]] std::string uninstall_deleted_text(const UninstallTicks& ticks, bool projects_offered);
+[[nodiscard]] std::vector<std::string> uninstall_kept_lines(const UninstallTicks& ticks, const std::string& data_dir,
+                                                            const std::string& runtimes_dir,
+                                                            const std::string& projects_dir);
+
+// FloServer.exe --remove-program <file>: the plan's file; nothing for other arguments.
+inline constexpr std::string_view kRemoveProgramFlag = "--remove-program";
+[[nodiscard]] std::optional<std::string> parse_remove_program_args(const std::vector<std::string>& args);
+// The copy's command line; empty when a path can't be quoted.
+[[nodiscard]] std::string remove_program_command(std::string_view exe, std::string_view plan_file);
+
 // FloServer's MSI, found through its upgrade code (the same for every version).
 inline constexpr std::string_view kUpgradeCode = "{3AC2E747-DDE1-465C-87CC-277C97C81D0F}";
 

@@ -4,7 +4,7 @@
 #include <charconv>
 #include <cstddef>
 
-namespace floserver::ui {
+namespace floserver::setup {
 
 namespace {
 
@@ -181,7 +181,7 @@ std::optional<std::vector<PathFigure>> parse_svg_path(std::string_view data) {
                     const auto c1 = point();
                     const auto c2 = c1 ? point() : std::nullopt;
                     const auto end = c2 ? point() : std::nullopt;
-                    if (!end) {
+                    if (!c1 || !c2 || !end) {
                         return std::nullopt;
                     }
                     curve_to(*c1, *c2, *end);
@@ -190,7 +190,7 @@ std::optional<std::vector<PathFigure>> parse_svg_path(std::string_view data) {
                 } else {  // S: the first control mirrors the last curve's second one
                     const auto c2 = point();
                     const auto end = c2 ? point() : std::nullopt;
-                    if (!end) {
+                    if (!c2 || !end) {
                         return std::nullopt;
                     }
                     const PathPoint c1 = last_was_curve
@@ -221,4 +221,4 @@ std::optional<std::vector<PathFigure>> parse_svg_path(std::string_view data) {
     return figures;
 }
 
-}  // namespace floserver::ui
+}  // namespace floserver::setup

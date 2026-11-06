@@ -39,6 +39,7 @@ add_executable(floserver_tests
     test_ui_code_editor.cpp
     test_ui_folder_removal.cpp
     test_ui_uninstall.cpp
+    test_setup_model.cpp
     test_ui_update.cpp
     test_ui_toast.cpp
     test_ui_glyphs.cpp
@@ -56,7 +57,7 @@ add_executable(floserver_tests
 # test_service.cpp runs the real floserverd.
 add_dependencies(floserver_tests floserverd floserver_shim)
 target_compile_definitions(floserver_tests PRIVATE FLOSERVER_TEST_BIN_DIR="$<TARGET_FILE_DIR:floserverd>")
-target_link_libraries(floserver_tests PRIVATE floserver_core floserver_ui_model floserver_third_party floserver_monocypher floserver_miniz)
+target_link_libraries(floserver_tests PRIVATE floserver_core floserver_ui_model floserver_setup_model floserver_third_party floserver_monocypher floserver_miniz)
 if(WIN32)
     target_link_libraries(floserver_tests PRIVATE ws2_32 crypt32)
 else()

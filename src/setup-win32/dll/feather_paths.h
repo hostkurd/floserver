@@ -4,7 +4,7 @@
 // parts, without the blue tile), as SVG path data for setup_look.cpp. Copied
 // from the SVG; if the icon changes, copy its two paths here again.
 
-namespace floserver::ui::setup_look {
+namespace floserver::setup::look {
 
 // class "cls-3" (#b3e4ff).
 inline constexpr const char* kFeatherLight =
@@ -32,4 +32,4 @@ inline constexpr const char* kFeatherWhite =
     "65-20.74,52.3-35.89,76.21-40.7,64.28-98.46,109.55-163.98,128.57-26.93,7.81-60.68,12.14-119.91,15.38-60.86,3.34"
     "-99.56,8.94-143.27,20.77-52.23,14.12-102.73,38.27-146.12,69.85-7.65,5.58-11.27,6.51-10.1,2.6Z";
 
-}  // namespace floserver::ui::setup_look
+}  // namespace floserver::setup::look
