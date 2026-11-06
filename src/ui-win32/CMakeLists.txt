@@ -18,6 +18,8 @@ add_library(floserver_ui_model STATIC
     model/folder_removal.cpp
     model/uninstall.cpp
     model/app_update.cpp
+    model/msi_progress.cpp
+    model/svg_path.cpp
     model/toast.cpp
     model/glyphs.cpp
     model/access_tree.cpp
