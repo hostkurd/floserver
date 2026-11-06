@@ -519,7 +519,7 @@ void MainWindow::add_panel_access(AccessTree& t) const {
     // Database.
     if (shown(g.db_box)) {
         const std::string database = !row->database.empty() ? row->database : row->wants.database;
-        const std::string name = core::project_database_name(p);
+        const std::string name = row_database_name(*row);  // kept through a rename (D22)
         const std::uint16_t port = database_port(snap_.databases, database);
         const std::string host = port != 0 ? "127.0.0.1:" + std::to_string(port) : std::string("127.0.0.1");
         words("db-title", fill(lang_, Str::DatabaseTitle, {name}), g.db_title);

@@ -56,6 +56,9 @@ struct ProjectRow {
     std::string node;
     std::string python;
     std::string database;  // "mariadb-11.4"
+    // Its database and user as the service names them ("my_shop"; a renamed
+    // project keeps its own, D22); empty from an older service.
+    std::string database_name;
     Wants wants;
     // What the service says is missing, as it says it: "php", "php 8.2", "nginx".
     std::vector<std::string> missing;

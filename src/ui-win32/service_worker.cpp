@@ -241,7 +241,9 @@ void ServiceWorker::database_call(const std::string& method, const nlohmann::jso
     // an earlier one is told apart (and dropped there).
     // projects.remove from the window: dropping its database may start
     // MariaDB first (a minute, its first time). One at a time per project.
-    if (method == "folders.get" || method == "folders.clean" || method == "projects.remove") {
+    // projects.rename reloads the web server and may wait for a folder.
+    if (method == "folders.get" || method == "folders.clean" || method == "projects.remove" ||
+        method == "projects.rename") {
         start_side_call(method, params, purpose.empty() ? method : purpose);
         return;
     }

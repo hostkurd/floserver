@@ -1,6 +1,9 @@
 #include "model/project_menu.h"
 
 #include "floserver/core/mariadb.h"
+#include "floserver/core/project_registry.h"
+
+#include <algorithm>
 
 namespace floserver::ui {
 
@@ -29,6 +32,7 @@ std::vector<MenuItem> project_menu(const ProjectRow& row, const ProjectMenuState
         {MenuCommand::KeepRunning, Str::KeepRunning, change, state.keep},
         {},
         // No Project settings…: a click on the row opens its panel (approved 4 Nov).
+        {MenuCommand::Rename, Str::RenameProject, change, false},
         {MenuCommand::Remove, Str::RemoveProject, change, false},
     };
 }
@@ -63,6 +67,7 @@ std::optional<Glyph> menu_glyph(MenuCommand command) {
         case MenuCommand::None:
         case MenuCommand::KeepRunning:  // a ticked item: its tick is its mark
         case MenuCommand::Settings:
+        case MenuCommand::Rename:
             break;
     }
     return std::nullopt;
@@ -77,6 +82,72 @@ std::string menu_item_text(const MenuItem& item, Lang lang, std::string_view edi
 
 bool row_has_database(const ProjectRow& row) { return is_mariadb(row.database) || is_mariadb(row.wants.database); }
 
+std::string row_database_name(const ProjectRow& row) {
+    return row.database_name.empty() ? core::project_database_name(row.name) : row.database_name;
+}
+
+namespace {
+
+// What's wrong with `name` as the project's new name, or nothing. The
+// service's own rules (project_registry.h); it checks them again.
+std::optional<std::string> rename_problem(const ProjectRow& row, std::string_view name,
+                                          const std::vector<ProjectRow>& rows, Lang lang) {
+    if (name.empty()) {
+        return std::string(text(lang, Str::RenameEmpty));
+    }
+    if (name.size() > core::kMaxProjectNameLength) {
+        return std::string(text(lang, Str::RenameTooLong));
+    }
+    if (const auto problem = core::project_name_problem(name)) {
+        return std::string(text(lang, name.starts_with("xn--") ? Str::RenameXn : Str::RenameRule));
+    }
+    if (name == "phpmyadmin") {
+        return fill(lang, Str::RenameReserved, {name});
+    }
+    const bool taken = std::any_of(rows.begin(), rows.end(),
+                                   [&](const ProjectRow& r) { return r.name == name && r.name != row.name; });
+    if (taken) {
+        return fill(lang, Str::RenameTaken, {name});
+    }
+    return std::nullopt;
+}
+
+}  // namespace
+
+RenameQuestion rename_question(const ProjectRow& row, std::string_view typed, const std::vector<ProjectRow>& rows,
+                               const FooterText& footer, Lang lang) {
+    RenameQuestion q;
+    q.window_title = "FloServer";
+    q.title = fill(lang, Str::RenameTitle, {row.name});
+    q.label = std::string(text(lang, Str::RenameNewName));
+    q.rename = std::string(text(lang, Str::RenameConfirm));
+    q.cancel = std::string(text(lang, Str::WizardCancel));
+    const std::string name(typed);
+    const auto problem = rename_problem(row, name, rows, lang);
+    q.problem = problem.has_value();
+    q.help = problem ? *problem : fill(lang, Str::RenameHelp, {new_project_address(name, footer)});
+    q.can_rename = !problem && name != row.name;
+    if (!row.path.empty()) {
+        q.folder = std::string(text(lang, Str::RenameFolder));
+        q.folder_note = fill(lang, Str::RenameFolderNote, {row.path, problem ? std::string("…") : name});
+    }
+    if (row_has_database(row)) {
+        // Kept, unless it's one of MariaDB's own names (never made): the
+        // service's rule (rename_project()).
+        const std::string database = row_database_name(row);
+        q.database_note =
+            core::database_follows_rename(database)
+                ? fill(lang, Str::RenameDatabaseFollows,
+                       {database, problem ? std::string("…") : core::project_database_name(name)})
+                : fill(lang, Str::RenameDatabaseNote, {database});
+    }
+    return q;
+}
+
+std::string rename_outcome(const std::string& old_name, const std::string& new_name, bool folder, Lang lang) {
+    return fill(lang, folder ? Str::RenameDoneFolder : Str::RenameDone, {old_name, new_name});
+}
+
 RemoveQuestion remove_question(const ProjectRow& row, Lang lang, FolderOffer offer) {
     RemoveQuestion q;
     q.window_title = "FloServer";
@@ -86,7 +157,7 @@ RemoveQuestion remove_question(const ProjectRow& row, Lang lang, FolderOffer off
     q.cancel = std::string(text(lang, Str::WizardCancel));
     if (row_has_database(row)) {
         // The name the service gives it; the service works it out again itself.
-        q.drop = fill(lang, Str::RemoveDropDatabase, {core::project_database_name(row.name)});
+        q.drop = fill(lang, Str::RemoveDropDatabase, {row_database_name(row)});
     }
     if (offer == FolderOffer::Offer && !row.path.empty()) {
         q.trash = std::string(text(lang, Str::RemoveTrashFolder));

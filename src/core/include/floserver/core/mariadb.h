@@ -17,6 +17,7 @@
 // takes any connection.
 
 #include "floserver/core/ports.h"
+#include "floserver/core/project_registry.h"
 
 #include <filesystem>
 #include <map>
@@ -114,11 +115,21 @@ inline constexpr std::string_view kSharedDatabasePrefix = "www_";
 // The database and user name for a project: its name with '-' as '_'
 // ("my-shop" -> "my_shop"), so tools that don't quote names cope.
 [[nodiscard]] std::string project_database_name(std::string_view project);
+// The same for a registered project: the name it kept through a rename
+// (D22), else the one its name gives.
+[[nodiscard]] std::string project_database_name(const Project& project);
 
 // Names a project's database and user can't have: MariaDB's own accounts
 // and databases ("root" would take over the root account), and the shared
 // sites' ("www", "www_..."), which their login may use.
 [[nodiscard]] bool reserved_database_name(std::string_view name);
+
+// Whether a project's database called `database` takes the project's new
+// name when it's renamed (D22) instead of keeping its own: only MariaDB's
+// own names (root, mysql...), which FloServer never makes for a project.
+// Shared sites' (www, www_...) are reserved now but were made for projects
+// from before shared sites, so they're kept like any other.
+[[nodiscard]] bool database_follows_rename(std::string_view database);
 
 // Which .env keys a project uses: FloCMS's (DB_TYPE, DB_NAME) or
 // Laravel's (DB_CONNECTION, DB_DATABASE), from the project's .env or

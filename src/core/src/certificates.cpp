@@ -2,6 +2,7 @@
 
 #include "floserver/core/encoding.h"
 #include "floserver/core/paths.h"
+#include "floserver/core/phpmyadmin.h"
 #include "floserver/core/project_registry.h"
 #include "floserver/core/sha256.h"
 
@@ -347,6 +348,30 @@ std::optional<SiteCertificate> CertStore::ensure_site(const std::string& name, s
         return std::nullopt;
     }
     return ensure_host(name, name + ".localhost", error);
+}
+
+bool CertStore::remove_site(const std::string& name, std::string& error) {
+    if (const auto problem = project_name_problem(name)) {
+        error = "can't remove the certificate for \"" + name + "\": " + *problem;
+        return false;
+    }
+    if (reserved_project_name(name)) {
+        error = "the certificate for " + name + ".localhost is phpMyAdmin's; it isn't removed";
+        return false;
+    }
+    const std::lock_guard lock(mutex_);
+    const fs::path base = dir_ / "sites" / path_from_utf8(name);
+    bool removed = true;
+    for (const char* ext : {".pem", ".key", ".json"}) {
+        std::error_code ec;
+        const fs::path file = fs::path(base) += ext;
+        fs::remove(file, ec);
+        if (ec) {
+            error = "can't remove " + path_to_utf8(file) + ": " + error_text(ec);
+            removed = false;
+        }
+    }
+    return removed;
 }
 
 std::optional<SiteCertificate> CertStore::ensure_localhost(std::string& error) {
