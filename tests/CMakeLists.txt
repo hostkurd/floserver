@@ -45,6 +45,7 @@ add_executable(floserver_tests
     test_ui_access.cpp
     test_ui_pages_access.cpp
     test_ui_settings_access.cpp
+    test_ui_start_measure.cpp
     test_web_service.cpp
     test_web_settings.cpp
     test_tar.cpp
