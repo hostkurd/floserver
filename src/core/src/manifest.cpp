@@ -333,12 +333,15 @@ std::optional<std::string> read_app_release(const json& e, AppRelease& out) {
         return "is not an object";
     }
     // Always x.y.z, written plainly: the version FloServer.exe and the MSI carry.
-    auto version = get_string(e, "version");
-    const auto parsed = version ? Version::parse(*version) : std::nullopt;
+    const auto version = get_string(e, "version");
+    if (!version) {
+        return "has no valid version";
+    }
+    const auto parsed = Version::parse(*version);
     if (!parsed || parsed->parts().size() != 3 || parsed->to_string() != *version) {
         return "has no valid version";
     }
-    out.version = std::move(*version);
+    out.version = *version;
     auto platform = get_string(e, "platform");
     if (!platform || platform->empty() || platform->size() > kMaxNameLength ||
         !std::all_of(platform->begin(), platform->end(), [](char c) {
