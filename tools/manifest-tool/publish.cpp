@@ -197,12 +197,13 @@ LiveResult fetch_live_list(HttpTransport& http, std::string_view cdn,
     live.runtimes = opened.manifest->runtimes;
     live.template_count = opened.manifest->templates.size();
     live.templates_json = doc.is_object() && doc.contains("templates") ? doc["templates"].dump() : "[]";
+    live.app = opened.manifest->app;
     result.list = std::move(live);
     return result;
 }
 
 std::string runtime_title(std::string_view runtime, std::string_view version) {
-    static constexpr std::array<std::pair<std::string_view, std::string_view>, 9> kNames = {{
+    static constexpr std::array<std::pair<std::string_view, std::string_view>, 10> kNames = {{
         {"php", "PHP"},
         {"mariadb", "MariaDB"},
         {"node", "Node.js"},
@@ -212,6 +213,7 @@ std::string runtime_title(std::string_view runtime, std::string_view version) {
         {"wordpress", "WordPress"},
         {"python", "Python"},
         {"phpmyadmin", "phpMyAdmin"},
+        {kAppFolder, "FloServer"},
     }};
     std::string name(runtime);
     for (const auto& [id, title] : kNames) {
@@ -241,6 +243,23 @@ std::vector<PublishFile> files_from_live(const LiveList& live, std::string_view 
         f.sha256 = to_hex(r.sha256);
         files.push_back(std::move(f));
     }
+    if (live.app) {
+        const core::AppRelease& app = *live.app;
+        const std::string_view url = app.urls.empty() ? std::string_view() : std::string_view(app.urls.front());
+        if (!url.starts_with(prefix)) {
+            notes.push_back(runtime_title(kAppFolder, app.version) + " isn't on " + std::string(cdn) +
+                            " and is left out");
+        } else {
+            PublishFile f;
+            f.path = std::string(url.substr(prefix.size()));
+            f.title = runtime_title(kAppFolder, app.version);
+            f.published = true;
+            f.size = app.size;
+            f.sha256 = to_hex(app.sha256);
+            f.notes_url = app.notes_url;
+            files.push_back(std::move(f));
+        }
+    }
     return files;
 }
 
@@ -261,6 +280,24 @@ AddResult new_file(std::string_view text, std::string_view cdn,
     while (text.starts_with('/')) {
         text.remove_prefix(1);
     }
+    // FloServer's installer: "app/1.2.0/FloServer-1.2.0-x64.msi https://floserver.org/news/1.2.0".
+    std::string notes;
+    if (const std::size_t gap = text.find_first_of(" \t"); gap != std::string_view::npos) {
+        std::string_view after = text.substr(gap);
+        text = text.substr(0, gap);
+        while (!after.empty() && (after.front() == ' ' || after.front() == '\t')) {
+            after.remove_prefix(1);
+        }
+        notes = std::string(after);
+        if (!text.starts_with(std::string(kAppFolder) + "/")) {
+            result.error = "Only FloServer's installer takes an address after its path (its What's new page).";
+            return result;
+        }
+        if (!is_plain_https_url(notes)) {
+            result.error = "The What's new address after the installer's path must be a plain https address.";
+            return result;
+        }
+    }
     if (text.empty()) {
         result.error = "Type the file's path on the CDN, such as php/8.5.13/php-8.5.13-nts-Win32-vs17-x64.zip.";
         return result;
@@ -277,9 +314,15 @@ AddResult new_file(std::string_view text, std::string_view cdn,
         result.error = p.problem;
         return result;
     }
+    const bool app = p.runtime == kAppFolder;
     for (const PublishFile& f : existing) {
         if (f.path == text) {
             result.error = "That file is already in the list.";
+            return result;
+        }
+        if (app && f.path.starts_with(std::string(kAppFolder) + "/")) {
+            result.error = f.title + " is already in the list (" + f.path +
+                           "). The list names one installer: remove it first to replace it.";
             return result;
         }
         if (f.title == runtime_title(p.runtime, p.version)) {
@@ -290,6 +333,7 @@ AddResult new_file(std::string_view text, std::string_view cdn,
     PublishFile f;
     f.path = std::string(text);
     f.title = runtime_title(p.runtime, p.version);
+    f.notes_url = std::move(notes);
     result.file = std::move(f);
     return result;
 }
@@ -334,8 +378,9 @@ OfficialSource official_source(std::string_view path) {
         // Each download has its own .sha256 next to it: "<hash>  <file>".
         s.kind = Kind::Sums;
         s.urls = {"https://files.phpmyadmin.net/phpMyAdmin/" + v + "/" + p.file + ".sha256"};
-    } else if (p.runtime == "apache") {
-        // Apache Lounge publishes no checksum list.
+    } else if (p.runtime == "apache" || p.runtime == kAppFolder) {
+        // Apache Lounge publishes no checksum list; FloServer's installer is
+        // HostKurd's own, compared with the CI artifact.
         s.kind = Kind::ByHand;
     }
     return s;
@@ -497,10 +542,14 @@ void check_file(CheckContext& ctx, PublishFile& file) {
         file.detail = "FloServer Publisher doesn't know where this runtime's official checksums are; "
                       "add it to official_source() in tools/manifest-tool/publish.cpp.";
     } else if (source.kind == OfficialSource::Kind::ByHand) {
-        // Only a project that publishes no checksum at all (Apache Lounge).
+        // Only a project that publishes no checksum at all (Apache Lounge),
+        // and FloServer's own installer.
         file.state = CheckState::ByHand;
-        file.detail = "Its project publishes no checksum list. Compare its SHA-256 with the one on its "
-                      "download page: " + file.sha256;
+        file.detail = describe_cdn_path(file.path).runtime == kAppFolder
+                          ? "FloServer's own installer. Compare its SHA-256 with the CI build's artifact "
+                            "(the FloServer-<version>-x64.msi it uploaded): " + file.sha256
+                          : "Its project publishes no checksum list. Compare its SHA-256 with the one on its "
+                            "download page: " + file.sha256;
     } else if (!official) {
         // A file with an official source is never signed without that source:
         // it fails, and the next Publish tries again.
@@ -582,6 +631,9 @@ BuiltList build_next_list(std::string_view cdn, const std::vector<PublishFile>& 
 
     nlohmann::ordered_json list = nlohmann::ordered_json::array();
     for (const PublishFile& f : files) {
+        if (describe_cdn_path(f.path).runtime == kAppFolder) {
+            options.app_notes_url = f.notes_url;
+        }
         std::string result;
         if (f.state == CheckState::Ok) {
             result = "ok";

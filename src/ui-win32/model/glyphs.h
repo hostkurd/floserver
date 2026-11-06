@@ -9,7 +9,7 @@
 
 namespace floserver::ui {
 
-enum class Glyph : std::uint8_t { Globe, Folder, Terminal, Code, Studio, Copy, Power, Trash };
+enum class Glyph : std::uint8_t { Globe, Folder, Terminal, Code, Studio, Copy, Power, Trash, Download, Tick };
 
 struct GlyphShape {
     enum class Kind : std::uint8_t { Line, Ellipse } kind = Kind::Line;

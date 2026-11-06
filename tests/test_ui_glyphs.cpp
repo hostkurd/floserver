@@ -9,7 +9,7 @@ using namespace floserver::ui;
 
 TEST_CASE("glyphs: each has shapes inside its box") {
     for (const Glyph g : {Glyph::Globe, Glyph::Folder, Glyph::Terminal, Glyph::Code, Glyph::Studio, Glyph::Copy,
-                          Glyph::Power, Glyph::Trash}) {
+                          Glyph::Power, Glyph::Trash, Glyph::Download, Glyph::Tick}) {
         CAPTURE(static_cast<int>(g));
         const auto shapes = glyph_shapes(g);
         REQUIRE_FALSE(shapes.empty());

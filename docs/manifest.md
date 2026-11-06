@@ -1,8 +1,8 @@
 # The runtime manifest (D5)
 
-FloServer downloads PHP, MariaDB, Node.js, Composer, nginx, Apache and phpMyAdmin from a
-list on our server. The list is signed, so a hacked mirror or a hijacked
-connection can't send users a different file.
+FloServer downloads PHP, MariaDB, Node.js, Composer, nginx, Apache, phpMyAdmin
+and its own updates from a list on our server. The list is signed, so a
+hacked mirror or a hijacked connection can't send users a different file.
 
 ## Files
 
@@ -68,6 +68,31 @@ renamed into place, so a folder without a marker is never taken for an
 install. Other variants than PHP's usual NTS get their own folder
 (`8.5.12-ts`).
 
+## App updates
+
+The same signed list may name the newest Windows app in a top-level `"app"`
+entry (version `x.y.z`, platform `windows-x86_64`, the MSI's https URLs,
+`size`, `sha256` and an optional `notes_url`, the What's new page). Apps from
+before it ignore it, and a list without it is fine. An `"app"` that fails
+its checks is skipped with a warning; the runtimes still load.
+
+The service reads the list a minute after it starts, then once a day, and
+when the window asks (Settings > General's **Check now**). When the list
+offers a newer version than its own, it downloads the MSI in the background
+with the same downloader and rules as a runtime (https only, a `.part` file,
+exact size and SHA-256) to `%LOCALAPPDATA%\FloServer\updates\`, and keeps
+it there; any other file in that folder is deleted. Nothing is installed
+until the user clicks **Update now**. The window then copies `FloServer.exe`
+(and the Visual C++ DLLs beside it) to a new folder,
+`%TEMP%\FloServer-update-<random>\`, starts that copy and quits. The copy
+marks that an update is running (no FloServer window opens meanwhile),
+waits for the old window to go, stops the service, opens the MSI so that
+nothing can change it, checks its SHA-256 against the signed list again
+through that handle and installs it with Windows Installer, then opens the
+new FloServer. When Windows must restart to finish, it says so instead. If
+it fails, it says why; only when the installer had passed its checks does
+it offer to open it the usual way.
+
 Files that are the same everywhere (Composer, phpMyAdmin) are listed with
 `"platform": "any"`. An entry whose name a FloServer doesn't know still
 passes its checks: the list is never refused for it. Such an app offers it
@@ -102,6 +127,14 @@ steps 2 to 6 below in one window:
 2. Open the Publisher. It reads the live list (signed, sequence, expiry) and
    lists its files. Type each new file's CDN path and press **Add**; select a
    file and **Remove** to leave it out of the next list.
+
+   A new FloServer release: upload the MSI from the CI run's artifact to
+   `app/<x.y.z>/FloServer-<x.y.z>-x64.msi` (the name CI gives it), remove the
+   old installer's row, and add the new path followed by a space and its
+   What's new address, if it has one:
+   `app/1.2.0/FloServer-1.2.0-x64.msi https://floserver.org/news/1.2.0`.
+   The list names one installer at a time; the What's new address is kept
+   while the installer is carried over to later lists.
 3. Press **Publish** and choose the key file (asked every time; only the
    path is kept while the window is open, and the key is wiped right after
    signing). It then:
@@ -112,7 +145,8 @@ steps 2 to 6 below in one window:
      checksum list (PHP, MariaDB, Node.js, Composer, Python, phpMyAdmin's .sha256) or the original
      download (nginx, WordPress). Apache is compared by hand: select it,
      compare the SHA-256 shown with apachelounge.com, tick the box and press
-     Publish again;
+     Publish again. FloServer's own installer is compared by hand too: with
+     the SHA-256 of the MSI in the CI run's artifact;
    - builds the list (live sequence + 1, 90 days, built-in templates), signs
      it and checks FloServer's built-in key opens it;
    - writes `manifest.json`, `manifest.json.sig` and `upload-steps.txt` to
@@ -136,6 +170,9 @@ steps 2 to 6 below in one window:
    Every file must say OK, except Apache: Apache Lounge publishes no
    machine-readable checksum, so it always says CHECK BY HAND. Compare its
    SHA-256 with the checksum on apachelounge.com/download yourself.
+   FloServer's installer (`app/<x.y.z>/FloServer-<x.y.z>-x64.msi`, listed
+   without `Sums` or `Orig`) says CHECK BY HAND too: compare its SHA-256
+   with the MSI in the CI run's artifact.
    Don't use `-Only` for a run you'll publish from; `build` refuses such a report.
 4. **Build** the list from the JSON report, on the same computer:
    ```
@@ -145,6 +182,7 @@ steps 2 to 6 below in one window:
    - The CDN address in the list is the one in the report, the address the files were checked on.
    - A file under a known runtime whose name doesn't fit (a typo, a wrong version folder) stops the build.
    - `--accept` names files you compared by hand.
+   - FloServer's installer becomes the list's `"app"` (one only); `--app-notes <https URL>` gives its What's new page.
    - Source archives such as MariaDB's `.tar.gz` stay on the CDN for the GPL but aren't listed.
    - The tool knows each runtime's licence, platform and official fallback URL (the catalog in `tools/manifest-tool/build.cpp`).
    - It runs the finished list through the app's own checks before writing it.

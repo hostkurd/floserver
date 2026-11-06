@@ -1,8 +1,9 @@
 // floserverd: the background service in the user's session (D2).
 //
 // The private channel, the runtimes (the signed list, installs as jobs,
-// removal), the project list, the local certificate authority, and running
-// the projects: nginx and the PHP pools that sleep when idle.
+// removal), the project list, the local certificate authority, running
+// the projects (nginx and the PHP pools that sleep when idle), and the
+// app's own updates (downloaded here, installed by the window).
 
 #include "floserver/core/apache_settings.h"
 #include "floserver/core/builtin_templates.h"
@@ -24,6 +25,7 @@
 #include "floserver/core/runtime_service.h"
 #include "floserver/core/runtime_store.h"
 #include "floserver/core/trust_store.h"
+#include "floserver/core/update_service.h"
 #include "floserver/core/database_service.h"
 #include "floserver/core/mariadb_settings.h"
 #include "floserver/core/mariadb.h"
@@ -126,7 +128,8 @@ private:
 };
 
 // The runtime work, or nothing when there's no data folder to keep it in.
-std::unique_ptr<floserver::core::RuntimeService> make_runtimes() {
+std::unique_ptr<floserver::core::RuntimeService> make_runtimes(
+    const std::shared_ptr<floserver::core::HttpTransport>& transport) {
     namespace core = floserver::core;
     const auto data = core::data_dir();
     if (!data) {
@@ -146,7 +149,29 @@ std::unique_ptr<floserver::core::RuntimeService> make_runtimes() {
             config.vc_runtime_dir = vc;
         }
     }
-    return std::make_unique<core::RuntimeService>(std::move(config), core::make_system_transport());
+    return std::make_unique<core::RuntimeService>(std::move(config), transport);
+}
+
+// The app's updates (Q5): the same signed list, read again by the runtimes.
+std::unique_ptr<floserver::core::UpdateService> make_updates(
+    floserver::core::RuntimeService& runtimes, const std::shared_ptr<floserver::core::HttpTransport>& transport) {
+    namespace core = floserver::core;
+    const auto data = core::data_dir();
+    if (!data) {
+        return nullptr;
+    }
+    core::UpdateServiceConfig config;
+    config.data_dir = *data;
+    config.current_version = core::kVersion;
+    config.fetch_list = [&runtimes](std::string& error) { return runtimes.fresh_list(error); };
+    // FLOSERVER_UPDATE_DELAY (seconds): the first check sooner or later, for tests and dev copies.
+    if (const auto delay = core::get_env("FLOSERVER_UPDATE_DELAY")) {
+        try {
+            config.first_delay = std::chrono::seconds(std::max(0L, std::stol(*delay)));
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): ignored, the usual delay is used
+        }
+    }
+    return std::make_unique<core::UpdateService>(std::move(config), transport);
 }
 
 // FLOSERVER_WEB_PORTS ("18080,18443"), FLOSERVER_IDLE_SECONDS and
@@ -206,6 +231,7 @@ std::optional<bool> bool_param(const json& params, const char* key) {
 struct Service {
     std::shared_ptr<ipc::Server> server;
     std::unique_ptr<floserver::core::RuntimeService> runtimes;
+    std::unique_ptr<floserver::core::UpdateService> updates;
     std::unique_ptr<floserver::core::ProjectService> projects;
     std::unique_ptr<floserver::core::CertStore> certs;
     std::unique_ptr<floserver::core::WebService> web;
@@ -364,6 +390,24 @@ struct Service {
                        : protocol::make_error(r.id, "unknown_job", "there's no job " + std::to_string(*id));
         }
         return protocol::make_result(r.id, {{"cancelled", runtimes->cancel(*id)}});
+    }
+
+    // The reply to one updates.* request (Q5).
+    [[nodiscard]] std::string update_request(const protocol::Request& r) const {
+        if (!updates) {
+            return protocol::make_error(r.id, "no_data_folder",
+                                        "FloServer can't find a folder to keep the update in (LOCALAPPDATA or HOME)");
+        }
+        if (r.method == "updates.cancel") {
+            return protocol::make_result(r.id, {{"cancelled", updates->cancel()}});
+        }
+        if (r.method == "updates.check") {
+            std::string error;
+            if (!updates->check(error)) {
+                return protocol::make_error(r.id, "updates_unavailable", error);
+            }
+        }
+        return protocol::make_result(r.id, updates->status());
     }
 
     // The reply to one projects.* request.
@@ -1115,6 +1159,9 @@ struct Service {
             } else if (request->method == "templates.list" || request->method == "projects.create" ||
                        request->method == "create.get" || request->method == "create.cancel") {
                 reply = template_request(*request);
+            } else if (request->method == "updates.status" || request->method == "updates.check" ||
+                       request->method == "updates.cancel") {
+                reply = update_request(*request);
             } else if (request->method == "quit") {
                 reply = protocol::make_result(request->id, json::object());
                 quit = true;
@@ -1235,7 +1282,15 @@ int run() {
     auto service = std::make_shared<Service>();
     std::thread integration_thread;
     service->server = std::move(server);
-    service->runtimes = make_runtimes();
+    // One transport for the runtimes and the app's updates.
+    const std::shared_ptr<floserver::core::HttpTransport> transport = floserver::core::make_system_transport();
+    service->runtimes = make_runtimes(transport);
+    if (service->runtimes) {
+        service->updates = make_updates(*service->runtimes, transport);
+        if (service->updates) {
+            service->updates->start();
+        }
+    }
     if (const auto data = floserver::core::data_dir()) {
         service->projects = std::make_unique<floserver::core::ProjectService>(*data);
         service->certs = std::make_unique<floserver::core::CertStore>(*data);
@@ -1319,6 +1374,10 @@ int run() {
     if (integration_thread.joinable()) {
         integration_thread.join();
     }
+    // The app's download first: its check reads the list through the runtimes.
+    if (service->updates) {
+        service->updates->stop();
+    }
     // Templates first: a job waits on installs and adds projects.
     if (service->templates) {
         service->templates->stop();
@@ -1342,6 +1401,7 @@ int run() {
     }
     // Waits for the cancelled install to wind down (a moment: the transfer
     // ends as soon as it's cancelled).
+    service->updates.reset();
     service->runtimes.reset();
     return 0;
 }

@@ -846,8 +846,8 @@ CleanResult remove_leftovers(const fs::path& data, const std::vector<CleanItem>&
 
 bool is_uninstall_item(const fs::path& data, const fs::path& path) {
     const fs::path p = path.lexically_normal();
-    for (const fs::path& place : {runtimes_dir(data), downloads_dir(data), data / "templates", kept_manifest_file(data),
-                                  kept_signature_file(data)}) {
+    for (const fs::path& place : {runtimes_dir(data), downloads_dir(data), updates_dir(data), data / "templates",
+                                  kept_manifest_file(data), kept_signature_file(data)}) {
         if (p == place.lexically_normal()) {
             return true;
         }
@@ -875,8 +875,8 @@ std::vector<CleanItem> uninstall_items(const fs::path& data, bool runtimes, bool
         out.push_back({p, regular_file(p, size) ? size : 0, fs::is_directory(st), true});
     };
     if (runtimes) {
-        for (const fs::path& p : {runtimes_dir(data), downloads_dir(data), data / "templates", kept_manifest_file(data),
-                                  kept_signature_file(data)}) {
+        for (const fs::path& p : {runtimes_dir(data), downloads_dir(data), updates_dir(data), data / "templates",
+                                  kept_manifest_file(data), kept_signature_file(data)}) {
             add(p);
         }
     }

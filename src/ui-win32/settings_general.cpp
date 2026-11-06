@@ -1,6 +1,7 @@
 // Settings > General: the window's language and theme, starting FloServer
-// with Windows, what closing the window does, and About (the version, the
-// website, the licences), then Remove FloServer (D21).
+// with Windows, what closing the window does, Updates (Q5: when FloServer
+// last looked, Check now, and a newer version that's ready), and About (the
+// version, the licences), then Remove FloServer (D21).
 //
 // Opening the section reads the Run entry once; nothing is asked of the
 // service. The language, theme and closing choices are the window's own:
@@ -43,8 +44,6 @@ constexpr int kControlH = 30;
 constexpr int kRadio = 16;
 constexpr int kSwitchW = 40;
 constexpr int kSwitchH = 20;
-constexpr std::string_view kWebsite = "https://floserver.org";
-constexpr std::string_view kWebsiteName = "floserver.org";
 constexpr std::string_view kLicencesFile = "licences.txt";
 
 std::wstring w(std::string_view s) { return win::widen(s); }
@@ -94,6 +93,31 @@ Str theme_choice_label(ThemeChoice choice) {
             break;
     }
     return Str::GeneralSameAsWindows;
+}
+
+// "2026-11-05T09:12:00Z" in this computer's time zone.
+std::optional<LocalTime> local_time_of(const std::string& utc) {
+    const auto t = parse_checked(utc);
+    if (!t) {
+        return std::nullopt;
+    }
+    constexpr std::int64_t kEpochDifference = 116444736000000000LL;  // 1601 -> 1970, in 100 ns
+    const std::int64_t ticks = t->time_since_epoch().count() * 10000000LL + kEpochDifference;
+    FILETIME ft{};
+    ft.dwLowDateTime = static_cast<DWORD>(static_cast<std::uint64_t>(ticks) & 0xFFFFFFFFU);
+    ft.dwHighDateTime = static_cast<DWORD>(static_cast<std::uint64_t>(ticks) >> 32U);
+    SYSTEMTIME st_utc{};
+    SYSTEMTIME local{};
+    if (FileTimeToSystemTime(&ft, &st_utc) == FALSE || SystemTimeToTzSpecificLocalTime(nullptr, &st_utc, &local) == FALSE) {
+        return std::nullopt;
+    }
+    return LocalTime{local.wYear, local.wMonth, local.wDay, local.wHour, local.wMinute};
+}
+
+LocalTime local_now() {
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    return {st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute};
 }
 
 }  // namespace
@@ -233,6 +257,17 @@ void SettingsWindow::open_licences() {
     show_message(std::string(text(lang_, Str::GeneralLicencesOpened)), false);
 }
 
+std::string SettingsWindow::updates_summary_text() const {
+    // The service's own version when it has said it; else this window's.
+    const std::string current = updates_.current.empty() ? std::string(core::kVersion) : updates_.current;
+    return updates_summary(updates_, current, local_time_of(updates_.last_checked), local_now(), lang_);
+}
+
+bool SettingsWindow::can_check_updates() const {
+    return connected_ && updates_.available && updates_.state != UpdateState::Unknown &&
+           updates_.state != UpdateState::Checking && updates_.state != UpdateState::Downloading;
+}
+
 void SettingsWindow::remove_floserver() {
     if (asking_) {
         return;
@@ -321,15 +356,31 @@ void SettingsWindow::on_general_click(const Hit& hit) {
             }
             break;
         }
-        case Part::GeneralUpdates: {
-            // No updater yet: the website says what's new.
+        case Part::GeneralUpdates:
+            // The answer comes with the main window's next poll ("checking now…" meanwhile).
+            if (can_check_updates()) {
+                worker_.check_updates();
+                updates_.state = UpdateState::Checking;
+            }
+            break;
+        case Part::GeneralUpdateNotes: {
+            // Only the signed list's https address ever reaches the shell.
+            if (!is_openable_notes(updates_.notes_url)) {
+                break;
+            }
             const auto opened = reinterpret_cast<INT_PTR>(
-                ShellExecuteW(hwnd_, L"open", w(kWebsite).c_str(), nullptr, nullptr, SW_SHOWNORMAL));
+                ShellExecuteW(hwnd_, L"open", w(updates_.notes_url).c_str(), nullptr, nullptr, SW_SHOWNORMAL));
             if (opened <= 32) {
-                show_message(fill(lang_, Str::OpenFailed, {kWebsite}), true);
+                show_message(fill(lang_, Str::OpenFailed, {updates_.notes_url}), true);
             }
             break;
         }
+        case Part::GeneralUpdateNow:
+            // FloServer's window starts the update and quits (Settings goes with it).
+            if (updates_.state == UpdateState::Ready) {
+                post_pref(PrefChange::UpdateNow, 0);
+            }
+            return;
         case Part::GeneralLicences:
             open_licences();
             break;
@@ -492,7 +543,49 @@ void SettingsWindow::layout_general(HDC dc, Geometry& g, int x0, int x1, int y) 
     }
     card_end(gg.editor_card, yy);
 
-    // About: the version, two buttons and where the first one goes.
+    // Updates (Q5, approved 5 Nov): when it last looked and Check now, at
+    // its end; then a newer version on its way or ready, with What's new
+    // and Update now.
+    card_top(gg.updates_card, gg.updates_title, yy);
+    {
+        const int check_w = measure(text(lang_, Str::UpdatesCheckNow), fonts_.button.get()) + px(24);
+        gg.updates = {cx1 - check_w, yy, cx1, yy + px(kControlH)};
+        const int words_end = std::max(cx0 + px(80), static_cast<int>(gg.updates.left) - px(12));
+        const int summary_h = std::max(px(20), height(updates_summary_text(), fonts_.body.get(), words_end - cx0));
+        gg.updates_summary = {cx0, yy + px(4), words_end, yy + px(4) + summary_h};
+        const int updates_note_h = height(text(lang_, Str::UpdatesNote), fonts_.caption.get(), words_end - cx0);
+        gg.updates_note = {cx0, gg.updates_summary.bottom, words_end, gg.updates_summary.bottom + updates_note_h};
+        yy = std::max(static_cast<int>(gg.updates_note.bottom), static_cast<int>(gg.updates.bottom));
+        if (const std::string problem = updates_problem(updates_, lang_); !problem.empty()) {
+            gg.updates_problem = {cx0, yy + px(6), cx1, yy + px(6) + height(problem, fonts_.caption.get(), cx1 - cx0)};
+            yy = static_cast<int>(gg.updates_problem.bottom);
+        }
+        if (const UpdatesRow row = updates_row(updates_, lang_); !row.title.empty()) {
+            gg.update_divider = {cx0, yy + px(12), cx1, yy + px(12) + std::max(1, px(1))};
+            yy = static_cast<int>(gg.update_divider.bottom) + px(12);
+            int end = cx1;
+            if (row.ready) {
+                const int now_w = measure(text(lang_, Str::UpdateNow), fonts_.button_bold.get()) + px(24);
+                gg.update_now = {end - now_w, yy, end, yy + px(kControlH)};
+                end = static_cast<int>(gg.update_now.left) - px(8);
+            }
+            if (is_openable_notes(updates_.notes_url)) {
+                const int notes_w = measure(text(lang_, Str::UpdateWhatsNew), fonts_.button.get()) + px(12);
+                gg.update_notes = {end - notes_w, yy, end, yy + px(kControlH)};
+                end = static_cast<int>(gg.update_notes.left) - px(8);
+            }
+            const int words_w = std::max(px(80), end - px(4) - cx0);
+            gg.update_title = {cx0, yy, cx0 + words_w, yy + px(20)};
+            const int line_h = height(row.line, fonts_.caption.get(), words_w);
+            gg.update_line = {cx0, gg.update_title.bottom, cx0 + words_w, gg.update_title.bottom + line_h};
+            // Below the words, or below the buttons beside them when they reach lower.
+            const bool buttons = !is_empty(gg.update_now) || !is_empty(gg.update_notes);
+            yy = std::max(static_cast<int>(gg.update_line.bottom), buttons ? yy + px(kControlH) : 0);
+        }
+    }
+    card_end(gg.updates_card, yy);
+
+    // About: the version and the licences.
     card_top(gg.about_card, gg.about_title, yy);
     gg.version = {cx0, yy, cx1, yy + px(20)};
     yy = static_cast<int>(gg.version.bottom) + px(10);
@@ -506,12 +599,8 @@ void SettingsWindow::layout_general(HDC dc, Geometry& g, int x0, int x1, int y) 
         r = {bx, yy, bx + bw, yy + px(kControlH)};
         bx += bw + px(8);
     };
-    button(gg.updates, Str::GeneralCheckUpdates);
     button(gg.licences, Str::GeneralLicences);
-    yy += px(kControlH) + px(8);
-    const std::string updates_note = fill(lang_, Str::GeneralUpdatesNote, {kWebsiteName});
-    gg.updates_note = {cx0, yy, cx1, yy + height(updates_note, fonts_.caption.get(), cx1 - cx0)};
-    card_end(gg.about_card, static_cast<int>(gg.updates_note.bottom));
+    card_end(gg.about_card, static_cast<int>(gg.licences.bottom));
 
     // Remove FloServer (D21): what it does, and its button.
     card_top(gg.remove_card, gg.remove_title, yy);
@@ -546,6 +635,10 @@ const RECT* SettingsWindow::general_rect_of(const Hit& hit) const {
             return at(g.editors);
         case Part::GeneralUpdates:
             return &g.updates;
+        case Part::GeneralUpdateNotes:
+            return &g.update_notes;
+        case Part::GeneralUpdateNow:
+            return &g.update_now;
         case Part::GeneralLicences:
             return &g.licences;
         case Part::GeneralRemove:
@@ -572,6 +665,12 @@ void SettingsWindow::general_focus_order(std::vector<Hit>& order) const {
         order.push_back({Part::GeneralEditor, -1, static_cast<int>(i)});
     }
     order.push_back({Part::GeneralUpdates, -1, -1});
+    if (!is_empty(geometry_.general.update_notes)) {
+        order.push_back({Part::GeneralUpdateNotes, -1, -1});
+    }
+    if (!is_empty(geometry_.general.update_now)) {
+        order.push_back({Part::GeneralUpdateNow, -1, -1});
+    }
     order.push_back({Part::GeneralLicences, -1, -1});
     order.push_back({Part::GeneralRemove, -1, -1});
 }
@@ -607,8 +706,8 @@ void SettingsWindow::paint_general_shapes(Canvas& c) const {
     const RECT column{main_left() - px(4), 0, width_, height_};
     c.clip(column);
     for (const RECT* card :
-         {&gg.lang_card, &gg.theme_card, &gg.start_card, &gg.close_card, &gg.editor_card, &gg.about_card,
-          &gg.remove_card}) {
+         {&gg.lang_card, &gg.theme_card, &gg.start_card, &gg.close_card, &gg.editor_card, &gg.updates_card,
+          &gg.about_card, &gg.remove_card}) {
         c.round_rect(*card, pxf(8), p.card, p.card_border, border);
     }
     for (std::size_t i = 0; i < kLangChoices.size(); ++i) {
@@ -653,10 +752,29 @@ void SettingsWindow::paint_general_shapes(Canvas& c) const {
         paint_radio(c, gg.editors[i], on, {Part::GeneralEditor, -1, static_cast<int>(i)});
     }
 
-    for (const auto& [part, rect] : {std::pair{Part::GeneralUpdates, gg.updates}, std::pair{Part::GeneralLicences, gg.licences},
-                                      std::pair{Part::GeneralRemove, gg.remove}}) {
+    for (const auto& [part, rect] : {std::pair{Part::GeneralLicences, gg.licences}, std::pair{Part::GeneralRemove, gg.remove}}) {
         const Hit hit{part, -1, -1};
         paint_button(c, rect, hover_ == hit, is_focused(hit), true);
+    }
+    const Hit check{Part::GeneralUpdates, -1, -1};
+    paint_button(c, gg.updates, hover_ == check && can_check_updates(), is_focused(check), can_check_updates());
+    if (!is_empty(gg.update_divider)) {
+        c.fill(gg.update_divider, p.divider);
+    }
+    if (const Hit notes{Part::GeneralUpdateNotes, -1, -1}; !is_empty(gg.update_notes)) {
+        if (hover_ == notes) {
+            c.round_rect(gg.update_notes, pxf(4), p.row_hover);
+        }
+        if (is_focused(notes)) {
+            paint_ring(c, gg.update_notes);
+        }
+    }
+    if (const Hit now{Part::GeneralUpdateNow, -1, -1}; !is_empty(gg.update_now)) {
+        // The primary button, as in the main window's banner.
+        c.round_rect(gg.update_now, pxf(4), p.accent);
+        if (is_focused(now)) {
+            paint_ring(c, gg.update_now);
+        }
     }
     // The scroll bar, when the page is taller than the window.
     scroll_bar_.paint(c, p);
@@ -716,13 +834,31 @@ void SettingsWindow::paint_general_text(Canvas& c) const {
         }
     }
 
+    title(gg.updates_title, Str::UpdatesTitle);
+    c.paragraph(gg.updates_summary, w(updates_summary_text()), fonts_.body.get(), p.text);
+    c.paragraph(gg.updates_note, w(text(lang_, Str::UpdatesNote)), fonts_.caption.get(), p.text_subtle);
+    c.text(gg.updates, w(text(lang_, Str::UpdatesCheckNow)), fonts_.button.get(),
+           can_check_updates() ? p.text : p.button_disabled_text, Align::Center, false);
+    if (!is_empty(gg.updates_problem)) {
+        c.paragraph(gg.updates_problem, w(updates_problem(updates_, lang_)), fonts_.caption.get(), p.problem.text);
+    }
+    if (const UpdatesRow row = updates_row(updates_, lang_); !row.title.empty() && !is_empty(gg.update_title)) {
+        c.text(gg.update_title, w(row.title), fonts_.body_bold.get(), p.text, Align::Start, false);
+        c.paragraph(gg.update_line, w(row.line), fonts_.caption.get(), p.text_subtle);
+        if (!is_empty(gg.update_notes)) {
+            c.text(gg.update_notes, w(text(lang_, Str::UpdateWhatsNew)), fonts_.button.get(), p.link, Align::Center,
+                   false);
+        }
+        if (!is_empty(gg.update_now)) {
+            c.text(gg.update_now, w(text(lang_, Str::UpdateNow)), fonts_.button_bold.get(), p.accent_text,
+                   Align::Center, false);
+        }
+    }
+
     title(gg.about_title, Str::GeneralAbout);
     c.text(gg.version, w(fill(lang_, Str::GeneralVersion, {core::kVersion})), fonts_.body.get(), p.text, Align::Start,
            false);
-    c.text(gg.updates, w(text(lang_, Str::GeneralCheckUpdates)), fonts_.button.get(), p.text, Align::Center, false);
     c.text(gg.licences, w(text(lang_, Str::GeneralLicences)), fonts_.button.get(), p.text, Align::Center, false);
-    c.paragraph(gg.updates_note, w(fill(lang_, Str::GeneralUpdatesNote, {kWebsiteName})), fonts_.caption.get(),
-                p.text_subtle);
 
     title(gg.remove_title, Str::GeneralRemoveTitle);
     c.paragraph(gg.remove_note, w(text(lang_, Str::GeneralRemoveNote)), fonts_.caption.get(), p.text_subtle);

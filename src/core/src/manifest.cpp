@@ -35,10 +35,12 @@ bool is_name(std::string_view s) {
            });
 }
 
+}  // namespace
+
 // https://host[:port]/path with a plain lower-case host name, no user info,
 // no fragment, no NUL. The SHA-256 is what makes a download safe; this keeps
 // the downloader's input simple and predictable.
-bool is_https_url(std::string_view url) {
+bool is_plain_https_url(std::string_view url) {
     constexpr std::string_view kScheme = "https://";
     if (url.size() > kMaxUrlLength || !url.starts_with(kScheme)) {
         return false;
@@ -80,6 +82,8 @@ bool is_https_url(std::string_view url) {
                c != '>' && c != '`' && c != '#' && c != '@';
     });
 }
+
+namespace {
 
 std::optional<std::string> get_string(const json& o, const char* key) {
     const auto it = o.find(key);
@@ -148,7 +152,7 @@ std::optional<std::string> read_entry(const json& e, RuntimeFile& out) {
         return "has no download URLs";
     }
     for (const json& u : *urls) {
-        if (!u.is_string() || !is_https_url(u.get_ref<const std::string&>())) {
+        if (!u.is_string() || !is_plain_https_url(u.get_ref<const std::string&>())) {
             return "has a URL that isn't plain https";
         }
         out.urls.emplace_back(u.get<std::string>());
@@ -290,6 +294,14 @@ ManifestResult open_manifest(std::string_view manifest_bytes, std::string_view s
     if (const auto templates = doc.find("templates"); templates != doc.end()) {
         m.templates = parse_templates(*templates, result.warnings);
     }
+    if (const auto app = doc.find("app"); app != doc.end()) {
+        AppRelease release;
+        if (auto problem = read_app_release(*app, release)) {
+            result.warnings.push_back("the app entry " + *problem + " and was skipped");
+        } else {
+            m.app = std::move(release);
+        }
+    }
     result.key_id = key_id;
     result.manifest = std::move(m);
     return result;
@@ -313,6 +325,73 @@ std::vector<RuntimeFile> runtimes_for(const Manifest& manifest, std::string_view
         out.push_back(std::move(f.second));
     }
     return out;
+}
+
+std::optional<std::string> read_app_release(const json& e, AppRelease& out) {
+    out = {};
+    if (!e.is_object()) {
+        return "is not an object";
+    }
+    // Always x.y.z, written plainly: the version FloServer.exe and the MSI carry.
+    auto version = get_string(e, "version");
+    const auto parsed = version ? Version::parse(*version) : std::nullopt;
+    if (!parsed || parsed->parts().size() != 3 || parsed->to_string() != *version) {
+        return "has no valid version";
+    }
+    out.version = std::move(*version);
+    auto platform = get_string(e, "platform");
+    if (!platform || platform->empty() || platform->size() > kMaxNameLength ||
+        !std::all_of(platform->begin(), platform->end(), [](char c) {
+            return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_';
+        })) {
+        return "has no valid platform";
+    }
+    out.platform = std::move(*platform);
+    const auto size = e.find("size");
+    if (size == e.end() || !size->is_number_unsigned() || size->get<std::uint64_t>() == 0 ||
+        size->get<std::uint64_t>() > kMaxFileSize) {
+        return "has no valid size";
+    }
+    out.size = size->get<std::uint64_t>();
+    const auto hash_text = get_string(e, "sha256");
+    const auto hash = hash_text && hash_text->size() == 64 ? from_hex(*hash_text) : std::nullopt;
+    if (!hash) {
+        return "has no valid sha256";
+    }
+    std::copy(hash->begin(), hash->end(), out.sha256.begin());
+    const auto urls = e.find("urls");
+    if (urls == e.end() || !urls->is_array() || urls->empty() || urls->size() > kMaxUrls) {
+        return "has no download URLs";
+    }
+    for (const json& u : *urls) {
+        // An installer and nothing else: the window hands it to Windows Installer.
+        if (!u.is_string() || !is_plain_https_url(u.get_ref<const std::string&>()) ||
+            !u.get_ref<const std::string&>().ends_with(".msi")) {
+            return "has a URL that isn't a plain https address of an .msi";
+        }
+        out.urls.emplace_back(u.get<std::string>());
+    }
+    if (e.contains("notes_url")) {
+        auto notes = get_string(e, "notes_url");
+        if (!notes || !is_plain_https_url(*notes)) {
+            return "has a notes_url that isn't plain https";
+        }
+        out.notes_url = std::move(*notes);
+    }
+    return std::nullopt;
+}
+
+RuntimeFile app_download_entry(const AppRelease& app) {
+    RuntimeFile f;
+    f.name = "floserver";
+    f.version = app.version;
+    f.platform = app.platform;
+    f.archive = "file";
+    f.size = app.size;
+    f.sha256 = app.sha256;
+    f.license = "FloServer";
+    f.urls = app.urls;
+    return f;
 }
 
 bool matches_entry(const RuntimeFile& entry, std::uint64_t size, const Sha256Digest& digest) {

@@ -621,7 +621,9 @@ void MainWindow::on_snapshot() {
     if (focus_ >= 0 && focus_ < static_cast<int>(visible_.size())) {
         focused = snap_.rows[visible_[static_cast<std::size_t>(focus_)]].name;
     }
+    const UpdateBanner update_before = update_shown();
     snap_ = std::move(s);
+    on_update_snapshot(update_before);
     if (settings_) {
         settings_->on_snapshot(snap_);
         if (copied) {
@@ -791,6 +793,10 @@ void MainWindow::on_pref_change(WPARAM change, LPARAM value) {
         start_uninstall(uninstall_ticks_from(static_cast<unsigned>(value)));  // not a preference: nothing saved
         return;
     }
+    if (static_cast<PrefChange>(change) == PrefChange::UpdateNow) {
+        start_update();  // Settings > General's Update now: not a preference either
+        return;
+    }
     const auto index = static_cast<std::size_t>(value);
     const WindowPrefs before = prefs_;
     switch (static_cast<PrefChange>(change)) {
@@ -817,6 +823,7 @@ void MainWindow::on_pref_change(WPARAM change, LPARAM value) {
             forget_editor();  // looked for again with the new choice
             break;
         case PrefChange::RemoveFloServer:
+        case PrefChange::UpdateNow:
             break;  // handled above
     }
     if (prefs_ == before) {
@@ -1035,8 +1042,7 @@ RECT MainWindow::banner_rect() const {
 }
 
 RECT MainWindow::card_rect() const {
-    const RECT b = banner_rect();
-    const int top = b.bottom > 0 ? b.bottom + px(8) : px(kTopBarH);
+    const int top = content_top();
     const int bottom = std::max(top, height_ - px(kFooterH) - px(kGap));
     if (panel_open()) {
         if (!panel_beside_list()) {
@@ -1304,6 +1310,9 @@ MainWindow::Hit MainWindow::hit_test(int x, int y) const {
     if (contains(banner_rect(), x, y)) {
         return {Part::Banner, -1, {}};
     }
+    if (contains(update_geometry_.banner, x, y)) {
+        return update_hit_test(x, y);
+    }
     if (wizard_open()) {
         return contains(wizard_geometry_.area, x, y) ? wizard_hit_test(x, y) : Hit{};
     }
@@ -1370,6 +1379,10 @@ void MainWindow::on_click(const Hit& clicked) {
         if (hit.row < 0) {
             return;
         }
+    }
+    // Anywhere but the update banner, the keys leave its buttons.
+    if (!is_update_part(hit.part)) {
+        update_focus_ = -1;
     }
     // In the panel, the keys carry on from what was clicked.
     if (is_panel_part(hit.part)) {
@@ -1475,6 +1488,22 @@ void MainWindow::on_click(const Hit& clicked) {
             show_focus_ = false;
             on_first_run_click(hit);
             break;
+        case Part::UpdateNotes:
+        case Part::UpdateCancel:
+        case Part::UpdateLater:
+        case Part::UpdateNow: {
+            // The keys follow the mouse to the banner.
+            const std::vector<Part> order = update_focus_order();
+            if (const auto it = std::find(order.begin(), order.end(), hit.part); it != order.end()) {
+                update_focus_ = static_cast<int>(it - order.begin());
+                focus_ = -1;
+                shared_focused_ = false;
+                panel_focus_ = -1;
+                show_focus_ = false;
+            }
+            run_update_part(hit.part);
+            break;
+        }
         case Part::WizName:  // a real EDIT: it takes its own clicks
         case Part::None:
             break;
@@ -1519,6 +1548,10 @@ void MainWindow::on_key(WPARAM key) {
     }
     if (wizard_open()) {
         on_wizard_key(key);
+        return;
+    }
+    if (update_focus_ >= 0) {
+        on_update_key(key);
         return;
     }
     if (panel_open() && (panel_focus_ >= 0 || !panel_beside_list())) {
@@ -1583,6 +1616,10 @@ void MainWindow::on_key(WPARAM key) {
                 InvalidateRect(hwnd_, nullptr, FALSE);
                 return;
             }
+            // Shift+Tab: back to the update banner above the list, when it's there.
+            if ((GetKeyState(VK_SHIFT) & 0x8000) != 0 && focus_update_banner(true)) {
+                return;
+            }
             SetFocus(search_);
             return;
         case VK_F5:
@@ -1636,6 +1673,10 @@ LRESULT CALLBACK MainWindow::search_proc(HWND hwnd, UINT msg, WPARAM wparam, LPA
                 } else {
                     SetFocus(self->hwnd_);
                 }
+                return 0;
+            }
+            // Tab: the update banner's buttons first, when it's there.
+            if (wparam == VK_TAB && (GetKeyState(VK_SHIFT) & 0x8000) == 0 && self->focus_update_banner(false)) {
                 return 0;
             }
             if (wparam == VK_DOWN || wparam == VK_TAB || wparam == VK_RETURN) {
@@ -1966,6 +2007,7 @@ void MainWindow::on_paint() {
             place_panel_tips();
             wizard_geometry_ = wizard_open() ? wizard_geometry(mem.get()) : WizardGeometry{};
             shared_geometry_ = !wizard_open() && !first_run_open() ? shared_geometry(mem.get()) : SharedGeometry{};
+            update_geometry_ = update_geometry(mem.get());
             first_run_geometry_ = FirstRunGeometry{};
             if (first_run_open()) {
                 first_run_geometry_ = first_run_geometry(mem.get(), first_run_.scroll);
@@ -1995,6 +2037,7 @@ void MainWindow::on_paint() {
                     }
                     paint_top_bar(canvas, mem.get(), text_pass);
                     paint_banner(canvas, text_pass);
+                    paint_update_banner(canvas, text_pass);
                     if (wizard_open()) {
                         paint_wizard(canvas, mem.get(), text_pass);
                     } else {
