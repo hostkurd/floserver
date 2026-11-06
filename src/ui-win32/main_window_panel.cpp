@@ -128,8 +128,7 @@ bool MainWindow::panel_open() const { return shows_rows() && selected_row() != n
 bool MainWindow::panel_beside_list() const { return width_ >= px(kPanelBesideMinW); }
 
 RECT MainWindow::panel_rect() const {
-    const RECT b = banner_rect();
-    const int top = b.bottom > 0 ? b.bottom + px(8) : px(kTopBarH);
+    const int top = content_top();
     const int bottom = std::max(top, height_ - px(kFooterH) - px(kGap));
     const int left = panel_beside_list() ? width_ - px(kPad) - px(kPanelW) : px(kPad);
     return {left, top, width_ - px(kPad), bottom};

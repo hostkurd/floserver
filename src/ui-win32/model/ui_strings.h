@@ -438,8 +438,6 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     GeneralCloseQuitNote,
     GeneralAbout,
     GeneralVersion,          // {0}: "0.9.0"
-    GeneralCheckUpdates,
-    GeneralUpdatesNote,      // {0}: "floserver.org"
     GeneralLicences,
     GeneralLicencesOpened,
     GeneralLicencesFailed,   // {0}: the reason
@@ -600,6 +598,55 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     UninstallNext,
     UninstallStartFailed,     // {0}: why
     UninstallWait,
+    // App updates (Q5, approved 5 Nov). Arabic and Kurdish need a native read.
+    UpdateDownloading,          // {0}: the version
+    UpdateProgressLine,         // {0} done, {1} total (MB numbers), {2}: UpdateSecondsLeft and the like
+    UpdateProgressLineNoTime,   // {0} done, {1} total
+    UpdateSecondsLeft,          // {0}: seconds
+    UpdateMinuteLeft,
+    UpdateMinutesLeft,          // {0}: minutes
+    UpdateReadyTitle,           // {0}: the version
+    UpdateReadyLine,            // {0}: its size, "9.4 MB"
+    UpdateWhatsNew,
+    UpdateCancel,
+    UpdateLater,
+    UpdateNow,
+    UpdateCancelled,
+    UpdateStartFailed,          // {0}: why
+    UpdatesTitle,
+    UpdatesSummary,             // {0}: this version, {1}: UpdatesCheckedToday and the like
+    UpdatesNote,
+    UpdatesCheckedToday,        // {0}: "09:12"
+    UpdatesCheckedYesterday,    // {0}: "18:40"
+    UpdatesCheckedOn,           // {0}: "2026-11-02"
+    UpdatesNotChecked,
+    UpdatesCheckingNow,
+    UpdatesCheckNow,
+    UpdatesRowDownloading,      // {0} done, {1} total
+    UpdatesReadyLine,           // {0}: its size
+    UpdatesFailed,              // {0}: why
+    UpdatesUnavailable,
+    // The updating dialog (FloServer.exe --apply-update).
+    UpdatingWindowTitle,
+    UpdatingTitle,              // {0}: the version
+    UpdatingText,
+    UpdateStepChecked,
+    UpdateStepStopped,
+    UpdateStepInstalling,
+    UpdateStepOpen,
+    UpdateMarkDone,             // a step's mark, for screen readers
+    UpdateMarkNow,
+    UpdateMarkWaiting,
+    UpdateMarkFailed,
+    UpdateFailed,               // {0}: why
+    UpdateFailedNote,
+    UpdateOpenInstaller,
+    UpdateClose,
+    UpdateErrNotReady,
+    UpdateErrChanged,
+    UpdateErrStop,              // {0}: the service's reason
+    UpdateErrInstall,           // {0}: Windows Installer's error number
+    UpdateErrOpen,              // {0}: why
     Count_,
 };
 

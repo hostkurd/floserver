@@ -16,6 +16,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace floserver::ui {
 
@@ -90,6 +91,61 @@ bool put_secret_on_clipboard(HWND owner, std::string& value);
 // Opens an existing folder in Explorer ("explore" opens folders only, never
 // runs a file). False when it isn't one or couldn't be opened.
 bool explore_folder(HWND owner, const std::string& path);
+
+// A dialog template built in memory (DLGTEMPLATE, then its items), WORD by
+// WORD: the questions below, and the updating dialog (apply_update.cpp).
+class DialogTemplate {
+public:
+    DialogTemplate(DWORD style, DWORD ex_style, short cx, short cy) {
+        add_dword(style);
+        add_dword(ex_style);
+        count_at_ = words_.size();
+        add_word(0);  // the items, counted as they're added
+        add_word(0);  // x, y
+        add_word(0);
+        add_word(static_cast<WORD>(cx));
+        add_word(static_cast<WORD>(cy));
+        add_word(0);  // no menu
+        add_word(0);  // the dialog class
+        add_word(0);  // no title: set when it opens
+        add_word(9);  // DS_SETFONT: 9 point Segoe UI
+        add_text(L"Segoe UI");
+    }
+    // `kind`: 0x0080 a button, 0x0082 a static text.
+    void add(DWORD style, short x, short y, short cx, short cy, WORD id, WORD kind) {
+        while (words_.size() % 2 != 0) {
+            add_word(0);  // each item starts on a DWORD
+        }
+        add_dword(style | WS_CHILD | WS_VISIBLE);
+        add_dword(0);
+        add_word(static_cast<WORD>(x));
+        add_word(static_cast<WORD>(y));
+        add_word(static_cast<WORD>(cx));
+        add_word(static_cast<WORD>(cy));
+        add_word(id);
+        add_word(0xFFFF);
+        add_word(kind);
+        add_word(0);  // no text: set when it opens
+        add_word(0);  // no creation data
+        ++words_[count_at_];
+    }
+    [[nodiscard]] const DLGTEMPLATE* get() const { return reinterpret_cast<const DLGTEMPLATE*>(words_.data()); }
+
+private:
+    void add_word(WORD v) { words_.push_back(v); }
+    void add_dword(DWORD v) {
+        add_word(LOWORD(v));
+        add_word(HIWORD(v));
+    }
+    void add_text(const wchar_t* s) {
+        for (; *s != L'\0'; ++s) {
+            add_word(static_cast<WORD>(*s));
+        }
+        add_word(0);
+    }
+    std::vector<WORD> words_;
+    std::size_t count_at_ = 0;
+};
 
 enum class SaveChoice : std::uint8_t { Save, DontSave, Cancel };
 

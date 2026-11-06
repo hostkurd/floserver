@@ -106,6 +106,11 @@ private:
         FrNext,
         FrSkipSetup,  // every step's Skip setup
         FrWithout,    // step 2's Continue without downloading
+        // App updates' banner above the list (Q5).
+        UpdateNotes,   // What's new
+        UpdateCancel,  // stops the download
+        UpdateLater,
+        UpdateNow,
     };
     enum class PanelAction : std::uint8_t { Browser, Folder, Terminal, Editor, Studio, Download };
     // The panel's square icon buttons (approved 3 and 4 Nov), in their order.
@@ -118,6 +123,10 @@ private:
                part == Part::PanelButton || part == Part::PanelField || part == Part::PanelCopyEnv ||
                part == Part::PanelPhpMyAdmin || part == Part::PanelKeep || part == Part::PanelRemove ||
                is_php_part(part);
+    }
+    [[nodiscard]] static constexpr bool is_update_part(Part part) {
+        return part == Part::UpdateNotes || part == Part::UpdateCancel || part == Part::UpdateLater ||
+               part == Part::UpdateNow;
     }
     [[nodiscard]] static constexpr bool is_php_part(Part part) {
         return part == Part::PanelPhpSettings || part == Part::PanelPhpChange || part == Part::PanelPhpField ||
@@ -330,6 +339,19 @@ private:
         RECT next{};
         Str next_label = Str::WizardNext;
         bool next_primary = true;
+    };
+    // App updates' banner above the list (Q5), from the last paint; empty when it isn't shown.
+    struct UpdateGeometry {
+        UpdateBanner kind = UpdateBanner::None;
+        RECT banner{};
+        RECT icon{};
+        RECT title{};
+        RECT line{};
+        RECT bar{};    // downloading: the progress
+        RECT notes{};  // What's new; empty when the list gives none (or there's no room)
+        RECT cancel{};
+        RECT later{};
+        RECT now{};
     };
     // Step 3 and the job not finished yet (also before its first answer).
     [[nodiscard]] bool wizard_running() const;
@@ -635,6 +657,29 @@ private:
     // Settings > General changed one of the window's preferences (PrefChange, the choice's index).
     void on_pref_change(WPARAM change, LPARAM value);
 
+    // --- App updates (main_window_update.cpp, Q5) ---
+    // The banner the main screen shows now (none on the first-run page and New project).
+    [[nodiscard]] UpdateBanner update_shown() const;
+    [[nodiscard]] RECT update_banner_rect() const;
+    // Where the list and the panel start: under the service's banner or the update's.
+    [[nodiscard]] int content_top() const;
+    [[nodiscard]] UpdateGeometry update_geometry(HDC dc) const;
+    [[nodiscard]] UpdateBannerText update_words() const;
+    [[nodiscard]] std::vector<Part> update_focus_order() const;
+    [[nodiscard]] Hit update_hit_test(int x, int y) const;
+    [[nodiscard]] bool update_part_focused(Part part) const;
+    // After each snapshot: the download's speed, and a ready update said once.
+    void on_update_snapshot(UpdateBanner before);
+    void run_update_part(Part part);
+    void open_update_notes();
+    // Update now (Settings' too): the copy in %TEMP% is started and this window quits.
+    void start_update();
+    void on_update_key(WPARAM key);
+    // The keys to the banner's first (or `last`) button; false when it isn't shown.
+    bool focus_update_banner(bool last);
+    void paint_update_banner(Canvas& c, bool text_pass) const;
+    void add_update_access(AccessTree& t) const;
+
     // --- Remove FloServer… (main_window_uninstall.cpp, D21) ---
     // Settings > General's question was answered: Settings closes, and the
     // steps run in order (uninstall.h), each said here as it starts.
@@ -767,6 +812,13 @@ private:
     std::string query_;
     std::vector<std::size_t> visible_;  // indexes into snap_.rows that match query_
     mutable std::vector<RowGeometry> geometry_;  // from the last paint
+
+    // App updates (Q5): the banner as last painted, the keys on its buttons
+    // (-1: not there), the download's speed, and Later's choice.
+    mutable UpdateGeometry update_geometry_;
+    int update_focus_ = -1;
+    UpdateRate update_rate_;
+    std::optional<UpdateLater> update_later_;
 
     // Shared sites (D19): the row's geometry and keyboard focus, and the settings page.
     mutable SharedGeometry shared_geometry_;
