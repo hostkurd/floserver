@@ -44,10 +44,12 @@
     <!-- Exactly the staged folder (CI lays it out): FloServer.exe, floserverd.exe,
          flo.exe and floserver-shim.exe side by side, as each finds the others
          next to itself; the Visual C++ runtime next to them, so they start on
-         a PC without the redistributable (app-local, which Microsoft allows);
-         and vcruntime\, the copies the service hands to each runtime it
-         installs (PHP, nginx, Apache). No floserver.exe on Windows: it would
-         be FloServer.exe, the window. Not the Publisher (HostKurd's tool). -->
+         a PC without the redistributable (app-local, which Microsoft allows),
+         and the service copies the same files into each runtime it installs
+         (PHP, nginx, Apache): one copy, no vcruntime\ folder (an upgrade
+         removes the one older versions installed). No floserver.exe on
+         Windows: it would be FloServer.exe, the window. Not the Publisher
+         (HostKurd's tool). -->
     <ComponentGroup Id="Programs" Directory="INSTALLFOLDER">
       <Files Include="$(StageDir)\**" />
       <!-- The folder on the user's Path, so flo works in new terminals. -->

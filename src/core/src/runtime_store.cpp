@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <string_view>
 #include <chrono>
 #include <cstdio>
 #include <random>
@@ -81,6 +82,21 @@ bool has_program(const fs::path& dir) {
     return false;
 }
 
+// The Visual C++ runtime's own DLLs (vcruntime140.dll, msvcp140_1.dll,
+// concrt140.dll, ...), by name: the folder they come from is the app's own,
+// which may hold other DLLs too.
+bool is_vc_runtime_dll(const fs::path& file) {
+    std::string name = path_to_utf8(file.filename());
+    std::transform(name.begin(), name.end(), name.begin(),
+                   [](char c) { return static_cast<char>(std::tolower(static_cast<unsigned char>(c))); });
+    for (const std::string_view prefix : {"vcruntime140", "msvcp140", "concrt140", "vccorlib140"}) {
+        if (name.starts_with(prefix)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Copies the VC++ runtime DLLs next to the runtime's programs. The folders
 // are the ones the 1.0 runtimes keep their programs in: the top folder (PHP,
 // nginx, Node.js), bin (MariaDB) and Apache24/bin (Apache Lounge).
@@ -91,7 +107,7 @@ bool add_vc_runtime(const fs::path& install, const fs::path& vc_dir, std::string
         std::string ext = path_to_utf8(it->path().extension());
         std::transform(ext.begin(), ext.end(), ext.begin(),
                        [](char c) { return static_cast<char>(std::tolower(static_cast<unsigned char>(c))); });
-        if (ext == ".dll" && it->is_regular_file(ec)) {
+        if (ext == ".dll" && is_vc_runtime_dll(it->path()) && it->is_regular_file(ec)) {
             dlls.push_back(it->path());
         }
     }

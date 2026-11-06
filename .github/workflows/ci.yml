@@ -88,8 +88,8 @@ jobs:
           Get-ChildItem build -Recurse -Include FloServer.exe,floserverd.exe,flo.exe |
             Where-Object { $_.FullName -match '\\Release\\' } |
             ForEach-Object { "{0,-16} {1,10:N0} bytes" -f $_.Name, $_.Length }
-          "vcruntime/:"
-          Get-ChildItem build/bin/Release/vcruntime | ForEach-Object { "  {0,-28} {1,10:N0} bytes" -f $_.Name, $_.Length }
+          "Visual C++ runtime:"
+          Get-ChildItem build/bin/Release -Filter *.dll | ForEach-Object { "  {0,-28} {1,10:N0} bytes" -f $_.Name, $_.Length }
       # D15: the service's memory with nothing running, and the window's
       # memory and time to its first paint (FloServer.exe --measure, the
       # median of three starts). Over a budget fails the PR; the numbers are
@@ -453,7 +453,7 @@ jobs:
           name: FloServer-windows-x64-${{ github.sha }}
           path: |
             build/bin/Release/*.exe
-            build/bin/Release/vcruntime/*.dll
+            build/bin/Release/*.dll
           retention-days: 14
       # The installer (D21): WiX 5, pinned (WiX 6+ asks companies that earn
       # money with it for a fee). Built from the Release programs above.
@@ -469,12 +469,11 @@ jobs:
           $msi = "FloServer-$version-x64.msi"
           # What ships, laid out as installed (see installer/FloServer.wxs).
           $stage = Join-Path $env:RUNNER_TEMP 'msi-stage'
-          New-Item -ItemType Directory -Force -Path (Join-Path $stage 'vcruntime') | Out-Null
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
           foreach ($f in 'FloServer.exe', 'floserverd.exe', 'flo.exe', 'floserver-shim.exe') {
             Copy-Item (Join-Path 'build/bin/Release' $f) $stage
           }
-          Copy-Item build/bin/Release/vcruntime/*.dll $stage
-          Copy-Item build/bin/Release/vcruntime/*.dll (Join-Path $stage 'vcruntime')
+          Copy-Item build/bin/Release/*.dll $stage
           Get-ChildItem $stage -Recurse -File | ForEach-Object { "  {0,-40} {1,10:N0} bytes" -f $_.FullName.Substring($stage.Length + 1), $_.Length }
           wix build installer/FloServer.wxs -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext -arch x64 `
             -d Version=$version -d StageDir=$stage -o $msi 2>&1 | Tee-Object -FilePath wix.log
@@ -497,9 +496,10 @@ jobs:
           $dir = Join-Path $env:LOCALAPPDATA 'Programs\FloServer'
           $proc = Start-Process msiexec -ArgumentList '/i', $env:MSI, '/qn', '/l*v', 'install.log' -Wait -PassThru
           if ($proc.ExitCode -ne 0) { Get-Content install.log -Tail 40; Fail "install exited with $($proc.ExitCode)" }
-          foreach ($f in 'FloServer.exe', 'floserverd.exe', 'flo.exe', 'floserver-shim.exe', 'vcruntime140.dll', 'vcruntime\vcruntime140.dll') {
+          foreach ($f in 'FloServer.exe', 'floserverd.exe', 'flo.exe', 'floserver-shim.exe', 'vcruntime140.dll') {
             if (-not (Test-Path (Join-Path $dir $f))) { Fail "$f isn't in $dir" }
           }
+          if (Test-Path (Join-Path $dir 'vcruntime')) { Fail "a second copy of the Visual C++ runtime (vcruntime\) was installed" }
           if (Test-Path (Join-Path $dir 'floserver-publisher.exe')) { Fail "the Publisher (HostKurd's tool) was installed" }
           $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
           if (($userPath -split ';') -notcontains $dir -and ($userPath -split ';') -notcontains "$dir\") { Fail "$dir isn't on the user's Path: $userPath" }

@@ -143,12 +143,12 @@ std::unique_ptr<floserver::core::RuntimeService> make_runtimes(
     config.keys = core::builtin_manifest_keys();
     config.source = {std::string(core::kManifestUrl), std::string(core::kManifestSignatureUrl)};
     config.builtin_templates_json = std::string(core::kBuiltInTemplatesJson);
-    // The Visual C++ runtime DLLs ship next to floserverd (cmake: vcruntime/).
+    // The Visual C++ runtime DLLs ship next to floserverd (see its CMakeLists.txt).
     if (const auto self = core::executable_path()) {
-        const auto vc = self->parent_path() / "vcruntime";
+        const auto dir = self->parent_path();
         std::error_code ec;
-        if (std::filesystem::is_directory(vc, ec)) {
-            config.vc_runtime_dir = vc;
+        if (std::filesystem::is_regular_file(dir / "vcruntime140.dll", ec)) {
+            config.vc_runtime_dir = dir;
         }
     }
     return std::make_unique<core::RuntimeService>(std::move(config), transport);
