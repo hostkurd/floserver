@@ -39,7 +39,7 @@ struct Project {
     nlohmann::json other = nlohmann::json::object();  // keys of this entry this version doesn't use
     // Its database and user, kept by a rename (D22); empty: from the name
     // (project_database_name() says which).
-    std::string database_name{};
+    std::string database_name{};  // NOLINT(readability-redundant-member-init): GCC's -Wmissing-field-initializers wants it for {..} initialisations that stop short
 
     bool operator==(const Project&) const = default;
 };

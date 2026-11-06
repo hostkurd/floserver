@@ -309,12 +309,18 @@ TEST_CASE("rename question: the help follows what's typed (D22)") {
     CHECK(q.folder_note.empty());
 
     // In Arabic and Kurdish the names, the address and the folder read left to right.
+    const auto isolated = [](std::string_view s) {
+        std::string out(kLri);
+        out += s;
+        out += kPdi;
+        return out;
+    };
     for (const Lang lang : {Lang::Ar, Lang::Ku}) {
         q = rename_question(with_db, "store", rows, footer, lang);
-        CHECK(q.title.find(kLri + "my-shop" + kPdi) != std::string::npos);
-        CHECK(q.help.find(kLri + "https://store.localhost:8443" + kPdi) != std::string::npos);
-        CHECK(q.folder_note.find(kLri + "C:/sites/my-shop" + kPdi) != std::string::npos);
-        CHECK(q.database_note.find(kLri + "my_shop" + kPdi) != std::string::npos);
+        CHECK(q.title.find(isolated("my-shop")) != std::string::npos);
+        CHECK(q.help.find(isolated("https://store.localhost:8443")) != std::string::npos);
+        CHECK(q.folder_note.find(isolated("C:/sites/my-shop")) != std::string::npos);
+        CHECK(q.database_note.find(isolated("my_shop")) != std::string::npos);
         CHECK(q.cancel == text(lang, Str::WizardCancel));
         CHECK(rename_question(with_db, "blog", rows, footer, lang).problem);
     }

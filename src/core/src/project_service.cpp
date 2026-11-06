@@ -583,7 +583,7 @@ std::optional<fs::path> rename_project_folder(const AppConfig& config, const Pro
         return std::nullopt;
     }
     std::string ignored;
-    const fs::path kept = real_folder(target, ignored).value_or(target);
+    fs::path kept = real_folder(target, ignored).value_or(target);
     if (save(kept, refusal)) {
         return kept;
     }
