@@ -15,6 +15,14 @@ namespace {
 const std::string kLri{'\xE2', '\x80', '\xAA'};
 const std::string kPdi{'\xE2', '\x80', '\xAC'};
 
+// A value as the strings embed it: left to right.
+std::string ltr(std::string_view s) {
+    std::string out = kLri;
+    out += s;
+    out += kPdi;
+    return out;
+}
+
 ProjectRow served() {
     ProjectRow row;
     row.name = "my-shop";
@@ -51,7 +59,8 @@ TEST_CASE("project menu: the items, in the approved order") {
     const auto menu = project_menu(served(), {true, false, true, false});
     using enum MenuCommand;
     CHECK(commands(menu) == std::vector<MenuCommand>{OpenBrowser, OpenFolder, OpenTerminal, OpenEditor, CopyAddress,
-                                                     None, Toggle, KeepRunning, None, Rename, Remove});
+                                                     None, Toggle, KeepRunning, None, Rename, BackUp, Restore,
+                                                     None, Remove});
     for (const MenuItem& i : menu) {
         CAPTURE(static_cast<int>(i.command));
         CHECK(i.enabled);
@@ -64,6 +73,8 @@ TEST_CASE("project menu: the items, in the approved order") {
     CHECK(item(menu, KeepRunning).label == Str::KeepRunning);
     CHECK(text(Lang::En, item(menu, Remove).label) == "Remove from FloServer…");
     CHECK(text(Lang::En, item(menu, Rename).label) == "Rename…");
+    CHECK(text(Lang::En, item(menu, BackUp).label) == "Back up as zip…");
+    CHECK(text(Lang::En, item(menu, Restore).label) == "Restore from backup…");
     // Its icons: the panel's, and a tick for Keep running.
     CHECK(menu_glyph(OpenBrowser) == Glyph::Globe);
     CHECK(menu_glyph(OpenFolder) == Glyph::Folder);
@@ -129,11 +140,16 @@ TEST_CASE("project menu: what doesn't apply is greyed out") {
     const auto no_folder = project_menu(row, {true, false, true, false});
     CHECK_FALSE(item(no_folder, MenuCommand::OpenFolder).enabled);
     CHECK_FALSE(item(no_folder, MenuCommand::OpenTerminal).enabled);
+    // Backups are of its folder.
+    CHECK_FALSE(item(no_folder, MenuCommand::BackUp).enabled);
+    CHECK_FALSE(item(no_folder, MenuCommand::Restore).enabled);
     // The service isn't there: nothing can be changed; the panel still opens.
     const auto offline = project_menu(served(), {true, false, false, false});
     CHECK_FALSE(item(offline, MenuCommand::Toggle).enabled);
     CHECK_FALSE(item(offline, MenuCommand::KeepRunning).enabled);
     CHECK_FALSE(item(offline, MenuCommand::Remove).enabled);
+    CHECK_FALSE(item(offline, MenuCommand::BackUp).enabled);
+    CHECK_FALSE(item(offline, MenuCommand::Restore).enabled);
     CHECK(item(offline, MenuCommand::OpenBrowser).enabled);
     // Being removed: not again, nor switched.
     const auto removing = project_menu(served(), {true, false, true, true});
@@ -309,18 +325,12 @@ TEST_CASE("rename question: the help follows what's typed (D22)") {
     CHECK(q.folder_note.empty());
 
     // In Arabic and Kurdish the names, the address and the folder read left to right.
-    const auto isolated = [](std::string_view s) {
-        std::string out(kLri);
-        out += s;
-        out += kPdi;
-        return out;
-    };
     for (const Lang lang : {Lang::Ar, Lang::Ku}) {
         q = rename_question(with_db, "store", rows, footer, lang);
-        CHECK(q.title.find(isolated("my-shop")) != std::string::npos);
-        CHECK(q.help.find(isolated("https://store.localhost:8443")) != std::string::npos);
-        CHECK(q.folder_note.find(isolated("C:/sites/my-shop")) != std::string::npos);
-        CHECK(q.database_note.find(isolated("my_shop")) != std::string::npos);
+        CHECK(q.title.find(ltr("my-shop")) != std::string::npos);
+        CHECK(q.help.find(ltr("https://store.localhost:8443")) != std::string::npos);
+        CHECK(q.folder_note.find(ltr("C:/sites/my-shop")) != std::string::npos);
+        CHECK(q.database_note.find(ltr("my_shop")) != std::string::npos);
         CHECK(q.cancel == text(lang, Str::WizardCancel));
         CHECK(rename_question(with_db, "blog", rows, footer, lang).problem);
     }

@@ -132,6 +132,8 @@ struct RunEntry {
 struct StartArgs {
     bool tray = false;
     std::string instance;  // empty: none given, or not a usable name
+    // A .zip opened with FloServer (D22): New project from a backup, with it.
+    std::string open;
 };
 [[nodiscard]] StartArgs parse_start_args(const std::vector<std::string>& args);
 

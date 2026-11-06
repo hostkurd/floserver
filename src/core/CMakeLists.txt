@@ -74,7 +74,10 @@ add_library(floserver_core STATIC
     src/templates.cpp
     src/template_service.cpp
     src/update_service.cpp
-    src/zip_extract.cpp)
+    src/zip_extract.cpp
+    src/zip_write.cpp
+    src/backup.cpp
+    src/backup_service.cpp)
 
 target_include_directories(floserver_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include

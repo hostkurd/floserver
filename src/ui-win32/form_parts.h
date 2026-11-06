@@ -93,9 +93,16 @@ bool put_secret_on_clipboard(HWND owner, std::string& value);
 bool explore_folder(HWND owner, const std::string& path);
 
 // A dialog template built in memory (DLGTEMPLATE, then its items), WORD by
-// WORD: the questions below, and the updating dialog (apply_update.cpp).
+// WORD: the questions below, the backup dialogs (backup_dialogs.cpp) and the
+// updating dialog (apply_update.cpp). Standard controls, so the keys and
+// screen readers work as in any Windows dialog; texts are set when it opens.
 class DialogTemplate {
 public:
+    // Control kinds by their atoms.
+    static constexpr WORD kButton = 0x0080;
+    static constexpr WORD kEdit = 0x0081;
+    static constexpr WORD kStatic = 0x0082;
+
     DialogTemplate(DWORD style, DWORD ex_style, short cx, short cy) {
         add_dword(style);
         add_dword(ex_style);
@@ -111,8 +118,23 @@ public:
         add_word(9);  // DS_SETFONT: 9 point Segoe UI
         add_text(L"Segoe UI");
     }
-    // `kind`: 0x0080 a button, 0x0082 a static text.
+    // `kind`: kButton, kEdit or kStatic.
     void add(DWORD style, short x, short y, short cx, short cy, WORD id, WORD kind) {
+        begin_item(style, x, y, cx, cy, id);
+        add_word(0xFFFF);
+        add_word(kind);
+        end_item();
+    }
+    // A control of a class named in full (msctls_progress32).
+    void add(DWORD style, short x, short y, short cx, short cy, WORD id, const wchar_t* class_name) {
+        begin_item(style, x, y, cx, cy, id);
+        add_text(class_name);
+        end_item();
+    }
+    [[nodiscard]] const DLGTEMPLATE* get() const { return reinterpret_cast<const DLGTEMPLATE*>(words_.data()); }
+
+private:
+    void begin_item(DWORD style, short x, short y, short cx, short cy, WORD id) {
         while (words_.size() % 2 != 0) {
             add_word(0);  // each item starts on a DWORD
         }
@@ -123,15 +145,12 @@ public:
         add_word(static_cast<WORD>(cx));
         add_word(static_cast<WORD>(cy));
         add_word(id);
-        add_word(0xFFFF);
-        add_word(kind);
+    }
+    void end_item() {
         add_word(0);  // no text: set when it opens
         add_word(0);  // no creation data
         ++words_[count_at_];
     }
-    [[nodiscard]] const DLGTEMPLATE* get() const { return reinterpret_cast<const DLGTEMPLATE*>(words_.data()); }
-
-private:
     void add_word(WORD v) { words_.push_back(v); }
     void add_dword(DWORD v) {
         add_word(LOWORD(v));

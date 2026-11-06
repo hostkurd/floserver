@@ -75,12 +75,14 @@ struct RowAccessState {
 [[nodiscard]] AccessNode footer_node(const FooterText& footer, Lang lang);
 
 // A toast: a group with its words and its close button ("toast", "toast/text", "toast/close").
+// With an action ("Show in folder"), its button too ("toast/action").
 struct ToastNodes {
     AccessNode group;
     AccessNode text;
     AccessNode close;
+    AccessNode action;  // its name empty when there's none
 };
-[[nodiscard]] ToastNodes toast_nodes(const std::string& text, Lang lang);
+[[nodiscard]] ToastNodes toast_nodes(const std::string& text, Lang lang, const std::string& action = {});
 
 // The log's lines as they're shown, oldest first: a group called Log with
 // one text element per line ("No requests yet" when there are none).

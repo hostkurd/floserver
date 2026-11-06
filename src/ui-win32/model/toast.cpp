@@ -16,7 +16,7 @@ Toast toast_after(const Toast& toast, ToastEvent event) {
             break;
         case ToastEvent::TimeUp:
             // An error never goes by itself; nor anything while it's being read.
-            if (out.kind == ToastKind::Info && !out.hovered) {
+            if (out.kind == ToastKind::Info && !out.hovered && out.action.empty()) {
                 out = Toast{};
             }
             break;
@@ -27,14 +27,16 @@ Toast toast_after(const Toast& toast, ToastEvent event) {
     return out;
 }
 
-Toast toast_with(const Toast& shown, std::string text, ToastKind kind) {
+Toast toast_with(const Toast& shown, std::string text, ToastKind kind, std::string action) {
     if (text.empty()) {
         return shown;  // nothing to say: what's shown stays
     }
-    return Toast{std::move(text), kind, shown.hovered && !shown.text.empty()};
+    return Toast{std::move(text), kind, shown.hovered && !shown.text.empty(), std::move(action)};
 }
 
-bool toast_timer_runs(const Toast& toast) { return !toast.text.empty() && toast.kind == ToastKind::Info && !toast.hovered; }
+bool toast_timer_runs(const Toast& toast) {
+    return !toast.text.empty() && toast.kind == ToastKind::Info && !toast.hovered && toast.action.empty();
+}
 
 int toast_max_width(int window_w, int least) { return std::max(least, window_w * kToastWidthPercent / 100); }
 

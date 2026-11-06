@@ -17,6 +17,7 @@ struct ToastGeometry {
     RECT card{};   // empty: no toast
     RECT text{};
     RECT close{};  // the close mark's hit target
+    RECT action{};  // its button, when it has one (between the words and the close mark)
 };
 
 // The card for `toast` in a window `window_w` wide, its bottom edge at
@@ -25,12 +26,13 @@ struct ToastGeometry {
                                            bool rtl);
 
 void paint_toast(Canvas& c, const ToastGeometry& g, const Toast& toast, HFONT font, bool dark, UINT dpi,
-                 bool close_hover, bool text_pass);
+                 bool close_hover, bool text_pass, bool action_hover = false);
 
 // What the popup tells its owner (the wparam of the owner's message).
 inline constexpr WPARAM kToastMouseEntered = 0;
 inline constexpr WPARAM kToastMouseLeft = 1;
 inline constexpr WPARAM kToastCloseClicked = 2;
+inline constexpr WPARAM kToastActionClicked = 3;
 
 class ToastPopup {
 public:
@@ -57,6 +59,8 @@ private:
     void place();
     void paint();
     [[nodiscard]] bool over_close(LPARAM lparam) const;
+    [[nodiscard]] bool over_action(LPARAM lparam) const;
+    [[nodiscard]] bool over(const RECT& r, LPARAM lparam) const;
 
     HWND owner_ = nullptr;
     UINT message_ = 0;
@@ -71,6 +75,7 @@ private:
     UINT dpi_ = 96;
     bool rtl_ = false;
     bool close_hover_ = false;
+    bool action_hover_ = false;
     bool tracking_ = false;
     SIZE size_{};
 };
