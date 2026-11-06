@@ -30,7 +30,7 @@ nlohmann::json ready() {
     nlohmann::json j = downloading();
     j["state"] = "ready";
     j["done"] = j["size"];
-    j["file"] = "C:\\Users\\me\\AppData\\Local\\FloServer\\updates\\FloServer-1.2.0-x64.msi";
+    j["file"] = R"(C:\Users\me\AppData\Local\FloServer\updates\FloServer-1.2.0-x64.msi)";
     return j;
 }
 
@@ -127,7 +127,7 @@ TEST_CASE("the time left: seconds, then a minute, then minutes; from the last fe
     CHECK_FALSE(time_left_text(150, Lang::Ku).empty());
 
     CHECK(mb_number(0) == "0.0");
-    CHECK(mb_number(1024 * 1024) == "1.0");
+    CHECK(mb_number(std::uint64_t{1024} * 1024) == "1.0");
     CHECK(mb_number(9 * 1024 * 1024 + 400 * 1024) == "9.4");
 
     UpdateRate rate;
@@ -239,7 +239,7 @@ TEST_CASE("Windows Installer's progress messages move the bar") {
 }
 
 TEST_CASE("FloServer.exe --apply-update: its arguments and the copy's command line") {
-    auto a = parse_apply_update_args({"--apply-update", "C:\\Users\\me\\FloServer-1.2.0-x64.msi", "--instance", "dev",
+    auto a = parse_apply_update_args({"--apply-update", R"(C:\Users\me\FloServer-1.2.0-x64.msi)", "--instance", "dev",
                                       "--lang", "ar"});
     REQUIRE(a.has_value());
     CHECK(a->msi == "C:\\Users\\me\\FloServer-1.2.0-x64.msi");
@@ -253,7 +253,7 @@ TEST_CASE("FloServer.exe --apply-update: its arguments and the copy's command li
     CHECK_FALSE(a->lang.has_value());
     CHECK(a->instance.empty());
 
-    ApplyUpdateArgs args{"C:\\Users\\me\\up date.msi", "dev", Lang::Ku};
+    ApplyUpdateArgs args{R"(C:\Users\me\up date.msi)", "dev", Lang::Ku};
     CHECK(apply_update_command("C:\\Temp\\FloServer-update\\FloServer.exe", args) ==
           "\"C:\\Temp\\FloServer-update\\FloServer.exe\" --apply-update \"C:\\Users\\me\\up date.msi\" --instance dev "
           "--lang ku");

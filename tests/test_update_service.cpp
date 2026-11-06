@@ -234,7 +234,7 @@ TEST_CASE("updates: a file that doesn't match the signed list isn't kept") {
 }
 
 TEST_CASE("updates: a list that can't be had is a failed check, said plainly") {
-    World w;  // nothing served
+    const World w;  // nothing served
     UpdateService u(w.config(), w.transport);
     u.start();
     std::string error;
@@ -307,7 +307,7 @@ TEST_CASE("updates: stopping during a download ends it at once") {
 }
 
 TEST_CASE("updates: none where there's no transport") {
-    World w;
+    const World w;
     UpdateService u(w.config(), nullptr);
     u.start();
     const nlohmann::json s = u.status();

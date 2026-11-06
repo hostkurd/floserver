@@ -122,7 +122,7 @@ std::string time_left_text(double seconds, Lang lang) {
     if (s < 90) {
         return std::string(text(lang, Str::UpdateMinuteLeft));
     }
-    const auto minutes = static_cast<long>(std::lround(s / 60));
+    const long minutes = std::lround(s / 60);
     return fill_pattern(text(lang, Str::UpdateMinutesLeft), false, {std::to_string(minutes)});
 }
 
