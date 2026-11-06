@@ -46,6 +46,9 @@ $files = @(
     @{ Path = "wordpress/7.1.4/wordpress-7.1.4.zip";            Orig = "https://wordpress.org/wordpress-7.1.4.zip" },
     @{ Path = "wordpress/7.0.8/wordpress-7.0.8.zip";            Orig = "https://wordpress.org/wordpress-7.0.8.zip" },
     @{ Path = "apache/2.4.69/httpd-2.4.69-261002-Win64-VS18.zip"; Orig = "https://www.apachelounge.com/download/VS18/binaries/httpd-2.4.69-261002-Win64-VS18.zip" },
+    # FloServer's own installer (the list's "app"): no Sums or Orig, so it says CHECK BY HAND;
+    # compare its SHA-256 with the CI artifact's, then build with --accept and --app-notes, e.g.
+    #   @{ Path = "app/1.2.0/FloServer-1.2.0-x64.msi" },
     # python-build-standalone names its files with "+"; on the CDN it is "-" (S3-style storage such as R2 may read "+" in a URL as a space).
     # Name = the file name in the official checksum list.
     @{ Path = "python/3.13.18/cpython-3.13.18-20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz";

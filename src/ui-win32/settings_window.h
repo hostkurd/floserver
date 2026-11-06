@@ -88,7 +88,8 @@ namespace floserver::ui {
 // CodeEditor: the choice is read from prefs() (a program's path doesn't fit an lparam).
 // RemoveFloServer: Remove FloServer… was answered with Remove FloServer; the
 // lparam is uninstall_ticks_bits() of the boxes. FloServer's window does the rest.
-enum class PrefChange : std::uint8_t { Language, Theme, Close, StartInTray, CodeEditor, RemoveFloServer };
+// RemoveFloServer and UpdateNow aren't preferences: FloServer's window runs them.
+enum class PrefChange : std::uint8_t { Language, Theme, Close, StartInTray, CodeEditor, RemoveFloServer, UpdateNow };
 
 class SettingsWindow : public AccessSource {
 public:
@@ -237,7 +238,9 @@ private:
         GeneralStartMode,  // row 0: open the window, 1: start in the tray
         GeneralClose,      // row 0: keep running in the tray, 1: quit
         GeneralEditor,     // row: editor_rows()' index
-        GeneralUpdates,
+        GeneralUpdates,      // Updates' Check now (Q5)
+        GeneralUpdateNotes,  // What's new, beside a ready update
+        GeneralUpdateNow,
         GeneralLicences,
         GeneralRemove,     // Remove FloServer…
     };
@@ -433,12 +436,21 @@ private:
         RECT editor_card{};
         RECT editor_title{};
         std::vector<ChoiceGeometry> editors;  // one per editor_rows()
+        RECT updates_card{};  // Updates (Q5), above About
+        RECT updates_title{};
+        RECT updates_summary{};
+        RECT updates_note{};
+        RECT updates{};          // Check now
+        RECT updates_problem{};  // the last check didn't work; empty when it did
+        RECT update_divider{};   // a newer version on its way or ready; all empty when there's none
+        RECT update_title{};
+        RECT update_line{};
+        RECT update_notes{};
+        RECT update_now{};
         RECT about_card{};
         RECT about_title{};
         RECT version{};
-        RECT updates{};
         RECT licences{};
-        RECT updates_note{};
         RECT remove_card{};  // Remove FloServer (D21)
         RECT remove_title{};
         RECT remove_note{};
@@ -702,6 +714,10 @@ private:
     [[nodiscard]] bool shown_start_tray() const;
     [[nodiscard]] bool run_elsewhere() const;
     void open_licences();
+    // Updates' words, from updates_ and the local clock.
+    [[nodiscard]] std::string updates_summary_text() const;
+    // Check now: not while a check or a download is on its way, or where there are no updates.
+    [[nodiscard]] bool can_check_updates() const;
     // Remove FloServer…: its question, then the answer to FloServer's window.
     void remove_floserver();
     void paint_general_shapes(Canvas& c) const;
@@ -852,6 +868,8 @@ private:
     // as written since), and this FloServer.exe's path.
     std::optional<RunEntry> run_entry_;
     std::string own_exe_;
+    // And Updates (Q5): updates.status's answer, from the main window's poll.
+    UpdateStatus updates_;
     // The code editors on this PC, looked for as General opens.
     std::vector<FoundEditor> editors_found_;
     bool editor_program_missing_ = false;

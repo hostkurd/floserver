@@ -165,6 +165,7 @@ struct CleanResult {
 //   Downloaded runtimes and caches:
 //     <data>/runtimes/     every runtime installed (they can be downloaded again)
 //     <data>/downloads/    archives on their way
+//     <data>/updates/      FloServer's own installer, downloaded for an update
 //     <data>/templates/    New project's work folders
 //     <data>/state/manifest.json and manifest.json.sig   the runtime list kept for offline use
 //   Databases:

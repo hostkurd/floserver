@@ -2,7 +2,10 @@
 // For HostKurd's release process, not shipped to users.
 //
 //   floserver-manifest build  <report.json> --sequence N [--days D] [--accept PATH]... [--out FILE] [--templates FILE]
-//     (the CDN address comes from the report: the one the files were checked on)
+//                             [--app-notes URL]
+//     (the CDN address comes from the report: the one the files were checked on;
+//      FloServer's installer, app/<x.y.z>/FloServer-<x.y.z>-x64.msi, becomes the
+//      list's "app", --app-notes its What's new page)
 //   floserver-manifest keygen <secret-key-file> <key-id>
 //   floserver-manifest sign   <manifest.json> <secret-key-file>
 //   floserver-manifest verify <manifest.json> [<public-key-base64> <key-id>]
@@ -269,7 +272,8 @@ int verify(const fs::path& manifest_file, const std::string& public_b64, const s
         return 1;
     }
     std::cout << "OK: signed by " << result.key_id << ", sequence " << result.manifest->sequence
-              << ", " << result.manifest->runtimes.size() << " runtimes, expires "
+              << ", " << result.manifest->runtimes.size() << " runtimes"
+              << (result.manifest->app ? ", FloServer " + result.manifest->app->version : std::string()) << ", expires "
               << floserver::manifest_tool::format_utc_time(result.manifest->expires) << "\n";
     return 0;
 }
@@ -303,6 +307,8 @@ int build(const std::vector<std::string>& args) {
             ++i;
         } else if (a == "--accept" && has_value) {
             options.accepted.insert(args[++i]);
+        } else if (a == "--app-notes" && has_value) {
+            options.app_notes_url = args[++i];
         } else if (a == "--out" && has_value) {
             out = args[++i];
         } else if (a == "--templates" && has_value) {
@@ -345,8 +351,9 @@ int build(const std::vector<std::string>& args) {
         std::cerr << "Can't write the manifest file.\n";
         return 1;
     }
-    std::cout << "Wrote " << result.runtime_count << " runtimes and " << result.template_count
-              << " templates, sequence " << options.sequence
+    std::cout << "Wrote " << result.runtime_count << " runtimes and " << result.template_count << " templates"
+              << (result.app_version.empty() ? std::string() : ", FloServer " + result.app_version)
+              << ", sequence " << options.sequence
               << ", expires " << mt::format_utc_time(options.now + std::chrono::days{options.days})
               << ".\nNext: sign it on the offline computer.\n";
     return 0;
@@ -370,6 +377,7 @@ int run(const std::vector<std::string>& args) {
     }
     std::cerr << "Usage:\n"
               << "  floserver-manifest build  <report.json> --sequence N [--days D] [--accept PATH]... [--out FILE] [--templates FILE]\n"
+              << "                            [--app-notes URL]\n"
               << "  floserver-manifest keygen <secret-key-file> <key-id>\n"
               << "  floserver-manifest sign   <manifest.json> <secret-key-file>\n"
               << "  floserver-manifest verify <manifest.json> [<public-key-base64> <key-id>]\n";

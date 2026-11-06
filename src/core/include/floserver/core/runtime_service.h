@@ -76,6 +76,10 @@ public:
     // hand however old, else the last signed list kept on disk.
     [[nodiscard]] nlohmann::json list(bool refresh, bool installed_only = false, bool cached_only = false);
 
+    // The signed list fetched again now (app updates' daily check): the
+    // list in hand is replaced by it. Nothing (with `error`) when it can't be had.
+    [[nodiscard]] std::optional<Manifest> fresh_list(std::string& error);
+
     // The project templates (D9): the signed list's, fetching it when there's
     // no fresh copy. Offline (or with `fetch` false, so a project job never
     // waits on the network at quit) the last signed list kept on disk is used,

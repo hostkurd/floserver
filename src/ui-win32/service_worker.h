@@ -2,12 +2,14 @@
 
 // The window's link to floserverd (D2). One background thread connects
 // (starting the service the way the CLI does), asks for projects.list,
-// status, web.status, databases.list and shared.get (without the www
-// folder's folders: nothing reads it in the background) every 2 seconds,
+// status, web.status, databases.list, shared.get (without the www
+// folder's folders: nothing reads it in the background) and updates.status
+// every 2 seconds,
 // and sends the user's changes. While a project's panel is open it also asks for that
 // project's log. The UI thread never waits on the pipe: the worker keeps the
 // latest snapshot and posts a message to the window when it changes.
 
+#include "model/app_update.h"
 #include "model/first_run.h"
 #include "model/runtimes_page.h"
 #include "model/ui_strings.h"
@@ -70,6 +72,7 @@ struct Snapshot {
     std::vector<std::pair<std::string, FirstRunEnd>> first_run_ends;
     std::string projects_dir;  // projects.list's, or empty
     SharedSites shared;        // Shared sites (D19): shared.get's answer
+    UpdateStatus updates;      // App updates (Q5): updates.status's answer (Unknown: an older service)
     // New project (D9): the templates, once asked for.
     bool templates_loaded = false;
     std::string templates_error;
@@ -203,6 +206,10 @@ public:
                         const std::map<std::string, std::optional<std::string>>& versions);
     // The project whose log is fetched; empty for none.
     void select(const std::string& project);
+    // App updates (Q5): updates.check, updates.cancel; the next poll's
+    // updates.status says what came of it.
+    void check_updates();
+    void cancel_update();
     void start_service();  // after NotRunning or Failed
     void refresh();
     void quit_service();   // stops floserverd; quit_done follows
@@ -257,6 +264,8 @@ private:
             WebSettings,
             DatabaseCall,
             LoadDefaults,
+            CheckUpdates,
+            CancelUpdate,
             Select,
             Start,
             Refresh,

@@ -554,6 +554,7 @@ void SettingsWindow::on_snapshot(const Snapshot& snap) {
     has_installed_ = snap.has_installed;
     databases_ = snap.databases;
     jobs_ = snap.runtime_jobs;
+    updates_ = snap.updates;
     for (const std::string& key : snap.settled) {
         starting_.erase(key);
         removing_.erase(key);

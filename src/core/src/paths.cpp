@@ -74,6 +74,7 @@ std::optional<fs::path> data_dir() {
 
 fs::path runtimes_dir(const fs::path& data) { return data / "runtimes"; }
 fs::path downloads_dir(const fs::path& data) { return data / "downloads"; }
+fs::path updates_dir(const fs::path& data) { return data / "updates"; }
 fs::path manifest_state_file(const fs::path& data) { return data / "state" / "manifest-state.json"; }
 fs::path kept_manifest_file(const fs::path& data) { return data / "state" / "manifest.json"; }
 fs::path kept_signature_file(const fs::path& data) { return data / "state" / "manifest.json.sig"; }

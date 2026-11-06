@@ -236,6 +236,14 @@ json RuntimeService::list(bool refresh, bool installed_only, bool cached_only) {
     return out;
 }
 
+std::optional<Manifest> RuntimeService::fresh_list(std::string& error) {
+    auto cached = get_list(true, error);
+    if (!cached) {
+        return std::nullopt;
+    }
+    return std::move(cached->manifest);
+}
+
 std::optional<std::vector<ProjectTemplate>> RuntimeService::templates(std::string& error, bool fetch) {
     if (fetch) {
         std::string fetch_error;  // offline is not an error here
