@@ -35,6 +35,7 @@ struct MariaDbFiles {
     std::filesystem::path install_db;    // mariadb-install-db(.exe): bin/ or scripts/
     std::filesystem::path admin;         // mariadb-admin(.exe)
     std::filesystem::path client;        // mariadb(.exe)
+    std::filesystem::path dump;          // mariadb-dump(.exe): backups (D22)
     std::filesystem::path folder;        // <data>/data/mariadb-<series>
     std::filesystem::path data_dir;      // folder/data
     std::filesystem::path config;        // folder/my.ini (Windows) or my.cnf

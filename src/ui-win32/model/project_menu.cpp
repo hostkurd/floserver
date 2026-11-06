@@ -33,6 +33,10 @@ std::vector<MenuItem> project_menu(const ProjectRow& row, const ProjectMenuState
         {},
         // No Project settings…: a click on the row opens its panel (approved 4 Nov).
         {MenuCommand::Rename, Str::RenameProject, change, false},
+        // Backups (D22): its folder is what's backed up.
+        {MenuCommand::BackUp, Str::MenuBackUp, change && folder, false},
+        {MenuCommand::Restore, Str::MenuRestore, change && folder, false},
+        {},
         {MenuCommand::Remove, Str::RemoveProject, change, false},
     };
 }
@@ -68,6 +72,8 @@ std::optional<Glyph> menu_glyph(MenuCommand command) {
         case MenuCommand::KeepRunning:  // a ticked item: its tick is its mark
         case MenuCommand::Settings:
         case MenuCommand::Rename:
+        case MenuCommand::BackUp:  // no glyph of the panel's for them (yet)
+        case MenuCommand::Restore:
             break;
     }
     return std::nullopt;

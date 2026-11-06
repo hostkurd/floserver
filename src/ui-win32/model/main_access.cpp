@@ -144,13 +144,16 @@ AccessNode footer_node(const FooterText& footer, Lang lang) {
     return text_node("footer", access_join(lang, {footer.counts, footer.nginx, footer.memory}));
 }
 
-ToastNodes toast_nodes(const std::string& message, Lang lang) {
+ToastNodes toast_nodes(const std::string& message, Lang lang, const std::string& action) {
     ToastNodes t;
     t.group.id = "toast";
     t.group.role = AccessRole::Group;
     t.group.name = std::string(text(lang, Str::AccessMessage));
     t.text = text_node("toast/text", message);
     t.close = button_node("toast/close", std::string(text(lang, Str::AccessCloseMessage)));
+    if (!action.empty()) {
+        t.action = button_node("toast/action", action);
+    }
     return t;
 }
 

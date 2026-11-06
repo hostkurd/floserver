@@ -321,6 +321,12 @@ void MainWindow::run_project_command(const std::string& project, MenuCommand com
         case MenuCommand::Remove:
             ask_remove(project);
             break;
+        case MenuCommand::BackUp:
+            start_backup(project);
+            break;
+        case MenuCommand::Restore:
+            start_restore(project);
+            break;
         case MenuCommand::None:
             break;
     }

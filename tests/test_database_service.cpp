@@ -8,6 +8,7 @@
 
 #ifndef _WIN32
 
+#include "floserver/core/backup.h"
 #include "floserver/core/database_service.h"
 #include "floserver/core/mariadb_settings.h"
 #include "floserver/core/project_service.h"
@@ -763,6 +764,116 @@ TEST_CASE("phpMyAdmin in one click on the real MariaDB: a series never started, 
     ask.series = "x";
     CHECK_FALSE(phpmyadmin_login(db, writer, data, address, ask, refusal));
     CHECK(refusal.code == "bad_params");
+    db.stop();
+}
+
+TEST_CASE("backups on the real MariaDB: a project's database dumped with its own login and loaded into another (D22)") {
+    std::error_code ec;
+    if (!fs::is_regular_file("/usr/sbin/mariadbd", ec) || !fs::is_regular_file("/usr/bin/mariadb-dump", ec)) {
+        REQUIRE_MESSAGE(!get_env("CI"), "MariaDB is missing from this CI machine");
+        MESSAGE("MariaDB isn't installed here; skipped");
+        return;
+    }
+    const test_util::TempDir tmp;
+    const fs::path data = tmp.path() / "data";
+    fake_runtime(data, "mariadb", "10.11.14", "");
+    const fs::path m = runtimes_dir(data) / "mariadb" / "10.11.14";
+    fs::create_directories(m / "bin");
+    fs::create_directories(m / "sbin");
+    for (const char* t : {"mariadb", "mariadb-admin", "mariadb-dump", "mariadb-install-db", "my_print_defaults",
+                          "resolveip"}) {
+        fs::create_symlink(fs::path("/usr/bin") / t, m / "bin" / t, ec);
+    }
+    fs::create_symlink("/usr/sbin/mariadbd", m / "sbin" / "mariadbd");
+    fs::create_directory_symlink("/usr/share", m / "share");
+    AppConfig app;
+    std::string error;
+    for (const char* name : {"shop", "shop-copy"}) {
+        const fs::path dir = tmp.path() / name;
+        test_util::write_file(dir / "floserver.json", R"({"database": "mariadb-10.11"})");
+        REQUIRE(add_project(app, dir, "", error));
+    }
+    REQUIRE(save_app_config(app_config_file(data), app, error));
+    const SecretStore secrets(data);
+    DatabaseServiceConfig cfg;
+    cfg.data_dir = data;
+    cfg.idle_after = 30s;
+    cfg.reload_every = 1s;
+    // Internal ports clear of the ones the tests before used: a server of
+    // theirs may still be letting go of one.
+    cfg.probe = [](Port p) {
+        return p != 3306 && (p < kFirstInternalDatabasePort || p >= kFirstInternalDatabasePort + 50) &&
+               can_listen_on_loopback(p);
+    };
+    DatabaseService db(cfg, secrets);
+    db.start();
+    REQUIRE(eventually([&] { return server_status(db).is_object(); }, 10s));
+
+    ServiceRefusal refusal;
+    CHECK_FALSE(db.project_database_bytes("shop"));  // not made yet
+    const auto shop = db.project_login("shop", refusal);
+    REQUIRE_MESSAGE(shop, refusal.message);
+    REQUIRE(query(shop->port, "shop", shop->password,
+                  "USE shop; CREATE TABLE t (a INT, b TEXT); INSERT INTO t VALUES (1, 'it''s'), (2, 'two words'); "
+                  "CREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW SET NEW.a = NEW.a + 100; "
+                  "CREATE PROCEDURE p() SELECT 42; SELECT COUNT(*) FROM t") == "2");
+    CHECK(db.project_database_bytes("shop").value_or(0) > 0);
+
+    // Dumped with its own login, the project running meanwhile.
+    const fs::path work = tmp.path() / "work";
+    fs::create_directories(work);
+    const std::atomic<bool> go{false};
+    REQUIRE_MESSAGE(db.dump_project_database("shop", work, go, refusal), refusal.message);
+    const std::string dump = test_util::read_file(work / "database.sql");
+    CHECK(dump.find("INSERT INTO `t`") != std::string::npos);
+    CHECK(dump.find("CREATE DATABASE") == std::string::npos);
+    CHECK(dump.find("PROCEDURE `p`") != std::string::npos);  // its routines too
+
+    // Loaded into another project's own database, under its own user: its
+    // routines on their own; a dump that changes the login's password
+    // changes nothing (the kept one is set again).
+    bool extras = false;
+    REQUIRE(prepare_sql_for_load(work / "database.sql", work / "load.sql", work / "extras.sql", "shop_copy", extras,
+                                 error));
+    CHECK(extras);
+    {
+        std::ofstream out(work / "load.sql", std::ios::app);
+        out << "SET PASSWORD = PASSWORD('hijacked');\n";
+    }
+    std::string warning;
+    REQUIRE_MESSAGE(db.load_project_database("shop-copy", work / "load.sql", go, refusal, work / "extras.sql", &warning),
+                    refusal.message);
+    CHECK(warning.empty());
+    const auto copy = db.project_login("shop-copy", refusal);
+    REQUIRE(copy);
+    CHECK(query(copy->port, "shop_copy", copy->password, "USE shop_copy; CALL p()") == "42");
+    CHECK(query(copy->port, "shop_copy", copy->password, "USE shop_copy; SELECT a, b FROM t ORDER BY a") ==
+          "1\tit's\n2\ttwo words");
+    // Its trigger came too, with no other user's DEFINER.
+    CHECK(query(copy->port, "shop_copy", copy->password, "USE shop_copy; INSERT INTO t VALUES (3, 'x'); "
+                                                          "SELECT MAX(a) FROM t") == "103");
+
+    // Loaded back into the first: a table made since is gone, the rows are the backup's.
+    REQUIRE(query(shop->port, "shop", shop->password, "USE shop; CREATE TABLE later (x INT); DELETE FROM t") == "");
+    REQUIRE(prepare_sql_for_load(work / "database.sql", work / "load.sql", work / "extras.sql", "shop", extras, error));
+    REQUIRE_MESSAGE(db.load_project_database("shop", work / "load.sql", go, refusal, work / "extras.sql"),
+                    refusal.message);
+    CHECK(query(shop->port, "shop", shop->password, "USE shop; SHOW TABLES") == "t");
+    CHECK(query(shop->port, "shop", shop->password, "USE shop; SELECT COUNT(*) FROM t") == "2");
+    // The other project's database was never touched.
+    CHECK(query(copy->port, "shop_copy", copy->password, "USE shop_copy; SELECT COUNT(*) FROM t") == "3");
+
+    // Cancelled, or over its time limit: the mariadb program is stopped.
+    test_util::write_file(work / "slow.sql", "SELECT SLEEP(20);\n");
+    const std::atomic<bool> stop{true};
+    CHECK_FALSE(db.load_project_database("shop-copy", work / "slow.sql", stop, refusal));
+    CHECK(refusal.code == "cancelled");
+    ::setenv("FLOSERVER_DB_TOOL_SECONDS", "1", 1);  // NOLINT(concurrency-mt-unsafe): nothing else reads it meanwhile
+    const auto started = std::chrono::steady_clock::now();
+    CHECK_FALSE(db.load_project_database("shop-copy", work / "slow.sql", go, refusal));
+    ::unsetenv("FLOSERVER_DB_TOOL_SECONDS");  // NOLINT(concurrency-mt-unsafe): as above
+    CHECK(refusal.message.find("didn't finish in 1 seconds") != std::string::npos);
+    CHECK(std::chrono::steady_clock::now() - started < 10s);
     db.stop();
 }
 

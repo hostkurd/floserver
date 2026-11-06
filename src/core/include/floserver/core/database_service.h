@@ -33,6 +33,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -48,6 +49,13 @@ struct DatabaseServiceConfig {
 };
 
 inline constexpr Port kFirstInternalDatabasePort = 33100;
+
+// Backups (D22): what the mariadb program gets when it loads a backup's SQL
+// (`force`: routines and events, going on past errors), and mariadb-dump.
+[[nodiscard]] std::vector<std::string> mariadb_load_args(bool force);
+[[nodiscard]] std::vector<std::string> mariadb_dump_args(const std::string& database, const std::string& file);
+// How long a dump or a load may run: 30 minutes, or FLOSERVER_DB_TOOL_SECONDS.
+[[nodiscard]] std::chrono::seconds database_tool_limit();
 
 // Another registered project whose database has the same name as
 // `project`'s (project_database_name(), kept through a rename), or nothing.
@@ -98,6 +106,27 @@ public:
     // Call it while the project is held (hold_project): no login can make
     // the database again until the project is gone from config.json.
     bool drop_project_database(const std::string& project, ServiceRefusal& refusal, bool& dropped);
+
+    // Backups (D22). mariadb-dump of the project's own database with its
+    // own login, --single-transaction (the project keeps running), written
+    // to kDumpFileName in `work`; the server starts if it sleeps. Stopped
+    // when `cancel` is set (refusal "cancelled").
+    static constexpr std::string_view kDumpFileName = "database.sql";
+    bool dump_project_database(const std::string& project, const std::filesystem::path& work,
+                               const std::atomic<bool>& cancel, ServiceRefusal& refusal);
+    // The mariadb program runs `sql` (backup.h's prepare_sql_for_load(): it
+    // empties the database first) with the project's own login, so it can
+    // only change that database.
+    // `extras` (routines and events, when there are any) runs after it, with
+    // --force: what the login may not make is a `warning`, not a failure.
+    // Then the project's own password is set again (a dump may change it).
+    // Both stop when `cancel` is set, and after database_tool_limit().
+    bool load_project_database(const std::string& project, const std::filesystem::path& sql,
+                               const std::atomic<bool>& cancel, ServiceRefusal& refusal,
+                               const std::filesystem::path& extras = {}, std::string* warning = nullptr);
+    // How much the project's database takes on disk; nothing when it has
+    // none yet (or no database at all). Read from its folder: nothing starts.
+    [[nodiscard]] std::optional<std::uint64_t> project_database_bytes(const std::string& project) const;
 
     // While the returned guard lives, project_login() refuses `project`
     // ("removing"): projects.remove holds it across the drop and the removal.
@@ -195,6 +224,10 @@ private:
     [[nodiscard]] bool project_held(const std::string& project) const;
     void reload_locked();
     [[nodiscard]] std::shared_ptr<Server> server_of(const std::string& series);
+    // The server a project's database is on (its floserver.json's series).
+    [[nodiscard]] std::shared_ptr<Server> project_server(const std::string& project, ServiceRefusal& refusal);
+    bool run_project_tool(const std::string& project, bool dump, const std::filesystem::path& work,
+                          const std::filesystem::path& input, const std::atomic<bool>& cancel, ServiceRefusal& refusal);
     // Runs `work` on a thread of its own, joined at stop().
     void run_later(std::function<void()> work);
     // Shuts `server` down for good on a thread of its own.

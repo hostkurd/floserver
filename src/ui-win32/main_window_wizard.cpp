@@ -354,6 +354,10 @@ void MainWindow::on_wizard_click(const Hit& hit) {
             close_wizard();
             add_existing_folder();
             break;
+        case Part::WizFromBackup:
+            close_wizard();
+            start_from_backup({});
+            break;
         case Part::WizCancel:
             if (!wizard_running()) {
                 close_wizard();
@@ -392,7 +396,8 @@ void MainWindow::on_wizard_key(WPARAM key) {
             // card, a picker) Enter goes on, as a dialog's default button does.
             const Hit focus = wizard_focus();
             const bool button = focus.part == Part::WizBrowse || focus.part == Part::WizAddFolder ||
-                                focus.part == Part::WizCancel || focus.part == Part::WizBack || focus.part == Part::WizNext;
+                                focus.part == Part::WizFromBackup || focus.part == Part::WizCancel ||
+                                focus.part == Part::WizBack || focus.part == Part::WizNext;
             if (button) {
                 on_wizard_click(focus);
             } else if (wizard_.step == 3) {
@@ -468,8 +473,9 @@ std::vector<MainWindow::Hit> MainWindow::wizard_focus_order() const {
             break;
     }
     // The footer in reading order.
-    for (const auto& [rect, part] : {std::pair{g.add_folder, Part::WizAddFolder}, std::pair{g.cancel, Part::WizCancel},
-                                     std::pair{g.back, Part::WizBack}, std::pair{g.next, Part::WizNext}}) {
+    for (const auto& [rect, part] :
+         {std::pair{g.add_folder, Part::WizAddFolder}, std::pair{g.from_backup, Part::WizFromBackup},
+          std::pair{g.cancel, Part::WizCancel}, std::pair{g.back, Part::WizBack}, std::pair{g.next, Part::WizNext}}) {
         if (shown(rect)) {
             out.push_back({part, -1, {}});
         }
@@ -639,6 +645,12 @@ MainWindow::WizardGeometry MainWindow::wizard_geometry(HDC dc) const {
     if (wizard_.step == 0) {
         const int bw = Canvas::measure(dc, w(text(lang_, Str::AddExistingFolder)), fonts_.button.get(), rtl_) + px(28);
         g.add_folder = {x0, footer_mid - px(kButtonH) / 2, x0 + bw, footer_mid + px(kButtonH) / 2};
+        // From a backup… beside it (D22), when there's room before Cancel.
+        const int bw2 = Canvas::measure(dc, w(text(lang_, Str::BackupFromBackup)), fonts_.button.get(), rtl_) + px(28);
+        const int x2 = g.add_folder.right + px(8);
+        if (x2 + bw2 <= g.cancel.left - px(8)) {
+            g.from_backup = {x2, g.add_folder.top, x2 + bw2, g.add_folder.bottom};
+        }
     }
 
     const int bottom = g.footer.top - px(12);
@@ -713,7 +725,8 @@ MainWindow::Hit MainWindow::wizard_hit_test(int x, int y) const {
             return {Part::WizField, static_cast<int>(i), {}};
         }
     }
-    const std::pair<const RECT*, Part> buttons[] = {{&g.browse, Part::WizBrowse}, {&g.add_folder, Part::WizAddFolder},
+    const std::pair<const RECT*, Part> buttons[] = {{&g.browse, Part::WizBrowse},   {&g.add_folder, Part::WizAddFolder},
+                                                    {&g.from_backup, Part::WizFromBackup},
                                                     {&g.cancel, Part::WizCancel}, {&g.back, Part::WizBack},
                                                     {&g.next, Part::WizNext}};
     for (const auto& [rect, part] : buttons) {
@@ -794,7 +807,8 @@ void MainWindow::paint_wizard(Canvas& c, HDC dc, bool text_pass) const {
             c.round_rect(g.folder_box, pxf(4), p.window, p.input_border, border);
         }
         for (const auto& [rect, part] : {std::pair{g.browse, Part::WizBrowse}, std::pair{g.add_folder, Part::WizAddFolder},
-                                         std::pair{g.cancel, Part::WizCancel}, std::pair{g.back, Part::WizBack}}) {
+                                         std::pair{g.from_backup, Part::WizFromBackup}, std::pair{g.cancel, Part::WizCancel},
+                                         std::pair{g.back, Part::WizBack}}) {
             if (rect.right > rect.left) {
                 paint_button(c, rect, hovered(part, -1), focused(part, -1));
             }
@@ -911,6 +925,9 @@ void MainWindow::paint_wizard(Canvas& c, HDC dc, bool text_pass) const {
     // The footer buttons.
     if (g.add_folder.right > g.add_folder.left) {
         c.text(g.add_folder, w(text(lang_, Str::AddExistingFolder)), fonts_.button.get(), p.text, Align::Center, false);
+    }
+    if (g.from_backup.right > g.from_backup.left) {
+        c.text(g.from_backup, w(text(lang_, Str::BackupFromBackup)), fonts_.button.get(), p.text, Align::Center, false);
     }
     if (g.cancel.right > g.cancel.left) {
         c.text(g.cancel, w(text(lang_, Str::WizardCancel)), fonts_.button.get(), p.text, Align::Center, false);

@@ -23,7 +23,8 @@ add_library(floserver_ui_model STATIC
     model/access_tree.cpp
     model/main_access.cpp
     model/pages_access.cpp
-    model/settings_access.cpp)
+    model/settings_access.cpp
+    model/backup_dialogs.cpp)
 target_include_directories(floserver_ui_model PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # Core for paths.h's file helpers (window.json is read and written here, testably).
 target_link_libraries(floserver_ui_model PUBLIC floserver_third_party PRIVATE floserver_core)
@@ -44,6 +45,7 @@ add_executable(floserver_ui WIN32
     main_window_wizard.cpp
     main_window_first_run.cpp
     main_window_menu.cpp
+    main_window_backup.cpp
     main_window_uninstall.cpp
     main_window_update.cpp
     apply_update.cpp
@@ -66,6 +68,7 @@ add_executable(floserver_ui WIN32
     settings_shared.cpp
     settings_window_access.cpp
     form_parts.cpp
+    backup_dialogs.cpp
     scroll_bar.cpp
     window_style.cpp
     FloServer.rc)

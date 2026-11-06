@@ -244,6 +244,12 @@ TEST_CASE("access: the status line, the footer and a toast") {
     CHECK(t.close.role == AccessRole::Button);
     CHECK(t.close.name == "إغلاق الرسالة");
     CHECK(toast_nodes("x", Lang::Ku).close.name == "داخستنی پەیام");
+    // A backup's toast has its Show in folder button; others have none.
+    CHECK(t.action.name.empty());
+    const ToastNodes with = toast_nodes("Backed up my-shop", Lang::En, "Show in folder");
+    CHECK(with.action.id == "toast/action");
+    CHECK(with.action.role == AccessRole::Button);
+    CHECK(with.action.name == "Show in folder");
 }
 
 TEST_CASE("access: the log's lines as they're shown") {

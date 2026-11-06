@@ -32,6 +32,7 @@ namespace {
 constexpr int kLogLineH = 17;  // as main_window_panel.cpp draws the log
 // What a toast's close mark is in AccessTarget::part (it isn't one of the window's Parts).
 constexpr int kToastClosePart = 1000;
+constexpr int kToastActionPart = 1001;  // its button ("Show in folder")
 
 AccessRect ar(const RECT& r) { return {r.left, r.top, r.right, r.bottom}; }
 bool shown(const RECT& r) { return r.right > r.left && r.bottom > r.top; }
@@ -134,6 +135,8 @@ std::string MainWindow::access_id(const Hit& hit) const {
             return "wizard/browse";
         case Part::WizAddFolder:
             return "wizard/add-folder";
+        case Part::WizFromBackup:
+            return "wizard/from-backup";
         case Part::WizCancel:
             return "wizard/cancel";
         case Part::WizBack:
@@ -268,15 +271,23 @@ AccessTree MainWindow::build_access_tree() const {
 
     // A toast, where its popup is.
     if (!toast_.text.empty() && shown(toast_geometry_.card)) {
-        ToastNodes nodes = toast_nodes(toast_.text, lang_);
+        ToastNodes nodes = toast_nodes(toast_.text, lang_, toast_.action);
         nodes.group.bounds = ar(toast_geometry_.card);
         nodes.text.bounds = ar(toast_geometry_.text);
         nodes.close.bounds = ar(toast_geometry_.close);
-        nodes.close.keys = toast_.kind == ToastKind::Error ? "Esc" : "";
+        nodes.close.keys = toast_.kind == ToastKind::Error || !toast_.action.empty() ? "Esc" : "";
         nodes.close.target = AccessTarget{kToastClosePart, -1, {}};
         const int group = t.add(-1, std::move(nodes.group));
         t.add(group, std::move(nodes.text));
+        const bool action = !nodes.action.name.empty() && shown(toast_geometry_.action);
+        if (action) {
+            nodes.action.bounds = ar(toast_geometry_.action);
+            nodes.action.target = AccessTarget{kToastActionPart, -1, {}};
+        }
         t.add(group, std::move(nodes.close));
+        if (action) {
+            t.add(group, std::move(nodes.action));
+        }
     }
 
     t.focus = access_focus_id();
@@ -796,6 +807,7 @@ void MainWindow::add_wizard_access(AccessTree& t) const {
     };
     button(Part::WizBrowse, Str::WizardBrowse, true, g.browse, {});
     button(Part::WizAddFolder, Str::AddExistingFolder, connected, g.add_folder, {});
+    button(Part::WizFromBackup, Str::BackupFromBackup, connected, g.from_backup, {});
     button(Part::WizCancel, Str::WizardCancel, true, g.cancel, "Esc");
     button(Part::WizBack, Str::WizardBack, true, g.back, {});
     button(Part::WizNext, g.next_label, true, g.next, "Enter");
@@ -1116,6 +1128,10 @@ void MainWindow::run_access(const AccessNode& n, AccessAction action) {
         toast_event(ToastEvent::Close);
         return;
     }
+    if (n.target.part == kToastActionPart) {
+        PostMessageW(hwnd_, kToastMessage, kToastActionClicked, 0);
+        return;
+    }
     const auto part = static_cast<Part>(n.target.part);
     const Hit hit{part, n.target.index, n.target.project};
     if (action == AccessAction::Focus) {
@@ -1192,7 +1208,8 @@ void MainWindow::access_focus(const Hit& hit) {
             ensure_visible(row);
         }
     } else if (wizard_open() && (hit.part == Part::WizCard || hit.part == Part::WizField || hit.part == Part::WizBrowse ||
-                                 hit.part == Part::WizAddFolder || hit.part == Part::WizCancel ||
+                                 hit.part == Part::WizAddFolder || hit.part == Part::WizFromBackup ||
+                                 hit.part == Part::WizCancel ||
                                  hit.part == Part::WizBack || hit.part == Part::WizNext)) {
         const std::vector<Hit> order = wizard_focus_order();
         if (hit.part == Part::WizCard || std::find(order.begin(), order.end(), hit) != order.end()) {

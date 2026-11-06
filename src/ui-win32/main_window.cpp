@@ -282,8 +282,10 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             }
             return 0;
         case WM_SETCURSOR:
-            if (LOWORD(lparam) == HTCLIENT && win::int_to_ptr<HWND>(wparam) == hwnd_ && !remove_checking_.empty()) {
-                SetCursor(LoadCursorW(nullptr, IDC_APPSTARTING));  // the remove question is on its way
+            if (LOWORD(lparam) == HTCLIENT && win::int_to_ptr<HWND>(wparam) == hwnd_ &&
+                (!remove_checking_.empty() || !backup_planning_.empty())) {
+                // The remove question or the Back up dialog is on its way.
+                SetCursor(LoadCursorW(nullptr, IDC_APPSTARTING));
                 return TRUE;
             }
             if (LOWORD(lparam) == HTCLIENT && win::int_to_ptr<HWND>(wparam) == hwnd_) {
@@ -399,6 +401,23 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
         case kShowWindowMessage:
             show_window();
             return 0;
+        case kBackupMessage:
+            run_backup_steps();
+            return 0;
+        case WM_COPYDATA: {
+            // A second FloServer.exe opened with a .zip: New project from a backup here.
+            const auto* data = win::int_to_ptr<const COPYDATASTRUCT*>(lparam);
+            if (data != nullptr && data->dwData == kOpenBackupData && data->lpData != nullptr && data->cbData > 0 &&
+                data->cbData < 32768) {
+                std::string file(static_cast<const char*>(data->lpData), data->cbData);
+                if (file.find('\0') == std::string::npos) {
+                    show_window();
+                    open_backup(std::move(file));
+                }
+                return TRUE;
+            }
+            break;
+        }
         case kPhpBackMessage:
             // Escape in a PHP box: the keys go back to the tab bar.
             SetFocus(hwnd_);
@@ -430,6 +449,14 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             run_access_requests();
             return 0;
         case kToastMessage:
+            // Its button: the backup it names, in its folder; then it goes.
+            if (wparam == kToastActionClicked) {
+                if (!toast_.action.empty() && !toast_file_.empty()) {
+                    show_file_in_folder(toast_file_);
+                }
+                toast_event(ToastEvent::Close);
+                return 0;
+            }
             // The popup: information stays while it's read; its close mark.
             toast_event(wparam == kToastCloseClicked  ? ToastEvent::Close
                         : wparam == kToastMouseEntered ? ToastEvent::MouseEnter
@@ -612,6 +639,7 @@ void MainWindow::on_snapshot() {
     open_phpmyadmin_links(s.db);
     const std::vector<Removed> removed = on_remove_answers(s.db);
     const std::vector<Renamed> renamed = on_rename_answers(s.db);
+    on_backup_answers(s.db);
     on_first_run_answers(s);
     const bool quit_done = s.quit_done;
     const std::string quit_error = s.quit_error;
@@ -665,6 +693,12 @@ void MainWindow::on_snapshot() {
     snap_.custom_ini.clear();
     snap_.custom_ini_error.clear();
     update_visible();
+    // A .zip opened with FloServer before the service answered, or a backup
+    // step that waited for another question to be answered.
+    const bool backup_waits = (!open_backup_.empty() && snap_.link == Link::Connected) || backup_plan_;
+    if (backup_waits && !asking_ && !backup_job_) {
+        PostMessageW(hwnd_, kBackupMessage, 0, 0);
+    }
     // The panel's project may have been removed (flo remove).
     if (!selected_.empty() && shows_rows() && selected_row() == nullptr) {
         (void)leave_php_part(false);
@@ -1473,6 +1507,7 @@ void MainWindow::on_click(const Hit& clicked) {
         case Part::WizField:
         case Part::WizBrowse:
         case Part::WizAddFolder:
+        case Part::WizFromBackup:
         case Part::WizCancel:
         case Part::WizBack:
         case Part::WizNext:
@@ -1549,7 +1584,7 @@ void MainWindow::on_key(WPARAM key) {
     }
     // Esc closes an error first (its close mark can't be reached with Tab);
     // information goes by itself and leaves Esc to the page.
-    if (key == VK_ESCAPE && !toast_.text.empty() && toast_.kind == ToastKind::Error) {
+    if (key == VK_ESCAPE && !toast_.text.empty() && (toast_.kind == ToastKind::Error || !toast_.action.empty())) {
         toast_event(ToastEvent::Close);
         return;
     }
