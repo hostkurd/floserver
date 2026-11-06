@@ -11,6 +11,14 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <exception>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <system_error>
+#include <thread>
 #include <tuple>
 #include <vector>
 #include <utility>
@@ -559,6 +567,265 @@ bool ask_remove_project(HWND owner, Lang lang, const RemoveQuestion& question, b
     }
     drop = d.dropped;
     trash = d.trashed;
+    return true;
+}
+
+namespace {
+
+// Remove FloServer…'s controls.
+constexpr int kUninstallButton = 200;
+constexpr int kUninstallTitle = 201;
+constexpr int kUninstallText = 202;
+constexpr int kUninstallAlso = 203;
+constexpr int kRuntimesBox = 204;
+constexpr int kRuntimesNote = 205;
+constexpr int kDatabasesBox = 206;
+constexpr int kDatabasesNote = 207;
+constexpr int kProjectsBox = 208;
+constexpr int kProjectsNote = 209;
+// The sizes are counted: the notes are worded again.
+constexpr UINT kSizesMessage = WM_APP + 50;
+
+// Shared by the dialog and the thread counting the sizes, which may finish
+// after the dialog has gone: it posts only while `dialog` is set.
+struct SizesBox {
+    std::mutex mutex;
+    HWND dialog = nullptr;
+    std::optional<UninstallSizes> sizes;
+};
+
+struct UninstallDialog {
+    Lang lang = Lang::En;
+    std::string projects_dir;
+    UninstallQuestion question;
+    std::function<UninstallSizes()> count;
+    std::shared_ptr<SizesBox> box = std::make_shared<SizesBox>();
+    UninstallTicks ticks;
+    HFONT bold = nullptr;
+};
+
+// The notes under the boxes, and the same as each box's help for screen
+// readers (said after its name and state, so the size and "This can't be
+// undone." are heard on the box itself).
+void word_notes(HWND dialog, const UninstallQuestion& q) {
+    for (const auto& [box, note, words] : {std::tuple{kRuntimesBox, kRuntimesNote, &q.runtimes_note},
+                                           std::tuple{kDatabasesBox, kDatabasesNote, &q.databases_note},
+                                           std::tuple{kProjectsBox, kProjectsNote, &q.projects_note}}) {
+        if (HWND control = GetDlgItem(dialog, box); control != nullptr) {
+            SetDlgItemTextW(dialog, note, win::widen(*words).c_str());
+            set_accessible_help(control, *words);
+        }
+    }
+}
+
+// Remove FloServer, in red: it can't be taken back. In high contrast the
+// system's own button colours, as every other button there.
+void draw_destructive(const DRAWITEMSTRUCT& item, bool rtl) {
+    HIGHCONTRASTW contrast{};
+    contrast.cbSize = sizeof contrast;
+    const bool high = SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof contrast, &contrast, 0) != FALSE &&
+                      (contrast.dwFlags & HCF_HIGHCONTRASTON) != 0;
+    const bool pressed = (item.itemState & ODS_SELECTED) != 0;
+    RECT r = item.rcItem;
+    COLORREF text_color = RGB(0xFF, 0xFF, 0xFF);
+    if (high) {
+        DrawFrameControl(item.hDC, &r, DFC_BUTTON, DFCS_BUTTONPUSH | (pressed ? DFCS_PUSHED : 0U));
+        text_color = GetSysColor(COLOR_BTNTEXT);
+    } else {
+        // Windows' own red for a destructive action, darker while pressed.
+        const win::UniqueBrush fill(CreateSolidBrush(pressed ? RGB(0x9E, 0x22, 0x16) : RGB(0xC4, 0x2B, 0x1C)));
+        FillRect(item.hDC, &r, fill.get());
+    }
+    wchar_t label[128] = {};
+    const int n = GetWindowTextW(item.hwndItem, label, static_cast<int>(std::size(label)));
+    const int old_mode = SetBkMode(item.hDC, TRANSPARENT);
+    const COLORREF old_color = SetTextColor(item.hDC, text_color);
+    DrawTextW(item.hDC, label, n, &r,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | (rtl ? UINT{DT_RTLREADING} : 0U));
+    SetTextColor(item.hDC, old_color);
+    SetBkMode(item.hDC, old_mode);
+    if ((item.itemState & ODS_FOCUS) != 0 && (item.itemState & ODS_NOFOCUSRECT) == 0) {
+        RECT ring = item.rcItem;
+        InflateRect(&ring, -3, -3);
+        DrawFocusRect(item.hDC, &ring);
+    }
+}
+
+INT_PTR CALLBACK uninstall_dialog_proc(HWND dialog, UINT msg, WPARAM wparam, LPARAM lparam) {
+    auto* d = win::int_to_ptr<UninstallDialog*>(GetWindowLongPtrW(dialog, DWLP_USER));
+    switch (msg) {
+        case WM_INITDIALOG: {
+            d = win::int_to_ptr<UninstallDialog*>(lparam);
+            SetWindowLongPtrW(dialog, DWLP_USER, lparam);
+            const UninstallQuestion& q = d->question;
+            SetWindowTextW(dialog, win::widen(q.window_title).c_str());
+            for (const auto& [id, words] : {std::pair{kUninstallTitle, &q.title}, std::pair{kUninstallText, &q.text},
+                                            std::pair{kUninstallAlso, &q.also_delete},
+                                            std::pair{kRuntimesBox, &q.runtimes}, std::pair{kDatabasesBox, &q.databases},
+                                            std::pair{kProjectsBox, &q.projects},
+                                            std::pair{kUninstallButton, &q.remove}, std::pair{IDCANCEL, &q.cancel}}) {
+                SetDlgItemTextW(dialog, id, win::widen(*words).c_str());
+            }
+            word_notes(dialog, q);
+            CheckDlgButton(dialog, kRuntimesBox, d->ticks.runtimes ? BST_CHECKED : BST_UNCHECKED);
+            CheckDlgButton(dialog, kDatabasesBox, d->ticks.databases ? BST_CHECKED : BST_UNCHECKED);
+            CheckDlgButton(dialog, kProjectsBox, d->ticks.projects ? BST_CHECKED : BST_UNCHECKED);
+            // The question in bold, a little larger, as a task dialog's main line.
+            LOGFONTW lf{};
+            if (const auto font = reinterpret_cast<HFONT>(SendMessageW(dialog, WM_GETFONT, 0, 0));
+                font != nullptr && GetObjectW(font, sizeof lf, &lf) != 0) {
+                lf.lfWeight = FW_SEMIBOLD;
+                lf.lfHeight = lf.lfHeight * 4 / 3;
+                d->bold = CreateFontIndirectW(&lf);
+                SendDlgItemMessageW(dialog, kUninstallTitle, WM_SETFONT, reinterpret_cast<WPARAM>(d->bold), FALSE);
+            }
+            // The sizes, counted off this thread ("…" until they're known).
+            {
+                const std::lock_guard lock(d->box->mutex);
+                d->box->dialog = dialog;
+            }
+            try {
+                std::thread([box = d->box, count = d->count] {
+                    UninstallSizes sizes;
+                    try {
+                        sizes = count();
+                    } catch (const std::exception&) {
+                        return;  // left as "…"
+                    }
+                    const std::lock_guard lock(box->mutex);
+                    box->sizes = sizes;
+                    if (box->dialog != nullptr) {
+                        PostMessageW(box->dialog, kSizesMessage, 0, 0);
+                    }
+                }).detach();
+            } catch (const std::system_error&) {
+                // No thread: the sizes stay "…"; the question still works.
+            }
+            // Cancel is the default: Enter and Esc both keep everything.
+            SendMessageW(dialog, DM_SETDEFID, IDCANCEL, 0);
+            SetFocus(GetDlgItem(dialog, IDCANCEL));
+            return FALSE;
+        }
+        case kSizesMessage:
+            if (d != nullptr) {
+                std::optional<UninstallSizes> sizes;
+                {
+                    const std::lock_guard lock(d->box->mutex);
+                    sizes = d->box->sizes;
+                }
+                if (sizes) {
+                    d->question = uninstall_question(d->lang, d->projects_dir, *sizes);
+                    word_notes(dialog, d->question);
+                }
+            }
+            return TRUE;
+        case WM_DRAWITEM: {
+            const auto* item = win::int_to_ptr<const DRAWITEMSTRUCT*>(lparam);
+            if (d != nullptr && item != nullptr && item->CtlID == kUninstallButton) {
+                draw_destructive(*item, is_rtl(d->lang));
+                return TRUE;
+            }
+            break;
+        }
+        case WM_COMMAND:
+            if (d != nullptr && (LOWORD(wparam) == kUninstallButton || LOWORD(wparam) == IDCANCEL)) {
+                const bool remove = LOWORD(wparam) == kUninstallButton;
+                if (remove) {
+                    d->ticks.runtimes = IsDlgButtonChecked(dialog, kRuntimesBox) == BST_CHECKED;
+                    d->ticks.databases = IsDlgButtonChecked(dialog, kDatabasesBox) == BST_CHECKED;
+                    d->ticks.projects = IsDlgButtonChecked(dialog, kProjectsBox) == BST_CHECKED;
+                }
+                EndDialog(dialog, remove ? 1 : 0);
+                return TRUE;
+            }
+            break;
+        case WM_DESTROY:
+            if (d != nullptr) {
+                {
+                    const std::lock_guard lock(d->box->mutex);
+                    d->box->dialog = nullptr;  // a count finishing now posts nothing
+                }
+                for (const int id : {kRuntimesBox, kDatabasesBox, kProjectsBox}) {
+                    set_accessible_help(GetDlgItem(dialog, id), {});  // the help given goes with it
+                }
+                if (d->bold != nullptr) {
+                    DeleteObject(d->bold);
+                    d->bold = nullptr;
+                }
+            }
+            break;
+        default:
+            break;
+    }
+    return FALSE;
+}
+
+}  // namespace
+
+bool ask_remove_floserver(HWND owner, Lang lang, const std::string& projects_dir,
+                          std::function<UninstallSizes()> count, UninstallTicks& ticks) {
+    UninstallDialog d;
+    d.lang = lang;
+    d.projects_dir = projects_dir;
+    d.question = uninstall_question(lang, projects_dir, {});
+    d.count = std::move(count);
+    d.ticks = ticks;
+    d.ticks.projects = d.ticks.projects && !projects_dir.empty();
+    // In dialog units: the question, what happens, then "Also delete" and a
+    // box for each, its note under it, then Remove FloServer and Cancel.
+    constexpr short kWidth = 300;
+    constexpr short kMargin = 10;
+    constexpr short kInner = kWidth - 2 * kMargin;
+    constexpr short kIndent = 12;
+    constexpr WORD kButton = 0x0080;
+    constexpr WORD kStatic = 0x0082;
+    constexpr DWORD kBox = BS_AUTOCHECKBOX | BS_MULTILINE | BS_TOP | WS_TABSTOP;
+    constexpr DWORD kNote = SS_LEFT | SS_NOPREFIX | SS_EDITCONTROL;
+    short y = kMargin;
+    std::vector<std::tuple<DWORD, short, short, short, short, WORD, WORD>> items;
+    items.emplace_back(SS_LEFT | SS_NOPREFIX, kMargin, y, kInner, 24, kUninstallTitle, kStatic);
+    y += 28;
+    items.emplace_back(SS_LEFT | SS_NOPREFIX, kMargin, y, kInner, 28, kUninstallText, kStatic);
+    y += 34;
+    items.emplace_back(SS_LEFT | SS_NOPREFIX, kMargin, y, kInner, 10, kUninstallAlso, kStatic);
+    y += 14;
+    items.emplace_back(kBox, kMargin, y, kInner, 10, kRuntimesBox, kButton);
+    y += 12;
+    items.emplace_back(kNote, kMargin + kIndent, y, kInner - kIndent, 18, kRuntimesNote, kStatic);
+    y += 22;
+    items.emplace_back(kBox, kMargin, y, kInner, 10, kDatabasesBox, kButton);
+    y += 12;
+    items.emplace_back(kNote, kMargin + kIndent, y, kInner - kIndent, 18, kDatabasesNote, kStatic);
+    y += 22;
+    if (!projects_dir.empty()) {
+        items.emplace_back(kBox, kMargin, y, kInner, 10, kProjectsBox, kButton);
+        y += 12;
+        // The folder's path, and that projects added from elsewhere stay; a long path breaks anywhere.
+        items.emplace_back(kNote, kMargin + kIndent, y, kInner - kIndent, 26, kProjectsNote, kStatic);
+        y += 30;
+    }
+    y += 6;
+    constexpr short kRemoveW = 84;
+    constexpr short kCancelW = 60;
+    constexpr short kButtonH = 14;
+    // Drawn here, in red; still a push button to the keyboard and to screen readers.
+    items.emplace_back(BS_OWNERDRAW | WS_TABSTOP, kWidth - kMargin - kCancelW - 6 - kRemoveW, y, kRemoveW, kButtonH,
+                       kUninstallButton, kButton);
+    items.emplace_back(BS_DEFPUSHBUTTON | WS_TABSTOP, kWidth - kMargin - kCancelW, y, kCancelW, kButtonH, IDCANCEL,
+                       kButton);
+    y += kButtonH + kMargin;
+    // Mirrored in Arabic and Kurdish: the boxes, the text and the buttons from the right.
+    DialogTemplate dialog(DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU,
+                          is_rtl(lang) ? WS_EX_LAYOUTRTL | WS_EX_RTLREADING : 0U, kWidth, y);
+    for (const auto& [style, x, iy, cx, cy, id, kind] : items) {
+        dialog.add(style, x, iy, cx, cy, id, kind);
+    }
+    const INT_PTR answer = DialogBoxIndirectParamW(GetModuleHandleW(nullptr), dialog.get(), owner,
+                                                   uninstall_dialog_proc, reinterpret_cast<LPARAM>(&d));
+    if (answer != 1) {
+        return false;  // Cancel, Esc, closed, or no dialog at all: nothing is removed
+    }
+    ticks = d.ticks;
     return true;
 }
 

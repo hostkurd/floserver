@@ -1,6 +1,6 @@
 // Settings > General: the window's language and theme, starting FloServer
 // with Windows, what closing the window does, and About (the version, the
-// website, the licences).
+// website, the licences), then Remove FloServer (D21).
 //
 // Opening the section reads the Run entry once; nothing is asked of the
 // service. The language, theme and closing choices are the window's own:
@@ -8,12 +8,15 @@
 // applies them at once (a new language makes both windows again, see
 // MainWindow::change_language). Starting with Windows is written here, in
 // HKCU's Run key, because it's this user's and only the window needs it.
+// Remove FloServer… asks its question here; the answer goes to FloServer's
+// window, which runs the clean-up (main_window_uninstall.cpp).
 
 #include "settings_window.h"
 
 #include "code_editors.h"
 #include "main_window_layout.h"
 #include "model/theme.h"
+#include "uninstall.h"
 #include "window_prefs.h"
 
 #include "floserver/core/build_info.h"
@@ -230,6 +233,41 @@ void SettingsWindow::open_licences() {
     show_message(std::string(text(lang_, Str::GeneralLicencesOpened)), false);
 }
 
+void SettingsWindow::remove_floserver() {
+    if (asking_) {
+        return;
+    }
+    // Which projects folder the question offers: config.json, read here
+    // (a small file) so the question shows it at once; the sizes are counted
+    // on the dialog's own thread.
+    const auto data = core::data_dir();
+    const UninstallFolders folders = data ? uninstall_folders(*data) : UninstallFolders{};
+    UninstallTicks ticks;
+    // The dialog runs its own message loop: as while asking to save, the
+    // owner mustn't close or destroy Settings meanwhile; a Quit waits for it.
+    asking_ = true;
+    pressed_ = {};
+    hover_ = {};
+    const bool remove = ask_remove_floserver(hwnd_, lang_, folders.projects_dir, count_uninstall_sizes, ticks);
+    asking_ = false;
+    modal_closed();
+    if (quit_after_ask_) {
+        PostMessageW(owner_, closed_message_, 1, 0);
+        return;
+    }
+    if (hwnd_ == nullptr) {
+        return;
+    }
+    if (!remove) {
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return;
+    }
+    // FloServer's window runs it from here (it owns the service's link and
+    // quits at the end); Settings closes first.
+    PostMessageW(owner_, prefs_message_, static_cast<WPARAM>(PrefChange::RemoveFloServer),
+                 static_cast<LPARAM>(uninstall_ticks_bits(ticks)));
+}
+
 void SettingsWindow::on_general_click(const Hit& hit) {
     const auto row = static_cast<std::size_t>(std::max(0, hit.row));
     switch (hit.part) {
@@ -295,6 +333,9 @@ void SettingsWindow::on_general_click(const Hit& hit) {
         case Part::GeneralLicences:
             open_licences();
             break;
+        case Part::GeneralRemove:
+            remove_floserver();
+            return;  // Settings may be on its way out: nothing more of it here
         default:
             break;
     }
@@ -472,6 +513,15 @@ void SettingsWindow::layout_general(HDC dc, Geometry& g, int x0, int x1, int y) 
     gg.updates_note = {cx0, yy, cx1, yy + height(updates_note, fonts_.caption.get(), cx1 - cx0)};
     card_end(gg.about_card, static_cast<int>(gg.updates_note.bottom));
 
+    // Remove FloServer (D21): what it does, and its button.
+    card_top(gg.remove_card, gg.remove_title, yy);
+    const int remove_h = height(text(lang_, Str::GeneralRemoveNote), fonts_.caption.get(), cx1 - cx0);
+    gg.remove_note = {cx0, yy, cx1, yy + remove_h};
+    yy = static_cast<int>(gg.remove_note.bottom) + px(10);
+    bx = cx0;
+    button(gg.remove, Str::GeneralRemoveButton);
+    card_end(gg.remove_card, static_cast<int>(gg.remove.bottom));
+
     g.content_h = y + scroll_ + px(8);
 }
 
@@ -498,6 +548,8 @@ const RECT* SettingsWindow::general_rect_of(const Hit& hit) const {
             return &g.updates;
         case Part::GeneralLicences:
             return &g.licences;
+        case Part::GeneralRemove:
+            return &g.remove;
         default:
             break;
     }
@@ -521,6 +573,7 @@ void SettingsWindow::general_focus_order(std::vector<Hit>& order) const {
     }
     order.push_back({Part::GeneralUpdates, -1, -1});
     order.push_back({Part::GeneralLicences, -1, -1});
+    order.push_back({Part::GeneralRemove, -1, -1});
 }
 
 // --- painting ----------------------------------------------------------------------
@@ -554,7 +607,8 @@ void SettingsWindow::paint_general_shapes(Canvas& c) const {
     const RECT column{main_left() - px(4), 0, width_, height_};
     c.clip(column);
     for (const RECT* card :
-         {&gg.lang_card, &gg.theme_card, &gg.start_card, &gg.close_card, &gg.editor_card, &gg.about_card}) {
+         {&gg.lang_card, &gg.theme_card, &gg.start_card, &gg.close_card, &gg.editor_card, &gg.about_card,
+          &gg.remove_card}) {
         c.round_rect(*card, pxf(8), p.card, p.card_border, border);
     }
     for (std::size_t i = 0; i < kLangChoices.size(); ++i) {
@@ -599,7 +653,8 @@ void SettingsWindow::paint_general_shapes(Canvas& c) const {
         paint_radio(c, gg.editors[i], on, {Part::GeneralEditor, -1, static_cast<int>(i)});
     }
 
-    for (const auto& [part, rect] : {std::pair{Part::GeneralUpdates, gg.updates}, std::pair{Part::GeneralLicences, gg.licences}}) {
+    for (const auto& [part, rect] : {std::pair{Part::GeneralUpdates, gg.updates}, std::pair{Part::GeneralLicences, gg.licences},
+                                      std::pair{Part::GeneralRemove, gg.remove}}) {
         const Hit hit{part, -1, -1};
         paint_button(c, rect, hover_ == hit, is_focused(hit), true);
     }
@@ -668,6 +723,12 @@ void SettingsWindow::paint_general_text(Canvas& c) const {
     c.text(gg.licences, w(text(lang_, Str::GeneralLicences)), fonts_.button.get(), p.text, Align::Center, false);
     c.paragraph(gg.updates_note, w(fill(lang_, Str::GeneralUpdatesNote, {kWebsiteName})), fonts_.caption.get(),
                 p.text_subtle);
+
+    title(gg.remove_title, Str::GeneralRemoveTitle);
+    c.paragraph(gg.remove_note, w(text(lang_, Str::GeneralRemoveNote)), fonts_.caption.get(), p.text_subtle);
+    // In the problem colour: it removes FloServer (the question comes first).
+    c.text(gg.remove, w(text(lang_, Str::GeneralRemoveButton)), fonts_.button.get(), p.problem.text, Align::Center,
+           false);
     c.unclip_text();
 }
 

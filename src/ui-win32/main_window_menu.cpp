@@ -326,7 +326,9 @@ void MainWindow::copy_address(const std::string& address) {
 }
 
 void MainWindow::ask_remove(const std::string& project) {
-    if (!worker_ || snap_.link != Link::Connected || leaving(project) || asking_ || quitting_) {
+    // Not while Remove FloServer runs: its own move of the projects folder
+    // mustn't race a project's.
+    if (!worker_ || snap_.link != Link::Connected || leaving(project) || asking_ || quitting_ || uninstalling_) {
         return;
     }
     const auto found = std::find_if(snap_.rows.begin(), snap_.rows.end(),
@@ -427,6 +429,22 @@ std::vector<MainWindow::Removed> MainWindow::on_remove_answers(std::vector<Snaps
 }
 
 FolderGuard MainWindow::folder_guard(const std::string& project) const {
+    FolderGuard guard = windows_folder_guard();
+    if (!snap_.projects_dir.empty()) {
+        guard.kept.push_back(snap_.projects_dir);
+    }
+    if (!snap_.shared.dir.empty()) {
+        guard.kept.push_back(snap_.shared.dir);
+    }
+    for (const ProjectRow& r : snap_.rows) {
+        if (r.name != project && !r.path.empty()) {
+            guard.other_projects.push_back(r.path);
+        }
+    }
+    return guard;
+}
+
+FolderGuard MainWindow::windows_folder_guard() {
     FolderGuard guard;
     const auto known = [](const KNOWNFOLDERID& id, std::vector<std::string>& into) {
         PWSTR found = nullptr;
@@ -456,19 +474,8 @@ FolderGuard MainWindow::folder_guard(const std::string& project) const {
           FOLDERID_LocalAppDataLow}) {
         known(id, guard.system_trees);
     }
-    if (!snap_.projects_dir.empty()) {
-        guard.kept.push_back(snap_.projects_dir);
-    }
-    if (!snap_.shared.dir.empty()) {
-        guard.kept.push_back(snap_.shared.dir);
-    }
     if (const auto data = core::data_dir()) {
         guard.kept_with_contents.push_back(core::path_to_utf8(*data));
-    }
-    for (const ProjectRow& r : snap_.rows) {
-        if (r.name != project && !r.path.empty()) {
-            guard.other_projects.push_back(r.path);
-        }
     }
     return guard;
 }

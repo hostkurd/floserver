@@ -572,6 +572,34 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     AccessNotInstalled,    // a runtime's row that offers a download: "PHP 8.3.29, Not installed, 30 MB"
     AccessResetField,      // a field's Reset link: "Reset memory_limit"
     AccessPasswordHidden,  // root's password while it's masked with dots
+    // Settings > General: Remove FloServer… (D21).
+    GeneralRemoveTitle,
+    GeneralRemoveNote,
+    GeneralRemoveButton,
+    UninstallTitle,
+    UninstallText,
+    UninstallAlsoDelete,
+    UninstallRuntimes,
+    UninstallRuntimesNote,    // {0}: their size, "1.4 GB" (or "…" while it's counted)
+    UninstallDatabases,
+    UninstallDatabasesNote,   // {0}: their size
+    UninstallProjects,
+    UninstallProjectsNote,    // {0}: the projects folder
+    UninstallConfirm,
+    UninstallRemovingCa,
+    UninstallStopping,
+    UninstallCleaning,
+    UninstallCaNo,
+    UninstallFailed,          // {0}: why
+    UninstallStopFailed,      // {0}: why
+    UninstallLeft,            // {0}: what stayed and why (skipped_list_text)
+    UninstallProjectsStayed,  // {0}: Windows' reason
+    UninstallProjectsCancelled,
+    UninstallProjectsDeleted,
+    UninstallDevBuild,
+    UninstallNext,
+    UninstallStartFailed,     // {0}: why
+    UninstallWait,
     Count_,
 };
 

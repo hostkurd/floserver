@@ -6,6 +6,7 @@
 
 #include "model/project_menu.h"
 #include "model/theme.h"
+#include "model/uninstall.h"
 #include "model/ui_strings.h"
 
 #include <windows.h>
@@ -103,5 +104,17 @@ enum class SaveChoice : std::uint8_t { Save, DontSave, Cancel };
 // offered), the folder shown under it. True for Remove; `drop` and `trash`
 // are the boxes.
 [[nodiscard]] bool ask_remove_project(HWND owner, Lang lang, const RemoveQuestion& question, bool& drop, bool& trash);
+
+// Remove FloServer… (Settings > General, D21, approved with its mockup): the
+// same kind of dialog with "Also delete" and three boxes, each with its note
+// under it (also its help for screen readers): the runtimes and caches,
+// the databases, and the projects folder (only when there's one,
+// `projects_dir`). `ticks` are the boxes as they start (the runtimes
+// ticked) and, for Remove FloServer (drawn red), as chosen. Cancel is the
+// default: Enter and Esc keep everything. `count` gives the sizes; it runs
+// on a thread of its own and the notes say "…" until it's done. True for
+// Remove FloServer.
+[[nodiscard]] bool ask_remove_floserver(HWND owner, Lang lang, const std::string& projects_dir,
+                                        std::function<UninstallSizes()> count, UninstallTicks& ticks);
 
 }  // namespace floserver::ui
