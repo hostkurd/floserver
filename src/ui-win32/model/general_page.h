@@ -134,7 +134,10 @@ struct StartArgs {
     std::string instance;  // empty: none given, or not a usable name
     // A .zip opened with FloServer (D22): New project from a backup, with it.
     std::string open;
+    // --uninstall: Windows' Settings -> Apps -> Uninstall (D25): the Uninstall window.
+    bool uninstall = false;
 };
+inline constexpr std::string_view kUninstallFlag = "--uninstall";
 [[nodiscard]] StartArgs parse_start_args(const std::vector<std::string>& args);
 
 // A StartupApproved\Run value: Task Manager turned it off (its first byte odd: 0x03, 0x01).

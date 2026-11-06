@@ -4,6 +4,8 @@
 #include "floserver/core/project_registry.h"
 #include "floserver/core/shared_sites.h"
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 #include <cctype>
 #include <utility>
@@ -161,6 +163,152 @@ std::string msiexec_uninstall_args(std::string_view product_code) {
         return {};
     }
     return "/x " + std::string(product_code);
+}
+
+std::size_t forget_projects_inside(core::AppConfig& config, const std::string& projects_dir) {
+    const std::string root = comparable_path(projects_dir);
+    if (root.empty()) {
+        return 0;
+    }
+    const std::size_t before = config.projects.size();
+    std::erase_if(config.projects, [&root](const core::Project& p) {
+        const std::string dir = p.dir.empty() ? std::string() : comparable_path(shown_path(p.dir));
+        return !dir.empty() && same_or_inside(dir, root);
+    });
+    return before - config.projects.size();
+}
+
+std::vector<UninstallChoiceText> uninstall_choices(const UninstallQuestion& q, const UninstallTicks& ticks) {
+    std::vector<UninstallChoiceText> out;
+    out.push_back({uninstall_ticks_bits({true, false, false}), q.runtimes, q.runtimes_note, ticks.runtimes});
+    out.push_back({uninstall_ticks_bits({false, true, false}), q.databases, q.databases_note, ticks.databases});
+    if (!q.projects.empty()) {
+        out.push_back({uninstall_ticks_bits({false, false, true}), q.projects, q.projects_note, ticks.projects});
+    }
+    return out;
+}
+
+std::string remove_program_json(const RemoveProgramPlan& plan) {
+    const nlohmann::json j = {{"product", plan.product}, {"parent", plan.parent}, {"x", plan.x}, {"y", plan.y},
+                              {"deleted", plan.deleted}, {"kept", plan.kept},     {"problems", plan.problems},
+                              {"data_dir", plan.data_dir}};
+    return j.dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
+}
+
+std::optional<RemoveProgramPlan> parse_remove_program_json(std::string_view text) {
+    const nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
+    if (!j.is_object()) {
+        return std::nullopt;
+    }
+    auto str = [&j](const char* key) -> std::optional<std::string> {
+        const auto it = j.find(key);
+        if (it == j.end() || !it->is_string()) {
+            return std::nullopt;
+        }
+        return it->get<std::string>();
+    };
+    auto list = [&j](const char* key) -> std::optional<std::vector<std::string>> {
+        const auto it = j.find(key);
+        if (it == j.end() || !it->is_array()) {
+            return std::nullopt;
+        }
+        std::vector<std::string> out;
+        for (const auto& v : *it) {
+            if (!v.is_string()) {
+                return std::nullopt;
+            }
+            out.push_back(v.get<std::string>());
+        }
+        return out;
+    };
+    auto number = [&j](const char* key) -> std::optional<int> {
+        const auto it = j.find(key);
+        if (it == j.end() || !it->is_number_integer()) {
+            return std::nullopt;
+        }
+        return it->get<int>();
+    };
+    RemoveProgramPlan plan;
+    const auto product = str("product");
+    const auto deleted = str("deleted");
+    const auto data_dir = str("data_dir");
+    const auto kept = list("kept");
+    const auto problems = list("problems");
+    const auto parent = j.find("parent");
+    const auto x = number("x");
+    const auto y = number("y");
+    if (!product || !is_product_code(*product) || !deleted || !data_dir || !kept || !problems || !x || !y ||
+        parent == j.end() || !parent->is_number_unsigned() || parent->get<std::uint64_t>() > 0xFFFFFFFFU) {
+        return std::nullopt;
+    }
+    plan.parent = static_cast<std::uint32_t>(parent->get<std::uint64_t>());
+    plan.product = *product;
+    plan.deleted = *deleted;
+    plan.data_dir = *data_dir;
+    plan.kept = *kept;
+    plan.problems = *problems;
+    plan.x = *x;
+    plan.y = *y;
+    return plan;
+}
+
+std::string uninstall_deleted_text(const UninstallTicks& ticks, bool projects_offered) {
+    std::vector<std::string> gone;
+    if (ticks.runtimes) {
+        gone.emplace_back("downloaded runtimes and caches");
+    }
+    if (ticks.databases) {
+        gone.emplace_back("databases");
+    }
+    if (ticks.projects && projects_offered) {
+        gone.emplace_back("the projects folder (to the Recycle Bin)");
+    }
+    if (gone.empty()) {
+        return "Your projects, databases and downloaded runtimes are still on this computer.";
+    }
+    std::string out;
+    for (std::size_t i = 0; i < gone.size(); ++i) {
+        if (i > 0) {
+            out += i + 1 == gone.size() ? " and " : ", ";
+        }
+        out += gone[i];
+    }
+    out[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(out[0])));
+    return out + " were deleted too.";
+}
+
+std::vector<std::string> uninstall_kept_lines(const UninstallTicks& ticks, const std::string& data_dir,
+                                              const std::string& runtimes_dir, const std::string& projects_dir) {
+    std::vector<std::string> out;
+    if (!ticks.databases && !data_dir.empty()) {
+        out.push_back("Databases: " + data_dir);
+    }
+    if (!ticks.projects && !projects_dir.empty()) {
+        out.push_back("Projects: " + projects_dir);
+    }
+    if (!ticks.runtimes && !runtimes_dir.empty()) {
+        out.push_back("Downloaded runtimes: " + runtimes_dir);
+    }
+    return out;
+}
+
+std::optional<std::string> parse_remove_program_args(const std::vector<std::string>& args) {
+    for (std::size_t i = 0; i + 1 < args.size(); ++i) {
+        if (args[i] == kRemoveProgramFlag && !args[i + 1].empty()) {
+            return args[i + 1];
+        }
+    }
+    return std::nullopt;
+}
+
+std::string remove_program_command(std::string_view exe, std::string_view plan_file) {
+    const auto quotable = [](std::string_view s) {
+        return !s.empty() && s.find_first_of("\"\r\n") == std::string_view::npos;
+    };
+    if (!quotable(exe) || !quotable(plan_file)) {
+        return {};
+    }
+    return "\"" + std::string(exe) + "\" " + std::string(kRemoveProgramFlag) + " \"" + std::string(plan_file) + "\"";
 }
 
 }  // namespace floserver::ui

@@ -8,6 +8,7 @@
 // and FloServer.exe --apply-update runs the steps (main_window_update.cpp,
 // apply_update.cpp).
 
+#include "model/msi_progress.h"
 #include "model/ui_strings.h"
 
 #include <nlohmann/json.hpp>
@@ -156,27 +157,6 @@ enum class StepMark : std::uint8_t { Done, Now, Waiting, Failed };
 inline constexpr std::string_view kUpdaterFolderPrefix = "FloServer-update-";
 [[nodiscard]] std::string updater_folder_name(std::uint64_t random);
 [[nodiscard]] bool is_updater_folder(std::string_view name);
-
-// Windows Installer's progress messages (INSTALLMESSAGE_PROGRESS, fields 1
-// to 4), turned into how far the bar goes, as MSDN's "Parsing Windows
-// Installer Messages" reads them: a reset gives the total, action data
-// moves by its step, a report moves by its ticks, "add" makes the total larger.
-class MsiProgress {
-public:
-    void on_record(int field1, int field2, int field3, int field4);
-    // INSTALLMESSAGE_ACTIONDATA: one step, when the action said its data moves the bar.
-    void on_action_data();
-    // 0 to 1; 0 before the first reset.
-    [[nodiscard]] double fraction() const;
-
-private:
-    long long total_ = 0;
-    long long done_ = 0;
-    bool backward_ = false;
-    bool script_ = false;  // writing the script, not doing it: the bar waits
-    bool explicit_ = false;  // action data moves the bar
-    long long step_ = 0;
-};
 
 // FloServer.exe --apply-update <msi> [--instance <suffix>] [--lang en|ar|ku]:
 // the copy in %TEMP% that installs the update. Nothing for other arguments.

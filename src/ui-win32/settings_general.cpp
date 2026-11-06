@@ -9,8 +9,8 @@
 // applies them at once (a new language makes both windows again, see
 // MainWindow::change_language). Starting with Windows is written here, in
 // HKCU's Run key, because it's this user's and only the window needs it.
-// Remove FloServer… asks its question here; the answer goes to FloServer's
-// window, which runs the clean-up (main_window_uninstall.cpp).
+// Remove FloServer… asks FloServer's window to open the Uninstall window,
+// which runs the clean-up (main_window_uninstall.cpp, D25).
 
 #include "settings_window.h"
 
@@ -272,35 +272,9 @@ void SettingsWindow::remove_floserver() {
     if (asking_) {
         return;
     }
-    // Which projects folder the question offers: config.json, read here
-    // (a small file) so the question shows it at once; the sizes are counted
-    // on the dialog's own thread.
-    const auto data = core::data_dir();
-    const UninstallFolders folders = data ? uninstall_folders(*data) : UninstallFolders{};
-    UninstallTicks ticks;
-    // The dialog runs its own message loop: as while asking to save, the
-    // owner mustn't close or destroy Settings meanwhile; a Quit waits for it.
-    asking_ = true;
-    pressed_ = {};
-    hover_ = {};
-    const bool remove = ask_remove_floserver(hwnd_, lang_, folders.projects_dir, count_uninstall_sizes, ticks);
-    asking_ = false;
-    modal_closed();
-    if (quit_after_ask_) {
-        PostMessageW(owner_, closed_message_, 1, 0);
-        return;
-    }
-    if (hwnd_ == nullptr) {
-        return;
-    }
-    if (!remove) {
-        InvalidateRect(hwnd_, nullptr, FALSE);
-        return;
-    }
-    // FloServer's window runs it from here (it owns the service's link and
-    // quits at the end); Settings closes first.
-    PostMessageW(owner_, prefs_message_, static_cast<WPARAM>(PrefChange::RemoveFloServer),
-                 static_cast<LPARAM>(uninstall_ticks_bits(ticks)));
+    // FloServer's window opens the Uninstall window (D25, floserver-setup.dll):
+    // it owns the service's link and quits at the end.
+    PostMessageW(owner_, prefs_message_, static_cast<WPARAM>(PrefChange::RemoveFloServer), 0);
 }
 
 void SettingsWindow::on_general_click(const Hit& hit) {

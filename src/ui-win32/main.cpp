@@ -8,6 +8,8 @@
 #include "main_window.h"
 #include "model/start_measure.h"
 #include "model/ui_strings.h"
+#include "model/uninstall.h"
+#include "setup_dll.h"
 #include "win_util.h"
 #include "window_prefs.h"
 #include "window_style.h"
@@ -35,14 +37,15 @@ using floserver::ui::win::widen;
 // One window per user session and service instance: a second FloServer.exe
 // brings the first one forward and ends, handing over a .zip it was opened
 // with (New project from a backup there).
-bool hand_over_to_running_window(const std::wstring& class_name, const std::string& open) {
+bool hand_over_to_running_window(const std::wstring& class_name, const std::string& open, bool uninstall) {
     // The first copy may still be opening its window; give it a moment.
     for (int attempt = 0; attempt < 20; ++attempt) {
         if (HWND existing = FindWindowW(class_name.c_str(), nullptr); existing != nullptr) {
             DWORD pid = 0;
             GetWindowThreadProcessId(existing, &pid);
             AllowSetForegroundWindow(pid);
-            PostMessageW(existing, floserver::ui::kShowWindowMessage, 0, 0);
+            PostMessageW(existing, uninstall ? floserver::ui::kShowUninstallMessage : floserver::ui::kShowWindowMessage, 0,
+                         0);
             if (!open.empty()) {
                 COPYDATASTRUCT data{};
                 data.dwData = floserver::ui::MainWindow::kOpenBackupData;
@@ -168,6 +171,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE /*prev*/, PWSTR /*cmd*/, int s
     // window but doesn't show it (the service starts as it always does), and
     // --instance stands for FLOSERVER_INSTANCE, which floserverd inherits.
     const std::vector<std::string> command = command_args();
+    // Remove FloServer (D25): this is the copy in %TEMP% that removes the program.
+    if (const auto plan = floserver::ui::parse_remove_program_args(command)) {
+        INITCOMMONCONTROLSEX icc{};
+        icc.dwSize = sizeof icc;
+        icc.dwICC = ICC_STANDARD_CLASSES;
+        InitCommonControlsEx(&icc);
+        return floserver::ui::run_remove_program(*plan);
+    }
     // Update now (Q5): this is the copy in %TEMP% that installs the update.
     // Not one of the windows: it never takes their single-instance mark, so
     // the FloServer it opens at the end can.
@@ -188,7 +199,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE /*prev*/, PWSTR /*cmd*/, int s
     if (auto file = floserver::ui::parse_measure_args(command)) {
         meter.emplace(std::move(*file));
     }
-    const bool tray = args.tray && !meter;  // measured: always shown
+    // Windows' Settings -> Apps -> Uninstall (D25): only the Uninstall window shows.
+    const bool uninstall = args.uninstall && !meter;
+    const bool tray = (args.tray || uninstall) && !meter;  // measured: always shown
     if (!args.instance.empty()) {
         SetEnvironmentVariableW(L"FLOSERVER_INSTANCE", widen(args.instance).c_str());
     }
@@ -213,10 +226,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE /*prev*/, PWSTR /*cmd*/, int s
 
     const floserver::ui::win::UniqueHandle single(CreateMutexW(nullptr, FALSE, mutex_name.c_str()));
     if (single && GetLastError() == ERROR_ALREADY_EXISTS) {
-        if (tray) {
+        if (tray && !uninstall) {
             return 0;  // already running: nothing to bring forward at sign-in
         }
-        return hand_over_to_running_window(class_name, args.open) ? 0 : 1;
+        return hand_over_to_running_window(class_name, args.open, uninstall) ? 0 : 1;
     }
 
     // Opening an address goes through the shell, which may use COM.
@@ -246,12 +259,18 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE /*prev*/, PWSTR /*cmd*/, int s
     if (!args.open.empty()) {
         window.open_backup(args.open);
     }
+    if (uninstall) {
+        window.open_uninstall(true);
+    }
 
     MSG msg{};
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
         if (meter && meter->takes(msg)) {
             meter->finish();
             continue;
+        }
+        if (window.dialog_message(msg)) {
+            continue;  // Tab, Enter and Esc in the Uninstall window
         }
         TranslateMessage(&msg);
         DispatchMessageW(&msg);

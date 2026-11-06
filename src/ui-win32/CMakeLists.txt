@@ -18,6 +18,7 @@ add_library(floserver_ui_model STATIC
     model/folder_removal.cpp
     model/uninstall.cpp
     model/app_update.cpp
+    model/msi_progress.cpp
     model/toast.cpp
     model/glyphs.cpp
     model/access_tree.cpp
@@ -64,6 +65,8 @@ add_executable(floserver_ui WIN32
     code_editors.cpp
     recycle_bin.cpp
     uninstall.cpp
+    setup_dll.cpp
+    remove_program.cpp
     toast_view.cpp
     settings_folders.cpp
     settings_shared.cpp
@@ -77,7 +80,10 @@ set_target_properties(floserver_ui PROPERTIES OUTPUT_NAME FloServer)
 target_link_libraries(floserver_ui PRIVATE floserver_core floserver_ui_model
     comctl32 dwmapi gdiplus shell32 ole32 oleaut32 uuid advapi32 user32 gdi32 msi)
 # The window starts floserverd the way the CLI does; build it alongside.
-add_dependencies(floserver_ui floserverd)
+# floserver-setup.dll (D25) holds the Uninstall window: it's loaded from
+# FloServer.exe's folder only to uninstall; only its C interface is included.
+add_dependencies(floserver_ui floserverd floserver_setup_dll)
+target_include_directories(floserver_ui PRIVATE ${PROJECT_SOURCE_DIR}/src/setup-win32/include)
 if(MINGW)
     target_link_options(floserver_ui PRIVATE -municode)  # entry point is wWinMain
 endif()

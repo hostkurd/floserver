@@ -1,0 +1,31 @@
+// floserver-setup.dll's resources (configured by CMake): the icon its
+// windows show, and the licence the setup shows (the EULA, D4).
+#include <windows.h>
+
+1 ICON "@FLOSERVER_SETUP_ICON@"
+LICENCE_RTF RCDATA "@FLOSERVER_SETUP_LICENCE@"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION @FLOSERVER_SETUP_VERSION_COMMAS@
+PRODUCTVERSION @FLOSERVER_SETUP_VERSION_COMMAS@
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_DLL
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "HostKurd"
+            VALUE "FileDescription", "FloServer setup and uninstall screens"
+            VALUE "FileVersion", "@PROJECT_VERSION@"
+            VALUE "LegalCopyright", "HostKurd"
+            VALUE "OriginalFilename", "floserver-setup.dll"
+            VALUE "ProductName", "FloServer"
+            VALUE "ProductVersion", "@PROJECT_VERSION@"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

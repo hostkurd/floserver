@@ -18,6 +18,7 @@
 #include "recycle_bin.h"
 #include "scroll_bar.h"
 #include "toast_view.h"
+#include "setup_dll.h"
 #include "uninstall.h"
 #include "service_worker.h"
 #include "settings_window.h"
@@ -32,6 +33,7 @@
 #include <map>
 #include <optional>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <string>
 #include <utility>
@@ -41,6 +43,9 @@ namespace floserver::ui {
 
 // Posted by a second FloServer.exe to bring this one forward.
 inline constexpr UINT kShowWindowMessage = WM_APP + 1;
+// Posted by a second FloServer.exe started with --uninstall (Windows'
+// Settings -> Apps -> Uninstall): the Uninstall window, here.
+inline constexpr UINT kShowUninstallMessage = WM_APP + 14;
 
 // Screen readers see it through AccessSource (main_window_access.cpp).
 class MainWindow final : private AccessSource {
@@ -57,6 +62,13 @@ public:
     // A .zip opened with FloServer (D22): New project from a backup, with it,
     // once the service answers.
     void open_backup(std::string file);
+
+    // The Uninstall window (D25, from floserver-setup.dll): opened, or
+    // brought forward. `quit_on_cancel`: FloServer was started only for it
+    // (--uninstall), so it quits when the window is closed.
+    void open_uninstall(bool quit_on_cancel);
+    // Tab, Enter and Esc for the Uninstall window: true when it took `msg`.
+    [[nodiscard]] bool dialog_message(MSG& msg);
 
     // WM_COPYDATA's dwData when a second FloServer.exe hands over a .zip to open.
     static constexpr ULONG_PTR kOpenBackupData = 0x464C4231;  // "FLB1"
@@ -729,16 +741,26 @@ private:
     void paint_update_banner(Canvas& c, bool text_pass) const;
     void add_update_access(AccessTree& t) const;
 
-    // --- Remove FloServer… (main_window_uninstall.cpp, D21) ---
-    // Settings > General's question was answered: Settings closes, and the
-    // steps run in order (uninstall.h), each said here as it starts.
+    // --- Remove FloServer… (main_window_uninstall.cpp, D21, D25) ---
+    // The Uninstall window's Remove: Settings closes, and the steps run in
+    // order (uninstall.h), each shown in that window as it starts.
     void start_uninstall(const UninstallTicks& ticks);
+    // The Uninstall window's boxes, with the sizes when they're counted.
+    void push_uninstall_choices(const UninstallSizes& sizes);
+    // The window closed: freed here (never from inside its own messages).
+    void on_uninstall_window_closed();
+    // The clean-up is done: FloServer.exe's copy in %TEMP% goes on with
+    // removing the program (and shows Done); false with `error` if it couldn't start.
+    [[nodiscard]] bool hand_over_removal(const Uninstaller::Answer& answer, std::string& error);
+    static void __stdcall uninstall_remove_pressed(void* context, unsigned ticks);
+    static void __stdcall uninstall_window_closed(void* context);
     // A step finished on its thread: the next one, or what went wrong.
     void on_uninstall();
     // The worker stopped the service (`error`: not within its few seconds): the clean-up next.
     void uninstall_stopped(const std::string& error);
-    // Stopped before anything was deleted: said, and FloServer goes on as it was.
-    void uninstall_failed(const std::string& message);
+    // Stopped: said in the Uninstall window, with `note` on what was (or
+    // wasn't) changed; FloServer goes on.
+    void uninstall_failed(const std::string& message, std::string_view note);
     // The end: Windows' uninstall (or what was left said), then quit.
     void uninstall_done(const Uninstaller::Answer& answer);
     // Windows' own folders and the data folder, never moved to the Recycle Bin.
@@ -838,6 +860,19 @@ private:
     std::string uninstall_projects_dir_;  // the projects folder the user agreed to move
     bool uninstalling_ = false;  // they're running: no Quit, no Settings meanwhile
     UninstallTicks uninstall_ticks_;
+    const SetupDll* setup_dll_ = nullptr;    // floserver-setup.dll, once loaded
+    FloUninstall* uninstall_window_ = nullptr;  // the Uninstall window, while it's open
+    bool quit_after_uninstall_ = false;       // started for it (--uninstall): quit when it closes
+    bool uninstall_finished_ = false;         // the clean-up ended (its last word is on show)
+    unsigned uninstall_pending_ticks_ = 0;    // the boxes Remove was pressed with
+    bool uninstall_remove_pressed_ = false;   // set only by the Uninstall window's Remove
+    std::string uninstall_offer_dir_;         // the projects folder its box offers
+    // The sizes beside its boxes, counted on a thread of their own.
+    struct UninstallSizesBox {
+        std::mutex mutex;
+        std::optional<UninstallSizes> sizes;
+    };
+    std::shared_ptr<UninstallSizesBox> uninstall_sizes_ = std::make_shared<UninstallSizesBox>();
     std::string highlighted_;  // a row right-clicked while the panel is closed: shown selected
     std::string remove_checking_;     // the project whose remove question waits for its folder's check
     bool quit_after_folder_ = false;  // Quit waits for a folder's move (Windows' question needs its owner)
@@ -958,6 +993,10 @@ private:
     // screen reader listens), and the requests waiting for kAccessMessage.
     static constexpr UINT kAccessMessage = WM_APP + 11;
     static constexpr UINT kUninstallMessage = WM_APP + 12;  // a Remove FloServer… step finished
+    // From the Uninstall window and its sizes' thread (WM_APP + 14 is kShowUninstallMessage).
+    static constexpr UINT kUninstallRemoveMessage = WM_APP + 15;  // wparam: the boxes' bits
+    static constexpr UINT kUninstallClosedMessage = WM_APP + 16;
+    static constexpr UINT kUninstallSizesMessage = WM_APP + 17;
     AccessRoot access_;
     AccessTree access_now_;
     bool access_dirty_ = true;

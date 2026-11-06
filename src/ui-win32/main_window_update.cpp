@@ -143,6 +143,17 @@ bool copy_updater(const fs::path& exe, const fs::path& temp, fs::path& copy, std
 
 }  // namespace
 
+bool copy_floserver_to_temp(std::filesystem::path& copy, std::string& error) {
+    const auto exe = core::executable_path();
+    std::error_code ec;
+    const fs::path temp = fs::temp_directory_path(ec);
+    if (!exe || ec) {
+        error = !exe ? std::string("FloServer.exe") : core::error_text(ec);
+        return false;
+    }
+    return copy_updater(*exe, temp, copy, error);
+}
+
 // --- what shows ---------------------------------------------------------------------
 
 UpdateBanner MainWindow::update_shown() const {
