@@ -446,7 +446,9 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             open_uninstall(false);
             return 0;
         case kUninstallRemoveMessage:
-            start_uninstall(uninstall_ticks_from(uninstall_pending_ticks_));
+            if (std::exchange(uninstall_remove_pressed_, false)) {
+                start_uninstall(uninstall_ticks_from(uninstall_pending_ticks_));
+            }
             return 0;
         case kUninstallClosedMessage:
             on_uninstall_window_closed();

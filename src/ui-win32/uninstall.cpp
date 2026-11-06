@@ -355,6 +355,8 @@ void Uninstaller::clean(const UninstallTicks& ticks, const std::string& confirme
                         !core::save_app_config(file, *config, config_error)) {
                         answer.report.skipped.push_back({"config.json", "unsaved", config_error, {}});
                     }
+                } else {
+                    answer.report.skipped.push_back({"config.json", "unreadable", config_error, {}});
                 }
             }
         }

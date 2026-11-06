@@ -50,6 +50,7 @@ void __stdcall MainWindow::uninstall_remove_pressed(void* context, unsigned tick
     // nothing posted from elsewhere can choose what's deleted.
     auto* self = static_cast<MainWindow*>(context);
     self->uninstall_pending_ticks_ = ticks;
+    self->uninstall_remove_pressed_ = true;  // the message alone starts nothing
     PostMessageW(self->hwnd_, kUninstallRemoveMessage, 0, 0);
 }
 
@@ -75,6 +76,11 @@ void MainWindow::open_uninstall(bool quit_on_cancel) {
         const std::string product = installed_product_code();
         if (product.empty()) {
             const std::wstring message = L"FloServer's uninstall screens can't be opened (" + w(error) + L").";
+            MessageBoxW(nullptr, message.c_str(), L"FloServer", MB_OK | MB_ICONWARNING);
+        } else if (asking_ || (settings_ && settings_->asking()) || recycle_bin_.busy()) {
+            // Windows' uninstall would close FloServer mid-question: later.
+            const std::wstring message = L"FloServer's uninstall screens can't be opened (" + w(error) +
+                                         L"). Finish what's open in FloServer's window, then try again.";
             MessageBoxW(nullptr, message.c_str(), L"FloServer", MB_OK | MB_ICONWARNING);
         } else {
             const std::wstring message =

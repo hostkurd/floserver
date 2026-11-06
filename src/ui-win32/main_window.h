@@ -865,6 +865,7 @@ private:
     bool quit_after_uninstall_ = false;       // started for it (--uninstall): quit when it closes
     bool uninstall_finished_ = false;         // the clean-up ended (its last word is on show)
     unsigned uninstall_pending_ticks_ = 0;    // the boxes Remove was pressed with
+    bool uninstall_remove_pressed_ = false;   // set only by the Uninstall window's Remove
     std::string uninstall_offer_dir_;         // the projects folder its box offers
     // The sizes beside its boxes, counted on a thread of their own.
     struct UninstallSizesBox {
