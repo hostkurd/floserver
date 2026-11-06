@@ -1,6 +1,7 @@
 add_executable(floserver_tests
     test_apache_settings.cpp
     test_app_runner.cpp
+    test_backup.cpp
     test_builtin.cpp
     test_certificates.cpp
     test_downloader.cpp
@@ -29,6 +30,7 @@ add_executable(floserver_tests
     test_site_plan.cpp
     test_shared_sites.cpp
     test_ui_model.cpp
+    test_ui_backup.cpp
     test_ui_database.cpp
     test_ui_general.cpp
     test_ui_folders.cpp

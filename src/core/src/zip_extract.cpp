@@ -10,6 +10,7 @@
 #include <fstream>
 #include <optional>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 namespace floserver::core {
@@ -40,28 +41,79 @@ bool is_reserved_device(std::string_view component) {
            base[3] <= '9';
 }
 
-bool is_safe_component(std::string_view c) {
+// The code point starting at `i` in well-formed UTF-8 (shortest form, no
+// surrogates), moving `i` past it; nothing when it isn't.
+std::optional<char32_t> next_code_point(std::string_view s, std::size_t& i) {
+    const auto b = static_cast<unsigned char>(s[i]);
+    std::size_t len = 0;
+    char32_t cp = 0;
+    if (b < 0x80) {
+        ++i;
+        return b;
+    }
+    if ((b & 0xE0U) == 0xC0U) {
+        len = 2;
+        cp = b & 0x1FU;
+    } else if ((b & 0xF0U) == 0xE0U) {
+        len = 3;
+        cp = b & 0x0FU;
+    } else if ((b & 0xF8U) == 0xF0U) {
+        len = 4;
+        cp = b & 0x07U;
+    } else {
+        return std::nullopt;
+    }
+    if (i + len > s.size()) {
+        return std::nullopt;
+    }
+    for (std::size_t k = 1; k < len; ++k) {
+        const auto c = static_cast<unsigned char>(s[i + k]);
+        if ((c & 0xC0U) != 0x80U) {
+            return std::nullopt;
+        }
+        cp = (cp << 6U) | (c & 0x3FU);
+    }
+    constexpr std::array<char32_t, 5> kLeast = {0, 0, 0x80, 0x800, 0x10000};
+    if (cp < kLeast.at(len) || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
+        return std::nullopt;
+    }
+    i += len;
+    return cp;
+}
+
+bool is_safe_component(std::string_view c, bool unicode) {
     if (c.empty() || c.size() > kMaxComponentLength || c == "." || c == "..") {
         return false;
     }
     if (c.back() == '.' || c.back() == ' ') {
         return false;  // Windows drops them, so two names could reach one file
     }
-    for (const char ch : c) {
-        const auto u = static_cast<unsigned char>(ch);
+    for (std::size_t i = 0; i < c.size();) {
+        const auto u = static_cast<unsigned char>(c[i]);
+        if (u >= 0x80) {
+            // A backup's names: any letter, but no control characters and no
+            // direction marks that would show a name other than it is.
+            const auto cp = unicode ? next_code_point(c, i) : std::nullopt;
+            if (!cp || *cp < 0xA0 || (*cp >= 0x200E && *cp <= 0x200F) || (*cp >= 0x202A && *cp <= 0x202E) ||
+                (*cp >= 0x2066 && *cp <= 0x2069) || *cp == 0xFEFF) {
+                return false;
+            }
+            continue;
+        }
         if (u < 0x20 || u > 0x7e) {
             return false;
         }
-        if (std::string_view("<>:\"|?*").find(ch) != std::string_view::npos) {
+        if (std::string_view("<>:\"|?*").find(c[i]) != std::string_view::npos) {
             return false;
         }
+        ++i;
     }
     return !is_reserved_device(c);
 }
 
 // The entry's path components, or nothing when the name is refused.
 // A trailing slash (a folder entry) is allowed and dropped.
-std::optional<std::vector<std::string>> split_name(std::string_view name) {
+std::optional<std::vector<std::string>> split_name(std::string_view name, bool unicode) {
     if (name.empty() || name.size() > kMaxNameLength || name.front() == '/' || name.front() == '\\') {
         return std::nullopt;
     }
@@ -73,7 +125,7 @@ std::optional<std::vector<std::string>> split_name(std::string_view name) {
             end = name.size();
         }
         const std::string_view part = name.substr(start, end - start);
-        if (!is_safe_component(part)) {
+        if (!is_safe_component(part, unicode)) {
             return std::nullopt;
         }
         parts.emplace_back(part);
@@ -148,10 +200,62 @@ struct Entry {
     std::uint64_t size = 0;
 };
 
+// Opens `archive` for reading: false (with `error`) when it can't be.
+bool open_archive(const fs::path& archive, Reader& reader, Archive& a, std::string& error) {
+    std::error_code ec;
+    reader.in.open(archive, std::ios::binary);
+    reader.size = fs::file_size(archive, ec);
+    if (!reader.in || ec) {
+        error = "can't read " + path_to_utf8(archive);
+        return false;
+    }
+    a.zip.m_pRead = read_at;
+    a.zip.m_pIO_opaque = &reader;
+    if (mz_zip_reader_init(&a.zip, reader.size, 0) == MZ_FALSE) {
+        error = "the archive can't be opened: " + zip_error(a.zip);
+        return false;
+    }
+    a.open = true;
+    return true;
+}
+
+// The index of the plain file named exactly `name` at the archive's top.
+std::optional<mz_uint> top_file(Archive& a, std::string_view name, std::uint64_t& size, std::string& error) {
+    const mz_uint count = mz_zip_reader_get_num_files(&a.zip);
+    for (mz_uint i = 0; i < count; ++i) {
+        mz_zip_archive_file_stat st{};
+        if (mz_zip_reader_file_stat(&a.zip, i, &st) == MZ_FALSE) {
+            error = "the archive's file list can't be read: " + zip_error(a.zip);
+            return std::nullopt;
+        }
+        if (std::string_view(st.m_filename) != name) {
+            continue;
+        }
+        if (st.m_is_directory != 0 || st.m_is_encrypted != MZ_FALSE || st.m_is_supported == MZ_FALSE ||
+            ((st.m_version_made_by >> 8U) == kUnixHost &&
+             ((st.m_external_attr >> 16U) & kUnixTypeMask) == kUnixSymlink)) {
+            error = "the archive's " + std::string(name) + " isn't a plain file";
+            return std::nullopt;
+        }
+        size = st.m_uncomp_size;
+        return i;
+    }
+    return std::nullopt;
+}
+
+std::size_t append_to_string(void* opaque, mz_uint64 offset, const void* buffer, std::size_t n) {
+    auto* out = static_cast<std::pair<std::string*, std::size_t>*>(opaque);
+    if (offset != out->first->size() || n > out->second - out->first->size()) {
+        return 0;
+    }
+    out->first->append(static_cast<const char*>(buffer), n);
+    return n;
+}
+
 }  // namespace
 
-fs::path safe_entry_path(std::string_view name) {
-    const auto parts = split_name(name);
+fs::path safe_entry_path(std::string_view name, bool unicode_names) {
+    const auto parts = split_name(name, unicode_names);
     if (!parts) {
         return {};
     }
@@ -162,7 +266,68 @@ fs::path safe_entry_path(std::string_view name) {
     return out;
 }
 
-ZipResult extract_zip(const fs::path& archive, const fs::path& target, const ZipLimits& limits) {
+std::optional<std::string> read_zip_entry(const fs::path& archive, std::string_view name, std::size_t max_bytes,
+                                          std::string& error) {
+    error.clear();
+    Reader reader;
+    Archive a;
+    if (!open_archive(archive, reader, a, error)) {
+        return std::nullopt;
+    }
+    std::uint64_t size = 0;
+    const auto index = top_file(a, name, size, error);
+    if (!index) {
+        return std::nullopt;
+    }
+    if (size > max_bytes) {
+        error = "the archive's " + std::string(name) + " is larger than FloServer reads";
+        return std::nullopt;
+    }
+    std::string out;
+    out.reserve(static_cast<std::size_t>(size));
+    std::pair<std::string*, std::size_t> sink{&out, static_cast<std::size_t>(size)};
+    if (mz_zip_reader_extract_to_callback(&a.zip, *index, append_to_string, &sink, 0) == MZ_FALSE ||
+        out.size() != size) {
+        error = "the archive's " + std::string(name) + " can't be read: " + zip_error(a.zip);
+        return std::nullopt;
+    }
+    return out;
+}
+
+bool extract_zip_entry(const fs::path& archive, std::string_view name, const fs::path& file, std::string& error) {
+    error.clear();
+    Reader reader;
+    Archive a;
+    if (!open_archive(archive, reader, a, error)) {
+        return false;
+    }
+    std::uint64_t size = 0;
+    const auto index = top_file(a, name, size, error);
+    if (!index) {
+        if (error.empty()) {
+            error = "the archive has no " + std::string(name);
+        }
+        return false;
+    }
+    Writer w;
+    w.expected = size;
+    w.out.open(file, std::ios::binary | std::ios::trunc);
+    if (!w.out) {
+        error = "can't write " + path_to_utf8(file);
+        return false;
+    }
+    const bool extracted = mz_zip_reader_extract_to_callback(&a.zip, *index, write_at, &w, 0) != 0;
+    w.out.close();
+    if (!extracted || w.too_big || w.out.fail() || w.written != size) {
+        error = "can't unpack " + std::string(name) + ": " +
+                (extracted ? std::string("write failed (is the disk full?)") : zip_error(a.zip));
+        return false;
+    }
+    return true;
+}
+
+ZipResult extract_zip(const fs::path& archive, const fs::path& target, const ZipLimits& limits,
+                      const ZipOptions& options) {
     ZipResult result;
     std::error_code ec;
     if (fs::exists(target, ec)) {
@@ -171,20 +336,10 @@ ZipResult extract_zip(const fs::path& archive, const fs::path& target, const Zip
     }
 
     Reader reader;
-    reader.in.open(archive, std::ios::binary);
-    reader.size = fs::file_size(archive, ec);
-    if (!reader.in || ec) {
-        result.message = "can't read " + path_to_utf8(archive);
-        return result;
-    }
     Archive a;
-    a.zip.m_pRead = read_at;
-    a.zip.m_pIO_opaque = &reader;
-    if (mz_zip_reader_init(&a.zip, reader.size, 0) == MZ_FALSE) {
-        result.message = "the archive can't be opened: " + zip_error(a.zip);
+    if (!open_archive(archive, reader, a, result.message)) {
         return result;
     }
-    a.open = true;
 
     const mz_uint count = mz_zip_reader_get_num_files(&a.zip);
     if (count > limits.max_entries) {
@@ -212,7 +367,7 @@ ZipResult extract_zip(const fs::path& archive, const fs::path& target, const Zip
             result.message = "the archive has a symbolic link, which isn't allowed: " + std::string(name);
             return result;
         }
-        auto parts = split_name(name);
+        auto parts = split_name(name, options.unicode_names);
         if (!parts) {
             result.message = "the archive has an unsafe file name: " + std::string(name);
             return result;
@@ -229,7 +384,7 @@ ZipResult extract_zip(const fs::path& archive, const fs::path& target, const Zip
     }
 
     // Drop a single top folder shared by every entry.
-    if (!entries.empty()) {
+    if (options.drop_top_folder && !entries.empty()) {
         const std::string& top = entries.front().parts.front();
         const bool shared = std::all_of(entries.begin(), entries.end(), [&](const Entry& e) {
             return e.parts.front() == top && (e.folder || e.parts.size() >= 2);
@@ -240,6 +395,15 @@ ZipResult extract_zip(const fs::path& archive, const fs::path& target, const Zip
             }
         }
     }
+    // The archive's own files stay in it.
+    std::erase_if(entries, [&](const Entry& e) {
+        return !e.folder && e.parts.size() == 1 &&
+               std::find(options.skip.begin(), options.skip.end(), e.parts.front()) != options.skip.end();
+    });
+    const auto files_total =
+        static_cast<std::uint64_t>(std::count_if(entries.begin(), entries.end(), [](const Entry& e) {
+            return !e.folder;
+        }));
 
     fs::create_directories(target, ec);
     if (ec) {
@@ -291,6 +455,11 @@ ZipResult extract_zip(const fs::path& archive, const fs::path& target, const Zip
         }
         ++result.files;
         result.bytes += w.written;
+        if (options.progress && !options.progress(result.files, files_total)) {
+            result.cancelled = true;
+            result.message = "cancelled";
+            return result;
+        }
     }
     if (result.files == 0) {
         result.message = "the archive has no files";

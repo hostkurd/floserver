@@ -73,7 +73,10 @@ add_library(floserver_core STATIC
     src/tar_extract.cpp
     src/templates.cpp
     src/template_service.cpp
-    src/zip_extract.cpp)
+    src/zip_extract.cpp
+    src/zip_write.cpp
+    src/backup.cpp
+    src/backup_service.cpp)
 
 target_include_directories(floserver_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -81,7 +84,7 @@ target_include_directories(floserver_core PUBLIC
 # nlohmann/json is part of core's interface (protocol.h).
 target_link_libraries(floserver_core PUBLIC floserver_third_party PRIVATE floserver_monocypher floserver_miniz)
 if(WIN32)
-    target_link_libraries(floserver_core PRIVATE ws2_32 advapi32 psapi winhttp bcrypt crypt32 iphlpapi)
+    target_link_libraries(floserver_core PRIVATE ws2_32 advapi32 psapi winhttp bcrypt crypt32 iphlpapi shell32 ole32)
 else()
     # The local certificate authority (D7) uses the system's OpenSSL on Linux
     # and macOS. Without it the build works, but can't make certificates.

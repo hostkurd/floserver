@@ -58,7 +58,10 @@ void print_help(std::ostream& out) {
         << "  uninstall <name> <version> Remove an installed runtime: flo uninstall php 8.5.12\n"
         << "  projects [--json]          List your projects and what each one needs\n"
         << "  add [folder] [--name <n>] [--json]  Add a folder as a project (this folder if none)\n"
+        << "  add --from-backup <zip> [--name <n>]  A new project from a backup (its own copy of the database)\n"
         << "  remove <name> [--drop-database] [--yes]  Forget a project (its files are kept); also delete its database\n"
+        << "  backup <project> [--to <zip>] [--no-database]  Back up a project as a .zip (Documents\\FloServer Backups)\n"
+        << "  restore <project> <zip>    Put a project's files and database back from a backup\n"
         << "  use <php|node|python|mariadb> <v> Set a version in this project's floserver.json\n"
         << "  use php <none|newest|auto>  ...no PHP, always the newest PHP, or PHP when there are .php files\n"
         << "  php <series>               PHP settings for a series (8.5): extensions and php.ini values\n"
@@ -507,21 +510,38 @@ int stop(const std::vector<std::string>& args) {
     return 0;
 }
 
+int add_from_backup(const fs::path& zip, const std::string& name, bool install);
+
 int add(const std::vector<std::string>& args, const std::vector<fs::path>& paths) {
     std::optional<fs::path> folder;
+    std::optional<fs::path> backup_zip;
     std::string name;
     bool as_json = false;
+    bool install = true;
     for (std::size_t i = 1; i < args.size(); ++i) {
         if (args[i] == "--name" && i + 1 < args.size()) {
             name = args[++i];
+        } else if (args[i] == "--from-backup" && i + 1 < args.size()) {
+            backup_zip = paths[++i];
+        } else if (args[i] == "--no-install") {
+            install = false;
         } else if (args[i] == "--json") {
             as_json = true;
         } else if (!folder && !args[i].starts_with("--")) {
             folder = paths[i];
         } else {
-            std::cerr << "Usage: flo add [folder] [--name <name>] [--json]\n";
+            std::cerr << "Usage: flo add [folder] [--name <name>] [--json]\n"
+                      << "       flo add --from-backup <backup.zip> [--name <name>] [--no-install]\n";
             return 2;
         }
+    }
+    if (backup_zip) {
+        if (folder || as_json) {
+            std::cerr << "Usage: flo add --from-backup <backup.zip> [--name <name>] [--no-install]\n"
+                      << "(the new project goes in the projects folder: see Settings → Folders)\n";
+            return 2;
+        }
+        return add_from_backup(*backup_zip, name, install);
     }
     std::error_code ec;
     const fs::path dir = fs::absolute(folder.value_or(fs::current_path()), ec).lexically_normal();
@@ -602,6 +622,246 @@ int remove_cmd(const std::vector<std::string>& args) {
               << (dropped ? ", and its database is deleted" : drop ? " (it had no database to delete)" : "")
               << ". Its files are untouched.\n";
     return 0;
+}
+
+// Follows a backup job (backup.get) until it ends, a progress line on one
+// line meanwhile; Ctrl+C asks for backup.cancel. The job's last answer, or
+// nothing when the service stopped answering.
+std::optional<nlohmann::json> follow_backup(floserver::core::ServiceClient& client, std::int64_t job) {
+    (void)std::signal(SIGINT, on_interrupt);
+    bool cancel_sent = false;
+    std::size_t last_width = 0;
+    std::size_t log_shown = 0;
+    for (;;) {
+        if (g_interrupted != 0 && !cancel_sent) {
+            const auto cancelled = client.call("backup.cancel", {{"id", job}});
+            cancel_sent = true;
+            if (cancelled && cancelled->ok && !cancelled->result.value("cancelled", false)) {
+                std::cout << "\rIt's replacing things now, so it can't be stopped; wait for it to finish.\n";
+            }
+        }
+        const auto reply = client.call("backup.get", {{"id", job}});
+        if (!reply || !reply->ok || !reply->result.is_object()) {
+            std::cout << "\n";
+            (void)print_refusal(reply);
+            return std::nullopt;
+        }
+        const auto& j = reply->result;
+        // Commands it runs (composer install...) and what they said, as they come.
+        if (j.contains("log") && j["log"].is_array()) {
+            const auto& log = j["log"];
+            for (; log_shown < log.size(); ++log_shown) {
+                const std::string line = log[log_shown].is_string() ? log[log_shown].get<std::string>() : "";
+                const bool backup_step = j.value("kind", std::string()) == "backup" && !line.starts_with("$ ");
+                if (!backup_step) {
+                    if (last_width > 0) {
+                        std::cout << "\r" << std::string(last_width, ' ') << "\r";
+                        last_width = 0;
+                    }
+                    std::cout << line << "\n";
+                }
+            }
+        }
+        if (j.value("state", std::string()) != "running") {
+            if (last_width > 0) {
+                std::cout << "\r" << std::string(last_width, ' ') << "\r";
+            }
+            return j;
+        }
+        // The files as they go; the other steps are in the log already.
+        const auto total = j.value("total_files", std::uint64_t{0});
+        const std::string step = j.value("step", std::string());
+        if (total == 0 || step.starts_with("$ ")) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            continue;
+        }
+        const std::string line =
+            step + " " + std::to_string(j.value("files", std::uint64_t{0})) + " of " + std::to_string(total) + " files";
+        std::cout << "\r" << line << std::string(last_width > line.size() ? last_width - line.size() : 0, ' ')
+                  << std::flush;
+        last_width = line.size();
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
+}
+
+int backup(const std::vector<std::string>& args, const std::vector<fs::path>& paths) {
+    std::string name;
+    std::optional<fs::path> to;
+    bool database = true;
+    bool bad = false;
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        if (args[i] == "--to" && i + 1 < args.size()) {
+            to = paths[++i];
+        } else if (args[i] == "--no-database") {
+            database = false;
+        } else if (name.empty() && !args[i].starts_with("-")) {
+            name = args[i];
+        } else {
+            bad = true;
+        }
+    }
+    if (name.empty() || bad) {
+        std::cerr << "Usage: flo backup <project> [--to <file.zip>] [--no-database]\n"
+                  << "(vendor, node_modules and .venv are left out; composer, npm and pip bring them back)\n";
+        return 2;
+    }
+    nlohmann::json params = {{"name", name}, {"database", database}};
+    if (to) {
+        std::error_code ec;
+        const fs::path file = fs::absolute(*to, ec).lexically_normal();
+        params["to"] = shown(file);
+    }
+    // Saving the database may start MariaDB first.
+    auto client = connect_or_start(std::chrono::seconds(200));
+    if (!client) {
+        return 1;
+    }
+    const auto started = client->call("backup.start", params);
+    if (!started || !started->ok || !started->result.contains("job")) {
+        return print_refusal(started);
+    }
+    const auto j = follow_backup(*client, started->result["job"].get<std::int64_t>());
+    if (!j) {
+        return 1;
+    }
+    const std::string state = j->value("state", std::string());
+    if (state == "done") {
+        std::cout << "Backed up " << name << ": " << j->value("file", std::string()) << " ("
+                  << human_bytes(j->value("size", std::uint64_t{0})) << ")\n";
+        return 0;
+    }
+    if (state == "cancelled") {
+        std::cout << "Backup cancelled; nothing was saved.\n";
+        return 130;
+    }
+    std::cerr << "The backup failed: " << j->value("error", std::string()) << "\n";
+    return 1;
+}
+
+int restore(const std::vector<std::string>& args, const std::vector<fs::path>& paths) {
+    std::string name;
+    std::optional<fs::path> zip;
+    bool files = true;
+    bool database = true;
+    bool install = true;
+    bool yes = false;
+    bool bad = false;
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        if (args[i] == "--files-only") {
+            database = false;
+        } else if (args[i] == "--database-only") {
+            files = false;
+        } else if (args[i] == "--no-install") {
+            install = false;
+        } else if (args[i] == "--yes" || args[i] == "-y") {
+            yes = true;
+        } else if (name.empty() && !args[i].starts_with("-")) {
+            name = args[i];
+        } else if (!zip && !args[i].starts_with("-")) {
+            zip = paths[i];
+        } else {
+            bad = true;
+        }
+    }
+    if (name.empty() || !zip || bad || (!files && !database)) {
+        std::cerr << "Usage: flo restore <project> <backup.zip> [--files-only | --database-only] [--no-install] [--yes]\n";
+        return 2;
+    }
+    std::error_code ec;
+    const fs::path file = fs::absolute(*zip, ec).lexically_normal();
+    auto client = connect_or_start(std::chrono::seconds(200));
+    if (!client) {
+        return 1;
+    }
+    const auto info = client->call("backup.inspect", {{"file", shown(file)}});
+    if (!info || !info->ok || !info->result.is_object()) {
+        return print_refusal(info);
+    }
+    const bool has_database = info->result.value("database", false);
+    if (!yes) {
+        std::cout << "Restore " << name << " from the backup of " << info->result.value("date", std::string()) << "?\n";
+        if (files) {
+            std::cout << "  Its files are replaced; today's are kept in a folder beside it.\n";
+        }
+        if (database && has_database) {
+            std::cout << "  Its database " << floserver::core::project_database_name(name)
+                      << " is replaced; today's is saved as a .sql next to the backup.\n";
+        }
+        std::cout << "  The project stops while it's restored, then starts again. [y/N] " << std::flush;
+        std::string answer;
+        if (!std::getline(std::cin, answer) || (answer != "y" && answer != "Y" && answer != "yes")) {
+            std::cout << "Nothing was changed.\n";
+            return 1;
+        }
+    }
+    const auto started = client->call(
+        "backup.restore",
+        {{"name", name}, {"file", shown(file)}, {"files", files}, {"database", database && has_database}, {"install", install}});
+    if (!started || !started->ok || !started->result.contains("job")) {
+        return print_refusal(started);
+    }
+    const auto j = follow_backup(*client, started->result["job"].get<std::int64_t>());
+    if (!j) {
+        return 1;
+    }
+    const std::string state = j->value("state", std::string());
+    if (state == "done") {
+        std::cout << name << " is restored from the backup.\n";
+        if (j->contains("set_aside")) {
+            std::cout << "Today's files are in " << j->value("set_aside", std::string()) << "\n";
+        }
+        if (j->contains("saved_database")) {
+            std::cout << "Today's database is in " << j->value("saved_database", std::string()) << "\n";
+        }
+        return 0;
+    }
+    if (state == "cancelled") {
+        std::cout << "Restore cancelled; nothing was changed.\n";
+        return 130;
+    }
+    std::cerr << "The restore failed: " << j->value("error", std::string()) << "\n";
+    return 1;
+}
+
+int add_from_backup(const fs::path& zip, const std::string& name, bool install) {
+    std::error_code ec;
+    const fs::path file = fs::absolute(zip, ec).lexically_normal();
+    auto client = connect_or_start(std::chrono::seconds(200));
+    if (!client) {
+        return 1;
+    }
+    nlohmann::json params = {{"file", shown(file)}, {"install", install}};
+    if (!name.empty()) {
+        params["name"] = name;
+    }
+    const auto started = client->call("projects.from_backup", params);
+    if (!started || !started->ok || !started->result.contains("job")) {
+        return print_refusal(started);
+    }
+    const std::string made = started->result.value("name", name);
+    std::cout << "Making " << made << " in " << started->result.value("folder", std::string()) << "\n";
+    const auto j = follow_backup(*client, started->result["job"].get<std::int64_t>());
+    if (!j) {
+        return 1;
+    }
+    const std::string state = j->value("state", std::string());
+    if (state == "done") {
+        std::cout << "Added " << made << " from the backup.\n";
+        if (const auto list = client->call("projects.list"); list && list->ok && list->result.contains("projects")) {
+            for (const auto& p : list->result["projects"]) {
+                if (text_of(p, "name") == made) {
+                    print_served(p);
+                }
+            }
+        }
+        return 0;
+    }
+    if (state == "cancelled") {
+        std::cout << j->value("error", std::string("cancelled")) << "\n";
+        return 130;
+    }
+    std::cerr << "It couldn't be made: " << j->value("error", std::string()) << "\n";
+    return 1;
 }
 
 // The registered project folder that holds `here`, when the service is
@@ -1463,6 +1723,12 @@ int run_command(const std::vector<std::string>& args, const std::vector<fs::path
     }
     if (args[0] == "remove") {
         return remove_cmd(args);
+    }
+    if (args[0] == "backup") {
+        return backup(args, paths);
+    }
+    if (args[0] == "restore") {
+        return restore(args, paths);
     }
     if (args[0] == "use") {
         return use(args);

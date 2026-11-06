@@ -51,7 +51,8 @@ TEST_CASE("project menu: the items, in the approved order") {
     const auto menu = project_menu(served(), {true, false, true, false});
     using enum MenuCommand;
     CHECK(commands(menu) == std::vector<MenuCommand>{OpenBrowser, OpenFolder, OpenTerminal, OpenEditor, CopyAddress,
-                                                     None, Toggle, KeepRunning, None, Remove});
+                                                     None, Toggle, KeepRunning, None, BackUp, Restore, None,
+                                                     Remove});
     for (const MenuItem& i : menu) {
         CAPTURE(static_cast<int>(i.command));
         CHECK(i.enabled);
@@ -63,6 +64,8 @@ TEST_CASE("project menu: the items, in the approved order") {
     CHECK(item(menu, OpenBrowser).label == Str::OpenInBrowser);
     CHECK(item(menu, KeepRunning).label == Str::KeepRunning);
     CHECK(text(Lang::En, item(menu, Remove).label) == "Remove from FloServer…");
+    CHECK(text(Lang::En, item(menu, BackUp).label) == "Back up as zip…");
+    CHECK(text(Lang::En, item(menu, Restore).label) == "Restore from backup…");
     // Its icons: the panel's, and a tick for Keep running.
     CHECK(menu_glyph(OpenBrowser) == Glyph::Globe);
     CHECK(menu_glyph(OpenFolder) == Glyph::Folder);
@@ -128,11 +131,16 @@ TEST_CASE("project menu: what doesn't apply is greyed out") {
     const auto no_folder = project_menu(row, {true, false, true, false});
     CHECK_FALSE(item(no_folder, MenuCommand::OpenFolder).enabled);
     CHECK_FALSE(item(no_folder, MenuCommand::OpenTerminal).enabled);
+    // Backups are of its folder.
+    CHECK_FALSE(item(no_folder, MenuCommand::BackUp).enabled);
+    CHECK_FALSE(item(no_folder, MenuCommand::Restore).enabled);
     // The service isn't there: nothing can be changed; the panel still opens.
     const auto offline = project_menu(served(), {true, false, false, false});
     CHECK_FALSE(item(offline, MenuCommand::Toggle).enabled);
     CHECK_FALSE(item(offline, MenuCommand::KeepRunning).enabled);
     CHECK_FALSE(item(offline, MenuCommand::Remove).enabled);
+    CHECK_FALSE(item(offline, MenuCommand::BackUp).enabled);
+    CHECK_FALSE(item(offline, MenuCommand::Restore).enabled);
     CHECK(item(offline, MenuCommand::OpenBrowser).enabled);
     // Being removed: not again, nor switched.
     const auto removing = project_menu(served(), {true, false, true, true});

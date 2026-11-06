@@ -572,6 +572,68 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     AccessNotInstalled,    // a runtime's row that offers a download: "PHP 8.3.29, Not installed, 30 MB"
     AccessResetField,      // a field's Reset link: "Reset memory_limit"
     AccessPasswordHidden,  // root's password while it's masked with dots
+    // Backups (D22, approved 5 Nov): back up, new project from a backup, restore.
+    MenuBackUp,
+    MenuRestore,
+    BackupTitle,            // {0}: the project
+    BackupSaveAs,
+    BackupChange,
+    BackupInclude,
+    BackupDatabase,         // {0}: its database, "my_shop"
+    BackupDatabaseDetail,   // {0}: its size
+    BackupLeaveOut,
+    BackupVendor,           // {0}: the folder's size
+    BackupNodeModules,      // {0}: the folder's size
+    BackupVenv,             // {0}: the folder's size
+    BackupTotal,            // {0}: about how much the zip holds
+    BackupTotalAtLeast,     // {0}: the same, when the count stopped early
+    BackupConfirm,
+    BackupSaveTitle,        // the save dialog's title
+    BackupZipFiles,         // its filter, "Zip files"
+    BackupProgressTitle,    // {0}: the project
+    BackupProgressFiles,    // {0} of {1} files
+    BackupDbSaving,
+    BackupDbSaved,
+    BackupKeepsRunning,
+    BackupDone,             // {0}: the project
+    BackupShowInFolder,
+    BackupFailed,           // {0}: the project, {1}: why
+    BackupCancelled,        // {0}: the project
+    BackupStillRunning,     // the Cancel button once it can't be stopped
+    BackupFromBackup,       // New project's button, "From a backup…"
+    FromBackupTitle,
+    FromBackupBackup,
+    FromBackupChoose,
+    FromBackupPick,         // the open dialog's title
+    BackupDescribed,        // {0}: the project, {1}: when
+    BackupWithDatabase,
+    FromBackupName,
+    FromBackupWhere,        // {0}: the folder, {1}: the address
+    FromBackupDatabaseNote,
+    BackupInstall,
+    FromBackupCreate,
+    FromBackupProgressTitle,  // {0}: the new project
+    FromBackupDone,           // {0}: the new project
+    FromBackupFailed,         // {0}: the new project, {1}: why
+    BackupNotUsable,          // {0}: why the chosen file can't be used
+    BackupDbLoading,
+    BackupInstalling,
+    RestoreTitle,             // {0}: the project
+    RestoreBackedUp,          // {0}: when
+    RestoreFiles,
+    RestoreFilesNote,
+    RestoreDatabase,          // {0}: its database
+    RestoreDatabaseNote,
+    RestoreNote,
+    RestoreConfirm,
+    RestoreProgressTitle,     // {0}: the project
+    RestoreStopped,
+    RestoreDone,              // {0}: the project
+    RestoreDoneKept,          // {0}: the project, {1}: where today's database is
+    RestoreFailed,            // {0}: the project, {1}: why
+    RestoreCancelled,         // {0}: the project
+    RestoreNotRecycled,       // {0}: the project, {1}: why
+    RestoreNothing,
     Count_,
 };
 
