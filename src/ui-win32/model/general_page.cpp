@@ -353,6 +353,13 @@ StartArgs parse_start_args(const std::vector<std::string>& args) {
         } else if (args[i] == kInstanceFlag && i + 1 < args.size() && !args[i + 1].starts_with('-')) {
             ++i;
             out.instance = usable_suffix(args[i]) ? args[i] : std::string();
+        } else if (!args[i].starts_with('-') && args[i].size() > 4) {
+            std::string end = args[i].substr(args[i].size() - 4);
+            std::transform(end.begin(), end.end(), end.begin(),
+                           [](char c) { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c; });
+            if (end == ".zip") {
+                out.open = args[i];
+            }
         }
     }
     return out;

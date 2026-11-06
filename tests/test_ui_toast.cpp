@@ -6,6 +6,16 @@
 
 using namespace floserver::ui;
 
+TEST_CASE("toast: one with a button stays until it's closed") {
+    Toast t = toast_with({}, "Backed up my-shop", ToastKind::Info, "Show in folder");
+    CHECK(t.action == "Show in folder");
+    CHECK_FALSE(toast_timer_runs(t));
+    CHECK(toast_after(t, ToastEvent::TimeUp) == t);
+    CHECK(toast_after(t, ToastEvent::Close).text.empty());
+    // The next message brings its own button, or none.
+    CHECK(toast_with(t, "The address is on the clipboard", ToastKind::Info).action.empty());
+}
+
 TEST_CASE("toast: information goes by itself, but not while it's read") {
     Toast t = toast_with({}, "The address is on the clipboard", ToastKind::Info);
     CHECK(t.text == "The address is on the clipboard");

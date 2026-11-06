@@ -50,6 +50,13 @@
 //   updates.status   {} -> update_service.h, UpdateService::status()
 //   updates.check    {} -> the same; a check of the signed list starts now
 //   updates.cancel   {} -> {"cancelled": bool}   stops the app's download
+//   backup.plan      {"name"} -> what the Back up dialog offers (sizes, the default file)
+//   backup.start     {"name", "to"?, "database"?, "leave_out"?} -> {"job", "file"}
+//   backup.inspect   {"file"} -> its floserver-backup.json, and a new project's name and folder
+//   backup.restore   {"name", "file", "files"?, "database"?, "install"?} -> {"job"}
+//   projects.from_backup {"file", "name"?, "install"?} -> {"job", "name", "folder"}
+//   backup.get       {"id"} -> backup_service.h, BackupService::job()
+//   backup.cancel    {"id"} -> {"cancelled": bool}
 // projects.list and the projects.* changes also carry each project's
 // "address" and "run" ("sleeping" | "running" | "failed") once it's served.
 

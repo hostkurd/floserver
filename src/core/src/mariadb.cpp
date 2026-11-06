@@ -84,6 +84,7 @@ MariaDbFiles mariadb_files(const fs::path& install_dir, const std::string& versi
     f.install_db = first_existing({bin, install_dir / "scripts"}, {"mariadb-install-db", "mysql_install_db"});
     f.admin = first_existing({bin}, {"mariadb-admin", "mysqladmin"});
     f.client = first_existing({bin}, {"mariadb", "mysql"});
+    f.dump = first_existing({bin}, {"mariadb-dump", "mysqldump"});
     f.folder = data / "data" / path_from_utf8("mariadb-" + f.series);
     f.data_dir = f.folder / "data";
 #ifdef _WIN32

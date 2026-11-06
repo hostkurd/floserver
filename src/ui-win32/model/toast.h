@@ -25,6 +25,9 @@ struct Toast {
     std::string text;  // empty: none shown
     ToastKind kind = ToastKind::Info;
     bool hovered = false;  // the mouse is over it
+    // A button on it ("Show in folder", D22); empty: none. A toast with one
+    // stays until it's closed, like an error, so there's time to press it.
+    std::string action;
     bool operator==(const Toast&) const = default;
 };
 
@@ -39,7 +42,7 @@ enum class ToastEvent : std::uint8_t {
 // The toast after `event`.
 [[nodiscard]] Toast toast_after(const Toast& toast, ToastEvent event);
 // A new message: it replaces whatever was shown (the mouse may already be over it).
-[[nodiscard]] Toast toast_with(const Toast& shown, std::string text, ToastKind kind);
+[[nodiscard]] Toast toast_with(const Toast& shown, std::string text, ToastKind kind, std::string action = {});
 // Whether the timer runs now: information, shown, and the mouse not over it.
 [[nodiscard]] bool toast_timer_runs(const Toast& toast);
 // The card's widest, for a window `window_w` wide; never under `least`.

@@ -6,6 +6,7 @@
 // app's own updates (downloaded here, installed by the window).
 
 #include "floserver/core/apache_settings.h"
+#include "floserver/core/backup_service.h"
 #include "floserver/core/builtin_templates.h"
 #include "floserver/core/build_info.h"
 #include "floserver/core/builtin.h"
@@ -241,6 +242,7 @@ struct Service {
     std::unique_ptr<floserver::core::SecretStore> secrets;
     std::unique_ptr<floserver::core::DatabaseService> databases;
     std::unique_ptr<floserver::core::TemplateService> templates;
+    std::unique_ptr<floserver::core::BackupService> backups;
     std::unique_ptr<floserver::core::PhpMyAdminConfigWriter> phpmyadmin;
     std::optional<std::filesystem::path> data;
 
@@ -1221,6 +1223,206 @@ struct Service {
     }
     mutable std::mutex folders_mutex;
 
+    // A registered project as the backup jobs see it.
+    [[nodiscard]] std::optional<floserver::core::BackupProject> backup_project(const std::string& name,
+                                                                              std::string& error) const {
+        namespace core = floserver::core;
+        core::ServiceRefusal refusal;
+        const auto config = projects ? projects->config(refusal) : std::nullopt;
+        if (!config) {
+            error = refusal.message;
+            return std::nullopt;
+        }
+        const core::Project* p = core::find_project(*config, name);
+        if (p == nullptr) {
+            error = "there's no project called " + name;
+            return std::nullopt;
+        }
+        const core::ConfigResult parsed = core::read_project_config_file(*p);
+        return core::BackupProject{p->name, p->dir, p->on, parsed.config && parsed.config->database,
+                                   core::project_database_name(*p)};
+    }
+
+    // Backups (D22, backup_service.h):
+    //   backup.plan {name} -> {"name", "path", "bytes" (the whole folder),
+    //     "complete" (false: the count stopped early), "folders": [{"name",
+    //     "bytes", "tool"}] (those it can leave out), "database": {"name",
+    //     "bytes"} or null, "default_file" (Documents/FloServer Backups/...)}
+    //   backup.start {name, to?, database?: bool, leave_out?: [...]} -> {"job"}
+    //   backup.inspect {file} -> floserver-backup.json's description, "path",
+    //     "bytes", and for a new project from it: "new_name", "new_folder"
+    //   backup.restore {name, file, files?, database?, install?} -> {"job"}
+    //   projects.from_backup {file, name?, install?} -> {"job", "name", "folder"}
+    //   backup.get / backup.cancel {id}: as jobs.get and jobs.cancel
+    [[nodiscard]] std::string backup_request(const protocol::Request& r) const {
+        namespace core = floserver::core;
+        if (!backups || !projects || !data) {
+            return protocol::make_error(r.id, "no_data_folder",
+                                        "FloServer can't find a folder to keep its settings in (LOCALAPPDATA or HOME)");
+        }
+        core::ServiceRefusal refusal;
+        std::string error;
+        const std::string name = string_param(r.params, "name");
+        const auto bad_bool = [&r](const char* key) {
+            return r.params.contains(key) && !r.params.at(key).is_boolean();
+        };
+        for (const char* key : {"database", "files", "install"}) {
+            if (bad_bool(key)) {
+                return protocol::make_error(r.id, "bad_params", std::string(key) + " is true or false");
+            }
+        }
+        if (r.method == "backup.get" || r.method == "backup.cancel") {
+            const auto id = job_id(r.params);
+            if (!id) {
+                return protocol::make_error(r.id, "bad_params", "a job id is needed");
+            }
+            if (r.method == "backup.get") {
+                const auto job = backups->job(*id);
+                return job ? protocol::make_result(r.id, *job)
+                           : protocol::make_error(r.id, "unknown_job", "there's no job " + std::to_string(*id));
+            }
+            return protocol::make_result(r.id, {{"cancelled", backups->cancel(*id)}});
+        }
+        const auto default_file = [](const std::string& project) -> std::optional<std::filesystem::path> {
+            const auto dir = core::default_backups_dir();
+            if (!dir) {
+                return std::nullopt;
+            }
+            return *dir / core::path_from_utf8(core::backup_file_name(project, core::local_time_now()));
+        };
+        if (r.method == "backup.plan") {
+            const auto project = backup_project(name, error);
+            if (!project) {
+                return protocol::make_error(r.id, "unknown_project", error);
+            }
+            const core::BackupProject* plan = &*project;  // checked just above
+            // Walked now, for this request only (on the window's side thread),
+            // each given up after a few seconds.
+            const auto deadline = Clock::now() + std::chrono::seconds(8);
+            const core::DiskUsage all = core::disk_usage(plan->dir, deadline);
+            json folders = json::array();
+            for (const std::string& f : core::leavable_folders(plan->dir)) {
+                const core::DiskUsage usage =
+                    core::disk_usage(plan->dir / core::path_from_utf8(f), Clock::now() + std::chrono::seconds(4));
+                std::string tool;
+                for (const core::LeavableFolder& l : core::kLeavableFolders) {
+                    if (l.folder == f) {
+                        tool = std::string(l.tool);
+                    }
+                }
+                folders.push_back({{"name", f}, {"bytes", usage.bytes}, {"tool", tool}});
+            }
+            json database = nullptr;
+            if (plan->database) {
+                database = {{"name", plan->database_name},
+                            {"bytes", databases ? databases->project_database_bytes(plan->name).value_or(0) : 0}};
+            }
+            const auto file = default_file(plan->name);
+            return protocol::make_result(r.id, {{"name", plan->name},
+                                                {"path", core::path_to_utf8(plan->dir)},
+                                                {"bytes", all.bytes},
+                                                {"complete", all.complete},
+                                                {"folders", std::move(folders)},
+                                                {"database", std::move(database)},
+                                                {"default_file", file ? json(core::path_to_utf8(*file)) : json(nullptr)}});
+        }
+        if (r.method == "backup.start") {
+            core::BackupRequest request;
+            request.project = name;
+            const std::string to = string_param(r.params, "to");
+            if (to.empty()) {
+                const auto file = default_file(name);
+                if (!file) {
+                    return protocol::make_error(r.id, "bad_params", "there's no Documents folder: say where with \"to\"");
+                }
+                request.to = *file;
+            } else {
+                request.to = core::path_from_utf8(to);
+            }
+            request.database = bool_param(r.params, "database").value_or(true);
+            if (r.params.contains("leave_out")) {
+                if (!r.params.at("leave_out").is_array()) {
+                    return protocol::make_error(r.id, "bad_params", "leave_out is a list of folders");
+                }
+                std::vector<std::string> folders;
+                for (const json& f : r.params.at("leave_out")) {
+                    if (!f.is_string()) {
+                        return protocol::make_error(r.id, "bad_params", "leave_out is a list of folders");
+                    }
+                    folders.push_back(f.get<std::string>());
+                }
+                request.leave_out = std::move(folders);
+            }
+            const auto id = backups->backup(request, refusal);
+            return id ? protocol::make_result(r.id, {{"job", *id}, {"file", core::path_to_utf8(request.to)}})
+                      : protocol::make_error(r.id, refusal.code, refusal.message);
+        }
+        const std::filesystem::path file = core::path_from_utf8(string_param(r.params, "file"));
+        if (!file.is_absolute()) {
+            return protocol::make_error(r.id, "bad_params", "the backup must be named with its full path");
+        }
+        // Where new projects go, and the names already taken there or registered.
+        const auto config = projects->config(refusal);
+        if (!config) {
+            return protocol::make_error(r.id, refusal.code, refusal.message);
+        }
+        const auto parent = config->projects_dir ? config->projects_dir : core::default_projects_dir();
+        const auto taken = [&](const std::string& candidate) {
+            std::error_code ec;
+            return core::find_project(*config, candidate) != nullptr ||
+                   (parent && std::filesystem::exists(*parent / core::path_from_utf8(candidate), ec));
+        };
+        if (r.method == "backup.inspect") {
+            const auto info = core::read_backup_info(file, error);
+            if (!info) {
+                return protocol::make_error(r.id, "not_a_backup", error);
+            }
+            json out = core::backup_info_json(*info);
+            std::error_code ec;
+            out["path"] = core::path_to_utf8(file);
+            // Its left-out packages are installed again by default only when it was made here.
+            out["made_here"] = core::made_here(*info, *data);
+            out["bytes"] = std::filesystem::file_size(file, ec);
+            const std::string fresh = core::copy_name(info->name, taken);
+            out["new_name"] = fresh;
+            out["new_folder"] = parent ? json(core::path_to_utf8(*parent / core::path_from_utf8(fresh))) : json(nullptr);
+            out["projects_dir"] = parent ? json(core::path_to_utf8(*parent)) : json(nullptr);
+            return protocol::make_result(r.id, out);
+        }
+        if (r.method == "backup.restore") {
+            core::RestoreRequest request;
+            request.project = name;
+            request.from = file;
+            request.files = bool_param(r.params, "files").value_or(true);
+            request.database = bool_param(r.params, "database").value_or(true);
+            request.install = bool_param(r.params, "install");
+            const auto id = backups->restore(request, refusal);
+            return id ? protocol::make_result(r.id, {{"job", *id}})
+                      : protocol::make_error(r.id, refusal.code, refusal.message);
+        }
+        // projects.from_backup
+        if (!parent) {
+            return protocol::make_error(r.id, "bad_folder", "there's no projects folder: set one in Settings → Folders");
+        }
+        core::FromBackupRequest request;
+        request.from = file;
+        request.parent = *parent;
+        request.install = bool_param(r.params, "install");
+        request.name = name;
+        if (request.name.empty()) {
+            const auto info = core::read_backup_info(file, error);
+            if (!info) {
+                return protocol::make_error(r.id, "not_a_backup", error);
+            }
+            request.name = core::copy_name(info->name, taken);
+        }
+        const auto id = backups->create(request, refusal);
+        return id ? protocol::make_result(r.id, {{"job", *id},
+                                                 {"name", request.name},
+                                                 {"folder", core::path_to_utf8(*parent / core::path_from_utf8(request.name))}})
+                  : protocol::make_error(r.id, refusal.code, refusal.message);
+    }
+
     [[nodiscard]] json status() const {
         const auto memory = floserver::core::memory_in_use();
         return {{"version", floserver::core::kVersion},
@@ -1292,6 +1494,8 @@ struct Service {
             } else if (request->method == "updates.status" || request->method == "updates.check" ||
                        request->method == "updates.cancel") {
                 reply = update_request(*request);
+            } else if (request->method.starts_with("backup.") || request->method == "projects.from_backup") {
+                reply = backup_request(*request);
             } else if (request->method == "quit") {
                 reply = protocol::make_result(request->id, json::object());
                 quit = true;
@@ -1394,6 +1598,73 @@ floserver::core::TemplateHooks template_hooks(const std::shared_ptr<Service>& se
     return hooks;
 }
 
+// What the backup jobs need from the rest of the service (D22). As with
+// templates, the service outlives them: BackupService::stop() runs first at quit.
+floserver::core::BackupHooks backup_hooks(const std::shared_ptr<Service>& service) {
+    namespace core = floserver::core;
+    core::BackupHooks hooks;
+    Service* s = service.get();
+    hooks.project = [s](const std::string& name, std::string& error) { return s->backup_project(name, error); };
+    hooks.dump_database = [s](const std::string& project, const std::filesystem::path& work,
+                              const std::atomic<bool>& cancel, std::string& error) {
+        core::ServiceRefusal refusal;
+        if (!s->databases || !s->databases->dump_project_database(project, work, cancel, refusal)) {
+            error = s->databases ? refusal.message : std::string("there's no database service");
+            return false;
+        }
+        return true;
+    };
+    hooks.load_database = [s](const std::string& project, const std::filesystem::path& sql,
+                              const std::filesystem::path& extras, const std::atomic<bool>& cancel,
+                              std::string& warning, std::string& error) {
+        core::ServiceRefusal refusal;
+        if (!s->databases ||
+            !s->databases->load_project_database(project, sql, cancel, refusal, extras, &warning)) {
+            error = s->databases ? refusal.message : std::string("there's no database service");
+            return false;
+        }
+        return true;
+    };
+    hooks.database_login = [s](const std::string& project, std::string& error) -> std::optional<core::DatabaseLogin> {
+        core::ServiceRefusal refusal;
+        auto login = s->databases ? s->databases->project_login(project, refusal) : std::nullopt;
+        if (!login) {
+            error = refusal.message;
+        }
+        return login;
+    };
+    hooks.add_project = [s](const std::filesystem::path& dir, const std::string& name,
+                            std::string& error) -> std::optional<std::string> {
+        core::ServiceRefusal refusal;
+        const auto added = s->projects->add(dir, name, refusal);
+        if (!added) {
+            error = refusal.message;
+            return std::nullopt;
+        }
+        std::string registered = added->value("name", name);
+        (void)s->projects->set(registered, true, std::nullopt, refusal);
+        if (s->web) {
+            (void)s->web->reload();
+        }
+        if (s->databases) {
+            (void)s->databases->reload();
+        }
+        return registered;
+    };
+    hooks.set_on = [s](const std::string& project, bool on, std::string& error) {
+        core::ServiceRefusal refusal;
+        if (!s->projects->set(project, on, std::nullopt, refusal)) {
+            error = refusal.message;
+            return false;
+        }
+        if (s->web) {
+            (void)s->web->reload();
+        }
+        return true;
+    };
+    return hooks;
+}
+
 int run() {
     const std::string instance = ipc::default_instance();
     std::unique_ptr<ipc::Server> server;
@@ -1466,6 +1737,7 @@ int run() {
                 std::make_unique<floserver::core::ApacheSettingsService>(*data, *service->projects, std::move(hooks));
         }
         service->templates = std::make_unique<floserver::core::TemplateService>(*data, template_hooks(service));
+        service->backups = std::make_unique<floserver::core::BackupService>(*data, backup_hooks(service));
         service->data = *data;
         service->refresh_integration();
         try {
@@ -1508,7 +1780,10 @@ int run() {
     if (service->updates) {
         service->updates->stop();
     }
-    // Templates first: a job waits on installs and adds projects.
+    // Backups and templates first: their jobs use the databases and add projects.
+    if (service->backups) {
+        service->backups->stop();
+    }
     if (service->templates) {
         service->templates->stop();
     }

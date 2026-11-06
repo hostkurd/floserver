@@ -29,6 +29,8 @@ enum class MenuCommand : std::uint8_t {
     KeepRunning,
     Settings,     // Settings → Shared sites, from the Shared sites row
     Rename,       // D22
+    BackUp,       // Back up as zip… (D22)
+    Restore,      // Restore from backup…
     Remove,
 };
 
@@ -48,7 +50,8 @@ struct ProjectMenuState {
 };
 
 // Open in browser · Open folder · Open terminal · Open in <editor> · Copy
-// address | Turn on (or off) · Keep running | Rename… · Remove from FloServer…
+// address | Turn on (or off) · Keep running | Rename… · Back up as zip… ·
+// Restore from backup… (D22, approved 5 Nov) | Remove from FloServer…
 // (no Project settings…: a click on the row opens its panel).
 // The address items are greyed out when there's nothing to open (off, a
 // problem, needs a download); the changes while the service isn't there or

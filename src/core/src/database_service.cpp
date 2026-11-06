@@ -4,6 +4,7 @@
 
 #include "floserver/core/mariadb_settings.h"
 #include "floserver/core/paths.h"
+#include "floserver/core/process.h"
 #include "floserver/core/project_registry.h"
 #include "floserver/core/runtime_store.h"
 #include "floserver/core/site_plan.h"
@@ -499,6 +500,55 @@ private:
         return ok;
     }
 
+public:
+    // One of MariaDB's programs with a project's own login (backups, D22):
+    // TCP to the internal port, the password in MYSQL_PWD only, run in
+    // `work` (so file names on its command line are plain relative ones),
+    // standard input from `input` when it's given. Ended when `cancel` is set.
+    bool run_as(const fs::path& program, const DatabaseLogin& login, const std::vector<std::string>& extra,
+                const fs::path& work, const fs::path& input, const std::atomic<bool>& cancel, std::string& error) {
+        std::error_code ec;
+        if (!fs::is_regular_file(program, ec)) {
+            error = path_to_utf8(program.filename()) + " is missing from " + path_to_utf8(files_.base_dir);
+            return false;
+        }
+        ChildOptions o;
+        o.program = program;
+        o.args = {"--no-defaults", "--protocol=TCP", "--host=127.0.0.1", "--port=" + std::to_string(internal_.load()),
+                  "--user=" + login.user};
+        o.args.insert(o.args.end(), extra.begin(), extra.end());
+        o.working_dir = work;
+        o.env = {{"MYSQL_PWD", login.password}};
+        o.remove_env = {"MYSQL_HOST", "MYSQL_TCP_PORT", "MYSQL_UNIX_PORT"};
+        o.stdin_file = input;
+        o.output_log = work / ("client-" + random_suffix() + ".log");
+        auto child = ChildProcess::start(o, error);
+        if (!child) {
+            return false;
+        }
+        std::optional<int> code;
+        const auto limit = database_tool_limit();
+        const auto started = Clock::now();
+        while (!(code = child->wait(250ms))) {
+            touch();  // it's busy: no sleep meanwhile
+            if (cancel || Clock::now() - started > limit) {
+                child->kill();
+                error = cancel ? std::string("cancelled")
+                               : path_to_utf8(program.filename()) + " didn't finish in " +
+                                     std::to_string(limit.count()) + " seconds and was stopped";
+                fs::remove(o.output_log, ec);
+                return false;
+            }
+        }
+        const bool ok = *code == 0;
+        if (!ok) {
+            error = path_to_utf8(program.filename()) + ": " + tail(o.output_log, 600);
+        }
+        fs::remove(o.output_log, ec);
+        return ok;
+    }
+
+private:
     // Setting up the data folder (the first time), the config, and
     // mariadbd, waiting until root can log in. `reset_root`: a new password
     // for root through the init file. `wrong_root` is set when root's saved
@@ -1214,6 +1264,161 @@ std::optional<DatabaseLogin> DatabaseService::project_login(const std::string& p
         return std::nullopt;
     }
     return login;
+}
+
+std::shared_ptr<DatabaseService::Server> DatabaseService::project_server(const std::string& project,
+                                                                         ServiceRefusal& refusal) {
+    std::string error;
+    const auto app = load_app_config(app_config_file(config_.data_dir), error);
+    const Project* p = app ? find_project(*app, project) : nullptr;
+    if (p == nullptr) {
+        refusal = {"unknown_project", "there's no project called " + project};
+        return nullptr;
+    }
+    const ConfigResult cfg = read_project_config_file(*p);
+    if (!cfg.config || !cfg.config->database) {
+        refusal = {"no_database", project + " has no database in its floserver.json"};
+        return nullptr;
+    }
+    const auto installed = list_installed(runtimes_dir(config_.data_dir));
+    const InstalledRuntime* r = best_mariadb(installed, cfg.config->database->version);
+    if (r == nullptr) {
+        refusal = not_installed(cfg.config->database->version);
+        return nullptr;
+    }
+    auto server = server_of(mariadb_series(r->version));
+    if (!server) {
+        refusal = no_server_yet(mariadb_series(r->version));
+    }
+    return server;
+}
+
+std::vector<std::string> mariadb_load_args(bool force) {
+    // --binary-mode: no client commands but DELIMITER (and NUL bytes kept);
+    // --local-infile=0: LOAD DATA LOCAL can't read this computer's files.
+    std::vector<std::string> out = {"--batch", "--binary-mode", "--local-infile=0", "--default-character-set=utf8mb4"};
+    if (force) {
+        out.emplace_back("--force");
+    }
+    return out;
+}
+
+std::vector<std::string> mariadb_dump_args(const std::string& database, const std::string& file) {
+    return {"--single-transaction", "--triggers", "--routines", "--events", "--hex-blob",
+            "--default-character-set=utf8mb4", "--result-file=" + file, database};
+}
+
+std::chrono::seconds database_tool_limit() {
+    if (const auto text = get_env("FLOSERVER_DB_TOOL_SECONDS")) {
+        try {
+            return std::chrono::seconds(std::max(1L, std::stol(*text)));
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the usual limit
+        }
+    }
+    return std::chrono::minutes(30);
+}
+
+bool DatabaseService::run_project_tool(const std::string& project, bool dump, const fs::path& work,
+                                       const fs::path& input, const std::atomic<bool>& cancel,
+                                       ServiceRefusal& refusal) {
+    // Its login first: made if it never was, and the server started.
+    const auto login = project_login(project, refusal, true);
+    if (!login) {
+        return false;
+    }
+    const auto server = project_server(project, refusal);
+    if (!server) {
+        return false;
+    }
+    server->connection_opened();
+    const AtExit closed([&server] { server->connection_closed(); });
+    std::string error;
+    if (!server->ensure_running(error)) {
+        refusal = {"database_failed", error};
+        return false;
+    }
+    const bool ok = dump ? server->run_as(server->files().dump, *login,
+                                          mariadb_dump_args(login->database, std::string(kDumpFileName)), work, {},
+                                          cancel, error)
+                         : server->run_as(server->files().client, *login, mariadb_load_args(false), work, input,
+                                          cancel, error);
+    if (!ok) {
+        refusal = {cancel ? "cancelled" : "database_failed", error};
+        return false;
+    }
+    return true;
+}
+
+bool DatabaseService::dump_project_database(const std::string& project, const fs::path& work,
+                                            const std::atomic<bool>& cancel, ServiceRefusal& refusal) {
+    return run_project_tool(project, true, work, {}, cancel, refusal);
+}
+
+bool DatabaseService::load_project_database(const std::string& project, const fs::path& sql,
+                                            const std::atomic<bool>& cancel, ServiceRefusal& refusal,
+                                            const fs::path& extras, std::string* warning) {
+    const bool ok = run_project_tool(project, false, sql.parent_path(), sql, cancel, refusal);
+    // Routines and events on their own, going on past one its login may not make.
+    if (ok && !extras.empty() && !cancel) {
+        ServiceRefusal why;
+        const auto login = project_login(project, why, true);
+        const auto server = login ? project_server(project, why) : nullptr;
+        std::string error;
+        bool extras_ok = false;
+        if (login && server) {
+            server->connection_opened();
+            const AtExit closed([&server] { server->connection_closed(); });
+            extras_ok = server->ensure_running(error) &&
+                        server->run_as(server->files().client, *login, mariadb_load_args(true), extras.parent_path(),
+                                       extras, cancel, error);
+        } else {
+            error = why.message;
+        }
+        if (!extras_ok && warning != nullptr) {
+            *warning = "some of its routines or events couldn't be made with the project's own login: " + error;
+        }
+    }
+    // A dump can change its user's password (SET PASSWORD): the one kept is
+    // set again, so the project's .env still works. After a failed load too.
+    ServiceRefusal reset;
+    if (!project_login(project, reset, true) && ok) {
+        refusal = reset;
+        return false;
+    }
+    return ok;
+}
+
+std::optional<std::uint64_t> DatabaseService::project_database_bytes(const std::string& project) const {
+    std::string error;
+    const auto app = load_app_config(app_config_file(config_.data_dir), error);
+    const Project* p = app ? find_project(*app, project) : nullptr;
+    if (p == nullptr) {
+        return std::nullopt;
+    }
+    const ConfigResult cfg = read_project_config_file(*p);
+    if (!cfg.config || !cfg.config->database) {
+        return std::nullopt;
+    }
+    const auto installed = list_installed(runtimes_dir(config_.data_dir));
+    const InstalledRuntime* r = best_mariadb(installed, cfg.config->database->version);
+    if (r == nullptr) {
+        return std::nullopt;
+    }
+    // Its own folder in the series' data: one file per table (and the
+    // folder's own .opt), so the sum is close to what the dump holds.
+    const MariaDbFiles files = mariadb_files(r->dir, r->version, config_.data_dir);
+    const fs::path folder = files.data_dir / path_from_utf8(project_database_name(*p));  // kept through a rename
+    std::error_code ec;
+    if (!fs::is_directory(folder, ec)) {
+        return std::nullopt;
+    }
+    std::uint64_t bytes = 0;
+    for (fs::directory_iterator it(folder, ec), end; !ec && it != end; it.increment(ec)) {
+        if (it->is_regular_file(ec)) {
+            bytes += it->file_size(ec);
+        }
+    }
+    return bytes;
 }
 
 std::optional<std::string> project_sharing_database(const AppConfig& app, const std::string& project) {
