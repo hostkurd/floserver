@@ -62,7 +62,7 @@ one. Names that could escape the folder (`..`, absolute or drive paths,
 refused before anything is written. A single top folder in the zip
 (`node-v24.22.1-win-x64\`) is dropped. The Visual C++ runtime DLLs shipped
 next to `floserverd.exe` (`vcruntime140*.dll`, `msvcp140*.dll`,
-`concrt140.dll`; nothing else from that folder) are copied next to the runtime's
+`concrt140.dll`, `vccorlib140.dll`; nothing else from that folder) are copied next to the runtime's
 programs (top folder, `bin\`, `Apache24\bin\`) unless the runtime brings its
 own. A `.floserver-runtime.json` marker is written last and the folder is
 renamed into place, so a folder without a marker is never taken for an
