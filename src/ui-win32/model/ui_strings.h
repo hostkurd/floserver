@@ -647,6 +647,10 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     UpdateErrStop,              // {0}: the service's reason
     UpdateErrInstall,           // {0}: Windows Installer's error number
     UpdateErrOpen,              // {0}: why
+    UpdateErrWindow,
+    UpdateErrBusy,
+    UpdateRestartNeeded,        // {0}: the version
+    UpdateInProgress,           // FloServer.exe opened while an update installs
     Count_,
 };
 

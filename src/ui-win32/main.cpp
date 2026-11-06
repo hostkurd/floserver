@@ -107,7 +107,22 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE /*prev*/, PWSTR /*cmd*/, int s
     }
     const std::string service_instance = floserver::core::ipc::default_instance();
     const std::wstring class_name = L"FloServerWindow." + widen(service_instance);
-    const std::wstring mutex_name = L"Local\\FloServerWindow." + widen(service_instance);
+    const std::wstring mutex_name = floserver::ui::window_mark_name(service_instance);
+
+    // An update is being installed (apply_update.h): no window now, or it
+    // would start floserverd again in the middle. The new one opens by itself.
+    if (const floserver::ui::win::UniqueHandle updating(
+            OpenMutexW(SYNCHRONIZE, FALSE, floserver::ui::updating_mark_name(service_instance).c_str()));
+        updating) {
+        if (!tray) {
+            const floserver::ui::Lang lang = floserver::ui::window_lang(floserver::ui::load_window_prefs());
+            MessageBoxW(nullptr, widen(floserver::ui::text(lang, floserver::ui::Str::UpdateInProgress)).c_str(),
+                        L"FloServer",
+                        MB_OK | MB_ICONINFORMATION |
+                            (floserver::ui::is_rtl(lang) ? UINT{MB_RTLREADING | MB_RIGHT} : 0U));
+        }
+        return 0;
+    }
 
     const floserver::ui::win::UniqueHandle single(CreateMutexW(nullptr, FALSE, mutex_name.c_str()));
     if (single && GetLastError() == ERROR_ALREADY_EXISTS) {

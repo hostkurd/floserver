@@ -323,3 +323,74 @@ TEST_CASE("updates: none where there's no transport") {
 TEST_CASE("updates: the installer's name") {
     CHECK(UpdateService::file_name("1.2.0") == "FloServer-1.2.0-x64.msi");
 }
+
+TEST_CASE("updates: versions compare as numbers, 1.10.0 after 1.9.0") {
+    World w;
+    w.publish(w.app("1.10.0", w.msi));
+    w.serve_msi("1.10.0", w.msi);
+    UpdateServiceConfig c = w.config();
+    c.current_version = "1.9.0";
+    UpdateService u(c, w.transport);
+    u.start();
+    const nlohmann::json s = check_and_wait(u, "ready");
+    CHECK(s["version"] == "1.10.0");
+}
+
+TEST_CASE("updates: an installer already here at the list's size and hash is used without downloading") {
+    World w;
+    w.publish(w.app("1.2.0", w.msi));
+    w.serve_msi("1.2.0", w.msi);
+    write_file(w.updates() / "FloServer-1.2.0-x64.msi", w.msi);
+    UpdateService u(w.config(), w.transport);
+    CHECK(u.status()["state"] == "idle");  // not trusted before a check has read the list
+    u.start();
+    const nlohmann::json s = check_and_wait(u, "ready");
+    CHECK(s["file"] == path_to_utf8(w.updates() / "FloServer-1.2.0-x64.msi"));
+    CHECK(w.transport->fake.requests(msi_url("1.2.0")) == 0);
+}
+
+TEST_CASE("updates: a reply of the wrong size isn't kept") {
+    World w;
+    w.publish(w.app("1.2.0", w.msi));
+    UpdateService u(w.config(), w.transport);
+    u.start();
+    SUBCASE("shorter") {
+        w.serve_msi("1.2.0", w.msi.substr(0, w.msi.size() - 1));
+    }
+    SUBCASE("longer") {
+        w.serve_msi("1.2.0", w.msi + "x");
+    }
+    const nlohmann::json s = check_and_wait(u, "failed");
+    CHECK_FALSE(s.contains("file"));
+    CHECK(fs::is_empty(w.updates()));
+}
+
+TEST_CASE("updates: a check that can't read the list keeps a ready update") {
+    World w;
+    w.publish(w.app("1.2.0", w.msi));
+    w.serve_msi("1.2.0", w.msi);
+    std::atomic<int> fetched{0};
+    UpdateServiceConfig c = w.config();
+    const auto fetch = c.fetch_list;
+    c.fetch_list = [&fetched, fetch](std::string& error) {
+        auto list = fetch(error);
+        ++fetched;
+        return list;
+    };
+    UpdateService u(c, w.transport);
+    u.start();
+    check_and_wait(u, "ready");
+    REQUIRE(fetched == 1);
+
+    // Offline now.
+    w.transport->fake.serve(kSource.manifest_url, {0, "", "no network"});
+    std::string error;
+    REQUIRE(u.check(error));
+    wait_until(u, [&](const nlohmann::json&) { return fetched.load() == 2; });
+    std::this_thread::sleep_for(milliseconds(20));
+    const nlohmann::json s = u.status();
+    INFO(s.dump(2));
+    CHECK(s["state"] == "ready");
+    CHECK(s["file"] == path_to_utf8(w.updates() / "FloServer-1.2.0-x64.msi"));
+    CHECK(fs::exists(w.updates() / "FloServer-1.2.0-x64.msi"));
+}

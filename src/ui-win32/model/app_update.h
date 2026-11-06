@@ -136,6 +136,26 @@ enum class StepMark : std::uint8_t { Done, Now, Waiting, Failed };
 [[nodiscard]] Str apply_step_label(ApplyStep step);
 // A mark's words for screen readers ("Done", "Now"...).
 [[nodiscard]] Str step_mark_label(StepMark mark);
+// Installed, but Windows Installer says Windows must restart to finish:
+// three ticks, and opening FloServer waits for the restart.
+[[nodiscard]] std::vector<StepMark> apply_marks_restart();
+
+// After a failed step, whether "Open the installer" is offered: only when
+// the installer had passed its checks (`verified`: the service's file, at
+// the signed list's size and SHA-256, checked again before installing), so
+// the failure came while installing or opening FloServer. A file that
+// failed a check, or wasn't checked, is never handed to Windows.
+[[nodiscard]] bool offers_installer(ApplyStep failed_at, bool verified);
+// The installer is still what was checked: `size` and `sha256` (hex, any
+// case) as hashed again now, against what the service said it was.
+[[nodiscard]] bool installer_matches(const UpdateStatus& checked, std::uint64_t size, std::string_view sha256);
+
+// FloServer.exe's copy for Update now: a folder of its own under %TEMP%,
+// "FloServer-update-<16 hex digits>" from `random`; is_updater_folder()
+// knows an earlier one, to be cleaned up.
+inline constexpr std::string_view kUpdaterFolderPrefix = "FloServer-update-";
+[[nodiscard]] std::string updater_folder_name(std::uint64_t random);
+[[nodiscard]] bool is_updater_folder(std::string_view name);
 
 // Windows Installer's progress messages (INSTALLMESSAGE_PROGRESS, fields 1
 // to 4), turned into how far the bar goes, as MSDN's "Parsing Windows

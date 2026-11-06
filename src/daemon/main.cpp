@@ -1287,7 +1287,9 @@ int run() {
     service->runtimes = make_runtimes(transport);
     if (service->runtimes) {
         service->updates = make_updates(*service->runtimes, transport);
-        service->updates->start();
+        if (service->updates) {
+            service->updates->start();
+        }
     }
     if (const auto data = floserver::core::data_dir()) {
         service->projects = std::make_unique<floserver::core::ProjectService>(*data);

@@ -11,7 +11,10 @@
 // service); any other file there is stale and goes.
 //
 // A cancelled download isn't started again by itself: only the next daily
-// check or updates.check starts it.
+// check or updates.check starts it. A check that can't read the list keeps
+// an update that's ready: it was checked against a signed list already. An
+// installer found in the folder at start is trusted only once a check has
+// read the list again (and it matches that list's size and SHA-256).
 //
 // Kept in core, apart from floserverd, so tests run it with a fake
 // transport and their own list.

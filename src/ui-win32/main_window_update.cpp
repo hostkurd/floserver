@@ -5,10 +5,10 @@
 //
 // Update now: Windows Installer replaces FloServer.exe, so this window
 // mustn't be the one installing. FloServer.exe (and the Visual C++ DLLs
-// beside it) is copied to %TEMP%\FloServer-update\, that copy is started
-// with --apply-update <the MSI> (apply_update.cpp), and this window quits
-// without stopping the service: the copy stops it, installs, and opens the
-// new FloServer.
+// beside it) is copied to a new folder, %TEMP%\FloServer-update-<random>\,
+// that copy is started with --apply-update <the MSI> (apply_update.cpp), and
+// this window quits without stopping the service: the copy stops it,
+// installs, and opens the new FloServer.
 
 #include "main_window.h"
 
@@ -25,7 +25,9 @@
 #include <shellapi.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <filesystem>
+#include <random>
 #include <string_view>
 #include <system_error>
 #include <tuple>
@@ -50,26 +52,91 @@ LocalTime local_now() {
     return {st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute};
 }
 
-// The copy that installs the update, with the DLLs FloServer.exe needs beside it.
-bool copy_updater(const fs::path& exe, const fs::path& folder, fs::path& copy, std::string& error) {
+std::string last_error() { return core::error_text({static_cast<int>(GetLastError()), std::system_category()}); }
+
+bool is_reparse_point(const fs::path& p) {
+    const DWORD attributes = GetFileAttributesW(p.c_str());
+    return attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+}
+
+// Earlier updates' copies (FloServer-update-<hex>), best effort: their files,
+// never going through a link or junction, then the folder. One still running
+// keeps its files, and is tried again next time.
+void remove_old_updaters(const fs::path& temp) {
     std::error_code ec;
-    fs::remove_all(folder, ec);  // an earlier update's copy, if it's not in use
-    fs::create_directories(folder, ec);
-    if (ec) {
-        error = core::path_to_utf8(folder) + ": " + core::error_text(ec);
+    for (fs::directory_iterator it(temp, ec), end; !ec && it != end; it.increment(ec)) {
+        const fs::path folder = it->path();
+        if (!is_updater_folder(core::path_to_utf8(folder.filename())) || is_reparse_point(folder)) {
+            continue;
+        }
+        std::error_code inner;
+        for (fs::directory_iterator f(folder, inner), fend; !inner && f != fend; f.increment(inner)) {
+            const DWORD attributes = GetFileAttributesW(f->path().c_str());
+            if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+                DeleteFileW(f->path().c_str());  // a file link goes as the link
+            }
+        }
+        RemoveDirectoryW(folder.c_str());  // only when it's empty now
+    }
+}
+
+// One file into the new folder, checked by its size afterwards.
+bool copy_checked(const fs::path& from, const fs::path& to, std::string& error) {
+    if (CopyFileW(from.c_str(), to.c_str(), TRUE) == FALSE) {
+        error = core::path_to_utf8(to) + ": " + last_error();
+        return false;
+    }
+    std::error_code a;
+    std::error_code b;
+    const auto want = fs::file_size(from, a);
+    const auto got = fs::file_size(to, b);
+    if (a || b || want != got) {
+        error = core::path_to_utf8(to) + ": the copy isn't the size of " + core::path_to_utf8(from);
+        return false;
+    }
+    return true;
+}
+
+// The copy that installs the update, with the DLLs FloServer.exe needs
+// beside it, in a new folder of its own under %TEMP%: made here (never one
+// that was there already, nor a link), and every file checked.
+bool copy_updater(const fs::path& exe, const fs::path& temp, fs::path& copy, std::string& error) {
+    if (is_reparse_point(temp)) {
+        error = core::path_to_utf8(temp) + ": not a plain folder";
+        return false;
+    }
+    remove_old_updaters(temp);
+    std::random_device random;
+    fs::path folder;
+    for (int attempt = 0; attempt < 8 && folder.empty(); ++attempt) {
+        const std::uint64_t value = (std::uint64_t{random()} << 32U) ^ random();
+        const fs::path candidate = temp / core::path_from_utf8(updater_folder_name(value));
+        if (CreateDirectoryW(candidate.c_str(), nullptr) != FALSE) {
+            folder = candidate;
+        } else if (GetLastError() != ERROR_ALREADY_EXISTS) {
+            error = core::path_to_utf8(candidate) + ": " + last_error();
+            return false;
+        }
+    }
+    if (folder.empty() || is_reparse_point(folder)) {
+        error = core::path_to_utf8(temp) + ": no new folder for the update";
         return false;
     }
     copy = folder / exe.filename();
-    fs::copy_file(exe, copy, fs::copy_options::overwrite_existing, ec);
-    if (ec) {
-        error = core::path_to_utf8(copy) + ": " + core::error_text(ec);
+    if (!copy_checked(exe, copy, error)) {
         return false;
     }
+    std::error_code ec;
     for (fs::directory_iterator it(exe.parent_path(), ec), end; !ec && it != end; it.increment(ec)) {
         std::error_code ignored;
-        if (it->path().extension() == L".dll" && it->is_regular_file(ignored)) {
-            fs::copy_file(it->path(), folder / it->path().filename(), fs::copy_options::overwrite_existing, ignored);
+        if (it->path().extension() == L".dll" && it->is_regular_file(ignored) &&
+            !copy_checked(it->path(), folder / it->path().filename(), error)) {
+            return false;
         }
+    }
+    if (ec) {
+        error = core::path_to_utf8(exe.parent_path()) + ": " + core::error_text(ec);
+        return false;
     }
     return true;
 }
@@ -263,7 +330,7 @@ void MainWindow::start_update() {
     fs::path copy;
     if (!exe || ec) {
         error = !exe ? std::string("FloServer.exe") : core::error_text(ec);
-    } else if (copy_updater(*exe, temp / L"FloServer-update", copy, error)) {
+    } else if (copy_updater(*exe, temp, copy, error)) {
         ApplyUpdateArgs args;
         args.msi = u.file;
         args.instance = instance_suffix(core::ipc::default_instance());

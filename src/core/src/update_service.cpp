@@ -168,7 +168,7 @@ void UpdateService::run() {
     }
 }
 
-void UpdateService::set_failed(std::string message) {
+void UpdateService::set_failed(std::string message) {  // an unexpected error: nothing is trusted
     const std::lock_guard lock(mutex_);
     state_ = State::Failed;
     error_ = std::move(message);
@@ -192,14 +192,27 @@ void UpdateService::check_now() {
         if (stopping_) {
             return;
         }
-        state_ = State::Checking;
+        // A ready update stays ready while it's checked again: the banner
+        // and Update now don't go away for the length of a fetch.
+        if (state_ != State::Ready) {
+            state_ = State::Checking;
+        }
         error_.clear();
         cancel_ = false;
     }
     std::string error;
     const std::optional<Manifest> list = config_.fetch_list(error);
     if (!list) {
-        set_failed(error.empty() ? std::string("the runtime list can't be read") : error);
+        const std::lock_guard lock(mutex_);
+        if (state_ == State::Ready) {
+            // Offline: the update already downloaded and checked against a
+            // signed list is still good; the next check decides again.
+            return;
+        }
+        state_ = State::Failed;
+        error_ = error.empty() ? std::string("the runtime list can't be read") : error;
+        done_ = 0;
+        file_.clear();
         return;
     }
     const auto current = Version::parse(config_.current_version);
@@ -220,6 +233,18 @@ void UpdateService::check_now() {
     const std::string name = file_name(app->version);
     remove_stale(name);
     const fs::path target = updates_dir(config_.data_dir) / path_from_utf8(name);
+    const RuntimeFile entry = app_download_entry(*app);
+    // Already here at this list's size and hash (downloaded before, or ready
+    // since the last check): kept as it is, nothing downloaded.
+    if (const auto d = digest_file(target); d && matches_entry(entry, d->size, d->sha256)) {
+        const std::lock_guard lock(mutex_);
+        last_checked_ = config_.now();
+        offered_ = *app;
+        state_ = State::Ready;
+        done_ = app->size;
+        file_ = target;
+        return;
+    }
     {
         const std::lock_guard lock(mutex_);
         last_checked_ = config_.now();
@@ -236,7 +261,7 @@ void UpdateService::check_now() {
     };
     options.cancel = &cancel_;
     // A file already there at the list's size and hash is kept as it is.
-    const DownloadResult downloaded = download_file(*transport_, app_download_entry(*app), target, options);
+    const DownloadResult downloaded = download_file(*transport_, entry, target, options);
     const std::lock_guard lock(mutex_);
     if (downloaded.cancelled || cancel_) {
         // The .part went with it; nothing starts again until the next check.

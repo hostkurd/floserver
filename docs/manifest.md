@@ -83,11 +83,15 @@ with the same downloader and rules as a runtime (https only, a `.part` file,
 exact size and SHA-256) to `%LOCALAPPDATA%\FloServer\updates\`, and keeps
 it there; any other file in that folder is deleted. Nothing is installed
 until the user clicks **Update now**. The window then copies `FloServer.exe`
-(and the Visual C++ DLLs beside it) to `%TEMP%\FloServer-update\`, starts
-that copy and quits; the copy stops the service, checks the MSI's SHA-256
-against the signed list again and installs it with Windows Installer, then
-opens the new FloServer. If it fails, it says why and offers to open the
-installer as usual.
+(and the Visual C++ DLLs beside it) to a new folder,
+`%TEMP%\FloServer-update-<random>\`, starts that copy and quits. The copy
+marks that an update is running (no FloServer window opens meanwhile),
+waits for the old window to go, stops the service, opens the MSI so that
+nothing can change it, checks its SHA-256 against the signed list again
+through that handle and installs it with Windows Installer, then opens the
+new FloServer. When Windows must restart to finish, it says so instead. If
+it fails, it says why; only when the installer had passed its checks does
+it offer to open it the usual way.
 
 Files that are the same everywhere (Composer, phpMyAdmin) are listed with
 `"platform": "any"`. An entry whose name a FloServer doesn't know still

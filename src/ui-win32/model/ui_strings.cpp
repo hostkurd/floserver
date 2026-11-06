@@ -1305,6 +1305,21 @@ constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
     Entry{Str::UpdateErrOpen, "the new FloServer didn't start ({0})",
           "لم يبدأ " FLO_LRI "FloServer" FLO_PDI " الجديد ({0})",
           "وەشانە نوێیەکەی " FLO_LRI "FloServer" FLO_PDI " دەستی پێ نەکرد ({0})"},
+    Entry{Str::UpdateErrWindow, "FloServer's window didn't close; close it and try Update now again",
+          "لم تُغلق نافذة " FLO_LRI "FloServer" FLO_PDI "؛ أغلقها وجرّب «حدّث الآن» مجددًا",
+          "پەنجەرەی " FLO_LRI "FloServer" FLO_PDI " دانەخرا؛ دایبخە و دووبارە «ئێستا نوێی بکەرەوە» تاقی بکەرەوە"},
+    Entry{Str::UpdateErrBusy, "another update of FloServer is already running",
+          "يجري تحديث آخر لـ " FLO_LRI "FloServer" FLO_PDI " بالفعل",
+          "نوێکردنەوەیەکی تری " FLO_LRI "FloServer" FLO_PDI " لە کاردایە"},
+    Entry{Str::UpdateRestartNeeded,
+          "FloServer {0} is installed. Restart Windows to finish the update, then open FloServer.",
+          "تم تثبيت " FLO_LRI "FloServer" FLO_PDI " {0}. أعد تشغيل " FLO_LRI "Windows" FLO_PDI " لإكمال التحديث، "
+          "ثم افتح " FLO_LRI "FloServer" FLO_PDI ".",
+          FLO_LRI "FloServer" FLO_PDI " {0} دامەزرا. " FLO_LRI "Windows" FLO_PDI " دووبارە دەست پێ بکەرەوە بۆ "
+          "تەواوکردنی نوێکردنەوەکە، پاشان " FLO_LRI "FloServer" FLO_PDI " بکەرەوە."},
+    Entry{Str::UpdateInProgress, "FloServer is being updated. It opens by itself when it's done.",
+          "يجري تحديث " FLO_LRI "FloServer" FLO_PDI ". سيفتح من تلقاء نفسه عند الانتهاء.",
+          FLO_LRI "FloServer" FLO_PDI " نوێ دەکرێتەوە. کە تەواو بوو خۆی دەکرێتەوە."},
 }};
 
 #undef FLO_LRI

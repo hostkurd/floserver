@@ -278,6 +278,40 @@ Str step_mark_label(StepMark mark) {
     return Str::UpdateMarkWaiting;
 }
 
+std::vector<StepMark> apply_marks_restart() {
+    std::vector<StepMark> marks = apply_marks(ApplyStep::Opening, false);
+    marks.back() = StepMark::Waiting;
+    return marks;
+}
+
+bool offers_installer(ApplyStep failed_at, bool verified) {
+    return verified && (failed_at == ApplyStep::Installing || failed_at == ApplyStep::Opening);
+}
+
+bool installer_matches(const UpdateStatus& checked, std::uint64_t size, std::string_view sha256) {
+    if (checked.size == 0 || size != checked.size || sha256.size() != 64 || checked.sha256.size() != 64) {
+        return false;
+    }
+    const auto lower = [](char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c; };
+    return std::equal(sha256.begin(), sha256.end(), checked.sha256.begin(),
+                      [&](char a, char b) { return lower(a) == lower(b); });
+}
+
+std::string updater_folder_name(std::uint64_t random) {
+    std::array<char, 17> hex{};
+    (void)std::snprintf(hex.data(), hex.size(), "%016llx", static_cast<unsigned long long>(random));
+    return std::string(kUpdaterFolderPrefix) + hex.data();
+}
+
+bool is_updater_folder(std::string_view name) {
+    if (!name.starts_with(kUpdaterFolderPrefix) || name.size() != kUpdaterFolderPrefix.size() + 16) {
+        return false;
+    }
+    const std::string_view digits = name.substr(kUpdaterFolderPrefix.size());
+    return std::all_of(digits.begin(), digits.end(),
+                       [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); });
+}
+
 void MsiProgress::on_record(int field1, int field2, int field3, int field4) {
     switch (field1) {
         case 0:  // reset: the total, which way, and whether it's only the script being written

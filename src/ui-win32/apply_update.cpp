@@ -11,6 +11,7 @@
 #include "floserver/core/paths.h"
 #include "floserver/core/process.h"
 #include "floserver/core/service_client.h"
+#include "floserver/core/sha256.h"
 
 #include <commctrl.h>
 #include <msi.h>
@@ -23,7 +24,9 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
+#include <utility>
 #include <system_error>
 #include <thread>
 #include <tuple>
@@ -56,6 +59,7 @@ constexpr UINT kStepMessage = WM_APP + 60;
 constexpr UINT kProgressMessage = WM_APP + 61;
 constexpr UINT kFailedMessage = WM_APP + 62;
 constexpr UINT kDoneMessage = WM_APP + 63;
+constexpr UINT kRestartMessage = WM_APP + 64;  // installed; Windows must restart to finish
 
 // Glyphs in Windows' icon font (Segoe Fluent Icons, Segoe MDL2 Assets).
 constexpr wchar_t kIconCheck = L'';
@@ -72,6 +76,8 @@ struct Box {
     std::string error;
     MsiProgress progress;
     int last_permille = -1;
+    std::optional<UpdateStatus> checked;  // what the service said the installer is
+    bool verified = false;                // it was that, hashed again before installing
 
     void post(UINT message, WPARAM wparam = 0) {
         const std::lock_guard lock(mutex);
@@ -88,6 +94,7 @@ struct Dialog {
     std::shared_ptr<Box> box = std::make_shared<Box>();
     ApplyStep step = ApplyStep::Checked;
     bool failed = false;
+    bool restart = false;  // installed; Windows must restart to finish
     bool running = true;
     HFONT bold = nullptr;
     HFONT icons = nullptr;
@@ -166,6 +173,51 @@ int WINAPI msi_handler(LPVOID context, UINT type, MSIHANDLE record) {
     return 0;
 }
 
+// The installer opened so that nothing can change or delete it while it's
+// open (others may only read it, as Windows Installer does); empty when it
+// can't be.
+win::UniqueHandle open_installer(const fs::path& file) {
+    HANDLE h = CreateFileW(file.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    return win::UniqueHandle(h == INVALID_HANDLE_VALUE ? nullptr : h);
+}
+
+// The size and SHA-256 (hex) of what `file` holds, read through it from the start.
+std::optional<std::pair<std::uint64_t, std::string>> hash_installer(HANDLE file) {
+    LARGE_INTEGER zero{};
+    if (file == nullptr || SetFilePointerEx(file, zero, nullptr, FILE_BEGIN) == FALSE) {
+        return std::nullopt;
+    }
+    core::Sha256 hash;
+    std::uint64_t size = 0;
+    std::vector<std::uint8_t> buf(std::size_t{256} * 1024);
+    while (true) {
+        DWORD got = 0;
+        if (ReadFile(file, buf.data(), static_cast<DWORD>(buf.size()), &got, nullptr) == FALSE) {
+            return std::nullopt;
+        }
+        if (got == 0) {
+            break;
+        }
+        hash.update(std::span<const std::uint8_t>(buf.data(), got));
+        size += got;
+    }
+    const core::Sha256Digest digest = hash.finish();
+    return std::pair{size, core::to_hex(digest)};
+}
+
+// The installer is the service's file and still what the service checked:
+// opened (and held, while `held` lives) and hashed again now.
+bool still_checked(const UpdateStatus& checked, const std::string& msi, win::UniqueHandle& held) {
+    std::error_code ec;
+    if (checked.file.empty() || !fs::equivalent(core::path_from_utf8(checked.file), core::path_from_utf8(msi), ec)) {
+        return false;
+    }
+    held = open_installer(core::path_from_utf8(msi));
+    const auto now = hash_installer(held.get());
+    return now && installer_matches(checked, now->first, now->second);
+}
+
 // The steps, on their own thread; each said to the dialog as it begins.
 void apply(const std::shared_ptr<Box>& box, const ApplyUpdateArgs& args, Lang lang) {
     const std::string instance = core::ipc::default_instance();
@@ -187,48 +239,72 @@ void apply(const std::shared_ptr<Box>& box, const ApplyUpdateArgs& args, Lang la
         }
     }
     std::error_code ec;
-    const auto expected = status ? core::from_hex(status->sha256) : std::nullopt;
-    if (!status || status->state != UpdateState::Ready || !expected || expected->size() != 32 ||
+    if (!status || status->state != UpdateState::Ready || status->sha256.size() != 64 || status->size == 0 ||
         !fs::equivalent(core::path_from_utf8(status->file), core::path_from_utf8(args.msi), ec)) {
         fail(std::string(text(lang, Str::UpdateErrNotReady)));
         return;
     }
+    {
+        const std::lock_guard lock(box->mutex);
+        box->checked = *status;
+    }
 
-    // 2. Once the old window has gone (its single-instance mark goes with
-    //    it), the service and everything it runs stop.
+    // 2. Marked as updating first, so no FloServer window opens (and starts
+    //    the service again) meanwhile; then, once the old window has gone
+    //    (its single-instance mark goes with it), the service and
+    //    everything it runs stop.
     box->post(kStepMessage, static_cast<WPARAM>(ApplyStep::Stopped));
-    const std::wstring mark = L"Local\\FloServerWindow." + w(instance);
-    for (int i = 0; i < 100; ++i) {
+    win::UniqueHandle updating(CreateMutexW(nullptr, FALSE, updating_mark_name(instance).c_str()));
+    if (!updating || GetLastError() == ERROR_ALREADY_EXISTS) {
+        fail(std::string(text(lang, Str::UpdateErrBusy)));
+        return;
+    }
+    const std::wstring mark = window_mark_name(instance);
+    bool window_gone = false;
+    for (int i = 0; i < 100 && !window_gone; ++i) {
         const win::UniqueHandle still(OpenMutexW(SYNCHRONIZE, FALSE, mark.c_str()));
-        if (!still) {
-            break;
+        window_gone = !still;
+        if (!window_gone) {
+            Sleep(100);
         }
-        Sleep(100);
+    }
+    if (!window_gone) {
+        fail(std::string(text(lang, Str::UpdateErrWindow)));
+        return;
     }
     if (!core::stop_service(instance, error)) {
         fail(fill(lang, Str::UpdateErrStop, {error}));
         return;
     }
 
-    // 3. Checked once more, right before Windows Installer reads it.
+    // 3. Checked once more, right before Windows Installer reads it, through
+    //    a handle held until it's done: nothing can change it in between.
     box->post(kStepMessage, static_cast<WPARAM>(ApplyStep::Installing));
-    const auto digest = core::digest_file(core::path_from_utf8(args.msi));
-    if (!digest || digest->size != status->size ||
-        !std::equal(digest->sha256.begin(), digest->sha256.end(), expected->begin())) {
+    win::UniqueHandle held;
+    if (!still_checked(*status, args.msi, held)) {
         fail(std::string(text(lang, Str::UpdateErrChanged)));
         return;
+    }
+    {
+        const std::lock_guard lock(box->mutex);
+        box->verified = true;
+        box->error.clear();
     }
     MsiSetInternalUI(INSTALLUILEVEL_NONE, nullptr);
     constexpr auto kMessages = static_cast<DWORD>(INSTALLLOGMODE_PROGRESS) | static_cast<DWORD>(INSTALLLOGMODE_ACTIONDATA) |
                                static_cast<DWORD>(INSTALLLOGMODE_ERROR) | static_cast<DWORD>(INSTALLLOGMODE_FATALEXIT);
     MsiSetExternalUIRecord(msi_handler, kMessages, box.get(), nullptr);
-    {
-        const std::lock_guard lock(box->mutex);
-        box->error.clear();
-    }
     const UINT result = MsiInstallProductW(w(args.msi).c_str(), L"REBOOT=ReallySuppress");
     MsiSetExternalUIRecord(nullptr, 0, nullptr, nullptr);
-    if (result != ERROR_SUCCESS && result != ERROR_SUCCESS_REBOOT_REQUIRED) {
+    held.reset();
+    if (result == ERROR_SUCCESS_REBOOT_REQUIRED) {
+        // Installed, but Windows finishes it at a restart: FloServer isn't
+        // opened now (some of its files are still to be replaced).
+        box->post(kProgressMessage, 1000);
+        box->post(kRestartMessage);
+        return;
+    }
+    if (result != ERROR_SUCCESS) {
         std::string said;
         {
             const std::lock_guard lock(box->mutex);
@@ -242,6 +318,8 @@ void apply(const std::shared_ptr<Box>& box, const ApplyUpdateArgs& args, Lang la
         return;
     }
     box->post(kProgressMessage, 1000);
+    // Done installing: the new FloServer may start the service again.
+    updating.reset();
 
     // 4. The new FloServer, which starts the service and the projects.
     box->post(kStepMessage, static_cast<WPARAM>(ApplyStep::Opening));
@@ -254,7 +332,7 @@ void apply(const std::shared_ptr<Box>& box, const ApplyUpdateArgs& args, Lang la
 }
 
 void show_marks(HWND dialog, const Dialog& d) {
-    const std::vector<StepMark> marks = apply_marks(d.step, d.failed);
+    const std::vector<StepMark> marks = d.restart ? apply_marks_restart() : apply_marks(d.step, d.failed);
     for (std::size_t i = 0; i < marks.size(); ++i) {
         HWND mark = GetDlgItem(dialog, kMarkFirst + static_cast<int>(i));
         wchar_t glyph = 0;
@@ -375,7 +453,10 @@ INT_PTR CALLBACK dialog_proc(HWND dialog, UINT msg, WPARAM wparam, LPARAM lparam
                     }
                 }).detach();
             } catch (const std::system_error& e) {
-                d->box->error = e.what();
+                {
+                    const std::lock_guard lock(d->box->mutex);
+                    d->box->error = e.what();
+                }
                 PostMessageW(dialog, kFailedMessage, 0, 0);
             }
             return TRUE;
@@ -401,12 +482,23 @@ INT_PTR CALLBACK dialog_proc(HWND dialog, UINT msg, WPARAM wparam, LPARAM lparam
                     const std::lock_guard lock(d->box->mutex);
                     error = d->box->error;
                 }
-                const std::string message = fill(d->lang, Str::UpdateFailed, {error}) + "\r\n\r\n" +
-                                            std::string(text(d->lang, Str::UpdateFailedNote));
+                bool verified = false;
+                {
+                    const std::lock_guard lock(d->box->mutex);
+                    verified = d->box->verified;
+                }
+                // Open the installer only for a file that passed its checks.
+                const bool offer = offers_installer(d->step, verified);
+                std::string message = fill(d->lang, Str::UpdateFailed, {error});
+                if (offer) {
+                    message += "\r\n\r\n" + std::string(text(d->lang, Str::UpdateFailedNote));
+                }
                 SetDlgItemTextW(dialog, kError, w(message).c_str());
-                for (const int id : {kError, kOpenInstaller, static_cast<int>(IDCANCEL)}) {
+                for (const int id : {kError, static_cast<int>(IDCANCEL)}) {
                     ShowWindow(GetDlgItem(dialog, id), SW_SHOW);
                 }
+                ShowWindow(GetDlgItem(dialog, kOpenInstaller), offer ? SW_SHOW : SW_HIDE);
+                EnableWindow(GetDlgItem(dialog, kOpenInstaller), offer ? TRUE : FALSE);
                 if (d->bar != nullptr) {
                     SendMessageW(d->bar, PBM_SETSTATE, PBST_ERROR, 0);
                 }
@@ -421,14 +513,49 @@ INT_PTR CALLBACK dialog_proc(HWND dialog, UINT msg, WPARAM wparam, LPARAM lparam
             }
             EndDialog(dialog, 0);
             return TRUE;
+        case kRestartMessage:
+            if (d != nullptr) {
+                d->running = false;
+                d->restart = true;
+                show_marks(dialog, *d);
+                SetDlgItemTextW(dialog, kError, w(fill(d->lang, Str::UpdateRestartNeeded, {d->version})).c_str());
+                for (const int id : {kError, static_cast<int>(IDCANCEL)}) {
+                    ShowWindow(GetDlgItem(dialog, id), SW_SHOW);
+                }
+                SendMessageW(dialog, DM_SETDEFID, IDCANCEL, 0);
+                SetFocus(GetDlgItem(dialog, IDCANCEL));
+            }
+            return TRUE;
         case WM_COMMAND:
             if (d == nullptr || d->running) {
                 return TRUE;  // nothing stops it half-way: Esc and the close box do nothing meanwhile
             }
             if (LOWORD(wparam) == kOpenInstaller) {
-                // Windows' usual install of the same file, with its own screens.
+                std::optional<UpdateStatus> checked;
+                bool verified = false;
+                {
+                    const std::lock_guard lock(d->box->mutex);
+                    checked = d->box->checked;
+                    verified = d->box->verified;
+                }
+                // Windows' usual install of the same file, with its own screens:
+                // only one that passed its checks, and is still the service's
+                // file as it was checked (hashed again, and held meanwhile).
+                win::UniqueHandle held;
+                if (!offers_installer(d->step, verified) || !checked || !still_checked(*checked, d->args.msi, held)) {
+                    ShowWindow(GetDlgItem(dialog, kOpenInstaller), SW_HIDE);
+                    SetDlgItemTextW(dialog, kError, w(fill(d->lang, Str::UpdateFailed,
+                                                           {text(d->lang, Str::UpdateErrChanged)}))
+                                                        .c_str());
+                    SetFocus(GetDlgItem(dialog, IDCANCEL));
+                    return TRUE;
+                }
                 ShellExecuteW(nullptr, L"open", w(d->args.msi).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
                 EndDialog(dialog, 1);
+                return TRUE;
+            }
+            if (LOWORD(wparam) == IDCANCEL && d->restart) {
+                EndDialog(dialog, 0);  // Windows' restart opens nothing by itself; the user opens FloServer after
                 return TRUE;
             }
             if (LOWORD(wparam) == IDCANCEL) {
@@ -468,6 +595,14 @@ INT_PTR CALLBACK dialog_proc(HWND dialog, UINT msg, WPARAM wparam, LPARAM lparam
 }
 
 }  // namespace
+
+std::wstring window_mark_name(const std::string& service_instance) {
+    return L"Local\\FloServerWindow." + w(service_instance);
+}
+
+std::wstring updating_mark_name(const std::string& service_instance) {
+    return L"Local\\FloServerUpdating." + w(service_instance);
+}
 
 int run_apply_update(HINSTANCE instance, Lang lang, const ApplyUpdateArgs& args) {
     Dialog d;

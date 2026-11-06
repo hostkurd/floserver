@@ -273,7 +273,7 @@ TEST_CASE("the update words: in every language, with the same values in each") {
         }
         return found;
     };
-    for (auto i = static_cast<int>(Str::UpdateDownloading); i <= static_cast<int>(Str::UpdateErrOpen); ++i) {
+    for (auto i = static_cast<int>(Str::UpdateDownloading); i <= static_cast<int>(Str::UpdateInProgress); ++i) {
         const auto key = static_cast<Str>(i);
         CAPTURE(i);
         CHECK_FALSE(text(Lang::Ar, key).empty());
@@ -286,4 +286,43 @@ TEST_CASE("the update words: in every language, with the same values in each") {
             CHECK(text(Lang::Ku, key).find(isolate_ltr("FloServer")) != std::string_view::npos);
         }
     }
+}
+
+TEST_CASE("Open the installer: only for an installer that passed its checks, still the same") {
+    // Before the checks passed (the service's answer, stopping, the hash itself): never.
+    for (const ApplyStep at : {ApplyStep::Checked, ApplyStep::Stopped, ApplyStep::Installing}) {
+        CHECK_FALSE(offers_installer(at, false));
+    }
+    CHECK_FALSE(offers_installer(ApplyStep::Checked, true));
+    CHECK_FALSE(offers_installer(ApplyStep::Stopped, true));
+    // Windows Installer failed, or the new FloServer didn't open: it may be tried the usual way.
+    CHECK(offers_installer(ApplyStep::Installing, true));
+    CHECK(offers_installer(ApplyStep::Opening, true));
+
+    const UpdateStatus checked = update_status_from(ready());
+    const std::string sha(64, 'a');
+    CHECK(installer_matches(checked, checked.size, sha));
+    CHECK(installer_matches(checked, checked.size, std::string(64, 'A')));
+    CHECK_FALSE(installer_matches(checked, checked.size + 1, sha));
+    CHECK_FALSE(installer_matches(checked, checked.size, std::string(63, 'a') + "b"));
+    CHECK_FALSE(installer_matches(checked, checked.size, "abc"));
+    CHECK_FALSE(installer_matches(UpdateStatus{}, 0, sha));  // nothing was checked
+}
+
+TEST_CASE("installed, Windows must restart: three ticks, FloServer opens after the restart") {
+    CHECK(apply_marks_restart() ==
+          std::vector<StepMark>{StepMark::Done, StepMark::Done, StepMark::Done, StepMark::Waiting});
+    CHECK(fill(Lang::En, Str::UpdateRestartNeeded, {"1.2.0"}) ==
+          "FloServer 1.2.0 is installed. Restart Windows to finish the update, then open FloServer.");
+}
+
+TEST_CASE("the updater's own folder under %TEMP%, and earlier ones known again") {
+    CHECK(updater_folder_name(0x1234abcdULL) == "FloServer-update-000000001234abcd");
+    CHECK(updater_folder_name(~0ULL) == "FloServer-update-ffffffffffffffff");
+    CHECK(is_updater_folder(updater_folder_name(42)));
+    CHECK_FALSE(is_updater_folder("FloServer-update"));
+    CHECK_FALSE(is_updater_folder("FloServer-update-1234"));
+    CHECK_FALSE(is_updater_folder("FloServer-update-000000001234ABCD"));
+    CHECK_FALSE(is_updater_folder("FloServer-update-00000000..\\x1234"));
+    CHECK_FALSE(is_updater_folder("Other-000000001234abcd"));
 }
