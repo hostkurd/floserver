@@ -136,6 +136,12 @@ steps 2 to 6 below in one window:
    `app/1.2.0/FloServer-1.2.0-x64.msi https://floserver.org/news/1.2.0`.
    The list names one installer at a time; the What's new address is kept
    while the installer is carried over to later lists.
+
+   Upload `FloServer-Setup-<x.y.z>.exe` from the same artifact into the same
+   folder, `app/<x.y.z>/FloServer-Setup-<x.y.z>.exe`, and point the website's
+   Download button at it (D25). Don't add it in the Publisher: the setup is
+   what people download for a first install; installed copies update from
+   the MSI in the list.
 3. Press **Publish** and choose the key file (asked every time; only the
    path is kept while the window is open, and the key is wiped right after
    signing). It then:
