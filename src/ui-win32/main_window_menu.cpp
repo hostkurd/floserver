@@ -1,10 +1,12 @@
-// A project row's right-click menu and removing a project from FloServer
-// (approved 2 Nov). The menu opens on a right-click (the row is selected
+// A project row's right-click menu, removing a project from FloServer
+// (approved 2 Nov) and renaming one (D22, approved 5 Nov). The menu opens on a right-click (the row is selected
 // first), the menu key and Shift+F10; its items run what the panel's
 // buttons and the switches already do (model/project_menu.h says which
 // apply). Removing asks first with a task dialog in the window's language;
 // projects.remove then runs off the polling path (dropping a database may
-// start MariaDB), and the folder is never touched.
+// start MariaDB), and the folder is never touched. Renaming asks with its
+// own dialog (form_parts.h); projects.rename runs off the polling path too
+// (the web server reloads, a folder may take a moment to let go).
 
 #include "main_window.h"
 
@@ -32,6 +34,7 @@ namespace {
 std::wstring w(std::string_view s) { return win::widen(s); }
 
 constexpr std::string_view kRemovePurpose = "remove\n";
+constexpr std::string_view kRenamePurpose = "rename\n";
 
 // A command's menu id: never 0, which TrackPopupMenuEx returns for none.
 UINT menu_id(MenuCommand command) { return static_cast<UINT>(command) + 1U; }
@@ -312,6 +315,9 @@ void MainWindow::run_project_command(const std::string& project, MenuCommand com
             shared_focused_ = false;
             select(project);
             break;
+        case MenuCommand::Rename:
+            ask_rename(project);
+            break;
         case MenuCommand::Remove:
             ask_remove(project);
             break;
@@ -426,6 +432,99 @@ std::vector<MainWindow::Removed> MainWindow::on_remove_answers(std::vector<Snaps
         it = answers.erase(it);
     }
     return removed;
+}
+
+void MainWindow::ask_rename(const std::string& project) {
+    if (!worker_ || snap_.link != Link::Connected || leaving(project) || asking_ || quitting_ ||
+        !remove_checking_.empty()) {
+        return;
+    }
+    const auto found = std::find_if(snap_.rows.begin(), snap_.rows.end(),
+                                    [&](const ProjectRow& r) { return r.name == project; });
+    if (found == snap_.rows.end()) {
+        return;
+    }
+    // Copies: snapshots keep arriving while the dialog is open.
+    const ProjectRow row = *found;
+    const std::vector<ProjectRow> rows = snap_.rows;
+    const FooterText footer = snap_.footer;
+    const Lang lang = lang_;
+    // The dialog runs its own message loop: as while the remove question is
+    // open, a quit or a new language waits for it.
+    asking_ = true;
+    pressed_ = {};
+    hover_ = {};
+    InvalidateRect(hwnd_, nullptr, FALSE);
+    std::string new_name;
+    bool folder = false;
+    const bool rename = ask_rename_project(
+        hwnd_, lang, row.name,
+        [&](const std::string& typed) { return rename_question(row, typed, rows, footer, lang); }, new_name, folder);
+    asking_ = false;
+    first_run_after_ask();
+    if (quit_after_ask_) {
+        quit_after_ask_ = false;
+        quit();
+        return;
+    }
+    if (!rename || !worker_ || snap_.link != Link::Connected || leaving(project)) {
+        return;
+    }
+    renaming_.insert(project);
+    dismiss_error();
+    worker_->database_call("projects.rename",
+                           {{"name", project}, {"new_name", new_name}, {"rename_folder", folder}},
+                           std::string(kRenamePurpose) + project);
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+std::vector<MainWindow::Renamed> MainWindow::on_rename_answers(std::vector<Snapshot::DbAnswer>& answers) {
+    std::vector<Renamed> renamed;
+    for (auto it = answers.begin(); it != answers.end();) {
+        if (it->method != "projects.rename" || !it->purpose.starts_with(kRenamePurpose)) {
+            ++it;
+            continue;
+        }
+        const std::string project = it->purpose.substr(kRenamePurpose.size());
+        renaming_.erase(project);
+        const std::string to = it->reply && it->reply->is_object() ? it->reply->value("name", std::string()) : std::string();
+        if (!it->error.empty() || to.empty()) {
+            // Nothing changed: the user can try again.
+            show_notice(fill(lang_, Str::RenameFailed, {project, it->error.empty() ? "no answer" : it->error}), true);
+        } else {
+            const std::string path = it->reply->value("path", std::string());
+            const bool folder = comparable_path(path) != comparable_path(it->reply->value("old_path", std::string()));
+            renamed.push_back({project, to, path, folder});
+        }
+        it = answers.erase(it);
+    }
+    return renamed;
+}
+
+void MainWindow::apply_renames() {
+    std::erase_if(renamed_, [this](const auto& entry) {
+        const Renamed& r = entry.second;
+        const auto named = [this](const std::string& name) {
+            return std::find_if(snap_.rows.begin(), snap_.rows.end(), [&](const ProjectRow& row) { return row.name == name; });
+        };
+        if (named(r.to) != snap_.rows.end()) {
+            return true;  // the list has it under its new name
+        }
+        const auto old = named(r.from);
+        if (old == snap_.rows.end()) {
+            return true;  // gone meanwhile (flo remove)
+        }
+        // https://my-shop.localhost:8443 -> https://store.localhost:8443
+        const std::string host = "//" + r.from + ".";
+        if (const std::size_t at = old->address.find(host); at != std::string::npos) {
+            old->address.replace(at + 2, r.from.size(), r.to);
+        }
+        old->name = r.to;
+        if (!r.path.empty()) {
+            old->path = r.path;
+        }
+        return false;
+    });
 }
 
 FolderGuard MainWindow::folder_guard(const std::string& project) const {

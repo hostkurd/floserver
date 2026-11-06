@@ -43,6 +43,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace floserver::core {
@@ -113,7 +114,35 @@ public:
     // The ports nginx listens on now; nothing while it isn't running.
     [[nodiscard]] std::optional<WebPorts> ports_in_use() const;
 
+    // While the returned guard lives, the project is served as if it were
+    // off, whatever config.json says, so nothing of FloServer's runs in its
+    // folder (its own server is stopped): projects.rename holds it while
+    // the folder is renamed (D22). hold_project() reloads; the guard's end
+    // doesn't (the next reload serves it again).
+    class ProjectHold {
+    public:
+        ProjectHold() = default;
+        ProjectHold(WebService* service, std::string project) : service_(service), project_(std::move(project)) {}
+        ProjectHold(const ProjectHold&) = delete;
+        ProjectHold& operator=(const ProjectHold&) = delete;
+        ProjectHold(ProjectHold&& other) noexcept
+            : service_(std::exchange(other.service_, nullptr)), project_(std::move(other.project_)) {}
+        ProjectHold& operator=(ProjectHold&&) = delete;
+        ~ProjectHold() {
+            if (service_ != nullptr) {
+                service_->release_project(project_);
+            }
+        }
+
+    private:
+        WebService* service_ = nullptr;
+        std::string project_;
+    };
+    [[nodiscard]] ProjectHold hold_project(const std::string& project);
+
 private:
+    void release_project(const std::string& project) noexcept;
+
     struct Site {
         std::string address;
         std::optional<std::string> pool_key;
@@ -170,6 +199,7 @@ private:
     std::map<std::string, std::shared_ptr<AppRunner>> apps_;        // by project name
     std::shared_ptr<PortSet> app_internal_ports_ = std::make_shared<PortSet>();
     std::map<std::string, Site> sites_;                             // served or held back, by name
+    std::map<std::string, int> held_projects_;                      // served as off (hold_project)
     std::unique_ptr<ChildProcess> nginx_;
     std::filesystem::path nginx_dir_;
     std::string nginx_version_;
