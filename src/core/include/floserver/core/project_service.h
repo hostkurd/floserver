@@ -31,7 +31,7 @@ public:
     explicit ProjectService(std::filesystem::path data_dir);
 
     // Every project with what it needs:
-    //   {"projects": [{"name", "path", "on", "keep_running",
+    //   {"projects": [{"name", "path", "on", "keep_running", "database_name" (its database and user),
     //                  "state": "off" | "ready" | "needs_download" | "problem",
     //                  "php"?: "8.4.27", "missing": ["php 8.2"], "problem"?: "...",
     //                  "database"?: "mariadb-11.4",
@@ -48,6 +48,16 @@ public:
 
     // Forgets a project; its folder is never touched.
     [[nodiscard]] bool remove(const std::string& name, ServiceRefusal& refusal);
+
+    // Renames a project (D22): the new name follows the name rules and
+    // isn't taken; every other setting stays, and its database and user keep
+    // their names (rename_project()). With `rename_folder` its folder is
+    // renamed to the new name too, in the same parent folder (refused when
+    // a folder of that name is there or it's in use). The reply is that
+    // project, with "old_name" and "old_path" (its folder before).
+    // Its certificate, logs and what runs are the caller's (the daemon's).
+    [[nodiscard]] std::optional<nlohmann::json> rename(const std::string& name, const std::string& new_name,
+                                                       bool rename_folder, ServiceRefusal& refusal);
 
     // Turns a project On or Off, or Keep running on or off.
     [[nodiscard]] std::optional<nlohmann::json> set(const std::string& name, std::optional<bool> on,

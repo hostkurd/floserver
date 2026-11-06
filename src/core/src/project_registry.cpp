@@ -1,5 +1,6 @@
 #include "floserver/core/project_registry.h"
 
+#include "floserver/core/mariadb.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/phpmyadmin.h"
 #include "floserver/core/process.h"
@@ -61,8 +62,22 @@ std::optional<Project> read_project(const json& item, std::size_t index, std::st
     }
     p.on = item.value("on", false);
     p.keep_running = item.value("keep_running", false);
+    if (item.contains("database_name")) {
+        // As project_database_name() makes them: a-z, 0-9 and '_'.
+        const json& db = item["database_name"];
+        const auto usable = [](const std::string& n) {
+            return !n.empty() && n.size() <= kMaxProjectNameLength && std::all_of(n.begin(), n.end(), [](char c) {
+                return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_';
+            });
+        };
+        if (!db.is_string() || !usable(db.get<std::string>())) {
+            error = where + ": database_name may use only a-z, 0-9 and _";
+            return std::nullopt;
+        }
+        p.database_name = db.get<std::string>();
+    }
     p.other = item;
-    for (const char* key : {"name", "path", "on", "keep_running"}) {
+    for (const char* key : {"name", "path", "on", "keep_running", "database_name"}) {
         p.other.erase(key);
     }
     return p;
@@ -207,6 +222,9 @@ std::string write_app_config(const AppConfig& config) {
         item["path"] = generic_utf8(p.dir);
         item["on"] = p.on;
         item["keep_running"] = p.keep_running;
+        if (!p.database_name.empty()) {
+            item["database_name"] = p.database_name;
+        }
         list.push_back(std::move(item));
     }
     doc["projects"] = std::move(list);
@@ -288,7 +306,12 @@ std::optional<Project> add_project(AppConfig& config, const fs::path& dir, std::
     if (chosen.empty()) {
         const std::string base = project_name_from(path_to_utf8(folder.filename()));
         chosen = base;
-        for (int n = 2; find_project(config, chosen) != nullptr || reserved_project_name(chosen); ++n) {
+        // A renamed project may keep the database a name would get (D22).
+        const auto taken = [&config](const std::string& n) {
+            return find_project(config, n) != nullptr || reserved_project_name(n) ||
+                   project_with_database(config, project_database_name(n)) != nullptr;
+        };
+        for (int n = 2; taken(chosen); ++n) {
             const std::string suffix = "-" + std::to_string(n);
             chosen = base.substr(0, kMaxProjectNameLength - suffix.size());
             while (!chosen.empty() && chosen.back() == '-') {
@@ -305,6 +328,9 @@ std::optional<Project> add_project(AppConfig& config, const fs::path& dir, std::
     } else if (reserved_project_name(chosen)) {
         error = chosen + ".localhost is kept for phpMyAdmin; choose another name";
         return std::nullopt;
+    } else if (const Project* other = project_with_database(config, project_database_name(chosen))) {
+        error = "the database " + project_database_name(chosen) + " is " + other->name + "'s; choose another name";
+        return std::nullopt;
     }
 
     Project p{chosen, folder, false, false, json::object()};
@@ -320,6 +346,52 @@ bool remove_project(AppConfig& config, std::string_view name) {
     }
     config.projects.erase(it);
     return true;
+}
+
+const Project* project_with_database(const AppConfig& config, std::string_view database, std::string_view except) {
+    const auto it = std::find_if(config.projects.begin(), config.projects.end(), [&](const Project& p) {
+        return p.name != except && project_database_name(p) == database;
+    });
+    return it == config.projects.end() ? nullptr : &*it;
+}
+
+Project* rename_project(AppConfig& config, std::string_view name, std::string_view new_name, std::string& error) {
+    Project* project = find_project(config, name);
+    if (project == nullptr) {
+        error = "there's no project called " + std::string(name);
+        return nullptr;
+    }
+    const std::string chosen(new_name);
+    if (chosen == name) {
+        error = "the project is already called " + chosen;
+        return nullptr;
+    }
+    if (const auto problem = project_name_problem(chosen)) {
+        error = *problem;
+        return nullptr;
+    }
+    if (find_project(config, chosen) != nullptr) {
+        error = "there's already a project called " + chosen;
+        return nullptr;
+    }
+    if (reserved_project_name(chosen)) {
+        error = chosen + ".localhost is kept for phpMyAdmin; choose another name";
+        return nullptr;
+    }
+    // The database keeps its name; one FloServer never made (it refuses
+    // reserved names) has nothing to keep, so it follows the new name.
+    std::string database = project_database_name(*project);
+    if (reserved_database_name(database)) {
+        database = project_database_name(chosen);
+    }
+    if (const Project* other = project_with_database(config, database, name)) {
+        error = "the database " + database + " is " + other->name + "'s; choose another name";
+        return nullptr;
+    }
+    project->name = chosen;
+    // Written down only while it differs from what the name gives.
+    project->database_name = database == project_database_name(chosen) ? std::string() : database;
+    return project;
 }
 
 }  // namespace floserver::core

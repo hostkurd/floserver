@@ -429,6 +429,9 @@ struct Service {
             }
             return protocol::make_result(r.id, {{"entries", std::move(entries)}});
         }
+        if (r.method == "projects.rename") {
+            return rename_request(r, name);
+        }
         if (r.method == "projects.add") {
             const std::filesystem::path dir = core::path_from_utf8(string_param(r.params, "path"));
             if (!dir.is_absolute()) {
@@ -513,6 +516,78 @@ struct Service {
             (void)databases->reload();
         }
         return result ? protocol::make_result(r.id, *result) : protocol::make_error(r.id, refusal.code, refusal.message);
+    }
+
+    // projects.rename {name, new_name, rename_folder?} (D22). The reply is
+    // the project under its new name, with "old_name" and "old_path". What
+    // was the old name's goes with it: its certificate (the new one is made
+    // by the reload), its request log and its own server's log. With
+    // rename_folder, nothing of FloServer's runs in the folder while it's
+    // renamed (its own server is stopped first).
+    [[nodiscard]] std::string rename_request(const protocol::Request& r, const std::string& name) const {
+        namespace core = floserver::core;
+        namespace fs = std::filesystem;
+        const std::string new_name = string_param(r.params, "new_name");
+        bool rename_folder = false;
+        if (r.params.is_object() && r.params.contains("rename_folder")) {
+            if (!r.params["rename_folder"].is_boolean()) {
+                return protocol::make_error(r.id, "bad_params", "rename_folder is true or false");
+            }
+            rename_folder = r.params["rename_folder"].get<bool>();
+        }
+        core::ServiceRefusal refusal;
+        std::optional<json> result;
+        {
+            const core::WebService::ProjectHold hold =
+                rename_folder && web && projects->folder(name, refusal) ? web->hold_project(name)
+                                                                          : core::WebService::ProjectHold();
+            result = projects->rename(name, new_name, rename_folder, refusal);
+        }
+        if (!result) {
+            if (rename_folder && web) {
+                (void)web->reload();  // served again at once, as it was
+            }
+            return protocol::make_error(r.id, refusal.code, refusal.message);
+        }
+        // A log is moved when there's none under the new name yet (or only an
+        // empty one, which nginx makes when it reloads); else it's dropped.
+        // Tried before the reload (nginx keeps writing a renamed file) and
+        // after it (the old name's own server has stopped by then).
+        const auto move_log = [](const fs::path& from, const fs::path& to) {
+            std::error_code ec;
+            if (!fs::exists(from, ec)) {
+                return;
+            }
+            if (fs::exists(to, ec) && fs::file_size(to, ec) > 0 && !ec) {
+                fs::remove(from, ec);
+                return;
+            }
+            fs::rename(from, to, ec);
+        };
+        const auto move_logs = [&] {
+            if (!data) {
+                return;
+            }
+            const fs::path web_folder = core::web_dir(*data);
+            move_log(core::request_log_file(web_folder, name), core::request_log_file(web_folder, new_name));
+            move_log(web_folder / "apps" / core::path_from_utf8(name + ".log"),
+                     web_folder / "apps" / core::path_from_utf8(new_name + ".log"));
+        };
+        move_logs();
+        if (web) {
+            const json sites = web->reload()["sites"];
+            add_run_state(*result, sites);
+        }
+        move_logs();
+        // nginx has the new name's certificate now; the old one goes.
+        if (certs) {
+            std::string ignored;
+            (void)certs->remove_site(name, ignored);
+        }
+        if (databases) {
+            (void)databases->reload();
+        }
+        return protocol::make_result(r.id, *result);
     }
 
     // The reply to one php.* request: Settings → PHP (D20), per series.
@@ -1083,7 +1158,7 @@ struct Service {
             } else if (request->method == "projects.list" || request->method == "projects.add" ||
                        request->method == "projects.remove" || request->method == "projects.set" ||
                        request->method == "projects.use" || request->method == "projects.log" ||
-                       request->method == "projects.php" ||
+                       request->method == "projects.php" || request->method == "projects.rename" ||
                        request->method == "shared.get" || request->method == "shared.set") {
                 reply = project_request(*request);
             } else if (request->method == "php.get" || request->method == "php.set" ||

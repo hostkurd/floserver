@@ -202,3 +202,69 @@ TEST_CASE("Settings: who uses each runtime, and the defaults for new projects (D
     // Kept in config.json beside the projects.
     CHECK(*ProjectService(data.path()).defaults(refusal) == nlohmann::json{{"mariadb", "11.4"}});
 }
+
+TEST_CASE("a project is renamed, with its folder when asked (D22)") {
+    const TempDir data;
+    const fs::path work = data.path() / "work";
+    const fs::path shop = work / "my-shop";
+    test_util::write_file(shop / "floserver.json", R"({"php": "8.4", "database": "mariadb-11.4"})");
+    test_util::write_file(work / "blog" / "index.html", "<p>hi</p>");
+    fake_install(data.path(), "php", "8.4.27");
+
+    ProjectService service(data.path());
+    ServiceRefusal refusal;
+    REQUIRE(service.add(shop, "", refusal));
+    REQUIRE(service.add(work / "blog", "", refusal));
+    REQUIRE(service.set("my-shop", true, true, refusal));
+
+    CHECK_FALSE(service.rename("nobody", "store", false, refusal));
+    CHECK(refusal.code == "unknown_project");
+    CHECK_FALSE(service.rename("my-shop", "blog", false, refusal));
+    CHECK(refusal.code == "bad_params");
+    CHECK_FALSE(service.rename("my-shop", "My Store", false, refusal));
+    CHECK(refusal.code == "bad_params");
+
+    // Only the name: the folder stays, every setting stays, the database keeps its name.
+    const auto renamed = service.rename("my-shop", "store", false, refusal);
+    INFO(refusal.message);
+    REQUIRE(renamed);
+    CHECK((*renamed)["name"] == "store");
+    CHECK((*renamed)["old_name"] == "my-shop");
+    CHECK((*renamed)["on"] == true);
+    CHECK((*renamed)["keep_running"] == true);
+    CHECK((*renamed)["database_name"] == "my_shop");
+    CHECK(path_from_utf8((*renamed)["path"].get<std::string>()) == path_from_utf8((*renamed)["old_path"].get<std::string>()));
+    CHECK(fs::is_regular_file(shop / "floserver.json"));
+    const auto list = service.list(refusal);
+    REQUIRE(list);
+    CHECK((*list)["projects"][0]["name"] == "store");
+    CHECK((*list)["projects"][1]["database_name"] == "blog");
+
+    // With its folder: refused while a folder of the new name is there.
+    fs::create_directories(work / "shop");
+    CHECK_FALSE(service.rename("store", "shop", true, refusal));
+    CHECK(refusal.code == "folder_exists");
+    CHECK(fs::is_directory(shop));
+    CHECK(service.folder("store", refusal));  // nothing changed
+
+    const auto moved = service.rename("store", "my-store", true, refusal);
+    INFO(refusal.message);
+    REQUIRE(moved);
+    CHECK(fs::is_regular_file(work / "my-store" / "floserver.json"));
+    CHECK_FALSE(fs::exists(shop));
+    const auto dir = service.folder("my-store", refusal);
+    REQUIRE(dir);
+    CHECK(dir->filename() == "my-store");
+    CHECK(path_from_utf8((*moved)["path"].get<std::string>()) == *dir);
+    CHECK((*moved)["database_name"] == "my_shop");
+    CHECK((*moved)["wants"]["php"] == "8.4");  // its floserver.json came along
+
+    // A folder that holds another project's isn't renamed.
+    test_util::write_file(work / "my-store" / "docs" / "index.html", "<p>docs</p>");
+    REQUIRE(service.add(work / "my-store" / "docs", "", refusal));
+    CHECK_FALSE(service.rename("my-store", "store", true, refusal));
+    CHECK(refusal.code == "bad_folder");
+    CHECK(refusal.message.find("docs") != std::string::npos);
+    // Its name alone still can be.
+    CHECK(service.rename("my-store", "store", false, refusal));
+}

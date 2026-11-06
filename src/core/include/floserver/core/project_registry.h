@@ -6,13 +6,17 @@
 //     "projects_dir": "C:/Users/me/FloServer/projects",
 //     "projects": [
 //       {"name": "my-shop", "path": "C:/Users/me/FloServer/projects/my-shop",
-//        "on": true, "keep_running": false}
+//        "on": true, "keep_running": false},
+//       {"name": "store", "path": "...", "on": false, "keep_running": false,
+//        "database_name": "my_blog"}
 //     ]
 //   }
 //
 // Each project is a folder anywhere on the disk; its versions live in its own
 // floserver.json (D10), not here. The name gives the address
 // https://<name>.localhost (D7), so it is a DNS label: a-z, 0-9 and '-'.
+// A renamed project (D22) keeps its database and user: "database_name" says
+// what they're called when that's no longer the name with '-' as '_'.
 //
 // Other keys in config.json (the window's settings) are kept as they are, so
 // an older service never drops settings a newer window wrote.
@@ -33,6 +37,9 @@ struct Project {
     bool on = false;            // D11: the address answers (processes may still sleep)
     bool keep_running = false;  // D11: never put to sleep
     nlohmann::json other = nlohmann::json::object();  // keys of this entry this version doesn't use
+    // Its database and user, kept by a rename (D22); empty: from the name
+    // (project_database_name() says which).
+    std::string database_name{};
 
     bool operator==(const Project&) const = default;
 };
@@ -90,5 +97,19 @@ inline constexpr std::size_t kMaxProjectNameLength = 63;  // one DNS label
 
 // Forgets a project. Its folder and files are never touched.
 bool remove_project(AppConfig& config, std::string_view name);
+
+// The project other than `except` whose database and user are called
+// `database` (project_database_name()), or nothing.
+[[nodiscard]] const Project* project_with_database(const AppConfig& config, std::string_view database,
+                                                   std::string_view except = {});
+
+// Renames a project (D22). `new_name` follows add_project()'s rules (and
+// can't share another project's database). Every other setting stays, and
+// its database and user keep their names (database_name), so its .env keeps
+// working; a database named from the old name that FloServer never made (a
+// reserved name, root) follows the new name instead. Nothing (with `error`)
+// when there's no such project or the name can't be used.
+[[nodiscard]] Project* rename_project(AppConfig& config, std::string_view name, std::string_view new_name,
+                                      std::string& error);
 
 }  // namespace floserver::core

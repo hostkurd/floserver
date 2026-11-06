@@ -376,6 +376,20 @@ TEST_CASE("the store makes the CA once and project certificates on demand") {
     CHECK_FALSE(store.ensure_site("Bad Name", error));
     CHECK_FALSE(store.ensure_site("../ca", error));
 
+    // A renamed project's old certificate goes (D22); localhost's and the CA stay.
+    const auto old_site = store.ensure_site("old-shop", error);
+    REQUIRE(old_site);
+    REQUIRE(store.ensure_localhost(error));
+    CHECK(store.remove_site("old-shop", error));
+    CHECK_FALSE(fs::exists(old_site->certificate));
+    CHECK_FALSE(fs::exists(old_site->key));
+    CHECK_FALSE(fs::exists(certs_dir(data.path()) / "sites" / "old-shop.json"));
+    CHECK(store.remove_site("old-shop", error));  // nothing left to remove
+    CHECK_FALSE(store.remove_site("_localhost", error));
+    CHECK_FALSE(store.remove_site("../ca", error));
+    CHECK(fs::is_regular_file(certs_dir(data.path()) / "sites" / "_localhost.pem"));
+    CHECK(fs::is_regular_file(certs_dir(data.path()) / "ca.pem"));
+
 #if defined(_WIN32) || defined(FLOSERVER_TEST_OPENSSL)
     // What nginx will serve verifies with only the CA trusted.
     const auto first_cert = [](const std::string& text) {

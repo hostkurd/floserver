@@ -59,6 +59,7 @@ void print_help(std::ostream& out) {
         << "  projects [--json]          List your projects and what each one needs\n"
         << "  add [folder] [--name <n>] [--json]  Add a folder as a project (this folder if none)\n"
         << "  remove <name> [--drop-database] [--yes]  Forget a project (its files are kept); also delete its database\n"
+        << "  rename <name> <new> [--folder]  Rename a project (its address follows); --folder: its folder too\n"
         << "  use <php|node|python|mariadb> <v> Set a version in this project's floserver.json\n"
         << "  use php <none|newest|auto>  ...no PHP, always the newest PHP, or PHP when there are .php files\n"
         << "  php <series>               PHP settings for a series (8.5): extensions and php.ini values\n"
@@ -573,21 +574,29 @@ int remove_cmd(const std::vector<std::string>& args) {
         std::cerr << "Usage: flo remove <name> [--drop-database] [--yes]   (see your projects with: flo projects)\n";
         return 2;
     }
+    // Dropping may start MariaDB first (its first start sets it up).
+    auto client = connect_or_start(drop ? std::chrono::seconds(200) : std::chrono::seconds(15));
+    if (!client) {
+        return 1;
+    }
     if (drop && !yes) {
-        // The service names the database itself; this is what it will be.
-        std::cout << "Remove " << name << " from FloServer and delete its database "
-                  << floserver::core::project_database_name(name)
+        // The service names the database itself; this is what it will be
+        // (a renamed project keeps its own, D22).
+        std::string database = floserver::core::project_database_name(name);
+        if (const auto listed = client->call("projects.list"); listed && listed->ok && listed->result.contains("projects")) {
+            for (const auto& p : listed->result["projects"]) {
+                if (text_of(p, "name") == name && !text_of(p, "database_name").empty()) {
+                    database = text_of(p, "database_name");
+                }
+            }
+        }
+        std::cout << "Remove " << name << " from FloServer and delete its database " << database
                   << " and its user? This can't be undone. Its folder stays where it is. [y/N] " << std::flush;
         std::string answer;
         if (!std::getline(std::cin, answer) || (answer != "y" && answer != "Y" && answer != "yes")) {
             std::cout << "Nothing was removed.\n";
             return 1;
         }
-    }
-    // Dropping may start MariaDB first (its first start sets it up).
-    auto client = connect_or_start(drop ? std::chrono::seconds(200) : std::chrono::seconds(15));
-    if (!client) {
-        return 1;
     }
     nlohmann::json params = {{"name", name}};
     if (drop) {
@@ -601,6 +610,51 @@ int remove_cmd(const std::vector<std::string>& args) {
     std::cout << name << " is no longer a FloServer project"
               << (dropped ? ", and its database is deleted" : drop ? " (it had no database to delete)" : "")
               << ". Its files are untouched.\n";
+    return 0;
+}
+
+// Renames a project (D22): its address becomes https://<new>.localhost and
+// the old one stops; its database keeps its name, so .env keeps working.
+int rename_cmd(const std::vector<std::string>& args) {
+    std::vector<std::string> names;
+    bool folder = false;
+    bool bad = false;
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        if (args[i] == "--folder") {
+            folder = true;
+        } else if (!args[i].starts_with("-") && names.size() < 2) {
+            names.push_back(args[i]);
+        } else {
+            bad = true;
+        }
+    }
+    if (names.size() != 2 || bad) {
+        std::cerr << "Usage: flo rename <name> <new name> [--folder]   (--folder: rename its folder too)\n";
+        return 2;
+    }
+    auto client = connect_or_start(std::chrono::seconds(15));
+    if (!client) {
+        return 1;
+    }
+    const auto reply =
+        client->call("projects.rename", {{"name", names[0]}, {"new_name", names[1]}, {"rename_folder", folder}});
+    if (!reply || !reply->ok) {
+        return print_refusal(reply);
+    }
+    const nlohmann::json& p = reply->result;
+    std::cout << names[0] << " is now " << text_of(p, "name");
+    if (const std::string address = text_of(p, "address"); !address.empty()) {
+        std::cout << ": " << address;
+    }
+    std::cout << ".\n";
+    if (folder && text_of(p, "path") != text_of(p, "old_path")) {
+        std::cout << "Its folder is now " << text_of(p, "path") << ".\n";
+    }
+    const bool database = p.contains("database") ||
+                          (p.contains("wants") && p["wants"].is_object() && p["wants"].contains("database"));
+    if (database) {
+        std::cout << "Its database " << text_of(p, "database_name") << " and its user keep their names.\n";
+    }
     return 0;
 }
 
@@ -1463,6 +1517,9 @@ int run_command(const std::vector<std::string>& args, const std::vector<fs::path
     }
     if (args[0] == "remove") {
         return remove_cmd(args);
+    }
+    if (args[0] == "rename") {
+        return rename_cmd(args);
     }
     if (args[0] == "use") {
         return use(args);

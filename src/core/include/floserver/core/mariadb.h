@@ -17,6 +17,7 @@
 // takes any connection.
 
 #include "floserver/core/ports.h"
+#include "floserver/core/project_registry.h"
 
 #include <filesystem>
 #include <map>
@@ -114,6 +115,9 @@ inline constexpr std::string_view kSharedDatabasePrefix = "www_";
 // The database and user name for a project: its name with '-' as '_'
 // ("my-shop" -> "my_shop"), so tools that don't quote names cope.
 [[nodiscard]] std::string project_database_name(std::string_view project);
+// The same for a registered project: the name it kept through a rename
+// (D22), else the one its name gives.
+[[nodiscard]] std::string project_database_name(const Project& project);
 
 // Names a project's database and user can't have: MariaDB's own accounts
 // and databases ("root" would take over the root account), and the shared

@@ -296,6 +296,10 @@ std::string project_database_name(std::string_view project) {
     return out;
 }
 
+std::string project_database_name(const Project& project) {
+    return project.database_name.empty() ? project_database_name(project.name) : project.database_name;
+}
+
 bool reserved_database_name(std::string_view name) {
     static constexpr std::array<std::string_view, 8> kReserved = {
         "root", "mysql", "sys", "performance_schema", "information_schema", "test", "mariadb_sys", "public"};

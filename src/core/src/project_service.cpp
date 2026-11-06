@@ -17,6 +17,7 @@
 #include <ranges>
 #include <set>
 #include <string_view>
+#include <thread>
 
 namespace floserver::core {
 
@@ -45,7 +46,8 @@ json site_json(const Project& project, const PlannedSite& site, const WebPlan& p
                 {"on", project.on},
                 {"keep_running", project.keep_running},
                 {"state", state_name(site.state)},
-                {"missing", site.missing}};
+                {"missing", site.missing},
+                {"database_name", project_database_name(project)}};
     if (site.pool) {
         out["php"] = plan.pools.at(*site.pool).version;
     }
@@ -347,6 +349,115 @@ bool ProjectService::remove(const std::string& name, ServiceRefusal& refusal) {
         return false;
     }
     return save(*config, refusal);
+}
+
+namespace {
+
+// Renames a project's folder to `new_name` in the same parent folder (D22);
+// the folder as it's kept after. The same folder when it's already called
+// that. Refused (with `refusal`): no folder, a drive's top folder, one that
+// holds another project's folder (or the www or data folder), a folder of
+// that name already there, or one that can't be renamed (in use).
+std::optional<fs::path> rename_project_folder(const AppConfig& config, const Project& project,
+                                              const std::string& new_name, const fs::path& data_dir,
+                                              ServiceRefusal& refusal) {
+    const fs::path& dir = project.dir;
+    const std::string shown = path_to_utf8(dir);
+    std::error_code ec;
+    if (!fs::is_directory(dir, ec)) {
+        refusal = {"bad_folder", "there's no folder " + shown + " any more"};
+        return std::nullopt;
+    }
+    if (dir == dir.root_path() || !dir.has_parent_path() || dir.parent_path() == dir) {
+        refusal = {"bad_folder", shown + " is a drive's top folder, which can't be renamed"};
+        return std::nullopt;
+    }
+    if (path_to_utf8(dir.filename()) == new_name) {
+        return dir;  // already called that
+    }
+    // What would be left behind at the old path.
+    for (const Project& other : config.projects) {
+        if (other.name != project.name && same_or_inside(other.dir, dir)) {
+            refusal = {"bad_folder", "the folder holds " + other.name + "'s folder too, so it isn't renamed"};
+            return std::nullopt;
+        }
+    }
+    std::string ignored;
+    std::vector<fs::path> kept{data_dir};
+    if (const auto shared = read_shared_config(config, ignored)) {
+        if (const auto www = shared_dir(*shared)) {
+            kept.push_back(*www);
+        }
+    }
+    for (const fs::path& k : kept) {
+        if (same_or_inside(k, dir)) {
+            refusal = {"bad_folder", "the folder holds " + path_to_utf8(k) + ", so it isn't renamed"};
+            return std::nullopt;
+        }
+    }
+    const fs::path target = dir.parent_path() / path_from_utf8(new_name);
+    // Windows: "My-Shop" -> "my-shop" is the same folder, only its case changes.
+    if (fs::exists(target, ec) && !fs::equivalent(target, dir, ec)) {
+        refusal = {"folder_exists", "there's already a folder " + path_to_utf8(target)};
+        return std::nullopt;
+    }
+    // A server FloServer just stopped there may take a moment to end, and
+    // Windows' indexer or a virus scanner may hold a file briefly.
+    for (int attempt = 0;; ++attempt) {
+        ec.clear();
+        fs::rename(dir, target, ec);
+        if (!ec || attempt >= 30) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    if (ec) {
+        refusal = {"folder_in_use", shown + " can't be renamed: " + error_text(ec) +
+                                        ". Close editors and terminals that use it, then try again"};
+        return std::nullopt;
+    }
+    return real_folder(target, ignored).value_or(target);
+}
+
+}  // namespace
+
+std::optional<json> ProjectService::rename(const std::string& name, const std::string& new_name, bool rename_folder,
+                                           ServiceRefusal& refusal) {
+    const std::lock_guard lock(mutex_);
+    auto config = load(refusal);
+    if (!config) {
+        return std::nullopt;
+    }
+    if (find_project(*config, name) == nullptr) {
+        refusal = {"unknown_project", "there's no project called " + name};
+        return std::nullopt;
+    }
+    AppConfig renamed = *config;
+    std::string error;
+    Project* project = rename_project(renamed, name, new_name, error);
+    if (project == nullptr) {
+        refusal = {"bad_params", error};
+        return std::nullopt;
+    }
+    const fs::path old_dir = project->dir;
+    if (rename_folder) {
+        const auto dir = rename_project_folder(*config, *find_project(*config, name), new_name, data_dir_, refusal);
+        if (!dir) {
+            return std::nullopt;
+        }
+        project->dir = *dir;
+    }
+    if (!save(renamed, refusal)) {
+        if (project->dir != old_dir) {
+            std::error_code ec;
+            fs::rename(project->dir, old_dir, ec);  // as it was: config.json still has the old folder
+        }
+        return std::nullopt;
+    }
+    json out = describe(renamed, new_name);
+    out["old_name"] = name;
+    out["old_path"] = path_to_utf8(old_dir);
+    return out;
 }
 
 std::optional<json> ProjectService::set(const std::string& name, std::optional<bool> on,
