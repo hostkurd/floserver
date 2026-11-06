@@ -2,6 +2,8 @@
 
 #include "floserver/core/process.h"
 
+#include <algorithm>
+#include <optional>
 #include <thread>
 
 namespace floserver::core {
@@ -81,6 +83,8 @@ StartResult start_service(const std::string& instance, std::string& error, std::
 
 bool stop_service(const std::string& instance, std::string& error, std::chrono::milliseconds wait) {
     error.clear();
+    const auto deadline = Clock::now() + wait;
+    std::optional<ProcessExitWatch> process;
     {
         // Hang up straight after the reply: the service waits for its clients
         // to leave before it exits.
@@ -88,16 +92,26 @@ bool stop_service(const std::string& instance, std::string& error, std::chrono::
         if (!client) {
             return error.empty();
         }
+        // Its process id first: the channel closes before the service has
+        // stopped what it runs (MariaDB shuts down cleanly), and only the
+        // process ending means its files are free (the installer, D21).
+        if (const auto status = client->call("status");
+            status && status->ok && status->result.contains("pid") && status->result["pid"].is_number_unsigned()) {
+            process.emplace(status->result["pid"].get<std::uint32_t>());
+        }
         const auto reply = client->call("quit");
         if (!reply || !reply->ok) {
             error = "the service didn't accept the request to quit";
             return false;
         }
     }
-    const auto deadline = Clock::now() + wait;
     while (Clock::now() < deadline) {
         if (!is_running(instance)) {
-            return true;
+            const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now());
+            if (!process || process->wait(std::max(left, std::chrono::milliseconds(0)))) {
+                return true;
+            }
+            break;
         }
         std::this_thread::sleep_for(kPoll);
     }

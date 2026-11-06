@@ -7,6 +7,7 @@
 #endif
 
 #include <array>
+#include <cerrno>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
@@ -355,5 +356,51 @@ std::optional<int> run_and_wait(const fs::path& program, const std::vector<std::
 }
 
 #endif
+
+ProcessExitWatch::ProcessExitWatch(std::uint32_t pid) : pid_(pid) {
+#ifdef _WIN32
+    if (pid != 0) {
+        handle_ = OpenProcess(SYNCHRONIZE, FALSE, static_cast<DWORD>(pid));
+    }
+#endif
+}
+
+ProcessExitWatch::~ProcessExitWatch() {
+#ifdef _WIN32
+    if (handle_ != nullptr) {
+        CloseHandle(static_cast<HANDLE>(handle_));
+    }
+#endif
+}
+
+bool ProcessExitWatch::wait(std::chrono::milliseconds limit) const {
+#ifdef _WIN32
+    if (handle_ == nullptr) {
+        return true;  // gone already, or never there
+    }
+    const auto ms = std::max<std::chrono::milliseconds::rep>(0, limit.count());
+    return WaitForSingleObject(static_cast<HANDLE>(handle_), static_cast<DWORD>(std::min<std::chrono::milliseconds::rep>(ms, INFINITE - 1))) ==
+           WAIT_OBJECT_0;
+#else
+    if (pid_ == 0) {
+        return true;
+    }
+    const auto deadline = std::chrono::steady_clock::now() + limit;
+    while (true) {
+        // When it's this process's own child (the tests start the service
+        // so), it lingers as a zombie until collected: collect it.
+        if (::waitpid(static_cast<pid_t>(pid_), nullptr, WNOHANG) == static_cast<pid_t>(pid_)) {
+            return true;
+        }
+        if (::kill(static_cast<pid_t>(pid_), 0) != 0 && errno == ESRCH) {
+            return true;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+#endif
+}
 
 }  // namespace floserver::core

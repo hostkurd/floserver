@@ -165,6 +165,12 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             // Windows is signing out or shutting down: the first-run page is done, as when it's closed.
             if (wparam != FALSE) {
                 finish_first_run();
+                // The installer (an upgrade or an uninstall) needs FloServer's
+                // files: Windows' Restart Manager asks the window to close.
+                // Quit as the tray's Quit does, service and all.
+                if ((static_cast<ULONG_PTR>(lparam) & ENDSESSION_CLOSEAPP) != 0) {
+                    quit();
+                }
             }
             return 0;
         case WM_ERASEBKGND:

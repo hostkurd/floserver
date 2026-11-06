@@ -51,4 +51,25 @@ namespace floserver::core {
 // Windows: sibling_program("floserverd").
 [[nodiscard]] std::optional<std::filesystem::path> sibling_program(const std::string& name);
 
+// Waits for another process to end, by its id. Made before that process is
+// asked to quit, so its id can't be reused meanwhile (on Windows it holds the
+// process open; elsewhere it checks the id is still in use).
+class ProcessExitWatch {
+public:
+    explicit ProcessExitWatch(std::uint32_t pid);
+    ProcessExitWatch(const ProcessExitWatch&) = delete;
+    ProcessExitWatch& operator=(const ProcessExitWatch&) = delete;
+    ProcessExitWatch(ProcessExitWatch&&) = delete;
+    ProcessExitWatch& operator=(ProcessExitWatch&&) = delete;
+    ~ProcessExitWatch();
+
+    // True once the process has ended (or there was none to watch); false if
+    // it's still running after `limit`.
+    [[nodiscard]] bool wait(std::chrono::milliseconds limit) const;
+
+private:
+    std::uint32_t pid_ = 0;
+    void* handle_ = nullptr;  // Windows: the process, opened for waiting
+};
+
 }  // namespace floserver::core

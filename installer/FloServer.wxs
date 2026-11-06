@@ -1,0 +1,138 @@
+<!--
+  FloServer's installer (D21): one per-user MSI, no admin rights.
+  Built in CI with WiX 5 (pinned; WiX 6+ asks a maintenance fee of companies
+  that earn money with it, D21):
+
+    wix build installer\FloServer.wxs -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext -arch x64
+        -d Version=<x.y.z> -d StageDir=<full path of the folder to ship, laid out as installed>
+        -o FloServer-<x.y.z>-x64.msi
+
+  What it does and doesn't touch is in D21 and in the EULA (section 6).
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+  <!-- The upgrade code never changes: it's how a newer MSI finds the old one. -->
+  <Package Name="FloServer"
+           Manufacturer="HostKurd"
+           Version="$(Version)"
+           UpgradeCode="3AC2E747-DDE1-465C-87CC-277C97C81D0F"
+           Scope="perUser"
+           Compressed="yes"
+           InstallerVersion="500">
+
+    <!-- Same-version upgrades too: test builds of one version replace each other. -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of FloServer is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="FloServer.ico" SourceFile="$(sys.SOURCEFILEDIR)..\src\ui-win32\FloServer.ico" />
+    <Property Id="ARPPRODUCTICON" Value="FloServer.ico" />
+    <Property Id="ARPURLINFOABOUT" Value="https://floserver.org" />
+    <!-- ARPNOMODIFY comes from WixUI_Minimal. -->
+
+    <!-- %LOCALAPPDATA%\Programs\FloServer, named outright: per user, never
+         Program Files, so no admin rights (D5). (Windows Installer's ICE38,
+         ICE64 and ICE91 checks would flag files in the user's profile; WiX 5's
+         build doesn't run them, and they assume a machine-wide install.) -->
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="PROGRAMSFOLDER" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="FloServer" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <!-- Exactly the staged folder (CI lays it out): FloServer.exe, floserverd.exe,
+         flo.exe and floserver-shim.exe side by side, as each finds the others
+         next to itself; the Visual C++ runtime next to them, so they start on
+         a PC without the redistributable (app-local, which Microsoft allows);
+         and vcruntime\, the copies the service hands to each runtime it
+         installs (PHP, nginx, Apache). No floserver.exe on Windows: it would
+         be FloServer.exe, the window. Not the Publisher (HostKurd's tool). -->
+    <ComponentGroup Id="Programs" Directory="INSTALLFOLDER">
+      <Files Include="$(StageDir)\**" />
+      <!-- The folder on the user's Path, so flo works in new terminals. -->
+      <Component Id="PathEntry" Guid="9D1E2B5C-6F0A-4C1E-9B2D-5A7E3C4F8B10">
+        <Environment Id="FloOnPath" Name="PATH" Value="[INSTALLFOLDER]" Part="last" Action="set" System="no" Permanent="no" />
+        <RegistryValue Root="HKCU" Key="Software\HostKurd\FloServer" Name="PathEntry" Type="integer" Value="1" KeyPath="yes" />
+        <!-- The folder goes on uninstall (only when empty, which it is then). -->
+        <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+      </Component>
+    </ComponentGroup>
+
+    <ComponentGroup Id="StartMenu" Directory="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut" Guid="2F6B8C1D-3E4A-4B5C-8D9E-0A1B2C3D4E5F">
+        <Shortcut Id="FloServerShortcut" Name="FloServer" Target="[INSTALLFOLDER]FloServer.exe"
+                  WorkingDirectory="INSTALLFOLDER" Icon="FloServer.ico" />
+        <RegistryValue Root="HKCU" Key="Software\HostKurd\FloServer" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="Main" Title="FloServer" Level="1">
+      <ComponentGroupRef Id="Programs" />
+      <ComponentGroupRef Id="StartMenu" />
+    </Feature>
+
+    <!-- Before files are replaced or removed. All of these run hidden (the
+         Util extension's WixQuietExec: no console windows), as the user, and
+         before InstallValidate, which checks for files in use. They use the
+         flo already installed. A failure doesn't stop the (un)install. -->
+    <!-- Stop the service and everything it runs; flo waits until its process
+         has ended, so MariaDB shuts down cleanly and its files are free. The
+         window closes through Windows' Restart Manager. -->
+    <SetProperty Action="SetStopFloServerCmd" Id="WixQuietExecCmdLine" Sequence="execute"
+                 Value="&quot;[INSTALLFOLDER]flo.exe&quot; stop" Before="StopFloServer"
+                 Condition="Installed OR WIX_UPGRADE_DETECTED" />
+    <CustomAction Id="StopFloServer" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec"
+                  Execute="immediate" Return="ignore" />
+
+    <!-- Uninstall only (not an upgrade): undo what the app added outside its
+         folder. flo untrust (Windows asks) needs the service, so it starts it:
+         stop it again afterwards. -->
+    <SetProperty Action="SetRemoveCertificateCmd" Id="WixQuietExecCmdLine" Sequence="execute"
+                 Value="&quot;[INSTALLFOLDER]flo.exe&quot; untrust" Before="RemoveCertificate"
+                 Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    <CustomAction Id="RemoveCertificate" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec"
+                  Execute="immediate" Return="ignore" />
+    <SetProperty Action="SetStopFloServerAgainCmd" Id="WixQuietExecCmdLine" Sequence="execute"
+                 Value="&quot;[INSTALLFOLDER]flo.exe&quot; stop" Before="StopFloServerAgain"
+                 Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    <CustomAction Id="StopFloServerAgain" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec"
+                  Execute="immediate" Return="ignore" />
+    <SetProperty Action="SetRemoveShimsCmd" Id="WixQuietExecCmdLine" Sequence="execute"
+                 Value="&quot;[INSTALLFOLDER]flo.exe&quot; shims remove" Before="RemoveShims"
+                 Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    <CustomAction Id="RemoveShims" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec"
+                  Execute="immediate" Return="ignore" />
+    <SetProperty Action="SetRemoveRunEntryCmd" Id="WixQuietExecCmdLine" Sequence="execute"
+                 Value="&quot;[SystemFolder]reg.exe&quot; delete &quot;HKCU\Software\Microsoft\Windows\CurrentVersion\Run&quot; /v FloServer /f"
+                 Before="RemoveRunEntry" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    <CustomAction Id="RemoveRunEntry" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec"
+                  Execute="immediate" Return="ignore" />
+    <SetProperty Action="SetRemoveRunApprovalCmd" Id="WixQuietExecCmdLine" Sequence="execute"
+                 Value="&quot;[SystemFolder]reg.exe&quot; delete &quot;HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run&quot; /v FloServer /f"
+                 Before="RemoveRunApproval" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    <CustomAction Id="RemoveRunApproval" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec"
+                  Execute="immediate" Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="StopFloServer" After="CostFinalize" Condition="Installed OR WIX_UPGRADE_DETECTED" />
+      <Custom Action="RemoveCertificate" After="StopFloServer" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="StopFloServerAgain" After="RemoveCertificate" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="RemoveShims" After="StopFloServerAgain" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="RemoveRunEntry" After="RemoveShims" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="RemoveRunApproval" After="RemoveRunEntry" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    </InstallExecuteSequence>
+
+    <!-- Two screens (D21 mockups): the licence with Install, then Done with "Open FloServer". -->
+    <ui:WixUI Id="WixUI_Minimal" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(sys.SOURCEFILEDIR)License.rtf" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Open FloServer" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <CustomAction Id="OpenFloServer" Directory="INSTALLFOLDER"
+                  ExeCommand="&quot;[INSTALLFOLDER]FloServer.exe&quot;" Execute="immediate" Return="asyncNoWait" />
+    <UI>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="OpenFloServer"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed" />
+    </UI>
+  </Package>
+</Wix>

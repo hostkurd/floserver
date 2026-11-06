@@ -36,9 +36,10 @@ enum class StartResult : std::uint8_t { Started, AlreadyRunning, Failed };
 [[nodiscard]] StartResult start_service(const std::string& instance, std::string& error,
                                         std::chrono::milliseconds wait = std::chrono::seconds(5));
 
-// Asks the service to quit and waits until it's gone. True when it isn't
-// running afterwards (including when it wasn't running at all).
+// Asks the service to quit and waits until its process has ended (it stops
+// MariaDB and the web servers first). True when it isn't running afterwards
+// (including when it wasn't running at all).
 [[nodiscard]] bool stop_service(const std::string& instance, std::string& error,
-                                std::chrono::milliseconds wait = std::chrono::seconds(5));
+                                std::chrono::milliseconds wait = std::chrono::seconds(30));
 
 }  // namespace floserver::core
