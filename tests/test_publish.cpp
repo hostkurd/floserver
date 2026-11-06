@@ -481,3 +481,76 @@ TEST_CASE("publisher: sizes read like the window shows them") {
     CHECK(format_size(2773293) == "2.8 MB");
     CHECK(format_size(512000) == "512 KB");
 }
+
+TEST_CASE("publisher: FloServer's installer is added with its notes, compared by hand and carried over") {
+    FakeCdn cdn;
+    const auto now = at("2026-11-05T12:00:00Z");
+    const std::string msi = "app/1.2.0/FloServer-1.2.0-x64.msi";
+    const std::string body = "the FloServer 1.2.0 installer";
+    cdn.http.serve(kTestCdn + "/" + msi, {200, body});
+
+    // Its What's new page after the path; only a plain https address there.
+    CHECK(new_file(msi + " http://floserver.org/news", kTestCdn, cdn.files).error.find("plain https") !=
+          std::string::npos);
+    CHECK(new_file("php/8.5.13/php-8.5.13-nts-Win32-vs17-x64.zip https://floserver.org", kTestCdn, cdn.files)
+              .error.find("Only FloServer's installer") != std::string::npos);
+    const AddResult added = new_file("  " + msi + "   https://floserver.org/news/1.2.0 ", kTestCdn, cdn.files);
+    REQUIRE_MESSAGE(added.file, added.error);
+    CHECK(added.file->path == msi);
+    CHECK(added.file->title == "FloServer 1.2.0");
+    CHECK(added.file->notes_url == "https://floserver.org/news/1.2.0");
+    PublishFile file = *added.file;
+
+    // HostKurd's own file: nothing official to compare with.
+    CHECK(official_source(msi).kind == OfficialSource::Kind::ByHand);
+    CheckContext ctx{cdn.http, kTestCdn};
+    check_file(ctx, file);
+    CHECK(file.state == CheckState::ByHand);
+    CHECK(file.sha256 == sha256_hex(body));
+    CHECK(file.detail.find("CI build's artifact") != std::string::npos);
+    CHECK(file.detail.find(file.sha256) != std::string::npos);
+
+    std::vector<PublishFile> files = cdn.files;
+    files.push_back(file);
+    // Not ticked: not published.
+    BuiltList built = build_next_list(kTestCdn, files, 4, now);
+    CHECK_FALSE(built.manifest_json.has_value());
+    files.back().accepted = true;
+    built = build_next_list(kTestCdn, files, 4, now);
+    REQUIRE_MESSAGE(built.manifest_json, (built.errors.empty() ? "" : built.errors.front()));
+    const auto doc = nlohmann::json::parse(*built.manifest_json);
+    REQUIRE(doc.contains("app"));
+    CHECK(doc["app"]["version"] == "1.2.0");
+    CHECK(doc["app"]["urls"] == nlohmann::json::array({kTestCdn + "/" + msi}));
+    CHECK(doc["app"]["notes_url"] == "https://floserver.org/news/1.2.0");
+    CHECK(doc["app"]["sha256"] == sha256_hex(body));
+
+    // Live: read back, carried over with its notes, still served.
+    cdn.http.serve(kTestCdn + "/manifest.json", {200, *built.manifest_json});
+    cdn.http.serve(kTestCdn + "/manifest.json.sig", {200, cdn.key.sign(*built.manifest_json, "test-key")});
+    const LiveResult live = fetch_live_list(cdn.http, kTestCdn, cdn.keys(), now);
+    REQUIRE_MESSAGE(live.list, live.error);
+    REQUIRE(live.list->app.has_value());
+    std::vector<std::string> notes;
+    std::vector<PublishFile> carried = files_from_live(*live.list, kTestCdn, notes);
+    CHECK(notes.empty());
+    REQUIRE(carried.size() == cdn.files.size() + 1);
+    const PublishFile& again = carried.back();
+    CHECK(again.path == msi);
+    CHECK(again.title == "FloServer 1.2.0");
+    CHECK(again.published);
+    CHECK(again.notes_url == "https://floserver.org/news/1.2.0");
+    for (PublishFile& f : carried) {
+        check_file(ctx, f);
+        INFO(f.path << ": " << f.detail);
+        CHECK(f.state == CheckState::Ok);  // published: still served at its size
+    }
+    const BuiltList next = build_next_list(kTestCdn, carried, 5, now);
+    REQUIRE_MESSAGE(next.manifest_json, (next.errors.empty() ? "" : next.errors.front()));
+    CHECK(nlohmann::json::parse(*next.manifest_json)["app"]["notes_url"] == "https://floserver.org/news/1.2.0");
+
+    // One installer at a time: the listed one goes first.
+    const AddResult second = new_file("app/1.3.0/FloServer-1.3.0-x64.msi", kTestCdn, carried);
+    CHECK_FALSE(second.file.has_value());
+    CHECK(second.error.find("remove it first") != std::string::npos);
+}

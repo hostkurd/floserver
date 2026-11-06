@@ -13,6 +13,11 @@
 //
 // Paths are <runtime>/<version>/<file>. The runtime's licence, platform and
 // upstream fallback URL come from the catalog in build.cpp.
+//
+// FloServer's own installer is app/<x.y.z>/FloServer-<x.y.z>-x64.msi (Q5):
+// it becomes the list's "app" entry (manifest.h), at most one, the newest.
+// It's HostKurd's own file, so nothing official checks it: as with Apache,
+// its SHA-256 is compared by hand (with the CI artifact's) and accepted.
 
 #include <chrono>
 #include <cstdint>
@@ -34,6 +39,8 @@ struct BuildOptions {
     // The project templates (D9): a JSON array, normally the built-in
     // templates.json. Each one's runtimes must be in the list.
     std::string templates_json = "[]";
+    // The installer's "What's new" page (https), for its "notes_url"; empty for none.
+    std::string app_notes_url;
 };
 
 struct BuildResult {
@@ -42,6 +49,7 @@ struct BuildResult {
     std::vector<std::string> notes;  // files left out on purpose, e.g. source archives
     std::size_t runtime_count = 0;
     std::size_t template_count = 0;
+    std::string app_version;  // the installer listed, or empty
 };
 
 [[nodiscard]] BuildResult build_manifest(std::string_view report_json, const BuildOptions& options);
@@ -55,6 +63,10 @@ struct CdnPath {
     std::string problem;    // why not, when it can't ("<path>: ...")
 };
 [[nodiscard]] CdnPath describe_cdn_path(std::string_view path);
+
+// FloServer's installer on the CDN: app/<version>/<app_file_name(version)>.
+inline constexpr std::string_view kAppFolder = "app";
+[[nodiscard]] std::string app_file_name(std::string_view version);
 
 // "YYYY-MM-DDTHH:MM:SSZ"
 [[nodiscard]] std::string format_utc_time(std::chrono::sys_seconds t);

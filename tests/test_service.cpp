@@ -77,6 +77,26 @@ TEST_CASE("the real service starts, answers, refuses a second copy and stops") {
     CHECK_FALSE(unknown->ok);
     CHECK(unknown->error_code == "unknown_method");
 
+    // App updates (Q5): the methods are there; without a transport (not
+    // Windows) they say updates aren't available here.
+    const auto updates = client->call("updates.status");
+    REQUIRE(updates.has_value());
+    REQUIRE(updates->ok);
+    CHECK(updates->result.value("current", std::string()) == status->result.value("version", std::string()));
+#ifndef _WIN32
+    CHECK(updates->result["available"] == false);
+    CHECK(updates->result["state"] == "failed");
+    CHECK_FALSE(updates->result.value("error", std::string()).empty());
+    const auto check = client->call("updates.check");
+    REQUIRE(check.has_value());
+    CHECK_FALSE(check->ok);
+    CHECK(check->error_code == "updates_unavailable");
+#endif
+    const auto cancel = client->call("updates.cancel");
+    REQUIRE(cancel.has_value());
+    REQUIRE(cancel->ok);
+    CHECK(cancel->result["cancelled"] == false);
+
     // Projects over the channel: add a folder, see it, turn it on, forget it.
     const std::filesystem::path shop = data.path() / "My Shop";
     std::filesystem::create_directories(shop);

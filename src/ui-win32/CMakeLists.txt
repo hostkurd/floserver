@@ -17,6 +17,7 @@ add_library(floserver_ui_model STATIC
     model/code_editor.cpp
     model/folder_removal.cpp
     model/uninstall.cpp
+    model/app_update.cpp
     model/toast.cpp
     model/glyphs.cpp
     model/access_tree.cpp
@@ -44,6 +45,8 @@ add_executable(floserver_ui WIN32
     main_window_first_run.cpp
     main_window_menu.cpp
     main_window_uninstall.cpp
+    main_window_update.cpp
+    apply_update.cpp
     main_window_access.cpp
     access_provider.cpp
     canvas.cpp

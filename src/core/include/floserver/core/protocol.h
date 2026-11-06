@@ -36,6 +36,9 @@
 //   certs.remove     {} -> {}              deletes the CA and project certificates
 //   web.status       {} -> web_service.h, WebService::status()
 //   web.reload       {} -> the same, after bringing everything in line now
+//   updates.status   {} -> update_service.h, UpdateService::status()
+//   updates.check    {} -> the same; a check of the signed list starts now
+//   updates.cancel   {} -> {"cancelled": bool}   stops the app's download
 // projects.list and the projects.* changes also carry each project's
 // "address" and "run" ("sleeping" | "running" | "failed") once it's served.
 
