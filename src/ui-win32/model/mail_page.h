@@ -112,6 +112,11 @@ void mail_apply(MailStatus& status, const MailChanges& changes);
 // run PHP (the first switch restarts it for them).
 [[nodiscard]] std::string mail_footer_text(std::size_t php_projects, Lang lang);
 
+// runtimes.remove's answer for Mailpit asked to delete the emails too: the
+// error toast's words when they weren't ({"emails_deleted":false} or an
+// "emails_error"); empty when all is well or nothing was said.
+[[nodiscard]] std::string mail_remove_emails_error(const nlohmann::json& result, Lang lang);
+
 // --- the main window --------------------------------------------------------------
 
 // The status line's button: only once Mailpit is installed.

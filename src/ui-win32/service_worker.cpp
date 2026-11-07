@@ -806,6 +806,10 @@ void ServiceWorker::run(const std::stop_token& stop) {
                     } else {
                         need_installed = true;
                         refetch_runtimes = refetch_runtimes || watching;
+                        // Mailpit asked to delete its emails: removed, but they may have stayed.
+                        if (c.project == "mailpit" && !c.flag) {
+                            settings_error = mail_remove_emails_error(reply->result, lang_);
+                        }
                     }
                     break;
                 }

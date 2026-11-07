@@ -1564,6 +1564,12 @@ constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
           "گۆڕانکارییەکانت لە ئیمەیل پاشەکەوت بکرێن؟"},
     Entry{Str::MailDeleteAskOne, "Delete the 1 email? This can't be undone.", "حذف الرسالة الوحيدة؟ لا يمكن التراجع عن ذلك.",
           "ئەو یەک ئیمەیلە دەسڕدرێتەوە؟ ناتوانرێت پاشگەز ببیتەوە."},
+    Entry{Str::MailRemoveEmailsFailed, "Mailpit was removed, but the emails couldn't be deleted: {0}",
+          FLO_LRI "Mailpit" FLO_PDI " أُزيل، لكن تعذّر حذف الرسائل: {0}",
+          FLO_LRI "Mailpit" FLO_PDI " لابرا، بەڵام نەتوانرا ئیمەیلەکان بسڕدرێنەوە: {0}"},
+    Entry{Str::MailRemoveEmailsFailedNoWhy, "Mailpit was removed, but the emails couldn't be deleted.",
+          FLO_LRI "Mailpit" FLO_PDI " أُزيل، لكن تعذّر حذف الرسائل.",
+          FLO_LRI "Mailpit" FLO_PDI " لابرا، بەڵام نەتوانرا ئیمەیلەکان بسڕدرێنەوە."},
 }};
 
 #undef FLO_LRI

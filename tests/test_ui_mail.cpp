@@ -645,3 +645,25 @@ TEST_CASE("mail: the save question and the one-email delete question are in ever
     }
     CHECK(text(Lang::En, Str::MailAskSave) != text(Lang::En, Str::ApacheAskSave));
 }
+
+TEST_CASE("mail: Remove that couldn't delete the emails says so; the words are cleaned") {
+    CHECK(mail_remove_emails_error(json::parse(R"({"emails_deleted": true})"), Lang::En).empty());
+    CHECK(mail_remove_emails_error(json::parse("{}"), Lang::En).empty());
+    CHECK(mail_remove_emails_error(json::array(), Lang::En).empty());
+    CHECK(mail_remove_emails_error(json::parse(R"({"emails_deleted": false, "emails_error": "disk is busy"})"), Lang::En) ==
+          "Mailpit was removed, but the emails couldn't be deleted: disk is busy");
+    // An error alone counts too; neither reason: the shorter sentence.
+    CHECK(mail_remove_emails_error(json::parse(R"({"emails_error": "locked"})"), Lang::En).ends_with("locked"));
+    CHECK(mail_remove_emails_error(json::parse(R"({"emails_deleted": false})"), Lang::En) ==
+          "Mailpit was removed, but the emails couldn't be deleted.");
+    // Cleaned and cut like other service text.
+    const json odd = {{"emails_deleted", false}, {"emails_error", "x\xE2\x80\xAE" + std::string(1000, 'y')}};
+    const std::string msg = mail_remove_emails_error(odd, Lang::En);
+    CHECK(msg.find("\xE2\x80\xAE") == std::string::npos);
+    CHECK(msg.find("\xE2\x80\xA6") != std::string::npos);
+    CHECK(msg.size() < 450);
+    for (const Lang lang : {Lang::Ar, Lang::Ku}) {
+        CHECK(mail_remove_emails_error(odd, lang).find("xyyy") != std::string::npos);
+        CHECK_FALSE(mail_remove_emails_error(json::parse(R"({"emails_deleted": false})"), lang).empty());
+    }
+}

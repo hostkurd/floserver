@@ -792,6 +792,8 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     FirstRunWhatMailpit,
     MailAskSave,
     MailDeleteAskOne,
+    MailRemoveEmailsFailed,
+    MailRemoveEmailsFailedNoWhy,
     Count_,
 };
 

@@ -170,6 +170,22 @@ std::string mail_count_text(const MailStatus& status, Lang lang) {
     return fill(lang, Str::MailCount, {std::to_string(status.total), size});
 }
 
+std::string mail_remove_emails_error(const json& result, Lang lang) {
+    if (!result.is_object()) {
+        return {};
+    }
+    const bool said_no = result.contains("emails_deleted") && result["emails_deleted"].is_boolean() &&
+                         !result["emails_deleted"].get<bool>();
+    const std::string error = mail_plain_subject(text_of(result, "emails_error"), kMailErrorMaxChars);
+    if (!said_no && error.empty()) {
+        return {};
+    }
+    if (error.empty()) {
+        return std::string(text(lang, Str::MailRemoveEmailsFailedNoWhy));
+    }
+    return fill(lang, Str::MailRemoveEmailsFailed, {error});
+}
+
 std::string mail_not_served_text(const MailStatus& status, Lang lang) {
     if (status.inbox_served || !status.installed) {
         return {};
