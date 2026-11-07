@@ -163,7 +163,8 @@ struct MailpitPaths {
 
 // Text from an email (a subject, a recipient) made safe to show: UTF-8
 // (bad bytes become U+FFFD), control characters (C0, DEL, C1) as spaces,
-// bidi, zero-width and line/paragraph separators removed, cut to
+// bidi, zero-width and other invisible characters (soft hyphen, tags,
+// variation selectors) and line/paragraph separators removed, cut to
 // `max_chars` code points on a character boundary ("…" added when cut).
 [[nodiscard]] std::string clean_mail_text(std::string_view text, std::size_t max_chars = 200);
 // Error text (from Mailpit's log, say) made safe for a terminal or a

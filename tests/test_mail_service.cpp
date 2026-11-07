@@ -251,6 +251,12 @@ TEST_CASE("Mailpit wakes on SMTP and on the inbox, sleeps when idle, and the ser
     CHECK(eventually([&] { return mailpit_processes(data).empty(); }, 5s));  // stopped just after
     CHECK(mail.status()["total"] == 2);  // the last values stand
 
+    // The sockets of a Mailpit that was ended outright stay behind (always
+    // on Windows): the next start clears them before it touches the folder.
+    if (!fs::exists(fs::symlink_status(paths.http_socket))) {
+        test_util::write_file(paths.http_socket, "left behind");
+    }
+    CHECK(fs::exists(fs::symlink_status(paths.http_socket)));
     // The inbox wakes it: without the header nginx adds, Mailpit's own 401.
     CHECK(status_code(http(inbox->port, "mail.localhost", "/api/v1/info")) == "401");
     CHECK(mail.status()["state"] == "running");
@@ -352,7 +358,18 @@ TEST_CASE("mail.localhost through the real nginx: the inbox's password added, no
     CHECK(code("/api/v1/info", "Sec-Fetch-Site: same-site\r\nSec-Fetch-Mode: cors\r\n") == "403");
     CHECK(code("/api/v1/info", "Sec-Fetch-Site: cross-site\r\nSec-Fetch-Mode: navigate\r\n") == "403");
     CHECK(code("/proxy?url=x", "Sec-Fetch-Site: cross-site\r\nSec-Fetch-Mode: navigate\r\n") == "403");
-    CHECK(code("/", "Sec-Fetch-Site: cross-site\r\nSec-Fetch-Mode: navigate\r\n") == "200");
+    CHECK(code("/", "Sec-Fetch-Site: cross-site\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Dest: document\r\n") == "200");
+    // In a frame on another site (clickjacking): refused, and never framed anyway.
+    CHECK(code("/", "Sec-Fetch-Site: cross-site\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Dest: iframe\r\n") == "403");
+    CHECK(code("/", "Sec-Fetch-Site: same-site\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Dest: iframe\r\n") == "403");
+    CHECK(code("/", "Sec-Fetch-Site: cross-site\r\nSec-Fetch-Mode: navigate\r\n") == "403");  // no Dest: not a page
+    {
+        const std::string page = http(port, "mail.localhost:" + std::to_string(port), "/");
+        CHECK(status_code(page) == "200");
+        CHECK(page.find("Content-Security-Policy: frame-ancestors 'self'") != std::string::npos);
+        CHECK(page.find("X-Frame-Options: SAMEORIGIN") != std::string::npos);
+        CHECK(page.find("Referrer-Policy: no-referrer") != std::string::npos);
+    }
     CHECK(code("/api/v1/info", "Origin: http://evil.test\r\n") == "403");
     CHECK(code("/api/v1/info", "Origin: null\r\n") == "403");
     CHECK(code("/api/v1/info", "Origin: " + own + "\r\nSec-Fetch-Site: same-origin\r\nSec-Fetch-Mode: cors\r\n") == "200");

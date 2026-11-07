@@ -382,6 +382,11 @@ void MailService::reload() {
                 smtp6_listener_ = std::move(listeners.v6);
             }
         }
+        // [::1] came later (or was busy then): held as soon as it can be.
+        if (smtp_listener_ && !smtp6_listener_ && config_.ipv6 && loopback_ipv6_available()) {
+            std::string why;
+            smtp6_listener_ = LoopbackListener::open_ipv6(smtp_listener_->port(), why);
+        }
         if (!inbox_listener_) {
             std::set<Port> avoid;
             if (smtp_listener_) {
@@ -528,9 +533,15 @@ bool MailService::ensure_running(std::string& error) {
 
     std::string why;
     std::unique_ptr<ChildProcess> process;
+    // Whatever throws below, the state leaves Starting (else every later
+    // start and stop would wait on it for good): it's caught and Failed.
+    try {
     if (const auto problem = mailpit_socket_problem(paths_)) {
         why = *problem;  // never TCP instead: another program could take a TCP port first
-    } else if (ensure_secret_files(why) && make_owner_only_folder(paths_.dir, why) && remove_stale_sockets(why)) {
+    } else if (ensure_secret_files(why) && make_owner_only_folder(paths_.dir, why) &&
+               // Before anything in the folder is touched: a socket left by a
+               // killed Mailpit (Windows ends it outright) is a reparse point there.
+               remove_stale_sockets(why) && make_owner_only_files(paths_.dir, why)) {
         std::error_code ec;
         fs::create_directories(paths_.log.parent_path(), ec);
         const std::uintmax_t log_from = file_bytes(paths_.log);
@@ -575,7 +586,18 @@ bool MailService::ensure_running(std::string& error) {
             }
         }
     }
-    why = clean_error_text(why);
+    } catch (const std::exception& e) {
+        process.reset();
+        why = std::string("Mailpit couldn't be started: ") + e.what();
+    } catch (...) {
+        process.reset();
+        why = "Mailpit couldn't be started";
+    }
+    try {
+        why = clean_error_text(why);
+    } catch (...) {
+        why = "Mailpit couldn't be started";
+    }
     touch();
     lock.lock();
     if (process) {
@@ -718,26 +740,34 @@ void MailService::supervise() {
 }
 
 void MailService::serve(std::uintptr_t client, bool smtp) {
-    std::string error;
-    std::optional<std::uintptr_t> upstream;
-    if (ensure_running(error)) {
-        upstream = connect_local(smtp ? paths_.smtp_socket : paths_.http_socket);
+    bool relayed = false;
+    {
+        // Counted by the supervisor; let go here whatever happens, and
+        // before the service's own look at the counts below (not activity).
+        const AtExit counted([this] {
+            touch();
+            --active_;
+        });
+        std::string error;
+        std::optional<std::uintptr_t> upstream;
+        if (ensure_running(error)) {
+            upstream = connect_local(smtp ? paths_.smtp_socket : paths_.http_socket);
+        }
+        relayed = upstream.has_value();
+        if (upstream) {
+            relay_sockets(client, *upstream, [this] { touch(); });
+        } else if (smtp) {
+            // Anyone who can connect reads this: no paths, no log text. FloServer says why.
+            answer_and_close(client, "421 4.3.0 Mailpit isn't available just now; FloServer's window says why\r\n");
+        } else {
+            // A page aimed at 127.0.0.1 (DNS rebinding) can read this: nothing in it but the fact.
+            const std::string body = "Mailpit isn't available just now. FloServer's window says why.\n";
+            answer_and_close(client, "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain; charset=utf-8\r\n"
+                                     "Content-Length: " +
+                                         std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body);
+        }
     }
-    if (upstream) {
-        relay_sockets(client, *upstream, [this] { touch(); });
-    } else if (smtp) {
-        // Anyone who can connect reads this: no paths, no log text. FloServer says why.
-        answer_and_close(client, "421 4.3.0 Mailpit isn't available just now; FloServer's window says why\r\n");
-    } else {
-        // A page aimed at 127.0.0.1 (DNS rebinding) can read this: nothing in it but the fact.
-        const std::string body = "Mailpit isn't available just now. FloServer's window says why.\n";
-        answer_and_close(client, "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain; charset=utf-8\r\n"
-                                 "Content-Length: " +
-                                     std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body);
-    }
-    touch();
-    --active_;
-    if (upstream) {
+    if (relayed) {
         if (smtp) {
             refresh(true);  // the new-mail notice
         } else {

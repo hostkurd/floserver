@@ -135,9 +135,11 @@ public:
             // from elsewhere, and only to its pages, never /api/ or /proxy.
             // A request carrying an Origin must come from the inbox itself.
             const bool tls = spec_.mail->tls.has_value();
-            out_ << "\n    map \"$http_sec_fetch_site:$http_sec_fetch_mode:$request_method:$uri\" $floserver_mail_cross {\n"
+            // A frame is a navigation too: only a whole page (Dest: document) counts as a visit.
+            out_ << "\n    map \"$http_sec_fetch_site:$http_sec_fetch_mode:$http_sec_fetch_dest:$request_method:$uri\" "
+                    "$floserver_mail_cross {\n"
                  << "        default 0;\n"
-                 << "        \"~*^(cross-site|same-site):navigate:GET:/(?!api(/|$)|proxy)\" 0;\n"
+                 << "        \"~*^(cross-site|same-site):navigate:document:GET:/(?!api(/|$)|proxy)\" 0;\n"
                  << "        \"~*^(cross-site|same-site):\" 1;\n"
                  << "    }\n"
                  << "    map $http_origin $floserver_mail_origin {\n"
@@ -469,7 +471,11 @@ private:
         // No upstream keepalive: an idle kept connection would keep Mailpit
         // awake. A browser's own header is replaced by FloServer's.
         out_ << "        server_name " << name << ".localhost;\n"
+             // Never framed by another site (clickjacking with the password
+             // nginx adds); the location sets no add_header, so these apply there.
              << "        add_header Referrer-Policy no-referrer always;\n"
+             << "        add_header Content-Security-Policy \"frame-ancestors 'self'\" always;\n"
+             << "        add_header X-Frame-Options SAMEORIGIN always;\n"
              << "        if ($floserver_mail_cross) {\n"
              << "            return 403;\n"
              << "        }\n"

@@ -18,6 +18,10 @@
 
 #include <algorithm>
 
+#ifndef _WIN32
+#include <unistd.h>
+#endif
+
 using namespace floserver::core;
 namespace fs = std::filesystem;
 
@@ -315,6 +319,19 @@ TEST_CASE("text from an email is cleaned and cut short before it's shown") {
     CHECK(cut.size() == 200 * 2 + 3);
     CHECK(cut.ends_with("\xe2\x80\xa6"));
     CHECK(clean_mail_text(std::string(500, 'a')).size() == 203);
+    // Soft hyphen, Mongolian vowel separator, invisible operators, tags, variation selectors.
+    const auto utf8 = [](std::initializer_list<unsigned> bytes) {
+        std::string out;
+        for (const unsigned b : bytes) {
+            out += static_cast<char>(b);
+        }
+        return out;
+    };
+    CHECK(clean_mail_text("a" + utf8({0xC2, 0xAD}) + "b" + utf8({0xE1, 0xA0, 0x8E}) + "c" + utf8({0xE2, 0x81, 0xA1}) + "d" +
+                          utf8({0xE2, 0x81, 0xA4}) + "e" + utf8({0xF3, 0xA0, 0x80, 0x81}) + "f" +
+                          utf8({0xF3, 0xA0, 0x81, 0xBF}) + "g" + utf8({0xEF, 0xB8, 0x80}) + "h" +
+                          utf8({0xEF, 0xB8, 0x8F}) + "i" + utf8({0xF3, 0xA0, 0x84, 0x80}) + "j" +
+                          utf8({0xF3, 0xA0, 0x87, 0xAF}) + "k") == "abcdefghijk");
     CHECK(clean_error_text("line one\nline two\x1b]0;title\x07") == "line one line two ]0;title ");
 }
 
@@ -364,9 +381,13 @@ TEST_CASE("nginx serves mail.localhost only, the header from an owner-only file 
     CHECK(text->find("keepalive 8") == std::string::npos);  // no kept connection holds Mailpit awake
     CHECK(text->find("return 302") == std::string::npos);   // http only
     // Another site may only send a plain visit to the inbox's pages.
-    CHECK(text->find("map \"$http_sec_fetch_site:$http_sec_fetch_mode:$request_method:$uri\" $floserver_mail_cross {") !=
-          std::string::npos);
-    CHECK(text->find("\"~*^(cross-site|same-site):navigate:GET:/(?!api(/|$)|proxy)\" 0;") != std::string::npos);
+    CHECK(text->find("map \"$http_sec_fetch_site:$http_sec_fetch_mode:$http_sec_fetch_dest:$request_method:$uri\" "
+                     "$floserver_mail_cross {") != std::string::npos);
+    // A frame is a navigation too: only a whole page counts as a visit.
+    CHECK(text->find("\"~*^(cross-site|same-site):navigate:document:GET:/(?!api(/|$)|proxy)\" 0;") != std::string::npos);
+    CHECK(text->find("add_header Content-Security-Policy \"frame-ancestors 'self'\" always;") != std::string::npos);
+    CHECK(text->find("add_header X-Frame-Options SAMEORIGIN always;") != std::string::npos);
+    CHECK(text->find("add_header Referrer-Policy no-referrer always;") != std::string::npos);
     CHECK(text->find("\"~*^(cross-site|same-site):\" 1;") != std::string::npos);
     CHECK(text->find("\"http://mail.localhost:8080\" 0;") != std::string::npos);
     CHECK(text->find("if ($floserver_mail_cross) {\n            return 403;") != std::string::npos);
@@ -497,6 +518,35 @@ TEST_CASE("a too-old Mailpit isn't run, and a project named mail blocks the inbo
     REQUIRE(saved);
     CHECK(saved->other["mail"]["max"] == 50);
 }
+
+#ifndef _WIN32
+TEST_CASE("a Mailpit folder that belongs to another user isn't used") {
+    if (::geteuid() != 0) {
+        MESSAGE("needs root to give a folder to another user; skipped");
+        return;
+    }
+    const test_util::TempDir tmp;
+    const fs::path data = tmp.path() / "data";
+    fake_mailpit(data, "1.33.0");
+    std::string error;
+    REQUIRE(save_app_config(app_config_file(data), AppConfig{}, error));
+    const MailpitPaths paths = mailpit_paths(data);
+    fs::create_directories(paths.dir);
+    REQUIRE(::chown(paths.dir.c_str(), 12345, 12345) == 0);
+    CHECK_FALSE(make_owner_only_folder(paths.dir, error));
+    CHECK(error.find("belongs to another user") != std::string::npos);
+    MailServiceConfig config;
+    config.data_dir = data;
+    MailService mail(config, SecretStore(data));
+    mail.reload();
+    CHECK_FALSE(mail.inbox());  // no secret files written there, nothing for nginx
+    ServiceRefusal refusal;
+    CHECK_FALSE(mail.clear(refusal));
+    CHECK(refusal.message.find("belongs to another user") != std::string::npos);
+    CHECK(mail.status()["state"] == "failed");
+    CHECK_FALSE(fs::exists(paths.ui_auth));
+}
+#endif
 
 TEST_CASE("Settings → Folders never touches the emails") {
     const test_util::TempDir tmp;

@@ -15,6 +15,7 @@
 #endif
 
 #include <array>
+#include <cstdint>
 #include <fstream>
 #include <random>
 #include <system_error>
@@ -218,6 +219,42 @@ bool set_owner_only_acl(const fs::path& target, bool inherit, std::string& error
         error = "can't read this user's identity: " + last_error_text();
         return false;
     }
+    // Its owner may always change its ACL back: it must be this user (or
+    // the owner this user's files get, Administrators when elevated).
+    {
+        PSID owner = nullptr;
+        PSECURITY_DESCRIPTOR descriptor = nullptr;
+        std::wstring path_name = target.native();
+        const DWORD read = GetNamedSecurityInfoW(path_name.data(), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, &owner,
+                                                 nullptr, nullptr, nullptr, &descriptor);
+        if (read != ERROR_SUCCESS || owner == nullptr) {
+            if (descriptor != nullptr) {
+                LocalFree(descriptor);
+            }
+            error = "can't read who owns " + path_to_utf8(target) + ": " +
+                    error_text(std::error_code(static_cast<int>(read), std::system_category()));
+            return false;
+        }
+        bool ours = EqualSid(owner, reinterpret_cast<TOKEN_USER*>(user.data())->User.Sid) != FALSE;
+        if (!ours) {
+            HANDLE again = nullptr;
+            if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &again) != FALSE) {
+                DWORD owner_size = 0;
+                (void)GetTokenInformation(again, TokenOwner, nullptr, 0, &owner_size);
+                std::vector<std::uint8_t> default_owner(owner_size == 0 ? 1 : owner_size);
+                if (GetTokenInformation(again, TokenOwner, default_owner.data(), owner_size, &owner_size) != FALSE) {
+                    ours = EqualSid(owner, reinterpret_cast<TOKEN_OWNER*>(default_owner.data())->Owner) != FALSE;
+                }
+                CloseHandle(again);
+            }
+        }
+        LocalFree(descriptor);
+        if (!ours) {
+            error = path_to_utf8(target) + " belongs to another user, so it can't be kept private; remove it (or "
+                                           "choose another FLOSERVER_DATA_DIR) and try again";
+            return false;
+        }
+    }
     std::array<std::uint8_t, SECURITY_MAX_SID_SIZE> system{};
     DWORD system_size = static_cast<DWORD>(system.size());
     if (CreateWellKnownSid(WinLocalSystemSid, nullptr, system.data(), &system_size) == FALSE) {
@@ -264,21 +301,54 @@ bool make_owner_only_folder(const fs::path& dir, std::string& error) {
         return false;
     }
 #ifdef _WIN32
-    if (!set_owner_only_acl(dir, true, error)) {
+    const DWORD attributes = GetFileAttributesW(dir.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        error = "can't keep " + path_to_utf8(dir) + " private: it's a link or can't be read";
         return false;
     }
-    for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
-        std::error_code inner;
-        if (fs::is_regular_file(it->symlink_status(inner)) && !set_owner_only_acl(it->path(), false, error)) {
-            return false;
-        }
-    }
+    return set_owner_only_acl(dir, true, error);
 #else
+    struct stat st {};
+    if (::lstat(dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
+        error = "can't keep " + path_to_utf8(dir) + " private: it's a link or can't be read";
+        return false;
+    }
+    if (st.st_uid != ::geteuid()) {
+        error = path_to_utf8(dir) + " belongs to another user, so it can't be kept private; remove it (or choose "
+                                    "another FLOSERVER_DATA_DIR) and try again";
+        return false;
+    }
     if (::chmod(dir.c_str(), 0700) != 0) {
         error = "can't limit who may open " + path_to_utf8(dir) + ": " +
                 error_text(std::error_code(errno, std::generic_category()));
         return false;
     }
+    return true;
+#endif
+}
+
+bool make_owner_only_files(const fs::path& dir, std::string& error) {
+#ifdef _WIN32
+    std::error_code ec;
+    for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+        // Asked of the name itself: a reparse point (an AF_UNIX socket, a
+        // link) is never opened, followed or changed.
+        const DWORD attributes = GetFileAttributesW(it->path().c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES ||
+            (attributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) != 0) {
+            continue;
+        }
+        if (!set_owner_only_acl(it->path(), false, error)) {
+            return false;
+        }
+    }
+    if (ec) {
+        error = "can't read " + path_to_utf8(dir) + ": " + error_text(ec);
+        return false;
+    }
+#else
+    (void)dir;
+    (void)error;
 #endif
     return true;
 }

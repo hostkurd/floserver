@@ -490,10 +490,14 @@ void append_utf8(std::string& out, char32_t cp) {
     }
 }
 
-// Bidi controls, zero-width characters and line/paragraph separators.
+// Bidi controls, zero-width and other invisible characters (soft hyphen,
+// Mongolian vowel separator, invisible operators, tags, variation
+// selectors), and line/paragraph separators.
 bool invisible(char32_t cp) {
-    return cp == 0x061C || (cp >= 0x200B && cp <= 0x200F) || (cp >= 0x2028 && cp <= 0x202E) || cp == 0x2060 ||
-           (cp >= 0x2066 && cp <= 0x2069) || cp == 0xFEFF;
+    return cp == 0x00AD || cp == 0x061C || cp == 0x180E || (cp >= 0x200B && cp <= 0x200F) ||
+           (cp >= 0x2028 && cp <= 0x202E) || (cp >= 0x2060 && cp <= 0x2064) || (cp >= 0x2066 && cp <= 0x2069) ||
+           (cp >= 0xFE00 && cp <= 0xFE0F) || cp == 0xFEFF || (cp >= 0xE0000 && cp <= 0xE007F) ||
+           (cp >= 0xE0100 && cp <= 0xE01EF);
 }
 
 bool control(char32_t cp) { return cp < 0x20 || (cp >= 0x7F && cp <= 0x9F); }
