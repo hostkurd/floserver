@@ -662,7 +662,9 @@ jobs:
   clang-tidy:
     name: clang-tidy
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # A run with many new or changed files (nothing cached yet) took 25+ minutes
+    # with Mailpit (#76); 30 cut a combined build off.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install tools
