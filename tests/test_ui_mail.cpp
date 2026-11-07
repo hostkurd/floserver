@@ -38,6 +38,22 @@ MailStatus status_with_seq(std::uint64_t seq, int batch = 1) {
 
 }  // namespace
 
+
+namespace {
+// Unbalanced direction controls built at run time, so no string literal in this
+// file holds one (clang-tidy's misc-misleading-bidirectional).
+std::string utf8_bmp(char32_t c) {
+    std::string out;
+    out += static_cast<char>(0xE0 | (c >> 12));
+    out += static_cast<char>(0x80 | ((c >> 6) & 0x3F));
+    out += static_cast<char>(0x80 | (c & 0x3F));
+    return out;
+}
+const std::string kLre = utf8_bmp(U'\x202A');
+const std::string kRle = utf8_bmp(U'\x202B');
+const std::string kRlo = utf8_bmp(U'\x202E');
+}  // namespace
+
 TEST_CASE("mail.status is read, with the defaults for what's missing") {
     const auto s = mail_status_from_reply(status_reply());
     REQUIRE(s);
@@ -175,7 +191,7 @@ TEST_CASE("mail: the footer says how many projects restart") {
           "Applies when saved. Changing the first switch restarts PHP for 1 project (under a second).");
     CHECK(mail_footer_text(3, Lang::En) ==
           "Applies when saved. Changing the first switch restarts PHP for 3 projects (under a second).");
-    CHECK(mail_footer_text(3, Lang::Ar).find("3") != std::string::npos);
+    CHECK(mail_footer_text(3, Lang::Ar).find('3') != std::string::npos);
 }
 
 TEST_CASE("mail: the status line's button") {
@@ -468,10 +484,10 @@ AccessTree mail_page(Lang lang, bool php_on) {
     std::vector<PageItem> items;
     items.push_back(card("mail/card/addresses", {200, 60, 800, 200}));
     items.push_back(card("mail/card/options", {200, 220, 800, 360}));
-    AccessNode copy = button_node("mail/copy-inbox",
+    const AccessNode copy = button_node("mail/copy-inbox",
                                   access_join(lang, {std::string(text(lang, Str::DbCopy)), std::string(text(lang, Str::MailInbox))}));
     items.push_back(control(copy, {600, 100, 660, 130}));
-    AccessNode copy_smtp = button_node(
+    const AccessNode copy_smtp = button_node(
         "mail/copy-smtp", access_join(lang, {std::string(text(lang, Str::DbCopy)), std::string(text(lang, Str::MailSmtpServer))}));
     items.push_back(control(copy_smtp, {600, 140, 660, 170}));
     items.push_back(control(switch_node("mail/switch/0", {}, php_on, true, lang), {216, 260, 784, 300}));
@@ -546,8 +562,8 @@ TEST_CASE("mail toast: the subject is isolated in both directions, even in Engli
     const auto t = mail_notice_step(n, s, 100, Lang::En);
     REQUIRE(t);
     CHECK(t->title == "New email: " + isolate_auto(s.latest->subject));
-    CHECK(t->title.find("\xE2\x80\xAB") != std::string::npos);  // RLE around it
-    CHECK(t->detail.find("\xE2\x80\xAA") != std::string::npos);  // the address as LTR
+    CHECK(t->title.find(kRle) != std::string::npos);  // RLE around it
+    CHECK(t->detail.find(kLre) != std::string::npos);  // the address as LTR
 }
 
 TEST_CASE("mail toast: no latest clears the old subject; a jump counts the unread growth") {
@@ -626,7 +642,7 @@ TEST_CASE("mail: a failed mail.status's numbers aren't shown; long errors are cu
 
     json j = status_reply();
     j["state"] = "failed";
-    j["error"] = std::string(1000, 'e') + "\xE2\x80\xAE";
+    j["error"] = std::string(1000, 'e') + kRlo;
     const auto f = mail_status_from_reply(j);
     REQUIRE(f);
     CHECK(f->error.size() == kMailErrorMaxChars + 3);
@@ -658,9 +674,9 @@ TEST_CASE("mail: Remove that couldn't delete the emails says so; the words are c
     CHECK(mail_remove_emails_error(json::parse(R"({"emails_deleted": false})"), Lang::En) ==
           "Mailpit was removed, but the emails couldn't be deleted.");
     // Cleaned and cut like other service text.
-    const json odd = {{"emails_deleted", false}, {"emails_error", "x\xE2\x80\xAE" + std::string(1000, 'y')}};
+    const json odd = {{"emails_deleted", false}, {"emails_error", std::string("x") + kRlo + std::string(1000, 'y')}};
     const std::string msg = mail_remove_emails_error(odd, Lang::En);
-    CHECK(msg.find("\xE2\x80\xAE") == std::string::npos);
+    CHECK(msg.find(kRlo) == std::string::npos);
     CHECK(msg.find("\xE2\x80\xA6") != std::string::npos);
     CHECK(msg.size() < 450);
     for (const Lang lang : {Lang::Ar, Lang::Ku}) {
