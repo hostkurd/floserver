@@ -551,6 +551,11 @@ bool MailService::ensure_running(std::string& error) {
         o.working_dir = paths_.dir;
         o.remove_env = mailpit_env_names();
         o.output_log = paths_.log;
+#ifdef _WIN32
+        // A real (empty) standard input: Mailpit's SQLite library (modernc libc)
+        // panics with "no console" at start when stdin is INVALID_HANDLE_VALUE.
+        o.stdin_file = L"\\\\.\\NUL";
+#endif
         process = ChildProcess::start(o, why);
         if (process) {
             // Ready once both sockets take connections and it still runs.
