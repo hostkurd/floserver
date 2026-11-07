@@ -28,6 +28,11 @@ struct Toast {
     // A button on it ("Show in folder", D22); empty: none. A toast with one
     // stays until it's closed, like an error, so there's time to press it.
     std::string action;
+    // New mail (D27, approved 7 Nov): `text` is its bold first line, `detail`
+    // the second ("to customer@example.com"); `mail` gives it an envelope at
+    // its start and a primary (filled) button.
+    std::string detail;
+    bool mail = false;
     bool operator==(const Toast&) const = default;
 };
 
@@ -41,6 +46,8 @@ enum class ToastEvent : std::uint8_t {
 
 // The toast after `event`.
 [[nodiscard]] Toast toast_after(const Toast& toast, ToastEvent event);
+// New mail: the same, with the mail look (stays until it's closed: it has a button).
+[[nodiscard]] Toast toast_mail(const Toast& shown, std::string title, std::string detail, std::string action);
 // A new message: it replaces whatever was shown (the mouse may already be over it).
 [[nodiscard]] Toast toast_with(const Toast& shown, std::string text, ToastKind kind, std::string action = {});
 // Whether the timer runs now: information, shown, and the mouse not over it.

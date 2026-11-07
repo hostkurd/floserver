@@ -124,8 +124,8 @@ void SettingsWindow::load_db(const std::string& series) {
 bool SettingsWindow::on_db_answers(const Snapshot& snap) {
     bool close_now = false;
     for (const Snapshot::DbAnswer& answer : snap.db) {
-        if (answer.method.starts_with("apache.")) {
-            continue;  // Settings > Apache's (settings_apache.cpp)
+        if (answer.method.starts_with("apache.") || answer.method.starts_with("mail.")) {
+            continue;  // Settings > Apache's and Mail's (settings_apache.cpp, settings_mail.cpp)
         }
         const bool save = answer.method == "database.set";
         if (save && db_saving_) {

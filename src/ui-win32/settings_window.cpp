@@ -304,6 +304,9 @@ LRESULT SettingsWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             for (const auto& edit : apache_edits_) {
                 edit->set_font(fonts_.button.get());
             }
+            for (const auto& edit : mail_edits_) {
+                edit->set_font(fonts_.button.get());
+            }
             const RECT& r = *win::int_to_ptr<const RECT*>(lparam);
             SetWindowPos(hwnd_, nullptr, r.left, r.top, r.right - r.left, r.bottom - r.top,
                          SWP_NOZORDER | SWP_NOACTIVATE);
@@ -329,6 +332,9 @@ LRESULT SettingsWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
                     edit->set_font(fonts_.button.get());
                 }
                 for (const auto& edit : apache_edits_) {
+                    edit->set_font(fonts_.button.get());
+                }
+                for (const auto& edit : mail_edits_) {
                     edit->set_font(fonts_.button.get());
                 }
                 relayout();
@@ -506,6 +512,7 @@ void SettingsWindow::on_destroy() {
     port_edits_.clear();
     db_edits_.clear();
     apache_edits_.clear();
+    mail_edits_.clear();
     SecureZeroMemory(root_shown_.data(), root_shown_.size());
     root_shown_.clear();
     WINDOWPLACEMENT wp{};
@@ -536,6 +543,9 @@ void SettingsWindow::apply_theme() {
         edit->set_cue_color(palette(dark_).text_subtle);
         InvalidateRect(edit->hwnd(), nullptr, TRUE);
     }
+    for (const auto& edit : mail_edits_) {
+        InvalidateRect(edit->hwnd(), nullptr, TRUE);
+    }
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
@@ -555,6 +565,14 @@ void SettingsWindow::on_snapshot(const Snapshot& snap) {
     databases_ = snap.databases;
     jobs_ = snap.runtime_jobs;
     updates_ = snap.updates;
+    // Mail (D27): the poll's answer keeps the state, the counts and the saved options current;
+    // what's typed (mail_changes_) is kept apart until Save.
+    if (snap.mail && !mail_saving_) {
+        mail_ = snap.mail;
+        mail_loading_ = false;
+    }
+    php_projects_ = static_cast<std::size_t>(
+        std::count_if(snap.rows.begin(), snap.rows.end(), [](const ProjectRow& r) { return r.on && !r.php.empty(); }));
     for (const std::string& key : snap.settled) {
         starting_.erase(key);
         removing_.erase(key);
@@ -624,6 +642,10 @@ void SettingsWindow::on_snapshot(const Snapshot& snap) {
     if (!was_connected && connected_ && section_ == Section::Apache && !apache_ && !apache_loading_ && !apache_saving_) {
         load_apache();
     }
+    // And Mail's.
+    if (!was_connected && connected_ && section_ == Section::Mail && !mail_ && !mail_loading_ && !mail_saving_) {
+        load_mail();
+    }
     // The server's state, from the main window's poll: nothing is asked for it.
     if (!db_series_.empty()) {
         db_server_ = db_server_from_list(databases_, db_series_);
@@ -637,7 +659,8 @@ void SettingsWindow::on_snapshot(const Snapshot& snap) {
     }
     const bool close_php = on_php_answers(snap);
     const bool close_apache = on_apache_answers(snap);
-    const bool close_now = on_db_answers(snap) || close_php || close_apache;
+    const bool close_mail = on_mail_answers(snap);
+    const bool close_now = on_db_answers(snap) || close_php || close_apache || close_mail;
     if (!close_now && after_save_ != AfterSave::Close) {
         quit_on_close_ = false;  // the Save on the way out was refused: Settings stays, and so does FloServer
     }
@@ -720,6 +743,10 @@ SettingsWindow::Geometry SettingsWindow::layout(HDC dc) const {
     }
     if (section_ == Section::Apache) {
         layout_apache(dc, g, x0, x1, y);
+        return g;
+    }
+    if (section_ == Section::Mail) {
+        layout_mail(dc, g, x0, x1, y);
         return g;
     }
     if (section_ == Section::Php) {
@@ -913,6 +940,7 @@ void SettingsWindow::relayout() {
     place_port_edits();
     place_db_edits();
     place_apache_edits();
+    place_mail_edits();
     place_scroll_bar();
 }
 
@@ -1007,6 +1035,9 @@ const RECT* SettingsWindow::rect_of(const Hit& hit) const {
             if (is_apache_part(hit.part)) {
                 return apache_rect_of(hit);
             }
+            if (is_mail_part(hit.part)) {
+                return mail_rect_of(hit);
+            }
             return is_db_part(hit.part) ? db_rect_of(hit) : php_rect_of(hit);
     }
     return nullptr;
@@ -1031,6 +1062,10 @@ std::vector<SettingsWindow::Hit> SettingsWindow::focus_order() const {
     }
     if (section_ == Section::Apache) {
         apache_focus_order(order);
+        return order;
+    }
+    if (section_ == Section::Mail) {
+        mail_focus_order(order);
         return order;
     }
     if (section_ == Section::Php) {
@@ -1173,6 +1208,8 @@ void SettingsWindow::on_click(const Hit& hit) {
                 on_general_click(hit);
             } else if (is_apache_part(hit.part)) {
                 on_apache_click(hit);
+            } else if (is_mail_part(hit.part)) {
+                on_mail_click(hit);
             } else if (is_db_part(hit.part)) {
                 on_db_click(hit);
             } else {
@@ -1245,6 +1282,12 @@ void SettingsWindow::on_key(WPARAM key) {
             if (section_ == Section::Apache) {
                 if (apache_changes_.empty() && !apache_loading_ && !apache_saving_) {
                     load_apache();  // the modules folder and custom.conf read again
+                }
+                return;
+            }
+            if (section_ == Section::Mail) {
+                if (mail_changes_.empty() && !mail_loading_ && !mail_saving_) {
+                    load_mail();  // mail.status asked again
                 }
                 return;
             }
@@ -1355,32 +1398,50 @@ void SettingsWindow::picker_menu(int group) {
 }
 
 void SettingsWindow::run_button(const Hit& hit) {
-    const RuntimeRow* row = row_of(hit);
-    if (row == nullptr || !connected_) {
+    const RuntimeRow* found = row_of(hit);
+    if (found == nullptr || !connected_) {
         return;
     }
-    const RowGeometry& rg = geometry_.groups[static_cast<std::size_t>(hit.group)].rows[static_cast<std::size_t>(hit.row)];
-    switch (rg.button_kind) {
+    // Copies: snapshots arrive (and rebuild() replaces page_) while a question is open.
+    const RuntimeRow row = *found;
+    const Button kind =
+        geometry_.groups[static_cast<std::size_t>(hit.group)].rows[static_cast<std::size_t>(hit.row)].button_kind;
+    switch (kind) {
         case Button::Download: {
-            const std::string key = settings_install_key(row->name, row->version);
+            const std::string key = settings_install_key(row.name, row.version);
             starting_.insert(ServiceWorker::install_key(key));
             clear_toast();
-            worker_.install(key, {{row->name, row->version}});
+            worker_.install(key, {{row.name, row.version}});
             break;
         }
         case Button::Cancel:
-            if (const RuntimeJob* job = job_for(*row, jobs_); job != nullptr) {
+            if (const RuntimeJob* job = job_for(row, jobs_); job != nullptr) {
                 worker_.cancel_job(job->id);
             }
             break;
-        case Button::Remove:
-            removing_.insert(ServiceWorker::remove_key(row->name, row->folder));
+        case Button::Remove: {
+            // Mailpit asks first: its caught emails may go too (unticked: they stay).
+            bool delete_emails = false;
+            if (row.name == "mailpit") {
+                if (asking_) {
+                    return;
+                }
+                asking_ = true;
+                const bool yes = ask_remove_mailpit(hwnd_, lang_, fill(lang_, Str::MailRemoveAsk, {row.label}), delete_emails);
+                asking_ = false;
+                modal_closed();
+                if (hwnd_ == nullptr || !yes) {
+                    return;
+                }
+            }
+            removing_.insert(ServiceWorker::remove_key(row.name, row.folder));
             clear_toast();
-            worker_.remove_runtime(row->name, row->folder);
+            worker_.remove_runtime(row.name, row.folder, !delete_emails);
             break;
+        }
         case Button::RemoveDisabled:
             // The tooltip's words, for the keyboard.
-            show_message(fill_pattern(text(lang_, Str::SettingsUsedBy), false, {row->used_by}), false);
+            show_message(fill_pattern(text(lang_, Str::SettingsUsedBy), false, {row.used_by}), false);
             return;
         case Button::None:
             return;
@@ -1517,6 +1578,11 @@ void SettingsWindow::paint_shapes(Canvas& c) const {
             c.circle(static_cast<float>(ix) + pxf(8), static_cast<float>(iy) + pxf(8), pxf(6), p.text, pxf(1.3F));
             c.round_outline({ix + px(5), iy + px(2), ix + px(11), iy + px(14)}, pxf(3), p.text, pxf(1.3F));
             stroke(2, 8, 14, 8);
+        } else if (section == Section::Mail) {
+            // Mail's: an envelope, its flap a V.
+            c.round_outline({ix + px(2), iy + px(3), ix + px(14), iy + px(12)}, pxf(1.5F), p.text, pxf(1.3F));
+            stroke(2.5F, 4.5F, 8, 9);
+            stroke(8, 9, 13.5F, 4.5F);
         } else if (section == Section::Php) {
             // PHP's: </>, as in the mockup.
             stroke(5, 5, 2, 8);
@@ -1554,6 +1620,10 @@ void SettingsWindow::paint_shapes(Canvas& c) const {
     }
     if (section_ == Section::Apache) {
         paint_apache_shapes(c);
+        return;
+    }
+    if (section_ == Section::Mail) {
+        paint_mail_shapes(c);
         return;
     }
     if (section_ == Section::Php) {
@@ -1645,6 +1715,10 @@ void SettingsWindow::paint_text(Canvas& c) const {
     }
     if (section_ == Section::Apache) {
         paint_apache_text(c);
+        return;
+    }
+    if (section_ == Section::Mail) {
+        paint_mail_text(c);
         return;
     }
     if (section_ == Section::Php) {

@@ -18,6 +18,8 @@ struct ToastGeometry {
     RECT text{};
     RECT close{};  // the close mark's hit target
     RECT action{};  // its button, when it has one (between the words and the close mark)
+    RECT icon{};    // new mail's envelope, at the start
+    RECT detail{};  // new mail's second line, under `text`
 };
 
 // The card for `toast` in a window `window_w` wide, its bottom edge at

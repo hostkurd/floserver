@@ -247,6 +247,12 @@ void MainWindow::on_shared_key(WPARAM key) {
         case VK_TAB:
             if (!shift && shared_part_ == count - 1) {
                 shared_focused_ = false;
+                if (mail_link_visible()) {
+                    mail_focused_ = true;  // the status line's Mail button
+                    show_focus_ = true;
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                    return;
+                }
                 SetFocus(search_);
                 return;
             }

@@ -107,6 +107,8 @@ std::string SettingsWindow::access_id(const Hit& hit) const {
         "db/version", "db/runtimes", "db/start", "db/stop", "db/restart", "db/port", "db/keep", "db/final-ini",
         "db/edit-ini", "db/field", "db/reset", "db/root-show", "db/root-copy", "db/new-password", "db/set-password",
         "db/discard", "db/save", "db/phpmyadmin",
+        "mail/install", "mail/inbox-link", "mail/copy-inbox", "mail/open-inbox", "mail/copy-smtp", "mail/switch",
+        "mail/max", "mail/test", "mail/delete", "mail/discard", "mail/save",
         "apache/version", "apache/runtimes", "apache/find", "apache/module", "apache/more", "apache/final-conf",
         "apache/edit-conf", "apache/discard", "apache/save",
         "folders/projects/change", "folders/projects/open", "folders/projects/default", "folders/www/change",
@@ -117,6 +119,7 @@ std::string SettingsWindow::access_id(const Hit& hit) const {
     static_assert(kIds[static_cast<std::size_t>(Part::PhpVersion)] == "php/version" &&
                       kIds[static_cast<std::size_t>(Part::PortsChoice)] == "ports/choice" &&
                       kIds[static_cast<std::size_t>(Part::DbVersion)] == "db/version" &&
+                      kIds[static_cast<std::size_t>(Part::MailInstall)] == "mail/install" &&
                       kIds[static_cast<std::size_t>(Part::ApacheVersion)] == "apache/version" &&
                       kIds[static_cast<std::size_t>(Part::FoldersProjectsChange)] == "folders/projects/change" &&
                       kIds[static_cast<std::size_t>(Part::SharedSwitch)] == "shared/switch" &&
@@ -315,6 +318,45 @@ AccessNode SettingsWindow::access_node(const Hit& hit) const {
         case Part::DbSave:
             return button(!db_changes_.empty() && !db_saving_ && connected_);
 
+        // Settings > Mail.
+        case Part::MailInstall:
+            return button(connected_ && !mailpit_installing());
+        case Part::MailInboxLink: {
+            AccessNode n = page_link_node(access_id(hit), {});
+            n.focusable = true;
+            return n;
+        }
+        case Part::MailCopyInbox:
+        case Part::MailCopySmtp: {
+            // Two Copy buttons: each says what it copies.
+            AccessNode n = button_node(access_id(hit),
+                                       access_join(lang_, {std::string(text(lang_, Str::DbCopy)),
+                                                           std::string(text(lang_, hit.part == Part::MailCopyInbox
+                                                                                       ? Str::MailInbox
+                                                                                       : Str::MailSmtpServer))}));
+            n.focusable = true;
+            return n;
+        }
+        case Part::MailOpenInbox:
+            return button(true);
+        case Part::MailSwitch: {
+            // Its words are the label and the note drawn in its row.
+            const bool on = !mail_ ? false
+                            : row == 0 ? mail_php(*mail_, mail_changes_)
+                            : row == 1 ? mail_notices(*mail_, mail_changes_)
+                                       : mail_keep_running(*mail_, mail_changes_);
+            AccessNode n = switch_node(access_id(hit), {}, on, connected_ && !mail_saving_, lang_);
+            n.focusable = true;
+            return n;
+        }
+        case Part::MailTest:
+        case Part::MailDelete:
+            return button(connected_ && !mail_busy_);
+        case Part::MailDiscard:
+            return button(!mail_changes_.empty() && !mail_saving_);
+        case Part::MailSave:
+            return button(!mail_changes_.empty() && !mail_saving_ && connected_ && !mail_max_bad(mail_changes_));
+
         // Settings > Apache.
         case Part::ApacheVersion:
             return combo_node(access_id(hit),
@@ -456,6 +498,13 @@ void SettingsWindow::access_parts(std::vector<PageItem>& items) const {
                 card("db/card/server", g.db.server_card);
                 card("db/card/ini", g.db.ini_card);
                 card("db/card/root", g.db.root_card);
+            }
+            return;
+        case Section::Mail:
+            if (mail_ && mail_->installed) {
+                card("mail/card/addresses", g.mail.addr_card);
+                card("mail/card/options", g.mail.opt_card);
+                card("mail/card/emails", g.mail.emails_card);
             }
             return;
         case Section::Apache:

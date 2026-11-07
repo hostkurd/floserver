@@ -11,6 +11,7 @@
 #include "form_parts.h"
 #include "model/code_editor.h"
 #include "model/first_run.h"
+#include "model/mail_page.h"
 #include "model/php_page.h"
 #include "model/project_menu.h"
 #include "model/toast.h"
@@ -136,6 +137,8 @@ private:
         UpdateCancel,  // stops the download
         UpdateLater,
         UpdateNow,
+        // The status line's Mail · N new (D27).
+        MailLink,
     };
     enum class PanelAction : std::uint8_t { Browser, Folder, Terminal, Editor, Studio, Download };
     // The panel's square icon buttons (approved 3 and 4 Nov), in their order.
@@ -709,6 +712,17 @@ private:
     void start_shared_downloads();
     void open_shared_address();
     void on_shared_key(WPARAM key);
+    // Mail (D27): the status line's "Mail · N new" button opens the inbox, and
+    // a new email earns a toast. The button is a keyboard stop after the Shared
+    // sites row (mail_focused_), only while Mailpit is installed.
+    [[nodiscard]] bool mail_link_visible() const;
+    [[nodiscard]] RECT mail_link_rect(HDC dc) const;
+    [[nodiscard]] RECT mail_link_rect() const;
+    [[nodiscard]] bool mail_keys() const;
+    void on_mail_key(WPARAM key);
+    void open_mail_inbox();
+    void on_mail_snapshot();
+    void paint_mail_link(Canvas& c, const RECT& r, bool text_pass) const;
     void paint_shared_row(Canvas& c, HDC dc, bool text_pass) const;
     // The row's gear: Settings, at its Shared sites section.
     void open_settings_shared();
@@ -917,6 +931,9 @@ private:
     mutable SharedGeometry shared_geometry_;
     bool shared_focused_ = false;  // the keys are on the row (focus_ is then -1)
     int shared_part_ = 0;          // index into shared_focus_order()
+    // Mail (D27): the keys are on the status line's Mail button; what the toast remembers.
+    bool mail_focused_ = false;
+    MailNotice mail_notice_;
 
     // The panel's tabs: the one the user chose (kept across projects) and
     // how far the shown one's content is scrolled.

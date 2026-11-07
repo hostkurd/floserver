@@ -44,6 +44,7 @@ constexpr std::array kOffers{
     OfferSpec{"mariadb", "11.4", Str::FirstRunWhatMariadb, true, false},
     OfferSpec{"node", "24", Str::FirstRunWhatNode, true, false},
     OfferSpec{"composer", "", Str::FirstRunWhatComposer, true, false},
+    OfferSpec{"mailpit", "", Str::FirstRunWhatMailpit, true, false},
     OfferSpec{"python", "3.13", Str::FirstRunWhatPython, false, false},
     OfferSpec{"phpmyadmin", "5.2", Str::FirstRunWhatPma, false, false},
     OfferSpec{"apache", "2.4", Str::FirstRunWhatApache, false, false},
@@ -63,6 +64,9 @@ std::string shown_series(std::string_view name, std::string_view series, std::st
     }
     if (name == "composer") {
         return std::string(version.substr(0, version.find('.')));
+    }
+    if (name == "mailpit") {
+        return std::string(version);  // "Mailpit 1.27.3": it has no series people name it by
     }
     return version_series(name, version);
 }
