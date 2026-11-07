@@ -48,6 +48,8 @@ struct MailStatus {
     std::uint64_t notice_seq = 0;  // grows with each batch of new mail
     std::optional<MailLatest> latest;
     MailSettings settings;
+    // The last mail.status failed: these numbers are from before and aren't shown.
+    bool stale = false;
 };
 
 // mail.status's result; missing fields take the defaults above. Nothing when
@@ -122,6 +124,7 @@ void mail_apply(MailStatus& status, const MailChanges& changes);
 // At most one toast in this time; what comes meanwhile is merged into the next.
 inline constexpr std::int64_t kMailToastGapMs = 5000;
 inline constexpr std::size_t kMailSubjectMaxChars = 70;
+inline constexpr std::size_t kMailErrorMaxChars = 300;  // a service's error words, as shown
 
 // What the window remembers between polls.
 struct MailNotice {
@@ -130,6 +133,7 @@ struct MailNotice {
     std::string subject;                // the newest of them
     std::string to;
     std::optional<std::int64_t> last_toast_ms;
+    std::uint64_t unread = 0;           // at the last poll, for a jump in notice_seq
 };
 
 struct MailToastText {
@@ -141,10 +145,13 @@ struct MailToastText {
 // spaces collapsed, cut with an ellipsis after `max_chars` characters.
 [[nodiscard]] std::string mail_plain_subject(std::string_view subject, std::size_t max_chars = kMailSubjectMaxChars);
 
-// One poll's answer (nothing: no answer, or Mailpit isn't there). The first
-// answer after the program starts only sets what's seen. Returns the toast to
+// One poll's answer. Nothing (the link isn't connected) or Mailpit not installed
+// forgets what was seen, so the first answer after that only records where
+// notice_seq is: a restart isn't missed and old mail isn't announced. A stale
+// answer (the last mail.status failed) changes nothing. `blocked` (an error is
+// on screen) holds the notice back like the gap does. Returns the toast to
 // show now, if any, at `now_ms` (any steady clock, in milliseconds).
 [[nodiscard]] std::optional<MailToastText> mail_notice_step(MailNotice& notice, const std::optional<MailStatus>& status,
-                                                            std::int64_t now_ms, Lang lang);
+                                                            std::int64_t now_ms, Lang lang, bool blocked = false);
 
 }  // namespace floserver::ui

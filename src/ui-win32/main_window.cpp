@@ -1794,6 +1794,17 @@ LRESULT CALLBACK MainWindow::search_proc(HWND hwnd, UINT msg, WPARAM wparam, LPA
             if (wparam == VK_TAB && (GetKeyState(VK_SHIFT) & 0x8000) == 0 && self->focus_update_banner(false)) {
                 return 0;
             }
+            // Shift+Tab: back to the status line's Mail button, the stop before the box.
+            if (wparam == VK_TAB && (GetKeyState(VK_SHIFT) & 0x8000) != 0 && !self->first_run_open() &&
+                !self->wizard_open() && self->mail_link_visible()) {
+                SetFocus(self->hwnd_);
+                self->focus_ = -1;
+                self->shared_focused_ = false;
+                self->mail_focused_ = true;
+                self->show_focus_ = true;
+                InvalidateRect(self->hwnd_, nullptr, FALSE);
+                return 0;
+            }
             if (wparam == VK_DOWN || wparam == VK_TAB || wparam == VK_RETURN) {
                 SetFocus(self->hwnd_);
                 if (self->focus_ < 0 && !self->visible_.empty()) {
@@ -1814,6 +1825,9 @@ LRESULT CALLBACK MainWindow::search_proc(HWND hwnd, UINT msg, WPARAM wparam, LPA
             break;
         case WM_SETFOCUS:
         case WM_KILLFOCUS:
+            if (msg == WM_SETFOCUS) {
+                self->mail_focused_ = false;  // the keys are the box's now (click, Tab or Ctrl+F)
+            }
             InvalidateRect(hwnd, nullptr, TRUE);
             break;
         case WM_PAINT: {
@@ -2065,13 +2079,16 @@ void MainWindow::on_mail_key(WPARAM key) {
     const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
     const auto back = [this] {
         // To the Shared sites row, else the last project.
-        mail_focused_ = false;
         if (width_of(shared_geometry_.row) > 0) {
+            mail_focused_ = false;
             shared_focused_ = true;
             shared_part_ = static_cast<int>(shared_focus_order().size()) - 1;
-        } else {
+        } else if (!visible_.empty()) {
+            mail_focused_ = false;
             focus_ = static_cast<int>(visible_.size()) - 1;
             ensure_visible(focus_);
+        } else {
+            return;  // nothing before it: it keeps the keys
         }
         show_focus_ = true;
         InvalidateRect(hwnd_, nullptr, FALSE);
@@ -2109,7 +2126,9 @@ void MainWindow::on_mail_snapshot() {
     // A new email earns a toast (approved 7 Nov): Mailpit's notice_seq grew since the last poll.
     const std::optional<MailStatus> status = snap_.link == Link::Connected ? snap_.mail : std::nullopt;
     const auto now = static_cast<std::int64_t>(GetTickCount64());
-    if (const auto notice = mail_notice_step(mail_notice_, status, now, lang_)) {
+    // An error on screen keeps the notice pending; it comes once that's dismissed.
+    const bool error_shown = !toast_.text.empty() && toast_.kind == ToastKind::Error;
+    if (const auto notice = mail_notice_step(mail_notice_, status, now, lang_, error_shown)) {
         toast_ = toast_mail(toast_, notice->title, notice->detail, std::string(text(lang_, Str::MailToastOpen)));
         // Said by a screen reader as it comes, without moving the focus.
         access_.notify(access_join(lang_, {notice->title, notice->detail}), false);

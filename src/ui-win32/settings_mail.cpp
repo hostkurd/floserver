@@ -60,7 +60,7 @@ bool SettingsWindow::settle_mail_changes(AfterSave then) {
         return false;
     }
     asking_ = true;
-    const SaveChoice choice = ask_to_save(hwnd_, lang_, std::string(text(lang_, Str::ApacheAskSave)));
+    const SaveChoice choice = ask_to_save(hwnd_, lang_, std::string(text(lang_, Str::MailAskSave)));
     asking_ = false;
     modal_closed();
     if (quit_after_ask_) {
@@ -95,7 +95,12 @@ void SettingsWindow::load_mail() {
 }
 
 bool SettingsWindow::save_mail() {
-    if (!mail_ || mail_changes_.empty() || mail_saving_ || mail_max_bad(mail_changes_)) {
+    if (!mail_ || mail_changes_.empty() || mail_saving_) {
+        return false;
+    }
+    if (mail_max_bad(mail_changes_)) {
+        // From the leave-section or close question too: say why nothing was saved.
+        show_message(std::string(text(lang_, Str::MailMaxBad)), true);
         return false;
     }
     if (!connected_) {
@@ -176,7 +181,10 @@ void SettingsWindow::delete_all_mail() {
         return;
     }
     asking_ = true;
-    const bool yes = ask_delete_mails(hwnd_, lang_, fill(lang_, Str::MailDeleteAsk, {std::to_string(mail_->total)}));
+    const bool yes = ask_delete_mails(
+        hwnd_, lang_,
+        mail_->total == 1 ? std::string(text(lang_, Str::MailDeleteAskOne))
+                          : fill(lang_, Str::MailDeleteAsk, {std::to_string(mail_->total)}));
     asking_ = false;
     modal_closed();
     if (hwnd_ == nullptr || !yes) {
@@ -602,9 +610,9 @@ void SettingsWindow::paint_mail_shapes(Canvas& c) const {
         const Hit hit{Part::MailInstall, -1, -1};
         if (connected_) {
             c.round_rect(mg.install, pxf(4), p.accent);
-        if (hover_ == hit) {
-            c.round_outline(mg.install, pxf(4), p.accent_text, pxf(1));
-        }
+            if (hover_ == hit) {
+                c.round_outline(mg.install, pxf(4), p.accent_text, pxf(1));
+            }
         } else {
             paint_button(c, mg.install, false, false, false);
         }

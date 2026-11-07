@@ -1158,6 +1158,9 @@ void ServiceWorker::run(const std::stop_token& stop) {
                 }
             } else if (mail && mail->error_code == kUnknownMethod) {
                 latest_.mail = mail_not_installed();
+            } else if (mail && latest_.mail) {
+                // Failed some other way: the old numbers aren't kept on show.
+                latest_.mail->stale = true;
             }
             if (installed && installed->ok) {
                 latest_.installed = installed_from_list(installed->result);

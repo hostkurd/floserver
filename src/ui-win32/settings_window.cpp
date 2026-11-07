@@ -1398,47 +1398,50 @@ void SettingsWindow::picker_menu(int group) {
 }
 
 void SettingsWindow::run_button(const Hit& hit) {
-    const RuntimeRow* row = row_of(hit);
-    if (row == nullptr || !connected_) {
+    const RuntimeRow* found = row_of(hit);
+    if (found == nullptr || !connected_) {
         return;
     }
-    const RowGeometry& rg = geometry_.groups[static_cast<std::size_t>(hit.group)].rows[static_cast<std::size_t>(hit.row)];
-    switch (rg.button_kind) {
+    // Copies: snapshots arrive (and rebuild() replaces page_) while a question is open.
+    const RuntimeRow row = *found;
+    const Button kind =
+        geometry_.groups[static_cast<std::size_t>(hit.group)].rows[static_cast<std::size_t>(hit.row)].button_kind;
+    switch (kind) {
         case Button::Download: {
-            const std::string key = settings_install_key(row->name, row->version);
+            const std::string key = settings_install_key(row.name, row.version);
             starting_.insert(ServiceWorker::install_key(key));
             clear_toast();
-            worker_.install(key, {{row->name, row->version}});
+            worker_.install(key, {{row.name, row.version}});
             break;
         }
         case Button::Cancel:
-            if (const RuntimeJob* job = job_for(*row, jobs_); job != nullptr) {
+            if (const RuntimeJob* job = job_for(row, jobs_); job != nullptr) {
                 worker_.cancel_job(job->id);
             }
             break;
         case Button::Remove: {
             // Mailpit asks first: its caught emails may go too (unticked: they stay).
             bool delete_emails = false;
-            if (row->name == "mailpit") {
+            if (row.name == "mailpit") {
                 if (asking_) {
                     return;
                 }
                 asking_ = true;
-                const bool yes = ask_remove_mailpit(hwnd_, lang_, fill(lang_, Str::MailRemoveAsk, {row->label}), delete_emails);
+                const bool yes = ask_remove_mailpit(hwnd_, lang_, fill(lang_, Str::MailRemoveAsk, {row.label}), delete_emails);
                 asking_ = false;
                 modal_closed();
                 if (hwnd_ == nullptr || !yes) {
                     return;
                 }
             }
-            removing_.insert(ServiceWorker::remove_key(row->name, row->folder));
+            removing_.insert(ServiceWorker::remove_key(row.name, row.folder));
             clear_toast();
-            worker_.remove_runtime(row->name, row->folder, !delete_emails);
+            worker_.remove_runtime(row.name, row.folder, !delete_emails);
             break;
         }
         case Button::RemoveDisabled:
             // The tooltip's words, for the keyboard.
-            show_message(fill_pattern(text(lang_, Str::SettingsUsedBy), false, {row->used_by}), false);
+            show_message(fill_pattern(text(lang_, Str::SettingsUsedBy), false, {row.used_by}), false);
             return;
         case Button::None:
             return;

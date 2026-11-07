@@ -75,9 +75,9 @@ std::optional<MailStatus> mail_status_from_reply(const json& reply) {
     }
     MailStatus s;
     s.installed = flag_of(reply, "installed", false);
-    s.version = text_of(reply, "version");
+    s.version = mail_plain_subject(text_of(reply, "version"), 40);
     s.state = s.installed ? state_of(text_of(reply, "state")) : MailState::NotInstalled;
-    s.error = text_of(reply, "error");
+    s.error = mail_plain_subject(text_of(reply, "error"), kMailErrorMaxChars);
     if (reply.contains("smtp_port") && reply["smtp_port"].is_number_integer()) {
         const auto port = reply["smtp_port"].get<std::int64_t>();
         if (port > 0 && port < 65536) {
@@ -88,7 +88,7 @@ std::optional<MailStatus> mail_status_from_reply(const json& reply) {
         s.inbox_url = url;
     }
     s.inbox_served = flag_of(reply, "inbox_served", true);
-    s.inbox_blocked_by = text_of(reply, "inbox_blocked_by");
+    s.inbox_blocked_by = mail_plain_subject(text_of(reply, "inbox_blocked_by"), 80);
     s.unread = count_of(reply, "unread");
     s.total = count_of(reply, "total");
     s.size_bytes = count_of(reply, "size_bytes");
@@ -160,6 +160,9 @@ std::string mail_smtp_text(const MailStatus& status) { return "127.0.0.1 : " + s
 std::string mail_smtp_copy(const MailStatus& status) { return "127.0.0.1:" + std::to_string(status.smtp_port); }
 
 std::string mail_count_text(const MailStatus& status, Lang lang) {
+    if (status.stale) {
+        return {};
+    }
     const std::string size = human_bytes(status.size_bytes);
     if (status.total == 1) {
         return fill(lang, Str::MailCountOne, {size});
@@ -267,7 +270,7 @@ std::string mail_footer_text(std::size_t php_projects, Lang lang) {
 bool mail_link_shown(const std::optional<MailStatus>& status) { return status && status->installed; }
 
 std::string mail_link_text(const MailStatus& status, Lang lang) {
-    if (status.unread == 0) {
+    if (status.unread == 0 || status.stale) {
         return std::string(text(lang, Str::MailLink));
     }
     return fill_pattern(text(lang, Str::MailLinkNew), false, {std::to_string(status.unread)});
@@ -277,36 +280,44 @@ std::string mail_link_text(const MailStatus& status, Lang lang) {
 
 namespace {
 
-// Code points in UTF-8; false when `s[i]` doesn't start a whole one.
-std::size_t sequence_length(std::string_view s, std::size_t i) {
+// One code point read from UTF-8 at `i`: length 0 when it isn't a whole, valid one
+// (stray or missing continuation bytes, overlong forms, surrogates, above U+10FFFF).
+struct Decoded {
+    std::size_t len = 0;
+    char32_t cp = 0;
+};
+
+Decoded decode_at(std::string_view s, std::size_t i) {
     const auto b = static_cast<unsigned char>(s[i]);
-    const std::size_t len = b < 0x80 ? 1 : (b & 0xE0U) == 0xC0U ? 2 : (b & 0xF0U) == 0xE0U ? 3 : (b & 0xF8U) == 0xF0U ? 4 : 0;
+    if (b < 0x80) {
+        return {1, b};
+    }
+    const std::size_t len = (b & 0xE0U) == 0xC0U ? 2 : (b & 0xF0U) == 0xE0U ? 3 : (b & 0xF8U) == 0xF0U ? 4 : 0;
     if (len == 0 || i + len > s.size()) {
-        return 0;
+        return {};
     }
+    char32_t cp = len == 2 ? (b & 0x1FU) : len == 3 ? (b & 0x0FU) : (b & 0x07U);
     for (std::size_t k = 1; k < len; ++k) {
-        if ((static_cast<unsigned char>(s[i + k]) & 0xC0U) != 0x80U) {
-            return 0;
+        const auto c = static_cast<unsigned char>(s[i + k]);
+        if ((c & 0xC0U) != 0x80U) {
+            return {};
         }
+        cp = (cp << 6U) | (c & 0x3FU);
     }
-    return len;
+    const char32_t least = len == 2 ? 0x80 : len == 3 ? 0x800 : 0x10000;
+    if (cp < least || (cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF) {
+        return {};
+    }
+    return {len, cp};
 }
 
-// U+200E/F, U+202A-202E, U+2066-2069 and the byte-order mark: direction marks.
-bool is_direction_mark(std::string_view seq) {
-    if (seq.size() != 3) {
-        return false;
-    }
-    const auto a = static_cast<unsigned char>(seq[0]);
-    const auto b = static_cast<unsigned char>(seq[1]);
-    const auto c = static_cast<unsigned char>(seq[2]);
-    if (a == 0xE2 && b == 0x80) {
-        return c == 0x8E || c == 0x8F || (c >= 0xAA && c <= 0xAE);
-    }
-    if (a == 0xE2 && b == 0x81) {
-        return c >= 0xA6 && c <= 0xA9;
-    }
-    return a == 0xEF && b == 0xBB && c == 0xBF;
+// Characters that change how a line reads or hide in it: direction marks and
+// embeddings, Arabic letter mark, C1 controls, line/paragraph separators,
+// zero-width characters, word joiner and the byte-order mark.
+bool is_invisible(char32_t cp) {
+    return cp == 0x200E || cp == 0x200F || (cp >= 0x202A && cp <= 0x202E) || (cp >= 0x2066 && cp <= 0x2069) ||
+           cp == 0x061C || (cp >= 0x80 && cp <= 0x9F) || cp == 0x2028 || cp == 0x2029 || (cp >= 0x200B && cp <= 0x200D) ||
+           cp == 0x2060 || cp == 0xFEFF;
 }
 
 }  // namespace
@@ -317,19 +328,18 @@ std::string mail_plain_subject(std::string_view subject, std::size_t max_chars) 
     bool space = false;
     bool cut = false;
     for (std::size_t i = 0; i < subject.size();) {
-        const std::size_t len = sequence_length(subject, i);
-        if (len == 0) {
+        const Decoded d = decode_at(subject, i);
+        if (d.len == 0) {
             ++i;  // broken UTF-8 is left out
             continue;
         }
-        const std::string_view seq = subject.substr(i, len);
-        i += len;
-        if (is_direction_mark(seq)) {
+        const std::string_view seq = subject.substr(i, d.len);
+        i += d.len;
+        if (is_invisible(d.cp)) {
             continue;
         }
-        const auto first = static_cast<unsigned char>(seq[0]);
-        if (len == 1 && (first <= 0x20 || first == 0x7F)) {
-            space = !out.empty();  // controls and spaces: one space, never first
+        if (d.cp <= 0x20 || d.cp == 0x7F || d.cp == 0xA0) {
+            space = !out.empty();  // controls and spaces (also no-break): one space, never first
             continue;
         }
         if (chars >= max_chars) {
@@ -355,44 +365,56 @@ std::string mail_plain_subject(std::string_view subject, std::size_t max_chars) 
 }
 
 std::optional<MailToastText> mail_notice_step(MailNotice& notice, const std::optional<MailStatus>& status,
-                                              std::int64_t now_ms, Lang lang) {
+                                              std::int64_t now_ms, Lang lang, bool blocked) {
+    if (status && status->stale) {
+        return std::nullopt;  // no real answer this time: nothing changes
+    }
     if (!status || !status->installed) {
-        return std::nullopt;  // nothing seen; what was seen before still counts
+        // Not connected or not installed: forget, so a restart isn't missed and
+        // the first answer after this only records notice_seq.
+        notice = MailNotice{};
+        return std::nullopt;
     }
     if (!notice.seen || status->notice_seq < *notice.seen) {
         // The first answer, or the service started over: where it is now is the start.
         notice.seen = status->notice_seq;
         notice.pending = 0;
+        notice.unread = status->unread;
         return std::nullopt;
     }
     if (status->notice_seq > *notice.seen) {
         notice.seen = status->notice_seq;
         if (status->settings.notices) {
-            const int batch = status->latest ? status->latest->new_in_batch : 1;
-            notice.pending += static_cast<std::uint64_t>(std::max(1, batch));
+            std::uint64_t batch = 1;
             if (status->latest) {
-                notice.subject = status->latest->subject;
-                notice.to = status->latest->to;
+                batch = static_cast<std::uint64_t>(std::max(1, status->latest->new_in_batch));
             }
+            if (status->unread > notice.unread) {
+                batch = std::max(batch, status->unread - notice.unread);  // several batches in one poll
+            }
+            notice.pending += batch;
+            // The newest email's own words; none given: not the previous email's.
+            notice.subject = status->latest ? status->latest->subject : std::string();
+            notice.to = status->latest ? status->latest->to : std::string();
         }
     }
+    notice.unread = status->unread;
     if (!status->settings.notices) {
         notice.pending = 0;  // switched off: nothing is held back
         return std::nullopt;
     }
-    if (notice.pending == 0) {
+    if (notice.pending == 0 || blocked) {
         return std::nullopt;
     }
     if (notice.last_toast_ms && now_ms - *notice.last_toast_ms < kMailToastGapMs) {
         return std::nullopt;  // too soon: merged into the next
     }
-    const bool rtl = is_rtl(lang);
+    // Typed by a stranger: it follows its own first letter, and never joins the sentence's direction.
     std::string subject = mail_plain_subject(notice.subject);
     if (subject.empty()) {
         subject = std::string(text(lang, Str::MailNoSubject));
     }
-    // Typed by a stranger: it follows its own first letter, and never joins the sentence's direction.
-    const std::string shown_subject = rtl ? isolate_auto(subject) : subject;
+    const std::string shown_subject = isolate_auto(subject);
     MailToastText out;
     if (notice.pending > 1) {
         out.title = fill_pattern(text(lang, Str::MailToastMany), false, {std::to_string(notice.pending)});
@@ -401,7 +423,7 @@ std::optional<MailToastText> mail_notice_step(MailNotice& notice, const std::opt
         out.title = fill_pattern(text(lang, Str::MailToastOne), false, {shown_subject});
         const std::string to = mail_plain_subject(notice.to, 120);
         if (!to.empty()) {
-            out.detail = fill_pattern(text(lang, Str::MailToastTo), false, {rtl ? isolate_ltr(to) : to});
+            out.detail = fill_pattern(text(lang, Str::MailToastTo), false, {isolate_ltr(to)});
         }
     }
     notice.pending = 0;

@@ -790,6 +790,8 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     MailRemoveAsk,          // {0}: "Mailpit 1.27.3"
     MailRemoveEmails,
     FirstRunWhatMailpit,
+    MailAskSave,
+    MailDeleteAskOne,
     Count_,
 };
 

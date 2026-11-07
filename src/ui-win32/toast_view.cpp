@@ -213,9 +213,14 @@ void ToastPopup::show(const Toast& toast, const ToastGeometry& g, HFONT font, bo
         tracking_ = false;
         toast_.text.clear();  // named below
     }
-    if (toast.text != toast_.text) {
-        // Never drawn (a popup has no title bar): the name screen readers find it by.
-        SetWindowTextW(hwnd_, win::widen(access_text(toast.text)).c_str());
+    if (toast.text != toast_.text || toast.detail != toast_.detail) {
+        // Never drawn (a popup has no title bar): the name screen readers find it by,
+        // both lines of it.
+        std::string name = toast.text;
+        if (!toast.detail.empty()) {
+            name += ". " + toast.detail;
+        }
+        SetWindowTextW(hwnd_, win::widen(access_text(name)).c_str());
     }
     toast_ = toast;
     card_ = g.card;

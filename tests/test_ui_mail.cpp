@@ -238,8 +238,8 @@ TEST_CASE("mail toast: never on the first answer; then when notice_seq grows") {
     // A new batch: one email says its subject and where it went.
     const auto one = mail_notice_step(n, status_with_seq(8), 5000, Lang::En);
     REQUIRE(one);
-    CHECK(one->title == "New email: Reset your password");
-    CHECK(one->detail == "to customer@example.com");
+    CHECK(one->title == "New email: " + isolate_auto("Reset your password"));
+    CHECK(one->detail == "to " + isolate_ltr("customer@example.com"));
     CHECK_FALSE(mail_notice_step(n, status_with_seq(8), 7000, Lang::En));  // said once
     // The same words in Arabic and Kurdish (the subject isolated, in right-to-left).
     MailNotice ar;
@@ -263,7 +263,7 @@ TEST_CASE("mail toast: a batch says how many; bursts are merged, one toast in 5 
     const auto many = mail_notice_step(n, status_with_seq(2, 4), 10000, Lang::En);
     REQUIRE(many);
     CHECK(many->title == "4 new emails");
-    CHECK(many->detail == "Latest: Reset your password");
+    CHECK(many->detail == "Latest: " + isolate_auto("Reset your password"));
 
     // Within 5 seconds of the last one: held, and merged with what comes next.
     CHECK_FALSE(mail_notice_step(n, status_with_seq(3), 12000, Lang::En));
@@ -281,7 +281,7 @@ TEST_CASE("mail toast: a batch says how many; bursts are merged, one toast in 5 
     CHECK_FALSE(mail_notice_step(n, status_with_seq(6), 32000, Lang::En));
     const auto single = mail_notice_step(n, status_with_seq(6), 36000, Lang::En);
     REQUIRE(single);
-    CHECK(single->title == "New email: Reset your password");
+    CHECK(single->title == "New email: " + isolate_auto("Reset your password"));
 }
 
 TEST_CASE("mail toast: switched off, empty subjects, and a service that started over") {
@@ -301,12 +301,12 @@ TEST_CASE("mail toast: switched off, empty subjects, and a service that started 
     empty.latest->subject = "  ";
     const auto none = mail_notice_step(n, empty, 30000, Lang::En);
     REQUIRE(none);
-    CHECK(none->title == "New email: (no subject)");
+    CHECK(none->title == "New email: " + isolate_auto("(no subject)"));
     MailStatus longer = status_with_seq(4);
     longer.latest->subject = std::string(500, 'a');
     const auto cut = mail_notice_step(n, longer, 40000, Lang::En);
     REQUIRE(cut);
-    CHECK(cut->title.ends_with("\xE2\x80\xA6"));
+    CHECK(cut->title.find("\xE2\x80\xA6") != std::string::npos);
     CHECK(cut->title.size() < 120);
 
     // A seq that went back: the service started over; that's the new start.
@@ -489,7 +489,7 @@ AccessTree mail_page(Lang lang, bool php_on) {
 
 }  // namespace
 
-TEST_CASE("mail settings access: cards, switch and the two Copy buttons, in each language") {
+TEST_CASE("mail settings page: add_page names the cards, switch and the two Copy buttons, in each language") {
     for (const Lang lang : {Lang::En, Lang::Ar, Lang::Ku}) {
         CAPTURE(static_cast<int>(lang));
         const AccessTree t = mail_page(lang, true);
@@ -516,4 +516,132 @@ TEST_CASE("mail settings access: cards, switch and the two Copy buttons, in each
     CHECK(tab.set_size == 9);
     CHECK(section_node(5, text(Lang::Ar, kSettingsSidebar.at(5)), false, 9).name == "البريد");
     CHECK(section_node(5, text(Lang::Ku, kSettingsSidebar.at(5)), false, 9).name == "ئیمەیل");
+}
+
+TEST_CASE("mail: every kind of invisible or odd character is gone from a subject") {
+    const auto cleaned = [](std::string_view in) { return mail_plain_subject(in); };
+    CHECK(cleaned("a\xD8\x9C" "b") == "ab");                       // U+061C Arabic letter mark
+    CHECK(cleaned("a\xC2\x80\xC2\x85\xC2\x9F" "b") == "ab");     // C1 controls
+    CHECK(cleaned("a\xE2\x80\xA8\xE2\x80\xA9" "b") == "ab");   // line and paragraph separators
+    CHECK(cleaned("a\xE2\x80\x8B\xE2\x80\x8C\xE2\x80\x8D" "b") == "ab");  // zero-width
+    CHECK(cleaned("a\xE2\x81\xA0" "b") == "ab");                  // word joiner
+    CHECK(cleaned("a\xEF\xBB\xBF" "b") == "ab");                  // byte-order mark
+    CHECK(cleaned("a\xE2\x81\xA6" "b" "\xE2\x81\xA9") == "ab");  // isolates
+    CHECK(cleaned("a\xC2\xA0" "b") == "a b");                      // no-break space is a space
+    CHECK(cleaned("\xC2\xA0\xC2\xA0" "a") == "a");
+    CHECK(cleaned("a\xC0\xAF" "b") == "ab");                       // overlong "/"
+    CHECK(cleaned("a\xE0\x80\xAF" "b") == "ab");                  // overlong, 3 bytes
+    CHECK(cleaned("a\xF0\x80\x80\xAF" "b") == "ab");             // overlong, 4 bytes
+    CHECK(cleaned("a\xED\xA0\x80" "b") == "ab");                  // surrogate U+D800
+    CHECK(cleaned("a\xF4\x90\x80\x80" "b") == "ab");             // above U+10FFFF
+    CHECK(cleaned("a\xF0\x9F\x98\x80" "b") == "a\xF0\x9F\x98\x80" "b");  // a real emoji stays
+    CHECK(cleaned("a\xEF\xBF\xBD" "b") == "a\xEF\xBF\xBD" "b");  // U+FFFD itself is fine
+}
+
+TEST_CASE("mail toast: the subject is isolated in both directions, even in English") {
+    MailNotice n;
+    (void)mail_notice_step(n, status_with_seq(1), 0, Lang::En);
+    MailStatus s = status_with_seq(2);
+    s.latest->subject = "\xD9\x85\xD8\xB1\xD8\xAD\xD8\xA8\xD8\xA7";  // an Arabic subject
+    const auto t = mail_notice_step(n, s, 100, Lang::En);
+    REQUIRE(t);
+    CHECK(t->title == "New email: " + isolate_auto(s.latest->subject));
+    CHECK(t->title.find("\xE2\x80\xAB") != std::string::npos);  // RLE around it
+    CHECK(t->detail.find("\xE2\x80\xAA") != std::string::npos);  // the address as LTR
+}
+
+TEST_CASE("mail toast: no latest clears the old subject; a jump counts the unread growth") {
+    MailNotice n;
+    (void)mail_notice_step(n, status_with_seq(1), 0, Lang::En);
+    CHECK(mail_notice_step(n, status_with_seq(2), 10000, Lang::En));
+    MailStatus bare = status_with_seq(3);
+    bare.latest.reset();
+    const auto t = mail_notice_step(n, bare, 20000, Lang::En);
+    REQUIRE(t);
+    CHECK(t->title.find("Reset your password") == std::string::npos);
+    CHECK(t->title.find("(no subject)") != std::string::npos);
+    CHECK(t->detail.empty());
+
+    // Three emails by three batches between polls: unread grew by 3, each batch said 1.
+    MailStatus jump = status_with_seq(6);
+    jump.unread = 6;
+    const auto many = mail_notice_step(n, jump, 40000, Lang::En);
+    REQUIRE(many);
+    CHECK(many->title == "3 new emails");
+    // Batch bigger than the unread growth: the batch wins.
+    MailStatus big = status_with_seq(7, 5);
+    big.unread = 7;
+    const auto five = mail_notice_step(n, big, 60000, Lang::En);
+    REQUIRE(five);
+    CHECK(five->title == "5 new emails");
+    // Unread went down (read in the inbox): not a negative count.
+    MailStatus read = status_with_seq(8);
+    read.unread = 0;
+    const auto one = mail_notice_step(n, read, 80000, Lang::En);
+    REQUIRE(one);
+    CHECK(one->title.starts_with("New email: "));
+}
+
+TEST_CASE("mail toast: not connected or not installed forgets; the first answer after only records") {
+    MailNotice n;
+    (void)mail_notice_step(n, status_with_seq(5), 0, Lang::En);
+    REQUIRE(n.seen);
+    // Link lost: forgotten.
+    CHECK_FALSE(mail_notice_step(n, std::nullopt, 1000, Lang::En));
+    CHECK_FALSE(n.seen);
+    // Back: mail that came meanwhile isn't announced; the seq is just recorded.
+    CHECK_FALSE(mail_notice_step(n, status_with_seq(9), 5000, Lang::En));
+    CHECK(*n.seen == 9);
+    CHECK(mail_notice_step(n, status_with_seq(10), 20000, Lang::En));
+    // Not installed: forgotten too; a service that restarted with a lower seq isn't missed after.
+    CHECK_FALSE(mail_notice_step(n, mail_not_installed(), 30000, Lang::En));
+    CHECK_FALSE(n.seen);
+    CHECK_FALSE(mail_notice_step(n, status_with_seq(0), 31000, Lang::En));
+    CHECK(mail_notice_step(n, status_with_seq(1), 60000, Lang::En));
+
+    // A stale answer (mail.status failed) changes nothing.
+    MailStatus stale = status_with_seq(50);
+    stale.stale = true;
+    CHECK_FALSE(mail_notice_step(n, stale, 70000, Lang::En));
+    CHECK(*n.seen == 1);
+}
+
+TEST_CASE("mail toast: held while an error is shown, then comes") {
+    MailNotice n;
+    (void)mail_notice_step(n, status_with_seq(1), 0, Lang::En);
+    CHECK_FALSE(mail_notice_step(n, status_with_seq(2), 10000, Lang::En, true));
+    CHECK(n.pending == 1);
+    CHECK_FALSE(mail_notice_step(n, status_with_seq(3), 12000, Lang::En, true));
+    CHECK(n.pending == 2);
+    const auto t = mail_notice_step(n, status_with_seq(3), 14000, Lang::En, false);
+    REQUIRE(t);
+    CHECK(t->title == "2 new emails");
+}
+
+TEST_CASE("mail: a failed mail.status's numbers aren't shown; long errors are cut") {
+    MailStatus s = *mail_status_from_reply(status_reply());
+    s.stale = true;
+    CHECK(mail_link_text(s, Lang::En) == "Mail");
+    CHECK(mail_count_text(s, Lang::En).empty());
+
+    json j = status_reply();
+    j["state"] = "failed";
+    j["error"] = std::string(1000, 'e') + "\xE2\x80\xAE";
+    const auto f = mail_status_from_reply(j);
+    REQUIRE(f);
+    CHECK(f->error.size() == kMailErrorMaxChars + 3);
+    CHECK(f->error.ends_with("\xE2\x80\xA6"));
+    j["error"] = "bad\xE2\x80\xAE" "rtl\n";
+    CHECK(mail_status_from_reply(j)->error == "badrtl");
+}
+
+TEST_CASE("mail: the save question and the one-email delete question are in every language") {
+    CHECK(text(Lang::En, Str::MailAskSave) == "Save your changes to Mail?");
+    CHECK(text(Lang::En, Str::MailDeleteAskOne) == "Delete the 1 email? This can't be undone.");
+    for (const Lang lang : {Lang::En, Lang::Ar, Lang::Ku}) {
+        CHECK_FALSE(text(lang, Str::MailAskSave).empty());
+        CHECK_FALSE(text(lang, Str::MailDeleteAskOne).empty());
+        CHECK(text(lang, Str::MailAskSave) != text(lang, Str::ApacheAskSave));
+    }
+    CHECK(text(Lang::En, Str::MailAskSave) != text(Lang::En, Str::ApacheAskSave));
 }

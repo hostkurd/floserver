@@ -1560,6 +1560,10 @@ constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
     Entry{Str::MailRemoveEmails, "Also delete the caught emails", "حذف الرسائل الملتقطة أيضًا", "ئیمەیلە گیراوەکانیش بسڕدرێنەوە"},
     Entry{Str::FirstRunWhatMailpit, "catches the emails your sites send", "يلتقط رسائل البريد التي ترسلها مواقعك",
           "ئیمەیلەکانی ماڵپەڕەکانت دەگرێت"},
+    Entry{Str::MailAskSave, "Save your changes to Mail?", "هل تريد حفظ تغييراتك على البريد؟",
+          "گۆڕانکارییەکانت لە ئیمەیل پاشەکەوت بکرێن؟"},
+    Entry{Str::MailDeleteAskOne, "Delete the 1 email? This can't be undone.", "حذف الرسالة الوحيدة؟ لا يمكن التراجع عن ذلك.",
+          "ئەو یەک ئیمەیلە دەسڕدرێتەوە؟ ناتوانرێت پاشگەز ببیتەوە."},
 }};
 
 #undef FLO_LRI
