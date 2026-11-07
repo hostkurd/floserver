@@ -203,7 +203,7 @@ LiveResult fetch_live_list(HttpTransport& http, std::string_view cdn,
 }
 
 std::string runtime_title(std::string_view runtime, std::string_view version) {
-    static constexpr std::array<std::pair<std::string_view, std::string_view>, 10> kNames = {{
+    static constexpr std::array<std::pair<std::string_view, std::string_view>, 11> kNames = {{
         {"php", "PHP"},
         {"mariadb", "MariaDB"},
         {"node", "Node.js"},
@@ -213,6 +213,7 @@ std::string runtime_title(std::string_view runtime, std::string_view version) {
         {"wordpress", "WordPress"},
         {"python", "Python"},
         {"phpmyadmin", "phpMyAdmin"},
+        {"mailpit", "Mailpit"},
         {kAppFolder, "FloServer"},
     }};
     std::string name(runtime);
@@ -378,6 +379,11 @@ OfficialSource official_source(std::string_view path) {
         // Each download has its own .sha256 next to it: "<hash>  <file>".
         s.kind = Kind::Sums;
         s.urls = {"https://files.phpmyadmin.net/phpMyAdmin/" + v + "/" + p.file + ".sha256"};
+    } else if (p.runtime == "mailpit") {
+        // Mailpit's releases have no checksum file (md5sum off, no sha256 in
+        // its release workflow), so the GitHub download itself is compared.
+        s.kind = Kind::Original;
+        s.urls = {"https://github.com/axllent/mailpit/releases/download/v" + v + "/" + p.file};
     } else if (p.runtime == "apache" || p.runtime == kAppFolder) {
         // Apache Lounge publishes no checksum list; FloServer's installer is
         // HostKurd's own, compared with the CI artifact.
