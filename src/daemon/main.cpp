@@ -44,6 +44,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <functional>
 #include <cstdlib>
 #include <filesystem>
@@ -1841,15 +1842,47 @@ floserver::core::BackupHooks backup_hooks(const std::shared_ptr<Service>& servic
     return hooks;
 }
 
+#ifdef _WIN32
+// floserverd is a Windows program, not a console one, so no console window
+// ever flashes when the window, flo, Start with Windows or the installer
+// starts it. What it prints as it ends (--version, "already running", an
+// error at start) still reaches a console it was typed in: it borrows its
+// parent's console then, and only then, since a service attached to a
+// console would end when that console is closed. Output that's already
+// going somewhere (a pipe or a file: CI, the tests) stays as it is.
+void use_parent_console() {
+    const auto missing = [](DWORD which) {
+        HANDLE handle = GetStdHandle(which);
+        return handle == nullptr || handle == INVALID_HANDLE_VALUE;
+    };
+    const bool out = missing(STD_OUTPUT_HANDLE);
+    const bool err = missing(STD_ERROR_HANDLE);
+    if ((!out && !err) || AttachConsole(ATTACH_PARENT_PROCESS) == FALSE) {
+        return;
+    }
+    std::FILE* reopened = nullptr;
+    if (out && freopen_s(&reopened, "CONOUT$", "w", stdout) == 0) {
+        std::cout.clear();
+    }
+    if (err && freopen_s(&reopened, "CONOUT$", "w", stderr) == 0) {
+        std::cerr.clear();
+    }
+}
+#else
+void use_parent_console() {}
+#endif
+
 int run() {
     const std::string instance = ipc::default_instance();
     std::unique_ptr<ipc::Server> server;
     std::string error;
     switch (ipc::Server::listen(instance, server, error)) {
         case ipc::ListenStatus::AlreadyRunning:
+            use_parent_console();
             std::cout << "FloServer is already running.\n";
             return 0;
         case ipc::ListenStatus::Failed:
+            use_parent_console();
             std::cerr << "floserverd: " << error << "\n";
             return 1;
         case ipc::ListenStatus::Listening:
@@ -2031,14 +2064,17 @@ int main(int argc, char** argv) {
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
 #endif
     if (argc > 1 && std::string_view(argv[1]) == "--version") {
+        use_parent_console();
         std::cout << "floserverd " << floserver::core::kVersion << "\n";
         return 0;
     }
     try {
         return run();
     } catch (const std::exception& e) {
+        use_parent_console();
         std::cerr << "floserverd: " << e.what() << "\n";
     } catch (...) {
+        use_parent_console();
         std::cerr << "floserverd: unexpected error\n";
     }
     return 1;
