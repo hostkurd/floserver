@@ -374,6 +374,7 @@ void MainWindow::start_update() {
         settings_.reset();
     }
     quitting_ = true;
+    mark_quitting();  // the FloServer the update opens at its end waits for this one to end
     DestroyWindow(hwnd_);
 }
 

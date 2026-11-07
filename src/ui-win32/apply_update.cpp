@@ -604,6 +604,10 @@ std::wstring updating_mark_name(const std::string& service_instance) {
     return L"Local\\FloServerUpdating." + w(service_instance);
 }
 
+std::wstring quitting_mark_name(const std::string& service_instance) {
+    return L"Local\\FloServerQuitting." + w(service_instance);
+}
+
 int run_apply_update(HINSTANCE instance, Lang lang, const ApplyUpdateArgs& args) {
     Dialog d;
     d.lang = lang;

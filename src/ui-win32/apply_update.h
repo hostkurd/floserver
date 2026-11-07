@@ -36,10 +36,13 @@
 namespace floserver::ui {
 
 // The marks the windows and the updater leave for each other (per service
-// instance): a FloServer window is open; an update is being installed (no
-// window opens meanwhile, so nothing starts floserverd mid-install).
+// instance): a FloServer window is open (a mutex its process owns until it
+// ends); an update is being installed (no window opens meanwhile, so
+// nothing starts floserverd mid-install); the open window is quitting (a
+// FloServer.exe started meanwhile waits for it to end, then opens).
 [[nodiscard]] std::wstring window_mark_name(const std::string& service_instance);
 [[nodiscard]] std::wstring updating_mark_name(const std::string& service_instance);
+[[nodiscard]] std::wstring quitting_mark_name(const std::string& service_instance);
 
 // FloServer.exe and the DLLs beside it (floserver-setup.dll among them),
 // copied into a new folder of their own under %TEMP%

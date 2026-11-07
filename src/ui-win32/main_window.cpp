@@ -1,10 +1,13 @@
 #include "main_window.h"
 
+#include "apply_update.h"
 #include "main_window_layout.h"
 #include "model/theme.h"
 #include "model/view_model.h"
 #include "window_prefs.h"
 #include "window_style.h"
+
+#include "floserver/core/ipc.h"
 
 #include <commctrl.h>
 #include <windowsx.h>
@@ -124,6 +127,10 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
     }
     // Anything may change what's shown: the elements are made again when next asked for.
     access_dirty_ = true;
+    // A screen reader's requests that came while a menu or question was open run once it's closed.
+    if (access_gate_.waiting()) {
+        modal_closed();
+    }
     if (msg == taskbar_created_ && taskbar_created_ != 0) {
         tray_added_ = false;  // Explorer restarted
         add_tray_icon();
@@ -586,6 +593,7 @@ void MainWindow::on_destroy() {
     access_.detach();
     access_said_.reset();
     access_queue_.clear();
+    access_gate_.clear();
     set_accessible_name(search_, {});
     set_accessible_name(name_edit_, {});
     set_accessible_help(name_edit_, {});
@@ -850,6 +858,7 @@ void MainWindow::quit() {
         return;
     }
     quitting_ = true;
+    mark_quitting();
     settings_.reset();
     // An Uninstall window still asking goes with FloServer (its Remove can't start now).
     if (uninstall_window_ != nullptr) {
@@ -858,6 +867,15 @@ void MainWindow::quit() {
     }
     ShowWindow(hwnd_, SW_HIDE);
     worker_->quit_service();
+}
+
+void MainWindow::mark_quitting() {
+    // A manual-reset event that's only ever looked for: it goes with this
+    // process, as the window mark does.
+    if (!quitting_mark_) {
+        quitting_mark_.reset(
+            CreateEventW(nullptr, TRUE, TRUE, quitting_mark_name(core::ipc::default_instance()).c_str()));
+    }
 }
 
 void MainWindow::open_settings() {
@@ -2244,7 +2262,7 @@ void MainWindow::show_tray_menu(POINT at) {
     if (rtl_) {
         flags |= UINT{TPM_LAYOUTRTL};
     }
-    const auto command = static_cast<UINT>(TrackPopupMenuEx(menu.get(), flags, at.x, at.y, hwnd_, nullptr));
+    const UINT command = track_menu(menu.get(), flags, at);
     PostMessageW(hwnd_, WM_NULL, 0, 0);
     if (command == kMenuOpen) {
         show_window();

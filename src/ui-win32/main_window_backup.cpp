@@ -88,6 +88,7 @@ void MainWindow::run_backup_steps() {
                                     backup_start_params(plan, choice->file, choice->database, choice->leave_out));
         }
         asking_ = false;
+        modal_closed();
         backup_job_ = false;
         if (choice) {
             show_backup_outcome("backup", plan.name, result);
@@ -127,6 +128,7 @@ void MainWindow::start_restore(const std::string& project) {
     const auto choice = ask_restore(hwnd_, lang_, project, row_has_database(row) ? row_database_name(row) : std::string(),
                                     backups_folder());
     asking_ = false;
+    modal_closed();
     first_run_after_ask();
     if (quit_after_ask_) {
         quit_after_ask_ = false;
@@ -153,6 +155,7 @@ void MainWindow::run_restore(const std::string& project, const RestoreChoice& ch
                                              {"database", choice.database},
                                              {"install", choice.install}});
     asking_ = false;
+    modal_closed();
     backup_job_ = false;
     show_backup_outcome("restore", project, result);
 }
@@ -183,6 +186,7 @@ void MainWindow::start_from_backup(const std::string& file) {
                                 {{"file", choice->file}, {"name", choice->name}, {"install", choice->install}});
     }
     asking_ = false;
+    modal_closed();
     backup_job_ = false;
     if (choice) {
         show_backup_outcome("create", choice->name, result);

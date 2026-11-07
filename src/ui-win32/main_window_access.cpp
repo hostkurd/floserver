@@ -1075,9 +1075,21 @@ void MainWindow::access_request(const std::string& id, AccessAction action) {
     const bool first = access_queue_.empty();
     access_queue_.emplace_back(id, action);
     // While one runs (a menu it opened is still open), the next waits for it.
-    if (first && !access_running_ && hwnd_ != nullptr) {
+    if (access_gate_.post_queued(first) && hwnd_ != nullptr) {
         PostMessageW(hwnd_, kAccessMessage, 0, 0);
     }
+}
+
+void MainWindow::modal_closed() {
+    // Requests that came while it was open run now, not at some later message.
+    if (hwnd_ != nullptr && access_gate_.replay(modal_open(), access_queue_.empty())) {
+        PostMessageW(hwnd_, kAccessMessage, 0, 0);
+    }
+}
+
+UINT MainWindow::track_menu(HMENU menu, UINT flags, POINT at) {
+    const ModalScope modal(*this);
+    return static_cast<UINT>(TrackPopupMenuEx(menu, flags, at.x, at.y, hwnd_, nullptr));
 }
 
 void MainWindow::access_after_paint() {
@@ -1110,11 +1122,12 @@ void MainWindow::access_after_paint() {
 
 void MainWindow::run_access_requests() {
     // Never inside another: a picker's menu runs messages, and a second menu
-    // or Remove's question must not open over it.
-    if (access_running_) {
+    // or Remove's question must not open over it. Nor inside a menu or
+    // question opened by the mouse or the keys: they wait for it to close.
+    if (!access_gate_.may_run(modal_open())) {
         return;
     }
-    access_running_ = true;
+    access_gate_.begin();
     while (!access_queue_.empty()) {
         const auto [id, action] = access_queue_.front();
         access_queue_.erase(access_queue_.begin());
@@ -1133,7 +1146,7 @@ void MainWindow::run_access_requests() {
         const AccessNode node = *n;
         run_access(node, action);
     }
-    access_running_ = false;
+    access_gate_.end();
 }
 
 void MainWindow::run_access(const AccessNode& n, AccessAction action) {

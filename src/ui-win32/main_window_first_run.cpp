@@ -304,6 +304,7 @@ void MainWindow::first_run_trust_now() {
     std::string error;
     const bool trusted = core::trust_ca(*der, cancelled, error);
     asking_ = false;
+    modal_closed();
     if (trusted) {
         first_run_.trust = FirstRunTrust::Trusted;
         if (worker_) {
@@ -352,6 +353,7 @@ void MainWindow::first_run_change_folder() {
     const auto picked = pick_folder(hwnd_, std::string(text(lang_, Str::FoldersPickProjects)), start);
     picking_folder_ = false;
     asking_ = false;
+    modal_closed();
     first_run_after_ask();
     if (quit_after_ask_) {
         quit_after_ask_ = false;

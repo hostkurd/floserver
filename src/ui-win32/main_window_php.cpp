@@ -121,6 +121,7 @@ bool MainWindow::leave_php_part(bool ask, const PanelAct& then) {
         asking_ = true;
         const SaveChoice choice = ask_to_save(hwnd_, lang_, fill(lang_, Str::ProjectPhpAskSave, {selected_}));
         asking_ = false;
+        modal_closed();
         first_run_after_ask();
         if (quit_after_ask_) {
             quit_after_ask_ = false;
@@ -740,7 +741,7 @@ void MainWindow::php_change_menu() {
         ClientToScreen(hwnd_, &at);
         UINT flags = TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTBUTTON | TPM_TOPALIGN;
         flags |= rtl_ ? UINT{TPM_RIGHTALIGN | TPM_LAYOUTRTL} : UINT{TPM_LEFTALIGN};
-        const auto command = static_cast<UINT>(TrackPopupMenuEx(menu.get(), flags, at.x, at.y, hwnd_, nullptr));
+        const UINT command = track_menu(menu.get(), flags, at);
         if (command < kFirstChoice || command - kFirstChoice >= list.size() || !php_open_ || selected_ != project ||
             !php_info_) {
             return;
@@ -786,7 +787,7 @@ void MainWindow::php_display_menu(std::size_t index) {
     ClientToScreen(hwnd_, &at);
     UINT flags = TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTBUTTON | TPM_TOPALIGN;
     flags |= rtl_ ? UINT{TPM_RIGHTALIGN | TPM_LAYOUTRTL} : UINT{TPM_LEFTALIGN};
-    const auto command = static_cast<UINT>(TrackPopupMenuEx(menu.get(), flags, at.x, at.y, hwnd_, nullptr));
+    const UINT command = track_menu(menu.get(), flags, at);
     if (command < kFirstChoice || command - kFirstChoice >= values.size() || !php_open_) {
         return;
     }

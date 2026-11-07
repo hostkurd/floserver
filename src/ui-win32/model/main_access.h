@@ -92,4 +92,32 @@ struct ToastNodes {
 [[nodiscard]] std::vector<std::string> log_access_lines(const std::vector<LogLine>& lines, std::size_t shown,
                                                         bool known, Lang lang);
 
+// When the main window runs a screen reader's requests (as Settings does):
+// after the call that asked has returned (a posted message), one at a time,
+// and never while a menu or a question is open. Such a window runs its own
+// message loop, and a request run inside it would re-enter code that is
+// still waiting for its answer, so the requests wait for it to close, then
+// run in the order they came. `open`: a menu, a question or a picker is open.
+class AccessGate {
+public:
+    // A request was queued (`first`: into an empty queue). True: post the message that runs the queue.
+    [[nodiscard]] bool post_queued(bool first) const { return first && !running_; }
+    // The posted message came. True: run the queue now, between begin() and end().
+    // False: one is being run, or something is open (the queue then waits for replay()).
+    [[nodiscard]] bool may_run(bool open);
+    void begin() { running_ = true; }
+    void end() { running_ = false; }
+    // Any message, or a menu or question that just closed. True: post the
+    // message that runs the queue, which waited while something was open.
+    [[nodiscard]] bool replay(bool open, bool queue_empty);
+    // The window went: nothing waits any more.
+    void clear() { waiting_ = false; }
+    [[nodiscard]] bool running() const { return running_; }
+    [[nodiscard]] bool waiting() const { return waiting_; }
+
+private:
+    bool running_ = false;  // a request is being run (it may have a menu or question open)
+    bool waiting_ = false;  // requests wait for a menu or question opened otherwise to close
+};
+
 }  // namespace floserver::ui

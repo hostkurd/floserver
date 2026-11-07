@@ -270,3 +270,53 @@ TEST_CASE("access: the log's lines as they're shown") {
     CHECK(log_access_lines({}, 5, true, Lang::En) == std::vector<std::string>{"No requests yet"});
     CHECK(log_access_lines({}, 5, false, Lang::En).empty());
 }
+
+TEST_CASE("a screen reader's requests wait for a menu or question to close") {
+    AccessGate gate;
+    // The first request into an empty queue posts the message that runs it; more just queue.
+    CHECK(gate.post_queued(true));
+    CHECK_FALSE(gate.post_queued(false));
+
+    // Nothing open: the queue runs at once.
+    CHECK(gate.may_run(false));
+    CHECK_FALSE(gate.waiting());
+
+    // A menu opened with the mouse (or a question, a picker) is open: the
+    // request waits, and nothing replays it while it stays open.
+    CHECK_FALSE(gate.may_run(true));
+    CHECK(gate.waiting());
+    CHECK_FALSE(gate.replay(true, false));
+    CHECK(gate.waiting());
+    // Closed: posted again, once.
+    CHECK(gate.replay(false, false));
+    CHECK_FALSE(gate.waiting());
+    CHECK_FALSE(gate.replay(false, false));
+    CHECK(gate.may_run(false));
+}
+
+TEST_CASE("a request's own menu or question doesn't let the next one run inside it") {
+    AccessGate gate;
+    REQUIRE(gate.may_run(false));
+    gate.begin();
+    // The request opened a menu (or Remove's question): a request that comes
+    // meanwhile isn't posted, and its message (one already posted) doesn't run it.
+    CHECK(gate.running());
+    CHECK_FALSE(gate.post_queued(true));
+    CHECK_FALSE(gate.may_run(false));
+    CHECK_FALSE(gate.may_run(true));
+    CHECK_FALSE(gate.replay(false, false));
+    // The one running goes on to the queued ones when its menu has closed.
+    gate.end();
+    CHECK_FALSE(gate.running());
+    CHECK(gate.post_queued(true));
+}
+
+TEST_CASE("requests that waited and went meanwhile aren't posted again") {
+    AccessGate gate;
+    CHECK_FALSE(gate.may_run(true));
+    // The window went (or was made again in another language): the queue was emptied.
+    CHECK_FALSE(gate.replay(false, true));
+    CHECK_FALSE(gate.waiting());
+    gate.clear();
+    CHECK_FALSE(gate.waiting());
+}
