@@ -299,7 +299,7 @@ std::optional<std::int64_t> BackupService::create(const FromBackupRequest& reque
         return std::nullopt;
     }
     if (reserved_project_name(request.name)) {
-        refusal = {"bad_name", request.name + ".localhost is kept for phpMyAdmin; choose another name"};
+        refusal = {"bad_name", reserved_name_message(request.name)};
         return std::nullopt;
     }
     if (!zip_path_ok(request.from) || !is_regular(request.from)) {

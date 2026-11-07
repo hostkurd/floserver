@@ -9,6 +9,8 @@ add_executable(floserver_tests
     test_ipc.cpp
     test_main.cpp
     test_manifest.cpp
+    test_mailpit.cpp
+    test_mail_service.cpp
     test_mariadb.cpp
     test_mariadb_settings.cpp
     test_database_service.cpp

@@ -20,8 +20,8 @@
 //   "php_ini": {"memory_limit": "1024M"}
 //
 // php.ini is read top to bottom and a later value wins, so the generated file
-// is: FloServer's defaults, the series' values, the series' custom.ini, the
-// project's values. Extensions: the base list, then the series' changes, then
+// is: FloServer's defaults, PHP's mail() to Mailpit when it's installed
+// (D27), the series' values, the series' custom.ini, the project's values. Extensions: the base list, then the series' changes, then
 // the project's. opcache is always on and isn't offered.
 
 #include "floserver/core/project_config.h"
@@ -92,6 +92,9 @@ void write_php_series(AppConfig& app, const std::string& series, const PhpSeries
 // What one pool's php.ini holds beyond FloServer's defaults.
 struct PhpIniSettings {
     std::string series;                              // "8.5", for the file's comments
+    // PHP's mail() to Mailpit (mailpit.h's mail_php_ini()), written before
+    // the series' values and custom.ini so the user's own lines win.
+    std::vector<std::pair<std::string, std::string>> mail_ini;
     std::vector<std::string> extensions;             // on beyond the base list, sorted
     std::vector<std::string> removed;                // base ones turned off, sorted
     std::map<std::string, std::string> series_ini;

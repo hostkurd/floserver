@@ -1,5 +1,6 @@
 #include "floserver/core/nginx_config.h"
 
+#include "floserver/core/mailpit.h"
 #include "floserver/core/project_registry.h"
 #include "floserver/core/phpmyadmin.h"
 #include "floserver/core/request_log.h"
@@ -77,7 +78,8 @@ public:
 
         const bool any_tls = std::any_of(spec_.sites.begin(), spec_.sites.end(),
                                          [](const NginxSite& s) { return s.tls.has_value(); }) ||
-                             (spec_.shared && spec_.shared->tls) || (spec_.phpmyadmin && spec_.phpmyadmin->tls);
+                             (spec_.shared && spec_.shared->tls) || (spec_.phpmyadmin && spec_.phpmyadmin->tls) ||
+                             (spec_.mail && spec_.mail->tls);
         // One upstream per pool: a php-cgi worker on each port, requests
         // spread over them. A worker that sleeps still has its port held by
         // the service, so a connection never fails; max_fails=0 keeps nginx
@@ -120,10 +122,30 @@ public:
                      << "    }\n";
             }
         }
-        if (any_app) {
+        if (any_app || spec_.mail) {
             out_ << "\n    map $http_upgrade $floserver_connection {\n"
                  << "        default upgrade;\n"
                  << "        \"\" \"\";\n"
+                 << "    }\n";
+        }
+        if (spec_.mail) {
+            // Mailpit's inbox gets the password from nginx, so another site
+            // mustn't make the browser ask it anything (a link check, a read
+            // mark): only a plain visit (a link, a typed address) comes in
+            // from elsewhere, and only to its pages, never /api/ or /proxy.
+            // A request carrying an Origin must come from the inbox itself.
+            const bool tls = spec_.mail->tls.has_value();
+            // A frame is a navigation too: only a whole page (Dest: document) counts as a visit.
+            out_ << "\n    map \"$http_sec_fetch_site:$http_sec_fetch_mode:$http_sec_fetch_dest:$request_method:$uri\" "
+                    "$floserver_mail_cross {\n"
+                 << "        default 0;\n"
+                 << "        \"~*^(cross-site|same-site):navigate:document:GET:/(?!api(/|$)|proxy)\" 0;\n"
+                 << "        \"~*^(cross-site|same-site):\" 1;\n"
+                 << "    }\n"
+                 << "    map $http_origin $floserver_mail_origin {\n"
+                 << "        default 1;\n"
+                 << "        \"\" 0;\n"
+                 << "        \"" << site_address(std::string(kMailHostName), spec_.ports, tls) << "\" 0;\n"
                  << "    }\n";
         }
         out_ << "\n    # Addresses that aren't a project.\n"
@@ -155,6 +177,9 @@ public:
             return std::nullopt;
         }
         if (spec_.phpmyadmin && !write_phpmyadmin(*spec_.phpmyadmin)) {
+            return std::nullopt;
+        }
+        if (spec_.mail && !write_mail(*spec_.mail)) {
             return std::nullopt;
         }
         out_ << "}\n";
@@ -403,6 +428,75 @@ private:
              << "        }\n";
         write_php_location(pma.php_ports, pma.tls.has_value(), idle_log, std::string());
         out_ << "    }\n";
+        return true;
+    }
+
+    // Mailpit's inbox at mail.localhost.
+    bool write_mail(const NginxMail& mail) {
+        const auto auth = path(mail.auth_include);
+        if (!auth) {
+            return false;
+        }
+        if (mail.port == 0) {
+            error_ = "Mailpit's inbox has no port";
+            return false;
+        }
+        std::optional<std::string> cert;
+        std::optional<std::string> key;
+        if (mail.tls) {
+            cert = path(mail.tls->certificate);
+            key = path(mail.tls->key);
+            if (!cert || !key) {
+                return false;
+            }
+        }
+        const std::string name(kMailHostName);
+        out_ << "\n    # Mailpit's inbox\n";
+        if (mail.tls) {
+            out_ << "    server {\n";
+            listen(spec_.ports.http, "");
+            out_ << "        server_name " << name << ".localhost;\n"
+                 << "        return 302 " << site_address(name, spec_.ports, true) << "$request_uri;\n"
+                 << "    }\n";
+        }
+        out_ << "    server {\n";
+        if (mail.tls) {
+            listen(spec_.ports.https, spec_.http2_directive ? " ssl" : " ssl http2");
+            out_ << (spec_.http2_directive ? "        http2 on;\n" : "")
+                 << "        ssl_certificate " << *cert << ";\n"
+                 << "        ssl_certificate_key " << *key << ";\n";
+        } else {
+            listen(spec_.ports.http, "");
+        }
+        // No upstream keepalive: an idle kept connection would keep Mailpit
+        // awake. A browser's own header is replaced by FloServer's.
+        out_ << "        server_name " << name << ".localhost;\n"
+             // Never framed by another site (clickjacking with the password
+             // nginx adds); the location sets no add_header, so these apply there.
+             << "        add_header Referrer-Policy no-referrer always;\n"
+             << "        add_header Content-Security-Policy \"frame-ancestors 'self'\" always;\n"
+             << "        add_header X-Frame-Options SAMEORIGIN always;\n"
+             << "        if ($floserver_mail_cross) {\n"
+             << "            return 403;\n"
+             << "        }\n"
+             << "        if ($floserver_mail_origin) {\n"
+             << "            return 403;\n"
+             << "        }\n"
+             << "        location / {\n"
+             << "            proxy_pass http://127.0.0.1:" << mail.port << ";\n"
+             << "            proxy_http_version 1.1;\n"
+             << "            proxy_set_header Host $http_host;\n"
+             << "            proxy_set_header Upgrade $http_upgrade;\n"
+             << "            proxy_set_header Connection $floserver_connection;\n"
+             << "            proxy_set_header X-Forwarded-Proto $scheme;\n"
+             << "            include " << *auth << ";\n"
+             << "            proxy_buffering off;\n"
+             // The first request may wait for Mailpit to start; the live
+             // updates' WebSocket stays open while the inbox is.
+             << "            proxy_read_timeout 3600s;\n"
+             << "            proxy_send_timeout 3600s;\n"
+             << "        }\n"
+             << "    }\n";
         return true;
     }
 

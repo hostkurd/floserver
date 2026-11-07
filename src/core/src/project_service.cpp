@@ -3,6 +3,7 @@
 #include "floserver/core/shared_sites.h"
 
 #include "floserver/core/database_service.h"  // kFirstInternalDatabasePort
+#include "floserver/core/mailpit.h"
 #include "floserver/core/mariadb.h"
 #include "floserver/core/mariadb_settings.h"
 #include "floserver/core/paths.h"
@@ -1188,8 +1189,9 @@ std::optional<fs::path> ProjectService::php_final_ini(const std::string& series_
     }
     const PhpSettings all = read_php_settings(config);
     const auto found = all.find(*series);
-    const PhpIniSettings settings = effective_php_settings(
+    PhpIniSettings settings = effective_php_settings(
         *series, found != all.end() ? &found->second : nullptr, read_php_custom_ini(data_dir_, *series), nullptr);
+    settings.mail_ini = mail_php_ini(config, installed);  // as the pools have it (D27)
     // Each pool logs to its own file; the real path is in the pool's copy.
     const PhpIniResult made = make_php_ini(php->dir, settings, fs::path("(each project's own log)"));
     const std::string text = "; What PHP " + php->version +

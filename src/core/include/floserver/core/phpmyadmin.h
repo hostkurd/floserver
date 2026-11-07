@@ -56,8 +56,11 @@ inline constexpr std::string_view kSignonScriptName = "floserver-signon.php";
 inline constexpr std::chrono::seconds kSignonTokenLife{60};
 inline constexpr std::size_t kSignonTokenBytes = 32;
 
-// True for names no new project may take: "phpmyadmin".
+// True for names no new project may take: "phpmyadmin", and "mail"
+// (Mailpit's inbox, mailpit.h).
 [[nodiscard]] bool reserved_project_name(std::string_view name);
+// Why: "phpmyadmin.localhost is kept for phpMyAdmin; choose another name".
+[[nodiscard]] std::string reserved_name_message(std::string_view name);
 
 struct PhpMyAdminPaths {
     std::filesystem::path dir;            // <data>/phpmyadmin

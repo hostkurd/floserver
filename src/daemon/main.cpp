@@ -16,6 +16,8 @@
 #include "floserver/core/http.h"
 #include "floserver/core/integration.h"
 #include "floserver/core/ipc.h"
+#include "floserver/core/mail_service.h"
+#include "floserver/core/mailpit.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/phpmyadmin.h"
 #include "floserver/core/process.h"
@@ -30,6 +32,7 @@
 #include "floserver/core/database_service.h"
 #include "floserver/core/mariadb_settings.h"
 #include "floserver/core/mariadb.h"
+#include "floserver/core/nginx_config.h"
 #include "floserver/core/project_config.h"
 #include "floserver/core/site_plan.h"
 #include "floserver/core/secret_store.h"
@@ -41,6 +44,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <functional>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
@@ -51,6 +55,8 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -131,7 +137,8 @@ private:
 
 // The runtime work, or nothing when there's no data folder to keep it in.
 std::unique_ptr<floserver::core::RuntimeService> make_runtimes(
-    const std::shared_ptr<floserver::core::HttpTransport>& transport) {
+    const std::shared_ptr<floserver::core::HttpTransport>& transport,
+    std::function<void(const std::string&, const std::string&)> installed) {
     namespace core = floserver::core;
     const auto data = core::data_dir();
     if (!data) {
@@ -143,6 +150,7 @@ std::unique_ptr<floserver::core::RuntimeService> make_runtimes(
     config.keys = core::builtin_manifest_keys();
     config.source = {std::string(core::kManifestUrl), std::string(core::kManifestSignatureUrl)};
     config.builtin_templates_json = std::string(core::kBuiltInTemplatesJson);
+    config.installed = std::move(installed);
     // The Visual C++ runtime DLLs ship next to floserverd (see its CMakeLists.txt).
     if (const auto self = core::executable_path()) {
         const auto dir = self->parent_path();
@@ -244,6 +252,7 @@ struct Service {
     std::unique_ptr<floserver::core::TemplateService> templates;
     std::unique_ptr<floserver::core::BackupService> backups;
     std::unique_ptr<floserver::core::PhpMyAdminConfigWriter> phpmyadmin;
+    std::unique_ptr<floserver::core::MailService> mail;
     std::optional<std::filesystem::path> data;
 
     // integration.json for FloCMS Studio (D14): rewritten when what it says
@@ -325,6 +334,33 @@ struct Service {
     ActiveClients clients;
     std::atomic<bool> quitting{false};
 
+    // After Mailpit `version` was installed: the older installs go, with
+    // Mailpit stopped meanwhile; its emails stay (they're in the data folder).
+    void replace_older_mailpit(const std::string& name, const std::string& version) const noexcept {
+        namespace core = floserver::core;
+        if (name != core::kMailpitRuntime || !mail || !runtimes || !data) {
+            return;
+        }
+        try {
+            bool removed = false;
+            {
+                const core::MailService::RemovalHold hold = mail->hold_for_removal();
+                for (const core::InstalledRuntime& r : core::list_installed(core::runtimes_dir(*data))) {
+                    if (r.name == name && r.version != version) {
+                        core::ServiceRefusal ignored;  // left for the user to remove
+                        removed = runtimes->remove(r.name, core::path_to_utf8(r.dir.filename()), ignored) || removed;
+                    }
+                }
+            }
+            mail->reload();
+            if (web) {
+                (void)web->reload();
+            }
+            (void)removed;
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the older install stays; nothing breaks
+        }
+    }
+
     // The reply to one runtime or job request.
     [[nodiscard]] std::string runtime_request(const protocol::Request& r) const {
         if (!runtimes) {
@@ -355,6 +391,7 @@ struct Service {
                 if (web) {
                     const json status = web->status();
                     out["phpmyadmin"] = status.contains("phpmyadmin") ? status.at("phpmyadmin") : json();
+                    out["mail"] = status.contains("mail") ? status.at("mail") : json();
                 }
             }
             return protocol::make_result(r.id, out);
@@ -407,11 +444,48 @@ struct Service {
             // files first. The hold ends with `hold`, whatever happens.
             const std::string name = string_param(r.params, "name");
             const std::string version = string_param(r.params, "version");
+            // Mailpit (D27): "keep_emails" (default true) keeps mailpit.db for a later install.
+            bool keep_emails = true;
+            if (r.params.is_object() && r.params.contains("keep_emails")) {
+                if (!r.params.at("keep_emails").is_boolean()) {
+                    return protocol::make_error(r.id, "bad_params", "keep_emails is true or false");
+                }
+                keep_emails = r.params.at("keep_emails").get<bool>();
+            }
             const floserver::core::DatabaseService::RemovalHold hold =
                 name == "mariadb" && databases ? databases->hold_for_removal(version)
                                                : floserver::core::DatabaseService::RemovalHold();
+            // Mailpit stops first (its program and database are in use while it runs).
+            const bool is_mailpit = name == floserver::core::kMailpitRuntime && mail;
+            // A plain guard, not std::optional: GCC -O3 warns (maybe-uninitialized) about the optional.
+            floserver::core::MailService::RemovalHold mail_hold =
+                is_mailpit ? mail->hold_for_removal() : floserver::core::MailService::RemovalHold();
             const bool removed = runtimes->remove(name, version, refusal);
-            return removed ? protocol::make_result(r.id, json::object())
+            json result = json::object();
+            if (removed && is_mailpit && !keep_emails) {
+                // Only with the last Mailpit: another version still installed uses them.
+                bool another = false;
+                if (data) {
+                    for (const auto& installed : floserver::core::list_installed(floserver::core::runtimes_dir(*data))) {
+                        another = another || installed.name == floserver::core::kMailpitRuntime;
+                    }
+                }
+                std::string error;
+                result["emails_deleted"] = !another && mail->delete_emails(error);
+                if (another) {
+                    result["emails_kept"] = "another Mailpit version is still installed and uses them";
+                } else if (!error.empty()) {
+                    result["emails_error"] = floserver::core::clean_error_text(error);
+                }
+            }
+            mail_hold.release();
+            if (removed && is_mailpit) {
+                mail->reload();
+                if (web) {
+                    (void)web->reload();  // the inbox and PHP's mail() lines go
+                }
+            }
+            return removed ? protocol::make_result(r.id, result)
                            : protocol::make_error(r.id, refusal.code, refusal.message);
         }
         const auto id = job_id(r.params);
@@ -968,6 +1042,10 @@ struct Service {
                         env.push_back({"DATABASE_URL",
                                        core::database_url(*login, std::filesystem::is_regular_file(dir / "manage.py", ec))});
                     }
+                    // And Mailpit's address when it's installed (D27).
+                    for (const auto& [key, value] : mail_env_lines(dir, parsed.config && parsed.config->python)) {
+                        env.push_back({key, value});
+                    }
                     result["env_style"] = laravel ? "laravel" : "flocms";
                     result["env"] = env;
                     result["env_file"] = core::path_to_utf8(dir / ".env");
@@ -975,6 +1053,96 @@ struct Service {
             }
         }
         return protocol::make_result(r.id, result);
+    }
+
+    // The .env lines for Mailpit (D27) in a project's folder: none when
+    // Mailpit isn't installed or the project is a FloCMS one.
+    [[nodiscard]] std::vector<std::pair<std::string, std::string>> mail_env_lines(const std::filesystem::path& dir,
+                                                                                 bool python) const {
+        namespace core = floserver::core;
+        const auto port = mail ? mail->smtp_port() : std::nullopt;
+        if (!port) {
+            return {};
+        }
+        return core::mail_env_values(core::mail_env_kind(dir, python), *port);
+    }
+
+    // Mailpit (D27), protocol.h:
+    //   mail.status -> MailService::status() with "inbox_url" and "inbox_served" from the web service;
+    //   mail.set {php?, notices?, keep_running?, max?} -> {"ok": true};
+    //   mail.test {to?} -> {"ok": true}; mail.clear -> {"ok": true};
+    //   mail.env {name} -> {"env": [[key, value]...], "env_file"}: a project's mail lines alone
+    //     (flo env, for a project without a database).
+    [[nodiscard]] std::string mail_request(const protocol::Request& r) const {
+        namespace core = floserver::core;
+        if (!mail) {
+            return protocol::make_error(r.id, "no_data_folder",
+                                        "FloServer can't find a folder to keep its settings in (LOCALAPPDATA or HOME)");
+        }
+        core::ServiceRefusal refusal;
+        if (r.method == "mail.status") {
+            json out = mail->status();
+            const json status = web ? web->status() : json::object();
+            const json served = status.contains("mail") ? status.at("mail") : json();
+            std::string address = served.is_object() ? served.value("address", std::string()) : std::string();
+            out["inbox_served"] = !address.empty();
+            if (address.empty()) {
+                // Where it will be: the web ports and HTTPS as they are now.
+                const json nginx = status.value("nginx", json::object());
+                core::WebPorts ports{80, 443, false};
+                if (nginx.contains("http_port") && nginx.at("http_port").is_number_unsigned()) {
+                    ports.http = nginx.at("http_port").get<core::Port>();
+                }
+                if (nginx.contains("https_port") && nginx.at("https_port").is_number_unsigned()) {
+                    ports.https = nginx.at("https_port").get<core::Port>();
+                }
+                address = core::site_address(std::string(core::kMailHostName), ports, nginx.value("tls", false));
+            }
+            out["inbox_url"] = address;
+            return protocol::make_result(r.id, out);
+        }
+        if (r.method == "mail.set") {
+            if (!mail->set(r.params.is_object() ? r.params : json::object(), refusal)) {
+                return protocol::make_error(r.id, refusal.code, refusal.message);
+            }
+            if (web) {
+                (void)web->reload();  // PHP's php.ini when "php" changed
+            }
+            return protocol::make_result(r.id, {{"ok", true}});
+        }
+        if (r.method == "mail.test") {
+            // May wait for Mailpit to start: each client has its own thread here.
+            return mail->send_test(string_param(r.params, "to"), refusal)
+                       ? protocol::make_result(r.id, {{"ok", true}})
+                       : protocol::make_error(r.id, refusal.code, refusal.message);
+        }
+        if (r.method == "mail.clear") {
+            return mail->clear(refusal) ? protocol::make_result(r.id, {{"ok", true}})
+                                        : protocol::make_error(r.id, refusal.code, refusal.message);
+        }
+        // mail.env
+        if (!projects) {
+            return protocol::make_error(r.id, "no_data_folder", "FloServer can't find its data folder");
+        }
+        if (!mail->smtp_port()) {
+            return protocol::make_error(r.id, "not_installed",
+                                        "Mailpit isn't installed: download it in Settings → Runtimes (or: flo install mailpit)");
+        }
+        const std::string name = string_param(r.params, "name");
+        const auto config = projects->config(refusal);
+        if (!config) {
+            return protocol::make_error(r.id, refusal.code, refusal.message);
+        }
+        const core::Project* p = core::find_project(*config, name);
+        if (p == nullptr) {
+            return protocol::make_error(r.id, "unknown_project", "there's no project called " + name);
+        }
+        const auto parsed = core::read_project_config_file(*p);
+        json env = json::array();
+        for (const auto& [key, value] : mail_env_lines(p->dir, parsed.config && parsed.config->python)) {
+            env.push_back({key, value});
+        }
+        return protocol::make_result(r.id, {{"env", env}, {"env_file", core::path_to_utf8(p->dir / ".env")}});
     }
 
     // Settings → Database (MariaDB), per series ("11.4"):
@@ -1488,6 +1656,10 @@ struct Service {
                 reply = folders_request(*request);
             } else if (request->method == "phpmyadmin.login") {
                 reply = phpmyadmin_request(*request);
+            } else if (request->method == "mail.status" || request->method == "mail.set" ||
+                       request->method == "mail.test" || request->method == "mail.clear" ||
+                       request->method == "mail.env") {
+                reply = mail_request(*request);
             } else if (request->method == "templates.list" || request->method == "projects.create" ||
                        request->method == "create.get" || request->method == "create.cancel") {
                 reply = template_request(*request);
@@ -1595,6 +1767,10 @@ floserver::core::TemplateHooks template_hooks(const std::shared_ptr<Service>& se
         }
         return login;
     };
+    hooks.mail_env = [s](const std::filesystem::path& dir) {
+        const auto parsed = core::read_project_config_file(core::Project{"project", dir, true, false, {}});
+        return s->mail_env_lines(dir, parsed.config && parsed.config->python);
+    };
     return hooks;
 }
 
@@ -1685,7 +1861,10 @@ int run() {
     service->server = std::move(server);
     // One transport for the runtimes and the app's updates.
     const std::shared_ptr<floserver::core::HttpTransport> transport = floserver::core::make_system_transport();
-    service->runtimes = make_runtimes(transport);
+    // Mailpit is updated in place (D27): a new install replaces the older ones.
+    service->runtimes = make_runtimes(transport, [s = service.get()](const std::string& name, const std::string& version) {
+        s->replace_older_mailpit(name, version);
+    });
     if (service->runtimes) {
         service->updates = make_updates(*service->runtimes, transport);
         if (service->updates) {
@@ -1702,6 +1881,31 @@ int run() {
         service->databases = std::make_unique<floserver::core::DatabaseService>(db, *service->secrets);
         service->databases->start();
         {
+            // Mailpit (D27): its ports and sleep, its settings in config.json.
+            floserver::core::MailServiceConfig mail;
+            mail.data_dir = *data;
+            mail.idle_after = db.idle_after;
+            const Service* s = service.get();
+            mail.change_config = [s](const std::function<void(floserver::core::AppConfig&)>& change, std::string& why) {
+                floserver::core::ServiceRefusal refusal;
+                const bool ok = s->projects->change_config(
+                                    [&change](floserver::core::AppConfig& config, floserver::core::ServiceRefusal&) {
+                                        change(config);
+                                        return true;
+                                    },
+                                    refusal)
+                                    .has_value();
+                why = refusal.message;
+                return ok;
+            };
+            mail.php_changed = [s] {
+                if (s->web) {
+                    (void)s->web->reload();  // the pools' php.ini get the new port
+                }
+            };
+            service->mail = std::make_unique<floserver::core::MailService>(std::move(mail), *service->secrets);
+        }
+        {
             // phpMyAdmin's config.inc.php, kept in line by the web service's reloads.
             const Service* s = service.get();
             service->phpmyadmin = std::make_unique<floserver::core::PhpMyAdminConfigWriter>(
@@ -1711,8 +1915,10 @@ int run() {
                 std::string ignored;  // tried again on the next reload
                 (void)s->phpmyadmin->update(ignored);
             };
+            config.mail_inbox = [s] { return s->mail ? s->mail->inbox() : std::nullopt; };
             service->web = std::make_unique<floserver::core::WebService>(std::move(config), *service->certs);
         }
+        service->mail->start();
         service->web->start();
         {
             floserver::core::WebSettingsService::Hooks hooks;
@@ -1793,6 +1999,9 @@ int run() {
     // nginx and php-cgi end with the service ("quit stops everything").
     if (service->web) {
         service->web->stop();
+    }
+    if (service->mail) {
+        service->mail->stop();
     }
     if (service->databases) {
         service->databases->stop();  // a clean shutdown of each MariaDB

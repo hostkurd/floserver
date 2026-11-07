@@ -73,6 +73,18 @@ struct NginxPhpMyAdmin {
     std::optional<NginxTls> tls;
 };
 
+// Mailpit's inbox (mailpit.h) at mail.localhost: everything forwarded to
+// the port the service holds for it (mail_service.h), with the inbox's
+// password added as an Authorization header from `auth_include`, an
+// owner-only file of its own, so this config holds no secret. WebSocket
+// upgrades pass through (the inbox updates live). With `tls` the http port
+// redirects to https, as for a project.
+struct NginxMail {
+    Port port = 0;
+    std::filesystem::path auth_include;  // <data>/mailpit/nginx-auth.conf
+    std::optional<NginxTls> tls;
+};
+
 struct NginxSpec {
     std::filesystem::path nginx_dir;  // the installed nginx (its conf/mime.types, conf/fastcgi_params)
     std::filesystem::path work_dir;   // our folder: logs/, temp/, the pid file
@@ -89,6 +101,7 @@ struct NginxSpec {
     std::vector<NginxSite> sites;
     std::optional<NginxShared> shared;
     std::optional<NginxPhpMyAdmin> phpmyadmin;
+    std::optional<NginxMail> mail;
 };
 
 // The config text, or nothing (with `error`) when a name or path can't be

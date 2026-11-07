@@ -138,8 +138,14 @@ PhpIniResult make_php_ini(const fs::path& php_dir, const PhpIniSettings& setting
     // static builds of D5), so none are named.
     (void)php_dir;
 #endif
-    // Later values win in php.ini: the series', its custom.ini, the project's.
+    // Later values win in php.ini: Mailpit's, the series', its custom.ini, the project's.
     const std::string series = settings.series.empty() ? std::string("this PHP") : "PHP " + settings.series;
+    if (!settings.mail_ini.empty()) {
+        ini << "\n; mail() goes to Mailpit (Settings -> Mail)\n";
+        for (const auto& [key, value] : settings.mail_ini) {
+            ini << key << " = " << value << "\n";
+        }
+    }
     if (!settings.series_ini.empty()) {
         ini << "\n; " << series << " (Settings -> PHP)\n";
         write_values(ini, settings.series_ini);

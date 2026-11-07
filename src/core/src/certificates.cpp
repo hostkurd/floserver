@@ -356,7 +356,7 @@ bool CertStore::remove_site(const std::string& name, std::string& error) {
         return false;
     }
     if (reserved_project_name(name)) {
-        error = "the certificate for " + name + ".localhost is phpMyAdmin's; it isn't removed";
+        error = "the certificate for " + name + ".localhost is " + (name == "mail" ? std::string("Mailpit's") : std::string("phpMyAdmin's")) + "; it isn't removed";
         return false;
     }
     const std::lock_guard lock(mutex_);

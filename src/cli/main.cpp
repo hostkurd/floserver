@@ -5,6 +5,7 @@
 #include "floserver/core/encoding.h"
 #include "floserver/core/integration.h"
 #include "floserver/core/ipc.h"
+#include "floserver/core/mailpit.h"
 #include "floserver/core/mariadb.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/project_config.h"
@@ -15,7 +16,9 @@
 #include "floserver/core/service_client.h"
 #include "floserver/core/trust_store.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <csignal>
 #include <iomanip>
 #include <optional>
@@ -23,6 +26,8 @@
 
 #ifdef _WIN32
 #include <windows.h>
+
+#include <shellapi.h>
 #endif
 
 #include <fstream>
@@ -74,7 +79,11 @@ void print_help(std::ostream& out) {
         << "  shared [on|off]            Shared sites: every folder in the www folder at localhost (D19)\n"
         << "  shared php <v|newest>      ...their PHP version; shared web <apache|nginx>; shared dir <folder|default>\n"
         << "  shared db <11.4|none>      ...their database; shared login [--show]: its user and password\n"
-        << "  env [project] [--write]    A project's database settings as .env lines (--show: the password)\n"
+        << "  env [project] [--write]    A project's database (and Mailpit) settings as .env lines (--show: the password)\n"
+        << "  mail                       Mailpit: where email goes (SMTP), the inbox's address, how many emails\n"
+        << "  mail open                  Open the inbox in your browser\n"
+        << "  mail test [address]        Send a test email to the inbox\n"
+        << "  mail clear [--yes]         Delete every email in the inbox\n"
         << "  trust                      Let your browsers trust FloServer's HTTPS certificates\n"
         << "  untrust                    Remove FloServer's certificate authority\n"
         << "  check [folder]             Check the floserver.json for a project\n"
@@ -1655,7 +1664,15 @@ int env(const std::vector<std::string>& args) {
         }
     }
     // The first time can take a while: MariaDB sets up its data folder.
-    const auto reply = client->call("databases.login", {{"name", name}});
+    auto reply = client->call("databases.login", {{"name", name}});
+    if (reply && !reply->ok && reply->error_code == "no_database") {
+        // No database: Mailpit's lines alone, when it's installed and the project takes some.
+        const auto mail = client->call("mail.env", {{"name", name}});
+        if (mail && mail->ok && mail->result.contains("env") && mail->result["env"].is_array() &&
+            !mail->result["env"].empty()) {
+            reply = mail;
+        }
+    }
     if (!reply || !reply->ok) {
         return print_refusal(reply);
     }
@@ -1695,7 +1712,8 @@ int env(const std::vector<std::string>& args) {
 #else
         (void)perms;
 #endif
-        std::cout << "Database settings written to " << shown(file) << "\n";
+        std::cout << (r.contains("password") ? "Database settings" : "Mail settings") << " written to " << shown(file)
+                  << "\n";
         return 0;
     }
     for (const auto& [key, value] : values) {
@@ -1714,6 +1732,138 @@ int env(const std::vector<std::string>& args) {
         }
         std::cout << key << "=" << line << "\n";
     }
+    return 0;
+}
+
+// True for http(s)://mail.localhost followed by '/', ':' or nothing: the
+// only address `flo mail open` hands to the browser.
+bool is_inbox_url(const std::string& url) {
+    for (const char* start : {"http://mail.localhost", "https://mail.localhost"}) {
+        const std::string_view s(start);
+        if (url.starts_with(s) && (url.size() == s.size() || url[s.size()] == '/' || url[s.size()] == ':')) {
+            return std::all_of(url.begin(), url.end(), [](char c) {
+                return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == ':' || c == '/' || c == '.';
+            });
+        }
+    }
+    return false;
+}
+
+// Text from the service to print: no terminal escapes or other control
+// characters, whatever Mailpit's log or an email held.
+std::string printable(const nlohmann::json& j, const char* key) {
+    return floserver::core::clean_error_text(text_of(j, key));
+}
+
+// A refusal's message, printed the same way.
+int print_mail_refusal(const std::optional<floserver::core::protocol::Reply>& reply) {
+    std::cerr << (reply ? floserver::core::clean_error_text(reply->error_message) : std::string("FloServer stopped answering."))
+              << "\n";
+    return 1;
+}
+
+// flo mail [open | test [address] | clear [--yes]]: Mailpit (D27).
+int mail(const std::vector<std::string>& args) {
+    const std::string what = args.size() > 1 ? args[1] : "";
+    bool yes = false;
+    std::string to;
+    bool bad = !(what.empty() || what == "open" || what == "test" || what == "clear");
+    for (std::size_t i = 2; i < args.size() && !bad; ++i) {
+        if (what == "clear" && (args[i] == "--yes" || args[i] == "-y")) {
+            yes = true;
+        } else if (what == "test" && to.empty() && !args[i].starts_with("-")) {
+            to = args[i];
+        } else {
+            bad = true;
+        }
+    }
+    if (bad) {
+        std::cerr << "Usage: flo mail | flo mail open | flo mail test [address] | flo mail clear [--yes]\n";
+        return 2;
+    }
+    auto client = connect_or_start(std::chrono::seconds(60));
+    if (!client) {
+        return 1;
+    }
+    const auto status = client->call("mail.status");
+    if (!status || !status->ok) {
+        return print_mail_refusal(status);
+    }
+    const auto& st = status->result;
+    if (!st.value("installed", false)) {
+        std::cout << "Mailpit isn't installed. Install it with: flo install mailpit\n";
+        return what.empty() ? 0 : 1;
+    }
+    const std::string url = printable(st, "inbox_url");
+    if (what.empty()) {
+        const std::string state = printable(st, "state");
+        std::cout << "Mailpit " << printable(st, "version") << "  " << state << "\n"
+                  << "  SMTP   127.0.0.1:" << st.value("smtp_port", 0) << "   (any user name and password)\n"
+                  << "  Inbox  " << url;
+        if (!st.value("inbox_served", false)) {
+            if (st.contains("inbox_blocked_by")) {
+                std::cout << "   (not served: the project " << printable(st, "inbox_blocked_by") << " has this address)";
+            } else {
+                std::cout << "   (not served yet)";
+            }
+        }
+        std::cout << "\n  Emails " << st.value("total", 0) << " (" << st.value("unread", 0) << " unread), "
+                  << human_bytes(st.value("size_bytes", std::uint64_t{0})) << "\n";
+        for (const char* key : {"error", "php_error"}) {
+            if (st.contains(key)) {
+                std::cout << "  " << printable(st, key) << "\n";
+            }
+        }
+        return 0;
+    }
+    if (what == "open") {
+        if (!st.value("inbox_served", false) || !is_inbox_url(url)) {
+            std::cerr << "The inbox isn't served"
+                      << (st.contains("inbox_blocked_by")
+                              ? ": the project " + printable(st, "inbox_blocked_by") + " has the address mail.localhost"
+                              : std::string(" yet; try again in a few seconds"))
+                      << "\n";
+            return 1;
+        }
+#ifdef _WIN32
+        const std::wstring wide(url.begin(), url.end());  // checked above: ASCII only
+        const auto opened = reinterpret_cast<std::intptr_t>(
+            ShellExecuteW(nullptr, L"open", wide.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
+        if (opened > 32) {
+            std::cout << "Opened " << url << "\n";
+            return 0;
+        }
+#endif
+        std::cout << "Open " << url << " in your browser.\n";
+        return 0;
+    }
+    if (what == "test") {
+        // The first email may wait for Mailpit to start.
+        nlohmann::json params = nlohmann::json::object();
+        if (!to.empty()) {
+            params["to"] = to;
+        }
+        const auto reply = client->call("mail.test", params);
+        if (!reply || !reply->ok) {
+            return print_mail_refusal(reply);
+        }
+        std::cout << "A test email is in the inbox: " << url << "\n";
+        return 0;
+    }
+    if (!yes) {
+        std::cout << "Delete all " << st.value("total", 0) << " emails in Mailpit's inbox? This can't be undone. [y/N] "
+                  << std::flush;
+        std::string answer;
+        if (!std::getline(std::cin, answer) || (answer != "y" && answer != "Y" && answer != "yes")) {
+            std::cout << "Nothing was deleted.\n";
+            return 1;
+        }
+    }
+    const auto reply = client->call("mail.clear");
+    if (!reply || !reply->ok) {
+        return print_mail_refusal(reply);
+    }
+    std::cout << "The inbox is empty.\n";
     return 0;
 }
 
@@ -1857,6 +2007,9 @@ int run_command(const std::vector<std::string>& args, const std::vector<fs::path
     }
     if (args[0] == "env") {
         return env(args);
+    }
+    if (args[0] == "mail") {
+        return mail(args);
     }
     if (args[0] == "shims") {
         return shims(args);

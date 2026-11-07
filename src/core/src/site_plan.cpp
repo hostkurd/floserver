@@ -4,6 +4,7 @@
 
 #include "floserver/core/nginx_config.h"
 #include "floserver/core/paths.h"
+#include "floserver/core/mailpit.h"
 #include "floserver/core/phpmyadmin.h"
 #include "floserver/core/shared_sites.h"
 #include "floserver/core/version.h"
@@ -142,8 +143,9 @@ namespace {
 // config.json, its custom.ini (read once per series), and the project's.
 class PhpSettingsSource {
 public:
-    PhpSettingsSource(const AppConfig& config, const CustomIniReader& custom_ini)
-        : series_(read_php_settings(config)), custom_ini_(&custom_ini) {}
+    PhpSettingsSource(const AppConfig& config, const CustomIniReader& custom_ini,
+                      const std::vector<InstalledRuntime>& installed)
+        : series_(read_php_settings(config)), custom_ini_(&custom_ini), mail_(mail_php_ini(config, installed)) {}
 
     PhpIniSettings operator()(const InstalledRuntime& php, const ProjectConfig* project) {
         const std::string series = php_series_of(php.version).value_or(php.version);
@@ -152,12 +154,16 @@ public:
             text = custom_.emplace(series, *custom_ini_ ? (*custom_ini_)(series) : std::string()).first;
         }
         const auto found = series_.find(series);
-        return effective_php_settings(series, found != series_.end() ? &found->second : nullptr, text->second, project);
+        PhpIniSettings out =
+            effective_php_settings(series, found != series_.end() ? &found->second : nullptr, text->second, project);
+        out.mail_ini = mail_;
+        return out;
     }
 
 private:
     PhpSettings series_;
     const CustomIniReader* custom_ini_;
+    std::vector<std::pair<std::string, std::string>> mail_;  // PHP's mail() to Mailpit (D27)
     std::map<std::string, std::string> custom_;
 };
 
@@ -303,7 +309,7 @@ WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
                    const std::vector<InstalledRuntime>& installed, const std::optional<std::string>& default_php,
                    const CustomIniReader& custom_ini) {
     WebPlan plan;
-    PhpSettingsSource php_settings(config, custom_ini);
+    PhpSettingsSource php_settings(config, custom_ini, installed);
     for (const Project& project : config.projects) {
         PlannedSite site;
         site.name = project.name;

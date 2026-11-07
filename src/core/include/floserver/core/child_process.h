@@ -31,6 +31,9 @@ class LoopbackListener {
 public:
     // Listens on 127.0.0.1:port. Nothing (with `error`) when the port is taken.
     [[nodiscard]] static std::unique_ptr<LoopbackListener> open(Port port, std::string& error);
+    // Listens on [::1]:port only (IPV6_V6ONLY), never shared, not inherited
+    // by children. Nothing (with `error`) when the port is taken there.
+    [[nodiscard]] static std::unique_ptr<LoopbackListener> open_ipv6(Port port, std::string& error);
     LoopbackListener(const LoopbackListener&) = delete;
     LoopbackListener& operator=(const LoopbackListener&) = delete;
     LoopbackListener(LoopbackListener&&) = delete;
@@ -69,6 +72,19 @@ private:
 // servers and the projects' dev servers.
 [[nodiscard]] std::optional<std::uintptr_t> connect_loopback(Port port, bool ipv6 = false);
 void close_socket(std::uintptr_t socket);
+
+// A connection to the Unix-domain socket at `path` (AF_UNIX: Windows 10
+// 1803 and later have it too), or nothing. Close it with close_socket(); it
+// works with relay_sockets(), send_all() and receive_some().
+[[nodiscard]] std::optional<std::uintptr_t> connect_local(const std::filesystem::path& path);
+// The longest socket path (in bytes, as UTF-8) the system takes: sun_path's size less one.
+[[nodiscard]] std::size_t max_local_socket_path();
+
+// Sends all of `data` on a connected socket; false when the connection failed.
+bool send_all(std::uintptr_t socket, std::string_view data);
+// What the other side has sent, waiting at most `limit`: some bytes, ""
+// when it closed the connection, nothing when the time ran out or it failed.
+[[nodiscard]] std::optional<std::string> receive_some(std::uintptr_t socket, std::chrono::milliseconds limit);
 
 // Copies bytes both ways between two connected sockets until either side
 // ends, then closes both. `activity` is called whenever data passes.

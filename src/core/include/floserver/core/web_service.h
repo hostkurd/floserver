@@ -27,6 +27,7 @@
 #include "floserver/core/app_runner.h"
 #include "floserver/core/certificates.h"
 #include "floserver/core/child_process.h"
+#include "floserver/core/mail_service.h"
 #include "floserver/core/php_pool.h"
 #include "floserver/core/ports.h"
 #include "floserver/core/site_plan.h"
@@ -63,7 +64,13 @@ struct WebServiceConfig {
     // says changed. Called on each reload while phpMyAdmin is served, after
     // the service has written the signon script and the install's stub.
     std::function<void()> phpmyadmin_config;
+    // Mailpit's inbox (mail_service.h): where nginx forwards mail.localhost,
+    // or nothing when Mailpit isn't installed or can't run. Asked on each reload.
+    std::function<std::optional<MailInbox>()> mail_inbox;
 };
+
+// Mailpit's inbox among the sites; project names can't have '_'.
+inline constexpr std::string_view kMailSiteName = "_mail";
 
 [[nodiscard]] std::filesystem::path web_dir(const std::filesystem::path& data);
 
@@ -103,6 +110,8 @@ public:
     //    "shared": the same for shared sites, or null,
     //    "phpmyadmin": the same for phpMyAdmin with its "version" (and "name_taken": true when a
     //                  project has its address), or null when it isn't installed,
+    //    "mail": {"address"? (Mailpit's inbox, https://mail.localhost), "problem"?, "missing"?,
+    //             "name_taken"?: true} or null when Mailpit isn't installed,
     //    "error"?: "..."}
     [[nodiscard]] nlohmann::json status() const;
 
