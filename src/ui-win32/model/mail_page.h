@@ -34,20 +34,21 @@ struct MailLatest {
 };
 
 struct MailStatus {
-    bool installed = false;
-    std::string version;
-    MailState state = MailState::NotInstalled;
-    std::string error;
-    int smtp_port = 1025;
-    std::string inbox_url = "https://mail.localhost";
-    bool inbox_served = true;
-    std::string inbox_blocked_by;  // the project that holds the address
+    // Fields ordered largest first (clang-tidy's padding check).
     std::uint64_t unread = 0;
     std::uint64_t total = 0;
     std::uint64_t size_bytes = 0;
     std::uint64_t notice_seq = 0;  // grows with each batch of new mail
+    std::string version;
+    std::string error;
+    std::string inbox_url = "https://mail.localhost";
+    std::string inbox_blocked_by;  // the project that holds the address
     std::optional<MailLatest> latest;
+    int smtp_port = 1025;
     MailSettings settings;
+    bool installed = false;
+    MailState state = MailState::NotInstalled;
+    bool inbox_served = true;
     // The last mail.status failed: these numbers are from before and aren't shown.
     bool stale = false;
 };
@@ -114,7 +115,8 @@ void mail_apply(MailStatus& status, const MailChanges& changes);
 
 // runtimes.remove's answer for Mailpit asked to delete the emails too: the
 // error toast's words when they weren't ({"emails_deleted":false} or an
-// "emails_error"); empty when all is well or nothing was said.
+// "emails_error"); empty when all is well, nothing was said, or the service
+// kept them on purpose ("emails_kept": another Mailpit version still uses them).
 [[nodiscard]] std::string mail_remove_emails_error(const nlohmann::json& result, Lang lang);
 
 // --- the main window --------------------------------------------------------------

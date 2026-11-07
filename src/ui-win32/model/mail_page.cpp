@@ -180,6 +180,10 @@ std::string mail_remove_emails_error(const json& result, Lang lang) {
     if (!said_no && error.empty()) {
         return {};
     }
+    // Kept on purpose: another Mailpit version is still installed and uses them.
+    if (error.empty() && result.contains("emails_kept")) {
+        return {};
+    }
     if (error.empty()) {
         return std::string(text(lang, Str::MailRemoveEmailsFailedNoWhy));
     }

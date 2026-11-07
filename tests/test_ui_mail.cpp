@@ -649,6 +649,7 @@ TEST_CASE("mail: the save question and the one-email delete question are in ever
 TEST_CASE("mail: Remove that couldn't delete the emails says so; the words are cleaned") {
     CHECK(mail_remove_emails_error(json::parse(R"({"emails_deleted": true})"), Lang::En).empty());
     CHECK(mail_remove_emails_error(json::parse("{}"), Lang::En).empty());
+    CHECK(mail_remove_emails_error(json::parse(R"({"emails_deleted": false, "emails_kept": "another Mailpit version is still installed"})"), Lang::En).empty());
     CHECK(mail_remove_emails_error(json::array(), Lang::En).empty());
     CHECK(mail_remove_emails_error(json::parse(R"({"emails_deleted": false, "emails_error": "disk is busy"})"), Lang::En) ==
           "Mailpit was removed, but the emails couldn't be deleted: disk is busy");
