@@ -71,6 +71,9 @@ struct RowAccessState {
 // stopped (`clickable`), else text.
 [[nodiscard]] AccessNode status_node(const std::string& text, bool clickable);
 
+// The status line's Mail button (D27): "Mail · 3 new" (or "Mail"); it opens the inbox in the browser.
+[[nodiscard]] AccessNode mail_link_node(const std::string& text, Lang lang);
+
 // The footer while the service is well: "2 running · 1 sleeping, nginx on ports 80 and 443, …".
 [[nodiscard]] AccessNode footer_node(const FooterText& footer, Lang lang);
 

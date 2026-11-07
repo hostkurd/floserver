@@ -32,6 +32,7 @@ add_executable(floserver_tests
     test_ui_model.cpp
     test_ui_backup.cpp
     test_ui_database.cpp
+    test_ui_mail.cpp
     test_ui_general.cpp
     test_ui_folders.cpp
     test_ui_first_run.cpp

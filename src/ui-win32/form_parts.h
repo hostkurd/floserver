@@ -171,6 +171,18 @@ enum class SaveChoice : std::uint8_t { Save, DontSave, Cancel };
 // "Save your changes to PHP 8.5?" with Save, Don't save and Cancel.
 [[nodiscard]] SaveChoice ask_to_save(HWND owner, Lang lang, const std::string& question);
 
+// Mail (D27). Opens `address` (a .localhost address) in the default browser;
+// false when Windows couldn't.
+[[nodiscard]] bool open_address_in_browser(HWND owner, const std::string& address);
+
+// "Delete all 12 emails? This can't be undone.": Delete and Cancel (the
+// default). True for Delete.
+[[nodiscard]] bool ask_delete_mails(HWND owner, Lang lang, const std::string& question);
+
+// "Remove Mailpit 1.27.3?": Remove and Cancel (the default), and the box
+// "Also delete the caught emails", unticked. True for Remove; `emails` is the box.
+[[nodiscard]] bool ask_remove_mailpit(HWND owner, Lang lang, const std::string& question, bool& emails);
+
 // The question before a project is removed from FloServer (approved 2 and
 // 4 Nov): a small dialog in the window's language (laid out right to left in
 // Arabic and Kurdish) with Remove and Cancel (the default; Enter and Esc

@@ -140,6 +140,13 @@ AccessNode status_node(const std::string& text, bool clickable) {
     return clickable ? button_node("status", text) : text_node("status", text);
 }
 
+AccessNode mail_link_node(const std::string& label, Lang lang) {
+    AccessNode n = button_node("mail/link", label);
+    n.help = access_text(text(lang, Str::MailLinkHelp));
+    n.focusable = true;
+    return n;
+}
+
 AccessNode footer_node(const FooterText& footer, Lang lang) {
     return text_node("footer", access_join(lang, {footer.counts, footer.nginx, footer.memory}));
 }

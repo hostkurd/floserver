@@ -704,6 +704,9 @@ std::string runtime_label(std::string_view name) {
     if (name == "phpmyadmin") {
         return "phpMyAdmin";
     }
+    if (name == "mailpit") {
+        return "Mailpit";
+    }
     return std::string(name);
 }
 

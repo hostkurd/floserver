@@ -15,6 +15,17 @@ namespace {
 int px(int dip, UINT dpi) { return MulDiv(dip, static_cast<int>(dpi), 96); }
 float pxf(float dip, UINT dpi) { return dip * static_cast<float>(dpi) / 96.0F; }
 
+// The window's font, semibold: new mail's first line.
+win::UniqueFont semibold_of(HFONT font) {
+    LOGFONTW spec{};
+    win::UniqueFont out;
+    if (font != nullptr && GetObjectW(font, sizeof spec, &spec) != 0) {
+        spec.lfWeight = FW_SEMIBOLD;
+        out.reset(CreateFontIndirectW(&spec));
+    }
+    return out;
+}
+
 }  // namespace
 
 ToastGeometry toast_geometry(HDC dc, const Toast& toast, HFONT font, int window_w, int bottom, UINT dpi, bool rtl) {
@@ -33,25 +44,42 @@ ToastGeometry toast_geometry(HDC dc, const Toast& toast, HFONT font, int window_
                              ? 0
                              : Canvas::measure(dc, win::widen(toast.action), font, rtl) + 2 * px(12, dpi);
     const int action_gap = action_w > 0 ? gap : 0;
-    const int text_most = std::max(px(40, dpi), most - 2 * pad_x - close - gap - action_w - action_gap);
-    const int one_line = Canvas::measure(dc, text, font, rtl);
+    // New mail: an envelope at the start, a first line and a second line.
+    const int icon_w = toast.mail ? px(18, dpi) + px(10, dpi) : 0;
+    const int text_most = std::max(px(40, dpi), most - 2 * pad_x - close - gap - action_w - action_gap - icon_w);
+    const win::UniqueFont bold = toast.mail ? semibold_of(font) : win::UniqueFont();
+    const std::wstring detail = win::widen(toast.detail);
+    const int one_line = std::max(Canvas::measure(dc, text, bold ? bold.get() : font, rtl),
+                                  detail.empty() ? 0 : Canvas::measure(dc, detail, font, rtl));
     const int text_w = std::min(one_line + px(2, dpi), text_most);
     // Its height, wrapped as the canvas wraps it, at most kToastMaxLines lines.
     const win::Selected selected(dc, font);
     TEXTMETRICW tm{};
     GetTextMetricsW(dc, &tm);
     const int line_h = static_cast<int>(tm.tmHeight);
-    RECT measured{0, 0, text_w, 0};
-    DrawTextW(dc, text.c_str(), static_cast<int>(text.size()), &measured,
-              DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL | (rtl ? UINT{DT_RTLREADING} : 0U));
-    const int text_h = std::clamp(static_cast<int>(measured.bottom - measured.top), line_h, line_h * kToastMaxLines);
-    const int card_w = text_w + 2 * pad_x + close + gap + action_w + action_gap;
+    int text_h = line_h;
+    if (toast.mail) {
+        text_h = line_h * (detail.empty() ? 1 : 2);  // each line cut with an ellipsis, never wrapped
+    } else {
+        RECT measured{0, 0, text_w, 0};
+        DrawTextW(dc, text.c_str(), static_cast<int>(text.size()), &measured,
+                  DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL | (rtl ? UINT{DT_RTLREADING} : 0U));
+        text_h = std::clamp(static_cast<int>(measured.bottom - measured.top), line_h, line_h * kToastMaxLines);
+    }
+    const int card_w = text_w + 2 * pad_x + close + gap + action_w + action_gap + icon_w;
     const int card_h = std::max(text_h + 2 * pad_y, close + px(8, dpi));
     const int left = (window_w - card_w) / 2;
     g.card = {left, bottom - card_h, left + card_w, bottom};
-    g.text = {left + pad_x, g.card.top + (card_h - text_h) / 2, left + pad_x + text_w,
-              g.card.top + (card_h - text_h) / 2 + text_h};
+    const int text_left = left + pad_x + icon_w;
+    g.text = {text_left, g.card.top + (card_h - text_h) / 2, text_left + text_w,
+              g.card.top + (card_h - text_h) / 2 + (toast.mail && !detail.empty() ? line_h : text_h)};
     const int cy = (g.card.top + g.card.bottom) / 2;
+    if (toast.mail) {
+        g.icon = {left + pad_x, cy - px(9, dpi), left + pad_x + px(18, dpi), cy + px(9, dpi)};
+        if (!detail.empty()) {
+            g.detail = {text_left, g.text.bottom, text_left + text_w, g.text.bottom + line_h};
+        }
+    }
     g.close = {g.card.right - px(6, dpi) - close, cy - close / 2, g.card.right - px(6, dpi), cy - close / 2 + close};
     if (action_w > 0) {
         const int h = px(26, dpi);
@@ -71,9 +99,17 @@ void paint_toast(Canvas& c, const ToastGeometry& g, const Toast& toast, HFONT fo
     const Rgb ink = error ? p.banner_error.text : p.text;
     const bool action = !toast.action.empty() && g.action.right > g.action.left;
     if (text_pass) {
-        c.paragraph(g.text, win::widen(toast.text), font, ink);
+        if (toast.mail) {
+            const win::UniqueFont bold = semibold_of(font);
+            c.text(g.text, win::widen(toast.text), bold ? bold.get() : font, ink, Align::Start, false);
+            if (!toast.detail.empty()) {
+                c.text(g.detail, win::widen(toast.detail), font, p.text_subtle, Align::Start, false);
+            }
+        } else {
+            c.paragraph(g.text, win::widen(toast.text), font, ink);
+        }
         if (action) {
-            c.text(g.action, win::widen(toast.action), font, ink, Align::Center, false);
+            c.text(g.action, win::widen(toast.action), font, toast.mail ? p.accent_text : ink, Align::Center, false);
         }
         return;
     }
@@ -86,10 +122,27 @@ void paint_toast(Canvas& c, const ToastGeometry& g, const Toast& toast, HFONT fo
     } else if (close_hover) {
         c.round_rect(g.close, pxf(4, dpi), p.row_hover);
     }
-    if (action) {
+    if (action && toast.mail) {
+        // New mail's button is the primary one: filled, outlined while the mouse is over it.
+        c.round_rect(g.action, pxf(4, dpi), p.accent);
+        if (action_hover) {
+            c.round_outline(g.action, pxf(4, dpi), p.accent_text, std::max(1.0F, pxf(1.0F, dpi)));
+        }
+    } else if (action) {
         // A plain button: outlined, filled while the mouse is over it.
         c.round_rect(g.action, pxf(4, dpi), action_hover ? p.row_hover : fill, error ? ink : p.card_border,
                      std::max(1.0F, pxf(1.0F, dpi)));
+    }
+    if (toast.mail && g.icon.right > g.icon.left) {
+        // The envelope, 18 x 18: its body and the flap's V, in the accent colour.
+        const auto ix = static_cast<float>(g.icon.left);
+        const auto iy = static_cast<float>(g.icon.top);
+        const float k = pxf(1.0F, dpi) * 18.0F / 16.0F;
+        c.round_outline({g.icon.left + px(2, dpi), g.icon.top + px(3, dpi), g.icon.right - px(2, dpi),
+                         g.icon.bottom - px(3, dpi)},
+                        pxf(2, dpi), p.accent, pxf(1.4F, dpi));
+        c.line(ix + 3 * k, iy + 5 * k, ix + 9 * k, iy + 10 * k, p.accent, pxf(1.4F, dpi));
+        c.line(ix + 9 * k, iy + 10 * k, ix + 15 * k, iy + 5 * k, p.accent, pxf(1.4F, dpi));
     }
     const float cx = static_cast<float>(g.close.left + g.close.right) / 2.0F;
     const float cy = static_cast<float>(g.close.top + g.close.bottom) / 2.0F;
@@ -169,7 +222,7 @@ void ToastPopup::show(const Toast& toast, const ToastGeometry& g, HFONT font, bo
     const int w = g.card.right - g.card.left;
     const int h = g.card.bottom - g.card.top;
     local_ = g;
-    for (RECT* r : {&local_.card, &local_.text, &local_.close, &local_.action}) {
+    for (RECT* r : {&local_.card, &local_.text, &local_.close, &local_.action, &local_.icon, &local_.detail}) {
         OffsetRect(r, -g.card.left, -g.card.top);
     }
     // A font of its own, made like the window's: the window's may be made

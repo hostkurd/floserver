@@ -362,9 +362,9 @@ RuntimesPage runtimes_page(const json& reply, const Installed* installed, const 
         page.groups.insert(first_narrow, std::move(web));
     }
 
-    // Tools: phpMyAdmin, with how it's served on the newest install's row.
-    // Full width after Web servers (the user, 1 Nov: a third card in a row
-    // cut its rows off), before Node.js and Python.
+    // Tools: phpMyAdmin, with how it's served on the newest install's row,
+    // then Mailpit (D27). Full width after Web servers (the user, 1 Nov: a
+    // third card in a row cut its rows off), before Node.js and Python.
     RuntimeGroup tools;
     tools.title = std::string(text(lang, Str::SettingsTools));
     tools.wide = true;
@@ -381,6 +381,10 @@ RuntimesPage runtimes_page(const json& reply, const Installed* installed, const 
             row.usage = phpmyadmin_line(served, lang);
         }
         break;  // the newest is the one served
+    }
+    for (RuntimeRow& row : take_rows("mailpit")) {
+        row.label = "Mailpit " + row.label;
+        tools.rows.push_back(std::move(row));
     }
     if (!tools.rows.empty()) {
         const auto first_narrow = std::find_if(page.groups.begin(), page.groups.end(),
@@ -453,6 +457,14 @@ const RuntimeJob* job_for(const RuntimeRow& row, const std::vector<RuntimeJob>& 
         }
     }
     return nullptr;
+}
+
+json runtimes_remove_params(const std::string& name, const std::string& version, bool keep_emails) {
+    json params = {{"name", name}, {"version", version}};
+    if (name == "mailpit") {
+        params["keep_emails"] = keep_emails;
+    }
+    return params;
 }
 
 std::string settings_install_key(const std::string& name, const std::string& version) {
