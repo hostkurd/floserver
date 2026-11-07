@@ -104,9 +104,11 @@ public:
         RemovalHold& operator=(const RemovalHold&) = delete;
         RemovalHold(RemovalHold&& other) noexcept : service_(std::exchange(other.service_, nullptr)) {}
         RemovalHold& operator=(RemovalHold&&) = delete;
-        ~RemovalHold() {
+        ~RemovalHold() { release(); }
+        // Lets Mailpit start again now (the destructor does nothing afterwards).
+        void release() {
             if (service_ != nullptr) {
-                service_->release_hold();
+                std::exchange(service_, nullptr)->release_hold();
             }
         }
 

@@ -457,10 +457,9 @@ struct Service {
                                                : floserver::core::DatabaseService::RemovalHold();
             // Mailpit stops first (its program and database are in use while it runs).
             const bool is_mailpit = name == floserver::core::kMailpitRuntime && mail;
-            std::optional<floserver::core::MailService::RemovalHold> mail_hold;
-            if (is_mailpit) {
-                mail_hold.emplace(mail->hold_for_removal());
-            }
+            // A plain guard, not std::optional: GCC -O3 warns (maybe-uninitialized) about the optional.
+            floserver::core::MailService::RemovalHold mail_hold =
+                is_mailpit ? mail->hold_for_removal() : floserver::core::MailService::RemovalHold();
             const bool removed = runtimes->remove(name, version, refusal);
             json result = json::object();
             if (removed && is_mailpit && !keep_emails) {
@@ -479,7 +478,7 @@ struct Service {
                     result["emails_error"] = floserver::core::clean_error_text(error);
                 }
             }
-            mail_hold.reset();
+            mail_hold.release();
             if (removed && is_mailpit) {
                 mail->reload();
                 if (web) {
