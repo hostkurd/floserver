@@ -3,9 +3,10 @@
 // Mailpit, run by the service (D27; mailpit.h has what's written where).
 //
 // Sleep when idle (D11), as MariaDB and the dev servers do: the service
-// holds the public SMTP port (1025, or the one config.json keeps) and the
-// port nginx forwards mail.localhost to, and relays each connection to
-// Mailpit on internal ports (127.0.0.1 only). The first connection to
+// holds the public SMTP port (1025, or the one config.json keeps; on
+// 127.0.0.1 and [::1]) and the port nginx forwards mail.localhost to, and
+// relays each connection to Mailpit on its two Unix-domain sockets in the
+// owner-only <data>/mailpit (never TCP: no other program can take them). The first connection to
 // either starts Mailpit and waits until it listens; when no relayed
 // connection has been open for the idle time it is stopped, and the ports
 // stay. "keep_running" keeps it up.
@@ -46,6 +47,7 @@ struct MailServiceConfig {
     std::chrono::seconds reload_every{5};
     std::chrono::seconds start_limit{30};  // from starting until both ports listen
     PortProbe probe;                       // empty: can_listen_on_loopback
+    bool ipv6 = true;                      // also hold [::1]:<SMTP port> when the machine has it
     // Changes config.json under the lock every other change takes
     // (ProjectService::change_config); empty: loaded and saved directly.
     std::function<bool(const std::function<void(AppConfig&)>& change, std::string& error)> change_config;
@@ -128,7 +130,16 @@ private:
     // Runs `work` on a thread of its own, waited for at stop().
     void run_detached(std::function<void()> work);
     void tick(std::chrono::steady_clock::time_point now);
-    void refresh(bool after_smtp);
+    void refresh(bool after_smtp) noexcept;
+    void refresh_now(bool after_smtp);
+    // The old smtp.sock and http.sock, removed before a start.
+    bool remove_stale_sockets(std::string& error) const;
+    struct SmtpListeners {
+        std::shared_ptr<LoopbackListener> v4;
+        std::shared_ptr<LoopbackListener> v6;
+    };
+    // 127.0.0.1:port and, where there's IPv6 loopback, [::1]:port: both or none.
+    [[nodiscard]] SmtpListeners open_smtp(Port port) const;
     void save_counts_locked() const;
     void load_counts();
     // The password (made the first time) and the two files from it.
@@ -148,12 +159,14 @@ private:
     std::thread thread_;
     std::shared_ptr<LoopbackListener> smtp_listener_;   // mutex_
     std::shared_ptr<LoopbackListener> inbox_listener_;  // mutex_
+    std::shared_ptr<LoopbackListener> smtp6_listener_;  // mutex_: [::1], when the machine has it
     nlohmann::json latest_;           // mutex_: null or {"subject", "to", "new_in_batch"}
     std::string version_;             // mutex_
     std::string install_error_;       // mutex_: installed but can't run (too old, no program, no port)
     std::string blocked_by_;          // mutex_: a project named "mail"
     std::string error_;               // mutex_
     std::string password_;            // mutex_
+    std::string php_problem_;         // mutex_: why PHP's mail() can't be set up
     SecretStore secrets_;
     std::mutex reload_mutex_;  // one reload at a time
     std::mutex secret_mutex_;  // ensure_secret_files(), one at a time
@@ -170,8 +183,6 @@ private:
     std::atomic<int> active_{0};
     int threads_ = 0;                 // threads_mutex_
     MailSettings settings_;           // mutex_
-    Port smtp_internal_ = 0;          // mutex_
-    Port http_internal_ = 0;          // mutex_
     bool installed_ = false;          // mutex_
     State state_ = State::Asleep;     // mutex_
     bool stopped_ = false;            // mutex_

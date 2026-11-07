@@ -464,10 +464,19 @@ struct Service {
             const bool removed = runtimes->remove(name, version, refusal);
             json result = json::object();
             if (removed && is_mailpit && !keep_emails) {
+                // Only with the last Mailpit: another version still installed uses them.
+                bool another = false;
+                if (data) {
+                    for (const auto& installed : floserver::core::list_installed(floserver::core::runtimes_dir(*data))) {
+                        another = another || installed.name == floserver::core::kMailpitRuntime;
+                    }
+                }
                 std::string error;
-                result["emails_deleted"] = mail->delete_emails(error);
-                if (!error.empty()) {
-                    result["emails_error"] = error;
+                result["emails_deleted"] = !another && mail->delete_emails(error);
+                if (another) {
+                    result["emails_kept"] = "another Mailpit version is still installed and uses them";
+                } else if (!error.empty()) {
+                    result["emails_error"] = floserver::core::clean_error_text(error);
                 }
             }
             mail_hold.reset();

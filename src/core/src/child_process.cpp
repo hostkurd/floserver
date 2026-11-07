@@ -14,6 +14,8 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
+#include <afunix.h>
+
 #include <iphlpapi.h>
 
 #include <windows.h>
@@ -26,6 +28,7 @@
 #include <poll.h>
 #include <spawn.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
 extern char** environ;  // NOLINT(readability-redundant-declaration)
@@ -178,6 +181,59 @@ std::optional<std::uintptr_t> connect_loopback(Port port, bool ipv6) {
 }
 
 void close_socket(std::uintptr_t socket) { closesocket(static_cast<SOCKET>(socket)); }
+
+std::unique_ptr<LoopbackListener> LoopbackListener::open_ipv6(Port port, std::string& error) {
+    if (!winsock_started()) {
+        error = "Windows networking (Winsock) didn't start";
+        return nullptr;
+    }
+    const SOCKET s = WSASocketW(AF_INET6, SOCK_STREAM, IPPROTO_TCP, nullptr, 0, WSA_FLAG_NO_HANDLE_INHERIT);
+    if (s == INVALID_SOCKET) {
+        error = "can't make a socket (" + std::to_string(WSAGetLastError()) + ")";
+        return nullptr;
+    }
+    BOOL exclusive = TRUE;
+    setsockopt(s, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, reinterpret_cast<const char*>(&exclusive),
+               static_cast<int>(sizeof exclusive));
+    DWORD only = 1;
+    setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, reinterpret_cast<const char*>(&only), static_cast<int>(sizeof only));
+    sockaddr_in6 addr{};
+    addr.sin6_family = AF_INET6;
+    addr.sin6_port = htons(port);
+    addr.sin6_addr = in6addr_loopback;
+    if (bind(s, reinterpret_cast<const sockaddr*>(&addr), static_cast<int>(sizeof addr)) != 0 ||
+        listen(s, SOMAXCONN) != 0) {
+        error = "port " + std::to_string(port) + " is taken on [::1]";
+        closesocket(s);
+        return nullptr;
+    }
+    return std::unique_ptr<LoopbackListener>(new LoopbackListener(static_cast<std::uintptr_t>(s), port));
+}
+
+std::size_t max_local_socket_path() { return sizeof(sockaddr_un{}.sun_path) - 1; }
+
+std::optional<std::uintptr_t> connect_local(const std::filesystem::path& path) {
+    if (!winsock_started()) {
+        return std::nullopt;
+    }
+    const std::u8string generic = path.generic_u8string();  // '/' on Windows too, as Mailpit has it
+    const std::string text(generic.begin(), generic.end());
+    sockaddr_un addr{};
+    if (text.empty() || text.size() > max_local_socket_path()) {
+        return std::nullopt;
+    }
+    addr.sun_family = AF_UNIX;
+    std::copy(text.begin(), text.end(), addr.sun_path);
+    const SOCKET s = WSASocketW(AF_UNIX, SOCK_STREAM, 0, nullptr, 0, WSA_FLAG_NO_HANDLE_INHERIT);
+    if (s == INVALID_SOCKET) {
+        return std::nullopt;
+    }
+    if (connect(s, reinterpret_cast<const sockaddr*>(&addr), static_cast<int>(sizeof addr)) != 0) {
+        closesocket(s);
+        return std::nullopt;
+    }
+    return static_cast<std::uintptr_t>(s);
+}
 
 bool send_all(std::uintptr_t socket, std::string_view data) {
     const SOCKET s = static_cast<SOCKET>(socket);
@@ -452,6 +508,49 @@ std::optional<std::uintptr_t> connect_loopback(Port port, bool ipv6) {
 }
 
 void close_socket(std::uintptr_t socket) { close(static_cast<int>(socket)); }
+
+std::unique_ptr<LoopbackListener> LoopbackListener::open_ipv6(Port port, std::string& error) {
+    const int s = socket(AF_INET6, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_TCP);
+    if (s < 0) {
+        error = "can't make a socket";
+        return nullptr;
+    }
+    int one = 1;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, &one, sizeof one);
+    sockaddr_in6 addr{};
+    addr.sin6_family = AF_INET6;
+    addr.sin6_port = htons(port);
+    addr.sin6_addr = in6addr_loopback;
+    if (bind(s, reinterpret_cast<const sockaddr*>(&addr), sizeof addr) != 0 || listen(s, SOMAXCONN) != 0) {
+        error = "port " + std::to_string(port) + " is taken on [::1]";
+        close(s);
+        return nullptr;
+    }
+    return std::unique_ptr<LoopbackListener>(new LoopbackListener(static_cast<std::uintptr_t>(s), port));
+}
+
+std::size_t max_local_socket_path() { return sizeof(sockaddr_un{}.sun_path) - 1; }
+
+std::optional<std::uintptr_t> connect_local(const std::filesystem::path& path) {
+    const std::u8string generic = path.generic_u8string();  // '/' on Windows too, as Mailpit has it
+    const std::string text(generic.begin(), generic.end());
+    sockaddr_un addr{};
+    if (text.empty() || text.size() > max_local_socket_path()) {
+        return std::nullopt;
+    }
+    addr.sun_family = AF_UNIX;
+    std::copy(text.begin(), text.end(), addr.sun_path);
+    const int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (s < 0) {
+        return std::nullopt;
+    }
+    if (connect(s, reinterpret_cast<const sockaddr*>(&addr), sizeof addr) != 0) {
+        close(s);
+        return std::nullopt;
+    }
+    return static_cast<std::uintptr_t>(s);
+}
 
 bool send_all(std::uintptr_t socket, std::string_view data) {
     const int s = static_cast<int>(socket);

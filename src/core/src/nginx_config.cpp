@@ -128,6 +128,24 @@ public:
                  << "        \"\" \"\";\n"
                  << "    }\n";
         }
+        if (spec_.mail) {
+            // Mailpit's inbox gets the password from nginx, so another site
+            // mustn't make the browser ask it anything (a link check, a read
+            // mark): only a plain visit (a link, a typed address) comes in
+            // from elsewhere, and only to its pages, never /api/ or /proxy.
+            // A request carrying an Origin must come from the inbox itself.
+            const bool tls = spec_.mail->tls.has_value();
+            out_ << "\n    map \"$http_sec_fetch_site:$http_sec_fetch_mode:$request_method:$uri\" $floserver_mail_cross {\n"
+                 << "        default 0;\n"
+                 << "        \"~*^(cross-site|same-site):navigate:GET:/(?!api(/|$)|proxy)\" 0;\n"
+                 << "        \"~*^(cross-site|same-site):\" 1;\n"
+                 << "    }\n"
+                 << "    map $http_origin $floserver_mail_origin {\n"
+                 << "        default 1;\n"
+                 << "        \"\" 0;\n"
+                 << "        \"" << site_address(std::string(kMailHostName), spec_.ports, tls) << "\" 0;\n"
+                 << "    }\n";
+        }
         out_ << "\n    # Addresses that aren't a project.\n"
              << "    server {\n";
         listen(spec_.ports.http, " default_server");
@@ -452,6 +470,12 @@ private:
         // awake. A browser's own header is replaced by FloServer's.
         out_ << "        server_name " << name << ".localhost;\n"
              << "        add_header Referrer-Policy no-referrer always;\n"
+             << "        if ($floserver_mail_cross) {\n"
+             << "            return 403;\n"
+             << "        }\n"
+             << "        if ($floserver_mail_origin) {\n"
+             << "            return 403;\n"
+             << "        }\n"
              << "        location / {\n"
              << "            proxy_pass http://127.0.0.1:" << mail.port << ";\n"
              << "            proxy_http_version 1.1;\n"

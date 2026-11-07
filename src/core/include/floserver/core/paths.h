@@ -56,6 +56,14 @@ namespace floserver::core {
 [[nodiscard]] bool write_private_file_atomically(const std::filesystem::path& file, std::string_view bytes,
                                                  std::string& error);
 
+// Makes `dir` (and its parents) and keeps everyone else out of it: POSIX
+// 0700; on Windows an explicit, protected ACL (this user and SYSTEM, full
+// control, nothing inherited from above), inherited by what's made inside
+// and set again on each plain file already there (links aren't followed).
+// For folders of secrets that may lie on a drive whose ACL lets others in
+// (FLOSERVER_DATA_DIR on D:\, say). False (with `error`) when it can't.
+[[nodiscard]] bool make_owner_only_folder(const std::filesystem::path& dir, std::string& error);
+
 // Renames `from` to `to` only when nothing is at `to` (never replacing it):
 // Windows' MoveFileExW without MOVEFILE_REPLACE_EXISTING, POSIX link() then
 // unlink(). False with `error` otherwise; `from` is then where it was.

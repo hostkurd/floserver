@@ -2,6 +2,7 @@
 
 #include "floserver/core/crypto.h"
 #include "floserver/core/encoding.h"
+#include "floserver/core/child_process.h"
 #include "floserver/core/integration.h"
 #include "floserver/core/mariadb.h"
 #include "floserver/core/paths.h"
@@ -124,6 +125,8 @@ MailpitPaths mailpit_paths(const fs::path& data) {
     p.nginx_auth = p.dir / "nginx-auth.conf";
     p.status = p.dir / "status.json";
     p.log = data / "web" / "logs" / "mailpit.log";
+    p.smtp_socket = p.dir / "smtp.sock";
+    p.http_socket = p.dir / "http.sock";
     return p;
 }
 
@@ -177,11 +180,35 @@ const InstalledRuntime* newest_mailpit_any(const std::vector<InstalledRuntime>& 
     return best;
 }
 
-std::vector<std::string> mailpit_args(Port smtp, Port http, const MailpitPaths& paths, int max) {
+std::string mailpit_socket_text(const fs::path& socket) {
+    const std::u8string u = socket.generic_u8string();
+    return {u.begin(), u.end()};
+}
+
+std::optional<std::string> mailpit_socket_problem(const MailpitPaths& paths) {
+    for (const fs::path& socket : {paths.smtp_socket, paths.http_socket}) {
+        const std::string text = mailpit_socket_text(socket);
+        if (std::any_of(text.begin(), text.end(), [](char c) {
+                const auto u = static_cast<unsigned char>(c);
+                return u < 0x20 || u == 0x7F;
+            })) {
+            return "FloServer's data folder (" + clean_error_text(path_to_utf8(paths.dir)) +
+                   ") has a control character in its path, so Mailpit can't make its sockets there";
+        }
+        if (text.size() > max_local_socket_path()) {
+            return "FloServer's data folder path is too long for Mailpit's sockets (" + std::to_string(text.size()) +
+                   " characters; at most " + std::to_string(max_local_socket_path()) +
+                   "): set a shorter FLOSERVER_DATA_DIR";
+        }
+    }
+    return std::nullopt;
+}
+
+std::vector<std::string> mailpit_args(const MailpitPaths& paths, int max) {
     return {"--smtp",
-            "127.0.0.1:" + std::to_string(smtp),
+            "unix:" + mailpit_socket_text(paths.smtp_socket) + ":0600",
             "--listen",
-            "127.0.0.1:" + std::to_string(http),
+            "unix:" + mailpit_socket_text(paths.http_socket) + ":0600",
             "--database",
             path_to_utf8(paths.database),
             "--max",
@@ -343,18 +370,48 @@ std::string mailpit_nginx_auth(std::string_view password) {
            mailpit_basic_auth(password) + "\";\n";
 }
 
+std::optional<std::string> mail_sendmail_problem(const fs::path& mailpit) {
+#ifdef _WIN32
+    (void)mailpit;
+    return std::nullopt;
+#else
+    const std::string program = path_to_utf8(mailpit);
+    const bool bad = program.empty() || std::any_of(program.begin(), program.end(), [](char c) {
+        const auto u = static_cast<unsigned char>(c);
+        return u < 0x20 || u == 0x7F || c == '\'' || c == '$' || c == '"' || c == '`' || c == '\\';
+    });
+    if (!bad) {
+        return std::nullopt;
+    }
+    return "PHP's mail() can't use Mailpit: its path (" + clean_error_text(program) +
+           ") has a ' $ \" ` \\ or control character, which PHP's sendmail_path can't hold safely";
+#endif
+}
+
 std::vector<std::pair<std::string, std::string>> mail_php_ini_lines(Port port, const fs::path& mailpit) {
 #ifdef _WIN32
     (void)mailpit;
     return {{"SMTP", "127.0.0.1"}, {"smtp_port", std::to_string(port)}, {"sendmail_from", std::string(kMailFrom)}};
 #else
-    const std::string program = path_to_utf8(mailpit);
-    if (program.empty() || program.find_first_of("\"\r\n") != std::string::npos) {
+    if (mail_sendmail_problem(mailpit)) {
         return {};
     }
-    // Quoted: php.ini would read a path with spaces as several values.
-    return {{"sendmail_path", "\"" + program + " sendmail -S 127.0.0.1:" + std::to_string(port) + "\""}};
+    // PHP runs sendmail_path with /bin/sh -c: the program in '...' (a path
+    // with a space, as every macOS data folder has), the whole value in
+    // php.ini's "..." (which expands ${...}, so no $ gets this far).
+    return {{"sendmail_path",
+             "\"'" + path_to_utf8(mailpit) + "' sendmail -S 127.0.0.1:" + std::to_string(port) + "\""}};
 #endif
+}
+
+std::optional<std::string> mail_php_problem(const AppConfig& app, const std::vector<InstalledRuntime>& installed) {
+    const MailSettings settings = read_mail_settings(app);
+    const InstalledRuntime* mailpit = newest_mailpit(installed);
+    if (!settings.php || mailpit == nullptr) {
+        return std::nullopt;
+    }
+    const auto program = mailpit_program(mailpit->dir);
+    return program ? mail_sendmail_problem(*program) : std::nullopt;
 }
 
 std::vector<std::pair<std::string, std::string>> mail_php_ini(const AppConfig& app,
@@ -371,6 +428,102 @@ std::vector<std::pair<std::string, std::string>> mail_php_ini(const AppConfig& a
     return program ? mail_php_ini_lines(*settings.port, *program) : std::vector<std::pair<std::string, std::string>>{};
 #endif
 }
+
+namespace {
+
+// One code point from `text` at `at` (advanced); U+FFFD for a bad sequence.
+char32_t next_code_point(std::string_view text, std::size_t& at) {
+    const auto byte = [&text](std::size_t i) { return static_cast<unsigned char>(text[i]); };
+    const unsigned char first = byte(at);
+    std::size_t length = 1;
+    char32_t cp = first;
+    if (first >= 0xC2 && first <= 0xDF) {
+        length = 2;
+        cp = first & 0x1FU;
+    } else if (first >= 0xE0 && first <= 0xEF) {
+        length = 3;
+        cp = first & 0x0FU;
+    } else if (first >= 0xF0 && first <= 0xF4) {
+        length = 4;
+        cp = first & 0x07U;
+    } else if (first >= 0x80) {
+        ++at;
+        return 0xFFFD;
+    }
+    if (at + length > text.size()) {
+        ++at;
+        return 0xFFFD;
+    }
+    for (std::size_t i = 1; i < length; ++i) {
+        if ((byte(at + i) & 0xC0U) != 0x80U) {
+            ++at;
+            return 0xFFFD;
+        }
+        cp = (cp << 6U) | (byte(at + i) & 0x3FU);
+    }
+    // Overlong, surrogate or out of range: not UTF-8.
+    if ((length == 3 && cp < 0x800) || (length == 4 && (cp < 0x10000 || cp > 0x10FFFF)) ||
+        (cp >= 0xD800 && cp <= 0xDFFF)) {
+        ++at;
+        return 0xFFFD;
+    }
+    at += length;
+    return cp;
+}
+
+void append_utf8(std::string& out, char32_t cp) {
+    const auto put = [&out](unsigned value) { out += static_cast<char>(static_cast<unsigned char>(value)); };
+    if (cp < 0x80) {
+        put(cp);
+    } else if (cp < 0x800) {
+        put(0xC0U | (cp >> 6U));
+        put(0x80U | (cp & 0x3FU));
+    } else if (cp < 0x10000) {
+        put(0xE0U | (cp >> 12U));
+        put(0x80U | ((cp >> 6U) & 0x3FU));
+        put(0x80U | (cp & 0x3FU));
+    } else {
+        put(0xF0U | (cp >> 18U));
+        put(0x80U | ((cp >> 12U) & 0x3FU));
+        put(0x80U | ((cp >> 6U) & 0x3FU));
+        put(0x80U | (cp & 0x3FU));
+    }
+}
+
+// Bidi controls, zero-width characters and line/paragraph separators.
+bool invisible(char32_t cp) {
+    return cp == 0x061C || (cp >= 0x200B && cp <= 0x200F) || (cp >= 0x2028 && cp <= 0x202E) || cp == 0x2060 ||
+           (cp >= 0x2066 && cp <= 0x2069) || cp == 0xFEFF;
+}
+
+bool control(char32_t cp) { return cp < 0x20 || (cp >= 0x7F && cp <= 0x9F); }
+
+std::string clean_text(std::string_view text, std::size_t max_chars) {
+    std::string out;
+    std::size_t chars = 0;
+    for (std::size_t at = 0; at < text.size();) {
+        char32_t cp = next_code_point(text, at);
+        if (invisible(cp)) {
+            continue;
+        }
+        if (control(cp)) {
+            cp = U' ';
+        }
+        if (chars == max_chars) {
+            out += "\u2026";  // …
+            break;
+        }
+        append_utf8(out, cp);
+        ++chars;
+    }
+    return out;
+}
+
+}  // namespace
+
+std::string clean_mail_text(std::string_view text, std::size_t max_chars) { return clean_text(text, max_chars); }
+
+std::string clean_error_text(std::string_view text, std::size_t max_chars) { return clean_text(text, max_chars); }
 
 MailEnvKind mail_env_kind(const fs::path& project_dir, bool python) {
     if (env_style(project_dir) == EnvStyle::Laravel) {

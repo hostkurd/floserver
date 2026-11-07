@@ -108,10 +108,55 @@ std::vector<std::pair<int, std::string>> mailpit_processes(const fs::path& data)
     return out;
 }
 
-// The port after `flag` in a command line ("--listen 127.0.0.1:33301 ...").
-Port port_after(const std::string& cmd, const std::string& flag) {
-    const auto at = cmd.find(flag + " 127.0.0.1:");
-    return at == std::string::npos ? 0 : static_cast<Port>(std::stoi(cmd.substr(at + flag.size() + 11)));
+// U+202E (right-to-left override), as bytes: a literal would trip clang-tidy.
+const std::string kRlo = {'\xe2', '\x80', '\xae'};
+
+// A whole HTTP/1.0 exchange on a Unix-domain socket; the reply, or "".
+std::string http_unix(const fs::path& socket, const std::string& path, const std::string& headers = "") {
+    const auto c = connect_local(socket);
+    if (!c) {
+        return "";
+    }
+    std::string resp;
+    if (send_all(*c, "GET " + path + " HTTP/1.0\r\nHost: localhost\r\n" + headers + "\r\n")) {
+        while (const auto got = receive_some(*c, 20s)) {
+            if (got->empty()) {
+                break;
+            }
+            resp += *got;
+        }
+    }
+    close_socket(*c);
+    return resp;
+}
+
+// One email sent by hand to `port`, with `subject` as it is; true when taken.
+bool send_raw(Port port, const std::string& subject) {
+    const auto c = connect_loopback(port);
+    if (!c) {
+        return false;
+    }
+    std::string got;
+    const auto expect = [&](const std::string& code) {
+        got.clear();
+        while (got.find("\r\n") == std::string::npos) {
+            const auto more = receive_some(*c, 30s);
+            if (!more || more->empty()) {
+                return false;
+            }
+            got += *more;
+        }
+        return got.starts_with(code);
+    };
+    const bool ok = expect("220") && send_all(*c, "HELO t\r\n") && expect("250") &&
+                    send_all(*c, "MAIL FROM:<a@t.test>\r\n") && expect("250") &&
+                    send_all(*c, "RCPT TO:<b@t.test>\r\n") && expect("250") && send_all(*c, "DATA\r\n") &&
+                    expect("354") &&
+                    send_all(*c, "Subject: " + subject + "\r\nTo: \"Bob" + kRlo + "\x1b[2J\" <b@t.test>\r\n\r\nhi\r\n.\r\n") &&
+                    expect("250");
+    (void)send_all(*c, "QUIT\r\n");
+    close_socket(*c);
+    return ok;
 }
 
 }  // namespace
@@ -143,6 +188,9 @@ TEST_CASE("Mailpit wakes on SMTP and on the inbox, sleeps when idle, and the ser
     CHECK(mailpit_processes(data).empty());
     const auto password = SecretStore(data).read(std::string(kMailSecretName));
     REQUIRE(password);
+    // A socket file left by a Mailpit that was killed is cleared before the start.
+    const MailpitPaths paths = mailpit_paths(data);
+    test_util::write_file(paths.smtp_socket, "stale");
 
     // An email wakes it: the first connection waits for Mailpit to start.
     ServiceRefusal refusal;
@@ -170,26 +218,45 @@ TEST_CASE("Mailpit wakes on SMTP and on the inbox, sleeps when idle, and the ser
     CHECK(cmd.find("--ui-auth-file") != std::string::npos);
     CHECK(test_util::read_file(mailpit_paths(data).log).find(*password) == std::string::npos);
     CHECK(mail.status().dump().find(*password) == std::string::npos);
-    // Straight to Mailpit's own web port: its 401 without the password.
-    const Port internal = port_after(cmd, "--listen");
-    REQUIRE(internal != 0);
-    CHECK(status_code(http(internal, "127.0.0.1", "/api/v1/info")) == "401");
+    // Mailpit listens on its two sockets only: no TCP port another program could take first.
+    CHECK(cmd.find("--smtp unix:" + mailpit_socket_text(paths.smtp_socket) + ":0600") != std::string::npos);
+    CHECK(cmd.find("--listen unix:" + mailpit_socket_text(paths.http_socket) + ":0600") != std::string::npos);
+    CHECK(cmd.find("127.0.0.1") == std::string::npos);
+    CHECK(fs::is_socket(fs::symlink_status(paths.smtp_socket)));
+    CHECK(fs::is_socket(fs::symlink_status(paths.http_socket)));
+    CHECK((fs::status(paths.dir).permissions() & (fs::perms::group_all | fs::perms::others_all)) == fs::perms::none);
+    CHECK((fs::status(paths.http_socket).permissions() & (fs::perms::group_all | fs::perms::others_all)) ==
+          fs::perms::none);
+    // Straight to Mailpit's own socket: its 401 without the password.
+    CHECK(status_code(http_unix(paths.http_socket, "/api/v1/info")) == "401");
     const std::string login = "Authorization: " + mailpit_basic_auth(*password) + "\r\n";
-    CHECK(status_code(http(internal, "127.0.0.1", "/api/v1/info", login)) == "200");
+    CHECK(status_code(http_unix(paths.http_socket, "/api/v1/info", login)) == "200");
+
+    // Whatever an email says is shown cleaned: no escapes, no bidi tricks, cut short.
+    REQUIRE(send_raw(*mail.smtp_port(), "Pay" + kRlo + "fdp.exe\x1b]0;x\x07 " + std::string(400, 'z')));
+    REQUIRE(eventually([&] { return mail.status()["notice_seq"] == 2; }));
+    st = mail.status();
+    const std::string subject = st["latest"]["subject"].get<std::string>();
+    CHECK(subject.starts_with("Payfdp.exe ]0;x  zzz"));
+    CHECK(subject.find('\x1b') == std::string::npos);
+    CHECK(subject.size() <= 203);
+    CHECK(st["latest"]["to"].get<std::string>().find('\x1b') == std::string::npos);
+    CHECK(st["latest"]["to"].get<std::string>().find(kRlo) == std::string::npos);
+    CHECK(st["total"] == 2);
 
     // Asleep after the idle time, though the service asked its API after the email.
     const auto inbox = mail.inbox();
     REQUIRE(inbox);
     REQUIRE(eventually([&] { return mail.status()["state"] == "asleep"; }, 10s));
     CHECK(eventually([&] { return mailpit_processes(data).empty(); }, 5s));  // stopped just after
-    CHECK(mail.status()["total"] == 1);  // the last values stand
+    CHECK(mail.status()["total"] == 2);  // the last values stand
 
     // The inbox wakes it: without the header nginx adds, Mailpit's own 401.
     CHECK(status_code(http(inbox->port, "mail.localhost", "/api/v1/info")) == "401");
     CHECK(mail.status()["state"] == "running");
     CHECK(status_code(http(inbox->port, "mail.localhost", "/api/v1/info", login)) == "200");
     REQUIRE(eventually([&] { return mail.status()["state"] == "asleep"; }, 10s));
-    CHECK(mail.status()["notice_seq"] == 1);  // inbox requests aren't new email
+    CHECK(mail.status()["notice_seq"] == 2);  // inbox requests aren't new email
 
     // Clear wakes it and empties the inbox.
     REQUIRE(mail.clear(refusal));
@@ -207,7 +274,7 @@ TEST_CASE("Mailpit wakes on SMTP and on the inbox, sleeps when idle, and the ser
 
     // Each SMTP connection that delivered email is one more notice.
     REQUIRE(mail.send_test("", refusal));
-    REQUIRE(eventually([&] { return mail.status()["notice_seq"] == 2; }));
+    REQUIRE(eventually([&] { return mail.status()["notice_seq"] == 3; }));
     CHECK(mail.status()["latest"]["to"] == "you@example.com");
 
     // Removing it: stopped and held, the emails deleted when asked.
@@ -274,6 +341,22 @@ TEST_CASE("mail.localhost through the real nginx: the inbox's password added, no
     CHECK(status_code(reply) == "200");
     CHECK(reply.find("\"Messages\"") != std::string::npos);
     CHECK(http(port, "other.localhost", "/api/v1/info").find("404") != std::string::npos);
+    // Another site can't make the browser use the inbox's password: only a
+    // plain visit to its pages comes in; an Origin must be the inbox's own.
+    const std::string own = "http://mail.localhost:" + std::to_string(port);
+    const auto code = [&](const std::string& path, const std::string& headers) {
+        // With the port, as a browser sends it (Mailpit compares Origin with Host).
+        return status_code(http(port, "mail.localhost:" + std::to_string(port), path, headers));
+    };
+    CHECK(code("/api/v1/message/latest/link-check", "Sec-Fetch-Site: cross-site\r\nSec-Fetch-Mode: no-cors\r\n") == "403");
+    CHECK(code("/api/v1/info", "Sec-Fetch-Site: same-site\r\nSec-Fetch-Mode: cors\r\n") == "403");
+    CHECK(code("/api/v1/info", "Sec-Fetch-Site: cross-site\r\nSec-Fetch-Mode: navigate\r\n") == "403");
+    CHECK(code("/proxy?url=x", "Sec-Fetch-Site: cross-site\r\nSec-Fetch-Mode: navigate\r\n") == "403");
+    CHECK(code("/", "Sec-Fetch-Site: cross-site\r\nSec-Fetch-Mode: navigate\r\n") == "200");
+    CHECK(code("/api/v1/info", "Origin: http://evil.test\r\n") == "403");
+    CHECK(code("/api/v1/info", "Origin: null\r\n") == "403");
+    CHECK(code("/api/v1/info", "Origin: " + own + "\r\nSec-Fetch-Site: same-origin\r\nSec-Fetch-Mode: cors\r\n") == "200");
+    CHECK(code("/api/v1/info", "Sec-Fetch-Site: none\r\nSec-Fetch-Mode: navigate\r\n") == "200");
     // nginx.conf holds no secret; the header's file is owner-only.
     const auto password = SecretStore(data).read(std::string(kMailSecretName));
     REQUIRE(password);
@@ -301,6 +384,56 @@ TEST_CASE("mail.localhost through the real nginx: the inbox's password added, no
     web.stop();
     mail.stop();
     CHECK(mailpit_processes(data).empty());
+}
+
+TEST_CASE("PHP's mail() reaches Mailpit through sendmail_path, from a data folder with a space in its path") {
+    const auto mailpit = tool("FLOSERVER_TEST_MAILPIT", "/usr/local/bin/mailpit");
+    const auto php = tool("FLOSERVER_TEST_PHP_CGI", "/usr/bin/php-cgi");
+    if (!mailpit || !php) {
+        MESSAGE("mailpit or php-cgi isn't installed here; skipped");
+        return;
+    }
+    const test_util::TempDir tmp;
+    const fs::path data = tmp.path() / "Application Support" / "FloServer";  // as on every Mac
+    fake_runtime(data, "mailpit", "1.33.0");
+    // A copy, not a link: sendmail_path names the install's own program.
+    fs::copy_file(*mailpit, runtimes_dir(data) / "mailpit" / "1.33.0" / "mailpit");
+    fs::permissions(runtimes_dir(data) / "mailpit" / "1.33.0" / "mailpit", fs::perms::owner_all);
+    std::string error;
+    REQUIRE(save_app_config(app_config_file(data), AppConfig{}, error));
+    MailServiceConfig config;
+    config.data_dir = data;
+    config.idle_after = 5s;
+    MailService mail(config, SecretStore(data));
+    mail.start();
+    const auto app = load_app_config(app_config_file(data), error);
+    REQUIRE(app);
+    const auto lines = mail_php_ini(*app, list_installed(runtimes_dir(data)));
+    REQUIRE(lines.size() == 1);
+    CHECK(lines.front().second.find("Application Support") != std::string::npos);
+    CHECK_FALSE(mail.status().contains("php_error"));
+    std::string ini = "display_errors = stderr\n";
+    for (const auto& [key, value] : lines) {
+        ini.append(key).append(" = ").append(value).append("\n");
+    }
+    test_util::write_file(tmp.path() / "php.ini", ini);
+    test_util::write_file(tmp.path() / "send.php",
+                          "<?php echo mail('dev@example.com', 'From PHP', 'Sent by mail()') ? 'sent' : 'failed';");
+    const std::string cmd = "'" + php->string() + "' -n -c '" + (tmp.path() / "php.ini").string() + "' -f '" +
+                            (tmp.path() / "send.php").string() + "' 2>&1";
+    FILE* pipe = popen(cmd.c_str(), "r");  // NOLINT(cert-env33-c): a test, with fixed arguments
+    REQUIRE(pipe != nullptr);
+    std::string out;
+    char buf[1024];  // NOLINT(modernize-avoid-c-arrays)
+    while (fgets(buf, sizeof buf, pipe) != nullptr) {
+        out += buf;
+    }
+    pclose(pipe);
+    INFO(out);
+    CHECK(out.find("sent") != std::string::npos);
+    REQUIRE(eventually([&] { return mail.status()["notice_seq"] == 1; }, 30s));
+    CHECK(mail.status()["latest"]["subject"] == "From PHP");
+    mail.stop();
 }
 
 #endif

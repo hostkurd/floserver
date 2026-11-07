@@ -16,13 +16,15 @@
 //   runtimes.install {"name": "php", "version"?: "8.5"} -> {"job": 3}
 //   runtimes.remove  {"name": "php", "version": "8.5.12"} -> {}
 //                    Mailpit: {"name": "mailpit", "version", "keep_emails"?: bool (default true)}
-//                    -> {} or, with keep_emails false, {"emails_deleted": bool, "emails_error"?}
+//                    -> {} or, with keep_emails false, {"emails_deleted": bool, "emails_error"?,
+//                    "emails_kept"? (why not: another Mailpit version is still installed)}
 //   mail.status      {} -> {"installed", "version"?, "state": "not_installed"|"asleep"|"starting"|
 //                    "running"|"failed", "error"?, "smtp_port", "inbox_url", "inbox_served",
 //                    "inbox_blocked_by"? (the project named "mail"), "unread", "total",
 //                    "size_bytes" (mailpit.db on disk), "notice_seq" (+1 each time an SMTP
 //                    connection that delivered email ends), "latest"?: {"subject", "to",
-//                    "new_in_batch"}, "settings": {"php", "notices", "keep_running", "max"}}
+//                    "new_in_batch"} (cleaned, at most 200 characters each), "settings": {"php",
+//                    "notices", "keep_running", "max"}, "php_error"? (why PHP's mail() isn't set up)}
 //                    From the service's cache: cheap enough for a 2 s poll (D27).
 //   mail.set         {"php"?, "notices"?, "keep_running"?, "max"?} -> {"ok": true}
 //   mail.test        {"to"?} -> {"ok": true}   one email through the SMTP port (wakes Mailpit)

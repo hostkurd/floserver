@@ -84,16 +84,24 @@ TEST_CASE("the inbox's password file holds a salted hash only, and nginx's heade
     CHECK(conf.find("proxy_set_header Authorization \"" + mailpit_basic_auth("pw") + "\";") != std::string::npos);
 }
 
-TEST_CASE("Mailpit's arguments: internal loopback ports, its database, no secret, no relay") {
+TEST_CASE("Mailpit's arguments: its two sockets (never TCP), its database, no secret, no relay") {
     const MailpitPaths paths = mailpit_paths(path_from_utf8("/data"));
-    const auto args = mailpit_args(33300, 33301, paths, 500);
+    const auto args = mailpit_args(paths, 500);
     const auto has = [&args](const std::string& a) { return std::find(args.begin(), args.end(), a) != args.end(); };
     const auto after = [&args](const std::string& a) {
         const auto it = std::find(args.begin(), args.end(), a);
         return it != args.end() && it + 1 != args.end() ? *(it + 1) : std::string();
     };
-    CHECK(after("--smtp") == "127.0.0.1:33300");
-    CHECK(after("--listen") == "127.0.0.1:33301");
+    CHECK(after("--smtp") == "unix:/data/mailpit/smtp.sock:0600");
+    CHECK(after("--listen") == "unix:/data/mailpit/http.sock:0600");
+    for (const std::string& a : args) {
+        CHECK(a.find("127.0.0.1") == std::string::npos);
+    }
+    CHECK_FALSE(mailpit_socket_problem(paths));
+    // sun_path's limit: a longer folder is refused, never TCP instead.
+    const MailpitPaths deep = mailpit_paths(path_from_utf8("/" + std::string(120, 'd')));
+    REQUIRE(mailpit_socket_problem(deep));
+    CHECK(mailpit_socket_problem(deep)->find("too long") != std::string::npos);
     CHECK(after("--database") == path_to_utf8(paths.database));
     CHECK(after("--max") == "500");
     CHECK(after("--ui-auth-file") == path_to_utf8(paths.ui_auth));
@@ -184,7 +192,19 @@ TEST_CASE("PHP's mail() goes to Mailpit only when it's installed, the switch is 
 #else
     const auto program = mailpit_program(installed.front().dir);
     REQUIRE(program);
-    CHECK(value_of(lines, "sendmail_path") == "\"" + path_to_utf8(*program) + " sendmail -S 127.0.0.1:1026\"");
+    CHECK(value_of(lines, "sendmail_path") == "\"'" + path_to_utf8(*program) + "' sendmail -S 127.0.0.1:1026\"");
+    CHECK_FALSE(mail_php_problem(app, installed));
+    // A space is fine inside the shell's quotes (every macOS data folder has one).
+    CHECK(value_of(mail_php_ini_lines(1025, "/Users/me/Library/Application Support/FloServer/mailpit"),
+                   "sendmail_path") ==
+          "\"'/Users/me/Library/Application Support/FloServer/mailpit' sendmail -S 127.0.0.1:1025\"");
+    // What the shell or php.ini would read as more than a path is refused.
+    for (const char* bad : {"/x/it's/mailpit", "/x/$HOME/mailpit", "/x/${A}/mailpit", "/x/`id`/mailpit",
+                            "/x/\"q\"/mailpit", "/x/back\\slash/mailpit", "/x/new\nline/mailpit"}) {
+        INFO(bad);
+        CHECK(mail_php_ini_lines(1025, bad).empty());
+        CHECK(mail_sendmail_problem(bad));
+    }
 #endif
     CHECK(mail_php_ini_lines(1025, "/x/mailpit").size() == (current_platform().starts_with("windows") ? 3U : 1U));
 
@@ -273,6 +293,31 @@ TEST_CASE(".env mail lines: Laravel, Python, others, and none for FloCMS") {
     CHECK(mail_env_kind(p, false) == MailEnvKind::Other);
 }
 
+TEST_CASE("text from an email is cleaned and cut short before it's shown") {
+    CHECK(clean_mail_text("Hello") == "Hello");
+    CHECK(clean_mail_text("a\x1b[31mred\x07\r\nb\t") == "a [31mred   b ");
+    // C1 controls, bidi overrides, zero-width and separators.
+    CHECK(clean_mail_text("x\xc2\x85y") == "x y");
+    const std::string rlo = {'\xe2', '\x80', '\xae'};  // U+202E, as bytes (a literal trips clang-tidy)
+    CHECK(clean_mail_text("pay" + rlo + "exe.pdf") == "payexe.pdf");
+    CHECK(clean_mail_text("a\xe2\x80\x8b" "b\xe2\x80\xa8" "c\xef\xbb\xbf" "d\xd8\x9c" "e") == "abcde");  // 200B 2028 FEFF 061C
+    CHECK(clean_mail_text("\xe2\x81\xa6x\xe2\x81\xa9\xe2\x81\xa0") == "x");                  // 2066 2069 2060
+    // Arabic and Kurdish stay as they are.
+    CHECK(clean_mail_text("\xd8\xb3\xd9\x84\xd8\xa7\xd9\x85") == "\xd8\xb3\xd9\x84\xd8\xa7\xd9\x85");
+    // Bad UTF-8 becomes U+FFFD; overlong forms aren't let through.
+    CHECK(clean_mail_text("a\xff\xc0\xaf" "b") == "a\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd" "b");
+    // Cut on a character, never inside one.
+    std::string arabic;
+    for (int i = 0; i < 300; ++i) {
+        arabic += "\xd8\xb3";
+    }
+    const std::string cut = clean_mail_text(arabic);
+    CHECK(cut.size() == 200 * 2 + 3);
+    CHECK(cut.ends_with("\xe2\x80\xa6"));
+    CHECK(clean_mail_text(std::string(500, 'a')).size() == 203);
+    CHECK(clean_error_text("line one\nline two\x1b]0;title\x07") == "line one line two ]0;title ");
+}
+
 TEST_CASE("mail is kept for Mailpit's inbox: new projects can't take it, one that has it keeps it") {
     CHECK(reserved_project_name("mail"));
     CHECK(reserved_project_name("phpmyadmin"));
@@ -318,12 +363,26 @@ TEST_CASE("nginx serves mail.localhost only, the header from an owner-only file 
     CHECK(text->find("map $http_upgrade $floserver_connection") != std::string::npos);
     CHECK(text->find("keepalive 8") == std::string::npos);  // no kept connection holds Mailpit awake
     CHECK(text->find("return 302") == std::string::npos);   // http only
+    // Another site may only send a plain visit to the inbox's pages.
+    CHECK(text->find("map \"$http_sec_fetch_site:$http_sec_fetch_mode:$request_method:$uri\" $floserver_mail_cross {") !=
+          std::string::npos);
+    CHECK(text->find("\"~*^(cross-site|same-site):navigate:GET:/(?!api(/|$)|proxy)\" 0;") != std::string::npos);
+    CHECK(text->find("\"~*^(cross-site|same-site):\" 1;") != std::string::npos);
+    CHECK(text->find("\"http://mail.localhost:8080\" 0;") != std::string::npos);
+    CHECK(text->find("if ($floserver_mail_cross) {\n            return 403;") != std::string::npos);
+    CHECK(text->find("if ($floserver_mail_origin) {\n            return 403;") != std::string::npos);
 
     spec.mail->tls = NginxTls{path_from_utf8("/c/mail.pem"), path_from_utf8("/c/mail.key")};
     text = make_nginx_config(spec, error);
     REQUIRE(text);
     CHECK(text->find("return 302 https://mail.localhost:8443$request_uri;") != std::string::npos);
     CHECK(text->find("ssl_reject_handshake on;") != std::string::npos);
+    CHECK(text->find("\"https://mail.localhost:8443\" 0;") != std::string::npos);  // the origin as served
+    spec.mail.reset();
+    text = make_nginx_config(spec, error);
+    REQUIRE(text);
+    CHECK(text->find("floserver_mail") == std::string::npos);
+    spec.mail = mail;
 
     spec.mail->auth_include = path_from_utf8("/data/$bad/nginx-auth.conf");
     CHECK_FALSE(make_nginx_config(spec, error));
@@ -363,6 +422,11 @@ TEST_CASE("Mailpit's SMTP port: 1025, else the next free one, kept in config.jso
         CHECK(*smtp == chosen);
         const auto inbox = mail.inbox();
         REQUIRE(inbox);
+        // [::1] on the same port where the machine has it: nobody else gets mail sent to localhost.
+        if (loopback_ipv6_available()) {
+            std::string why;
+            CHECK_FALSE(LoopbackListener::open_ipv6(chosen, why));
+        }
         CHECK(inbox->port >= kFirstMailInboxPort);
         CHECK(inbox->auth_include == mailpit_paths(data).nginx_auth);
 

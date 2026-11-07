@@ -4,8 +4,11 @@
 
 #ifdef _WIN32
 #include <windows.h>
+
+#include <aclapi.h>
 #else
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -15,6 +18,7 @@
 #include <fstream>
 #include <random>
 #include <system_error>
+#include <vector>
 
 namespace floserver::core {
 
@@ -189,6 +193,94 @@ bool write_file_atomically(const fs::path& file, std::string_view bytes, std::st
 
 bool write_private_file_atomically(const fs::path& file, std::string_view bytes, std::string& error) {
     return write_atomically(file, bytes, true, error);
+}
+
+#ifdef _WIN32
+namespace {
+
+std::string last_error_text() {
+    return error_text(std::error_code(static_cast<int>(GetLastError()), std::system_category()));
+}
+
+// This user and SYSTEM, full control; `inherit`: passed on to what's inside.
+bool set_owner_only_acl(const fs::path& target, bool inherit, std::string& error) {
+    HANDLE token = nullptr;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token) == FALSE) {
+        error = "can't read this user's identity: " + last_error_text();
+        return false;
+    }
+    DWORD size = 0;
+    (void)GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+    std::vector<std::uint8_t> user(size == 0 ? 1 : size);
+    const BOOL got = GetTokenInformation(token, TokenUser, user.data(), size, &size);
+    CloseHandle(token);
+    if (got == FALSE) {
+        error = "can't read this user's identity: " + last_error_text();
+        return false;
+    }
+    std::array<std::uint8_t, SECURITY_MAX_SID_SIZE> system{};
+    DWORD system_size = static_cast<DWORD>(system.size());
+    if (CreateWellKnownSid(WinLocalSystemSid, nullptr, system.data(), &system_size) == FALSE) {
+        error = "can't name SYSTEM: " + last_error_text();
+        return false;
+    }
+    std::array<EXPLICIT_ACCESS_W, 2> access{};
+    const DWORD inheritance = inherit ? static_cast<DWORD>(SUB_CONTAINERS_AND_OBJECTS_INHERIT) : NO_INHERITANCE;
+    const std::array<PSID, 2> sids = {reinterpret_cast<TOKEN_USER*>(user.data())->User.Sid, system.data()};
+    for (std::size_t i = 0; i < access.size(); ++i) {
+        access[i].grfAccessPermissions = FILE_ALL_ACCESS;
+        access[i].grfAccessMode = SET_ACCESS;
+        access[i].grfInheritance = inheritance;
+        access[i].Trustee.TrusteeForm = TRUSTEE_IS_SID;
+        access[i].Trustee.TrusteeType = i == 0 ? TRUSTEE_IS_USER : TRUSTEE_IS_WELL_KNOWN_GROUP;
+        access[i].Trustee.ptstrName = static_cast<LPWSTR>(sids[i]);
+    }
+    PACL acl = nullptr;
+    if (SetEntriesInAclW(static_cast<ULONG>(access.size()), access.data(), nullptr, &acl) != ERROR_SUCCESS) {
+        error = "can't make an access list";
+        return false;
+    }
+    std::wstring name = target.native();
+    const DWORD set = SetNamedSecurityInfoW(name.data(), SE_FILE_OBJECT,
+                                            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, nullptr,
+                                            nullptr, acl, nullptr);
+    LocalFree(acl);
+    if (set != ERROR_SUCCESS) {
+        error = "can't limit who may open " + path_to_utf8(target) + ": " +
+                error_text(std::error_code(static_cast<int>(set), std::system_category()));
+        return false;
+    }
+    return true;
+}
+
+}  // namespace
+#endif
+
+bool make_owner_only_folder(const fs::path& dir, std::string& error) {
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    if (ec || !fs::is_directory(fs::symlink_status(dir, ec))) {
+        error = "can't make the folder " + path_to_utf8(dir) + (ec ? ": " + error_text(ec) : std::string(" (it's a link)"));
+        return false;
+    }
+#ifdef _WIN32
+    if (!set_owner_only_acl(dir, true, error)) {
+        return false;
+    }
+    for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+        std::error_code inner;
+        if (fs::is_regular_file(it->symlink_status(inner)) && !set_owner_only_acl(it->path(), false, error)) {
+            return false;
+        }
+    }
+#else
+    if (::chmod(dir.c_str(), 0700) != 0) {
+        error = "can't limit who may open " + path_to_utf8(dir) + ": " +
+                error_text(std::error_code(errno, std::generic_category()));
+        return false;
+    }
+#endif
+    return true;
 }
 
 bool rename_no_replace(const fs::path& from, const fs::path& to, std::string& error) {

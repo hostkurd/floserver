@@ -12,9 +12,6 @@
 #include <system_error>
 #include <vector>
 
-#ifndef _WIN32
-#include <sys/stat.h>
-#endif
 
 namespace floserver::core {
 
@@ -27,6 +24,7 @@ namespace {
 
 constexpr int kMaxConnections = 256;
 constexpr auto kFailedRetry = 30s;
+constexpr std::size_t kMaxStatusFile = 65536;
 constexpr auto kApiLimit = 5s;
 constexpr std::size_t kMaxApiReply = std::size_t{4} * 1024 * 1024;
 
@@ -156,6 +154,11 @@ int smtp_reply(std::uintptr_t socket, std::string& buffer, std::chrono::millisec
     }
 }
 
+std::string string_field(const json& j, const char* key) {
+    return j.is_object() && j.contains(key) && j.at(key).is_string() ? j.at(key).get<std::string>() : std::string();
+}
+
+// The recipients as one line to show: each cleaned, all of it at most 200 characters.
 std::string recipients(const json& to) {
     std::string out;
     if (!to.is_array()) {
@@ -165,8 +168,8 @@ std::string recipients(const json& to) {
         if (!r.is_object()) {
             continue;
         }
-        const std::string name = r.value("Name", std::string());
-        const std::string address = r.value("Address", std::string());
+        const std::string name = clean_mail_text(string_field(r, "Name"));
+        const std::string address = clean_mail_text(string_field(r, "Address"));
         std::string one = address;
         if (!name.empty()) {
             one = name;
@@ -176,11 +179,11 @@ std::string recipients(const json& to) {
             continue;
         }
         out += (out.empty() ? "" : ", ") + one;
-        if (out.size() > 200) {
+        if (out.size() > 1000) {
             break;
         }
     }
-    return out;
+    return clean_mail_text(out);
 }
 
 std::int64_t number(const json& j, const char* key) {
@@ -222,6 +225,7 @@ void MailService::stop() {
     }
     const std::lock_guard lock(mutex_);
     smtp_listener_.reset();
+    smtp6_listener_.reset();
     inbox_listener_.reset();
 }
 
@@ -242,13 +246,35 @@ void MailService::run_detached(std::function<void()> work) {
     };
     try {
         std::thread([shared, done] {
-            (*shared)();
+            try {
+                (*shared)();
+            } catch (...) {  // NOLINT(bugprone-empty-catch): a detached thread's exception would end the service
+            }
             done();
         }).detach();
     } catch (const std::system_error&) {
         (*shared)();  // no thread: here
         done();
     }
+}
+
+MailService::SmtpListeners MailService::open_smtp(Port port) const {
+    // [::1] too where the machine has it, on the same port, so mail sent to
+    // "localhost" by hand can't reach another program there.
+    SmtpListeners out;
+    std::string why;
+    std::shared_ptr<LoopbackListener> v4 = LoopbackListener::open(port, why);
+    if (!v4) {
+        return out;
+    }
+    if (config_.ipv6 && loopback_ipv6_available()) {
+        out.v6 = LoopbackListener::open_ipv6(port, why);
+        if (!out.v6) {
+            return out;  // both or neither
+        }
+    }
+    out.v4 = std::move(v4);
+    return out;
 }
 
 void MailService::reload() {
@@ -286,7 +312,9 @@ void MailService::reload() {
             state_ = State::Asleep;
             error_.clear();
             smtp_listener_.reset();
+            smtp6_listener_.reset();
             inbox_listener_.reset();
+            php_problem_.clear();
         }
         kill_and_note(std::move(process));
         return;
@@ -333,19 +361,25 @@ void MailService::reload() {
         // be had; else the one held now; else the next free one from 1025.
         const Port wanted = settings.port.value_or(kFirstMailPort);
         if (!smtp_listener_ || smtp_listener_->port() != wanted) {
-            std::string why;
-            std::shared_ptr<LoopbackListener> listener = LoopbackListener::open(wanted, why);
-            if (!listener && !smtp_listener_) {
+            SmtpListeners listeners = open_smtp(wanted);
+            if (!listeners.v4 && !smtp_listener_) {
                 std::set<Port> avoid = {wanted};
                 if (inbox_listener_) {
                     avoid.insert(inbox_listener_->port());
                 }
-                if (const auto free = pick_port_from(kFirstMailPort, avoid, config_.probe)) {
-                    listener = LoopbackListener::open(*free, why);
+                // The probe asks for 127.0.0.1 and [::1] both.
+                for (unsigned tries = 0; !listeners.v4 && tries < 10; ++tries) {
+                    const auto free = pick_port_from(kFirstMailPort, avoid, config_.probe);
+                    if (!free) {
+                        break;
+                    }
+                    listeners = open_smtp(*free);
+                    avoid.insert(*free);
                 }
             }
-            if (listener) {
-                smtp_listener_ = std::move(listener);
+            if (listeners.v4) {
+                smtp_listener_ = std::move(listeners.v4);
+                smtp6_listener_ = std::move(listeners.v6);
             }
         }
         if (!inbox_listener_) {
@@ -364,6 +398,7 @@ void MailService::reload() {
             install_error = "no port is free for Mailpit's inbox (from " + std::to_string(kFirstMailInboxPort) + " up)";
         }
         install_error_ = install_error;
+        php_problem_ = mail_php_problem(*app, installed).value_or(std::string());
         if (smtp_listener_ && settings.port != smtp_listener_->port()) {
             save_port = true;
             port_to_save = smtp_listener_->port();
@@ -423,11 +458,10 @@ bool MailService::ensure_secret_files(std::string& error) {
             return false;
         }
     }
-    std::error_code ec;
-    fs::create_directories(paths_.dir, ec);
-#ifndef _WIN32
-    ::chmod(paths_.dir.c_str(), 0700);
-#endif
+    // Owner-only before anything secret goes in (and again for what's there).
+    if (!make_owner_only_folder(paths_.dir, error)) {
+        return false;
+    }
     const auto auth = read_small_file(paths_.ui_auth, 4096);
     if (!auth || !auth_line_matches(*auth, password)) {
         const auto line = mailpit_auth_line(password, error);
@@ -442,6 +476,22 @@ bool MailService::ensure_secret_files(std::string& error) {
     }
     const std::lock_guard lock(mutex_);
     password_ = std::move(password);
+    return true;
+}
+
+bool MailService::remove_stale_sockets(std::string& error) const {
+    // Only these two names in Mailpit's own folder; a link goes as the link.
+    for (const fs::path& socket : {paths_.smtp_socket, paths_.http_socket}) {
+        std::error_code ec;
+        const auto status = fs::symlink_status(socket, ec);
+        if (ec || !fs::exists(status) || socket.parent_path() != paths_.dir) {
+            continue;
+        }
+        if (fs::is_directory(status) || !fs::remove(socket, ec) || ec) {
+            error = "can't remove the old socket " + path_to_utf8(socket) + (ec ? ": " + error_text(ec) : std::string());
+            return false;
+        }
+    }
     return true;
 }
 
@@ -474,81 +524,60 @@ bool MailService::ensure_running(std::string& error) {
     state_ = State::Starting;
     const fs::path program = program_;
     const int max = settings_.max;
-    std::set<Port> avoid;
-    for (const auto& l : {smtp_listener_, inbox_listener_}) {
-        if (l) {
-            avoid.insert(l->port());
-        }
-    }
-    Port smtp = smtp_internal_;
-    Port http = http_internal_;
     lock.unlock();
 
     std::string why;
     std::unique_ptr<ChildProcess> process;
-    if (ensure_secret_files(why)) {
-        // The internal ports, chosen again when another program took one.
-        if (smtp == 0 || !config_.probe(smtp)) {
-            std::set<Port> taken = avoid;
-            taken.insert(http);
-            smtp = pick_port_from(kFirstMailInternalPort, taken, config_.probe).value_or(0);
-        }
-        if (http == 0 || http == smtp || !config_.probe(http)) {
-            std::set<Port> taken = avoid;
-            taken.insert(smtp);
-            http = pick_port_from(kFirstMailInternalPort, taken, config_.probe).value_or(0);
-        }
-        if (smtp == 0 || http == 0) {
-            why = "no free port for Mailpit";
-        } else {
-            std::error_code ec;
-            fs::create_directories(paths_.log.parent_path(), ec);
-            const std::uintmax_t log_from = file_bytes(paths_.log);
-            ChildOptions o;
-            o.program = program;
-            o.args = mailpit_args(smtp, http, paths_, max);
-            o.working_dir = paths_.dir;
-            o.remove_env = mailpit_env_names();
-            o.output_log = paths_.log;
-            process = ChildProcess::start(o, why);
-            if (process) {
-                // Ready once both ports take connections.
-                const auto deadline = Clock::now() + config_.start_limit;
-                bool ready = false;
-                while (!ready && Clock::now() < deadline && !stopping_) {
-                    if (!process->running()) {
-                        break;
-                    }
-                    const auto a = connect_loopback(smtp);
-                    const auto b = a ? connect_loopback(http) : std::nullopt;
-                    if (a) {
-                        close_socket(*a);
-                    }
-                    if (b) {
-                        close_socket(*b);
-                    }
-                    ready = a && b;
-                    if (!ready) {
-                        std::this_thread::sleep_for(50ms);
-                    }
+    if (const auto problem = mailpit_socket_problem(paths_)) {
+        why = *problem;  // never TCP instead: another program could take a TCP port first
+    } else if (ensure_secret_files(why) && make_owner_only_folder(paths_.dir, why) && remove_stale_sockets(why)) {
+        std::error_code ec;
+        fs::create_directories(paths_.log.parent_path(), ec);
+        const std::uintmax_t log_from = file_bytes(paths_.log);
+        ChildOptions o;
+        o.program = program;
+        o.args = mailpit_args(paths_, max);
+        o.working_dir = paths_.dir;
+        o.remove_env = mailpit_env_names();
+        o.output_log = paths_.log;
+        process = ChildProcess::start(o, why);
+        if (process) {
+            // Ready once both sockets take connections and it still runs.
+            // Only this user can make files in the folder, so they're its.
+            const auto deadline = Clock::now() + config_.start_limit;
+            bool ready = false;
+            while (!ready && Clock::now() < deadline && !stopping_) {
+                if (!process->running()) {
+                    break;
                 }
+                const auto a = connect_local(paths_.smtp_socket);
+                const auto b = a ? connect_local(paths_.http_socket) : std::nullopt;
+                if (a) {
+                    close_socket(*a);
+                }
+                if (b) {
+                    close_socket(*b);
+                }
+                ready = a && b && process->running();
                 if (!ready) {
-                    const bool ended = !process->running();
-                    process->kill();
-                    process.reset();
-                    const std::string said = log_since(paths_.log, log_from);
-                    why = ended ? "Mailpit stopped as it started" : "Mailpit didn't start listening in time";
-                    if (!said.empty()) {
-                        why += ": " + said;
-                    }
+                    std::this_thread::sleep_for(50ms);
+                }
+            }
+            if (!ready) {
+                const bool ended = !process->running();
+                process->kill();
+                process.reset();
+                const std::string said = log_since(paths_.log, log_from);
+                why = ended ? "Mailpit stopped as it started" : "Mailpit didn't start listening in time";
+                if (!said.empty()) {
+                    why += ": " + said;
                 }
             }
         }
     }
+    why = clean_error_text(why);
     touch();
     lock.lock();
-    smtp_internal_ = smtp;
-    http_internal_ = http;
     if (process) {
         process_ = std::move(process);
         state_ = State::Running;
@@ -635,17 +664,21 @@ void MailService::supervise() {
     auto last_reload = Clock::now();
     while (!stopping_) {
         std::shared_ptr<LoopbackListener> smtp;
+        std::shared_ptr<LoopbackListener> smtp6;
         std::shared_ptr<LoopbackListener> inbox;
         {
             const std::lock_guard lock(mutex_);
             smtp = smtp_listener_;
+            smtp6 = smtp6_listener_;
             inbox = inbox_listener_;
         }
         std::vector<const LoopbackListener*> listeners;
         std::vector<bool> is_smtp;
-        if (smtp) {
-            listeners.push_back(smtp.get());
-            is_smtp.push_back(true);
+        for (const auto& l : {smtp, smtp6}) {
+            if (l) {
+                listeners.push_back(l.get());
+                is_smtp.push_back(true);
+            }
         }
         if (inbox) {
             listeners.push_back(inbox.get());
@@ -688,26 +721,16 @@ void MailService::serve(std::uintptr_t client, bool smtp) {
     std::string error;
     std::optional<std::uintptr_t> upstream;
     if (ensure_running(error)) {
-        Port port = 0;
-        {
-            const std::lock_guard lock(mutex_);
-            port = smtp ? smtp_internal_ : http_internal_;
-        }
-        upstream = port != 0 ? connect_loopback(port) : std::nullopt;
-        if (!upstream) {
-            error = "Mailpit isn't taking connections";
-        }
+        upstream = connect_local(smtp ? paths_.smtp_socket : paths_.http_socket);
     }
     if (upstream) {
         relay_sockets(client, *upstream, [this] { touch(); });
     } else if (smtp) {
-        // The program sending sees why (PHP's mail() logs it).
-        std::string line = "421 4.3.0 FloServer: " + error;
-        std::replace(line.begin(), line.end(), '\r', ' ');
-        std::replace(line.begin(), line.end(), '\n', ' ');
-        answer_and_close(client, line.substr(0, 500) + "\r\n");
+        // Anyone who can connect reads this: no paths, no log text. FloServer says why.
+        answer_and_close(client, "421 4.3.0 Mailpit isn't available just now; FloServer's window says why\r\n");
     } else {
-        const std::string body = "Mailpit can't start: " + error + "\n";
+        // A page aimed at 127.0.0.1 (DNS rebinding) can read this: nothing in it but the fact.
+        const std::string body = "Mailpit isn't available just now. FloServer's window says why.\n";
         answer_and_close(client, "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain; charset=utf-8\r\n"
                                  "Content-Length: " +
                                      std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body);
@@ -729,7 +752,7 @@ void MailService::tick(Clock::time_point now) {
     {
         const std::lock_guard lock(mutex_);
         if (state_ == State::Running && process_ && !process_->running()) {
-            error_ = "Mailpit stopped: " + log_since(paths_.log, 0);
+            error_ = clean_error_text("Mailpit stopped: " + log_since(paths_.log, 0));
             process_.reset();
             state_ = State::Asleep;  // the next connection starts it again
         }
@@ -763,24 +786,22 @@ void MailService::tick(Clock::time_point now) {
 }
 
 std::optional<std::pair<int, std::string>> MailService::api(const std::string& method, const std::string& path) {
-    Port port = 0;
     std::string password;
     {
         const std::lock_guard lock(mutex_);
-        if (!process_) {
-            return std::nullopt;
+        if (!process_ || !process_->running()) {
+            return std::nullopt;  // the password goes only to the Mailpit this service started
         }
-        port = http_internal_;
         password = password_;
     }
-    if (port == 0 || password.empty()) {
+    if (password.empty()) {
         return std::nullopt;
     }
-    const auto socket = connect_loopback(port);
+    const auto socket = connect_local(paths_.http_socket);
     if (!socket) {
         return std::nullopt;
     }
-    const std::string request = method + " " + path + " HTTP/1.0\r\nHost: 127.0.0.1:" + std::to_string(port) +
+    const std::string request = method + " " + path + " HTTP/1.0\r\nHost: localhost" +
                                 "\r\nAuthorization: " + mailpit_basic_auth(password) +
                                 "\r\nAccept: application/json\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
     std::string response;
@@ -810,7 +831,15 @@ std::optional<std::pair<int, std::string>> MailService::api(const std::string& m
     }
 }
 
-void MailService::refresh(bool after_smtp) {
+void MailService::refresh(bool after_smtp) noexcept {
+    // On a thread of its own: nothing Mailpit says may end the service.
+    try {
+        refresh_now(after_smtp);
+    } catch (...) {  // NOLINT(bugprone-empty-catch): the last values stand
+    }
+}
+
+void MailService::refresh_now(bool after_smtp) {
     (void)after_smtp;  // either way: a batch Mailpit took since the last look is a notice
     const std::lock_guard serial(refresh_mutex_);
     const auto info = api("GET", "/api/v1/info");
@@ -835,8 +864,8 @@ void MailService::refresh(bool after_smtp) {
         if (messages.is_object() && messages.contains("messages") && messages.at("messages").is_array() &&
             !messages.at("messages").empty() && messages.at("messages").front().is_object()) {
             const json& m = messages.at("messages").front();
-            const json subject = m.contains("Subject") ? m.at("Subject") : json();
-            latest = {{"subject", subject.is_string() ? subject.get<std::string>() : std::string()},
+            // Anyone can send any text: shown cleaned and cut short.
+            latest = {{"subject", clean_mail_text(string_field(m, "Subject"))},
                       {"to", recipients(m.contains("To") ? m.at("To") : json())},
                       {"new_in_batch", batch}};
         } else {
@@ -858,16 +887,20 @@ void MailService::save_counts_locked() const {
     if (latest_.is_object()) {
         doc["latest"] = latest_;
     }
+    std::string text = doc.dump(-1, ' ', false, json::error_handler_t::replace);
+    if (text.size() > kMaxStatusFile) {
+        doc.erase("latest");  // can't happen with cleaned text; never a file load_counts() refuses
+        text = doc.dump();
+    }
     std::string ignored;  // only for showing while asleep after a restart
     std::error_code ec;
     if (fs::is_directory(paths_.dir, ec)) {
-        (void)write_private_file_atomically(paths_.status, doc.dump(-1, ' ', false, json::error_handler_t::replace),
-                                            ignored);
+        (void)write_private_file_atomically(paths_.status, text, ignored);
     }
 }
 
 void MailService::load_counts() {
-    const auto text = read_small_file(paths_.status, 65536);
+    const auto text = read_small_file(paths_.status, kMaxStatusFile);
     const json doc = text ? json::parse(*text, nullptr, false) : json();
     if (!doc.is_object()) {
         return;
@@ -876,7 +909,10 @@ void MailService::load_counts() {
     unread_ = std::max<std::int64_t>(0, number(doc, "unread"));
     total_ = std::max<std::int64_t>(0, number(doc, "total"));
     if (doc.contains("latest") && doc.at("latest").is_object()) {
-        latest_ = doc.at("latest");
+        const json& l = doc.at("latest");
+        latest_ = {{"subject", clean_mail_text(string_field(l, "subject"))},
+                   {"to", clean_mail_text(string_field(l, "to"))},
+                   {"new_in_batch", std::max<std::int64_t>(0, number(l, "new_in_batch"))}};
     }
 }
 
@@ -911,7 +947,10 @@ json MailService::status() const {
     }
     s["state"] = state;
     if (!error.empty()) {
-        s["error"] = error;
+        s["error"] = clean_error_text(error);
+    }
+    if (!php_problem_.empty()) {
+        s["php_error"] = clean_error_text(php_problem_);  // PHP's mail() isn't set up, and why
     }
     s["smtp_port"] = smtp_listener_ ? smtp_listener_->port() : settings_.port.value_or(kFirstMailPort);
     if (!blocked_by_.empty()) {

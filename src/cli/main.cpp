@@ -5,6 +5,7 @@
 #include "floserver/core/encoding.h"
 #include "floserver/core/integration.h"
 #include "floserver/core/ipc.h"
+#include "floserver/core/mailpit.h"
 #include "floserver/core/mariadb.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/project_config.h"
@@ -1748,6 +1749,19 @@ bool is_inbox_url(const std::string& url) {
     return false;
 }
 
+// Text from the service to print: no terminal escapes or other control
+// characters, whatever Mailpit's log or an email held.
+std::string printable(const nlohmann::json& j, const char* key) {
+    return floserver::core::clean_error_text(text_of(j, key));
+}
+
+// A refusal's message, printed the same way.
+int print_mail_refusal(const std::optional<floserver::core::protocol::Reply>& reply) {
+    std::cerr << (reply ? floserver::core::clean_error_text(reply->error_message) : std::string("FloServer stopped answering."))
+              << "\n";
+    return 1;
+}
+
 // flo mail [open | test [address] | clear [--yes]]: Mailpit (D27).
 int mail(const std::vector<std::string>& args) {
     const std::string what = args.size() > 1 ? args[1] : "";
@@ -1773,30 +1787,32 @@ int mail(const std::vector<std::string>& args) {
     }
     const auto status = client->call("mail.status");
     if (!status || !status->ok) {
-        return print_refusal(status);
+        return print_mail_refusal(status);
     }
     const auto& st = status->result;
     if (!st.value("installed", false)) {
         std::cout << "Mailpit isn't installed. Install it with: flo install mailpit\n";
         return what.empty() ? 0 : 1;
     }
-    const std::string url = text_of(st, "inbox_url");
+    const std::string url = printable(st, "inbox_url");
     if (what.empty()) {
-        const std::string state = text_of(st, "state");
-        std::cout << "Mailpit " << text_of(st, "version") << "  " << state << "\n"
+        const std::string state = printable(st, "state");
+        std::cout << "Mailpit " << printable(st, "version") << "  " << state << "\n"
                   << "  SMTP   127.0.0.1:" << st.value("smtp_port", 0) << "   (any user name and password)\n"
                   << "  Inbox  " << url;
         if (!st.value("inbox_served", false)) {
             if (st.contains("inbox_blocked_by")) {
-                std::cout << "   (not served: the project " << text_of(st, "inbox_blocked_by") << " has this address)";
+                std::cout << "   (not served: the project " << printable(st, "inbox_blocked_by") << " has this address)";
             } else {
                 std::cout << "   (not served yet)";
             }
         }
         std::cout << "\n  Emails " << st.value("total", 0) << " (" << st.value("unread", 0) << " unread), "
                   << human_bytes(st.value("size_bytes", std::uint64_t{0})) << "\n";
-        if (st.contains("error")) {
-            std::cout << "  " << text_of(st, "error") << "\n";
+        for (const char* key : {"error", "php_error"}) {
+            if (st.contains(key)) {
+                std::cout << "  " << printable(st, key) << "\n";
+            }
         }
         return 0;
     }
@@ -1804,7 +1820,7 @@ int mail(const std::vector<std::string>& args) {
         if (!st.value("inbox_served", false) || !is_inbox_url(url)) {
             std::cerr << "The inbox isn't served"
                       << (st.contains("inbox_blocked_by")
-                              ? ": the project " + text_of(st, "inbox_blocked_by") + " has the address mail.localhost"
+                              ? ": the project " + printable(st, "inbox_blocked_by") + " has the address mail.localhost"
                               : std::string(" yet; try again in a few seconds"))
                       << "\n";
             return 1;
@@ -1829,7 +1845,7 @@ int mail(const std::vector<std::string>& args) {
         }
         const auto reply = client->call("mail.test", params);
         if (!reply || !reply->ok) {
-            return print_refusal(reply);
+            return print_mail_refusal(reply);
         }
         std::cout << "A test email is in the inbox: " << url << "\n";
         return 0;
@@ -1845,7 +1861,7 @@ int mail(const std::vector<std::string>& args) {
     }
     const auto reply = client->call("mail.clear");
     if (!reply || !reply->ok) {
-        return print_refusal(reply);
+        return print_mail_refusal(reply);
     }
     std::cout << "The inbox is empty.\n";
     return 0;

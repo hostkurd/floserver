@@ -17,10 +17,17 @@
 //          projects can't take the name "mail"; one that already has it
 //          keeps its address and the inbox isn't served (the status says why).
 //
+// Mailpit itself listens only on those two sockets, never on a TCP port, so
+// no other program (another user's, or this user's on Windows, where Go's
+// listeners can be shared) can take its place; the folder is owner-only
+// (make_owner_only_folder(): 0700, or a protected ACL on Windows).
+//
 // Its files are in <data>/mailpit, never in the install (an update
 // replaces it) and never cleaned up by Settings → Folders or backed up:
 //
 //   mailpit.db         the emails (kept when the runtime is removed, unless asked)
+//   smtp.sock          Mailpit's SMTP, a Unix-domain socket (0600)
+//   http.sock          Mailpit's web inbox and API, a Unix-domain socket (0600)
 //   ui-auth            the inbox password's hash, owner-only (never the password)
 //   nginx-auth.conf    nginx's Authorization header for mail.localhost, owner-only
 //   status.json        the last counts, shown while Mailpit sleeps
@@ -50,10 +57,8 @@ inline constexpr std::string_view kMailHostName = "mail";
 // The oldest Mailpit FloServer offers or runs.
 inline constexpr std::string_view kMinMailpitVersion = "1.30.0";
 inline constexpr Port kFirstMailPort = 1025;
-// The port the service holds for the inbox (nginx forwards mail.localhost
-// there), and the internal ports Mailpit itself listens on.
+// The port the service holds for the inbox (nginx forwards mail.localhost there).
 inline constexpr Port kFirstMailInboxPort = 9500;
-inline constexpr Port kFirstMailInternalPort = 33300;
 // The user name in the inbox's Basic authentication.
 inline constexpr std::string_view kMailUiUser = "floserver";
 inline constexpr std::string_view kMailSecretName = "mailpit/ui";
@@ -89,6 +94,8 @@ struct MailpitPaths {
     std::filesystem::path nginx_auth;   // nginx-auth.conf
     std::filesystem::path status;       // status.json
     std::filesystem::path log;          // <data>/web/logs/mailpit.log (Clear old logs empties it)
+    std::filesystem::path smtp_socket;  // smtp.sock
+    std::filesystem::path http_socket;  // http.sock
 };
 
 [[nodiscard]] MailpitPaths mailpit_paths(const std::filesystem::path& data);
@@ -103,11 +110,18 @@ struct MailpitPaths {
 // The newest install of any version, allowed or not (to say why it doesn't run).
 [[nodiscard]] const InstalledRuntime* newest_mailpit_any(const std::vector<InstalledRuntime>& installed);
 
-// Mailpit's arguments: SMTP and web on internal loopback ports, the
+// A socket's path as Mailpit and connect_local() both take it: UTF-8, '/'.
+[[nodiscard]] std::string mailpit_socket_text(const std::filesystem::path& socket);
+// Why the sockets can't be made in `paths.dir` (a path longer than
+// sun_path takes, or with a character Mailpit's "unix:<path>:<mode>" can't
+// hold), or nothing when they can.
+[[nodiscard]] std::optional<std::string> mailpit_socket_problem(const MailpitPaths& paths);
+
+// Mailpit's arguments: SMTP and web on the two sockets (0600), the
 // database, the most emails kept, any SMTP login accepted (PHP and
 // frameworks often send one), no version check, the inbox behind the
-// password file. No relay, POP3 or webhook. Nothing secret.
-[[nodiscard]] std::vector<std::string> mailpit_args(Port smtp, Port http, const MailpitPaths& paths, int max);
+// password file. No TCP port, relay, POP3 or webhook. Nothing secret.
+[[nodiscard]] std::vector<std::string> mailpit_args(const MailpitPaths& paths, int max);
 
 // Mailpit's MP_* environment variables, removed from its environment so
 // nothing set there (a relay, a webhook, another password) changes it.
@@ -134,9 +148,28 @@ struct MailpitPaths {
 // Mailpit's own sendmail. Empty otherwise.
 [[nodiscard]] std::vector<std::pair<std::string, std::string>> mail_php_ini(
     const AppConfig& app, const std::vector<InstalledRuntime>& installed);
-// The same from its parts (the sendmail program is only used outside Windows).
+// Why `mailpit` can't go into sendmail_path, which PHP runs with /bin/sh -c
+// (it's quoted there with '...'): a ', $, ", `, \ or control character.
+// Nothing when it can, and always on Windows (no sendmail_path there).
+[[nodiscard]] std::optional<std::string> mail_sendmail_problem(const std::filesystem::path& mailpit);
+// The same as mail_php_ini() says it: why PHP's mail() isn't set up although
+// it should be, or nothing.
+[[nodiscard]] std::optional<std::string> mail_php_problem(const AppConfig& app,
+                                                          const std::vector<InstalledRuntime>& installed);
+// The same from its parts (the sendmail program is only used outside
+// Windows; empty when mail_sendmail_problem() refuses it).
 [[nodiscard]] std::vector<std::pair<std::string, std::string>> mail_php_ini_lines(Port port,
                                                                                   const std::filesystem::path& mailpit);
+
+// Text from an email (a subject, a recipient) made safe to show: UTF-8
+// (bad bytes become U+FFFD), control characters (C0, DEL, C1) as spaces,
+// bidi, zero-width and line/paragraph separators removed, cut to
+// `max_chars` code points on a character boundary ("…" added when cut).
+[[nodiscard]] std::string clean_mail_text(std::string_view text, std::size_t max_chars = 200);
+// Error text (from Mailpit's log, say) made safe for a terminal or a
+// window: every control character (escapes, line breaks) a space, bidi and
+// zero-width characters removed, at most `max_chars` code points.
+[[nodiscard]] std::string clean_error_text(std::string_view text, std::size_t max_chars = 600);
 
 // Which mail lines a project's .env gets.
 enum class MailEnvKind : std::uint8_t {
