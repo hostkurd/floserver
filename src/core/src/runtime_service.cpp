@@ -2,6 +2,7 @@
 
 #include "floserver/core/paths.h"
 #include "floserver/core/downloader.h"
+#include "floserver/core/mailpit.h"
 #include "floserver/core/runtime_store.h"
 #include "floserver/core/version.h"
 
@@ -223,7 +224,7 @@ json RuntimeService::list(bool refresh, bool installed_only, bool cached_only) {
                    {"key", cached->key_id},
                    {"warnings", cached->warnings}};
     for (const RuntimeFile& r : cached->manifest.runtimes) {
-        if (!runs_on(r, config_.platform)) {
+        if (!runs_on(r, config_.platform) || !runtime_version_allowed(r.name, r.version)) {
             continue;
         }
         out["available"].push_back({{"name", r.name},
@@ -530,8 +531,8 @@ void RuntimeService::run(Job& job) {
         return Version::parse(a.version).value_or(Version{}) > Version::parse(b.version).value_or(Version{});
     });
     for (const RuntimeFile& r : candidates) {
-        if (!r.variant.empty() && r.variant != "nts") {
-            continue;
+        if ((!r.variant.empty() && r.variant != "nts") || !runtime_version_allowed(r.name, r.version)) {
+            continue;  // a Mailpit with a known security problem is never installed
         }
         offered.push_back(r.version);
         const auto v = Version::parse(r.version);
@@ -560,6 +561,9 @@ void RuntimeService::run(Job& job) {
     const fs::path root = runtimes_root();
     if (is_installed(root, *entry)) {
         set_state(job, "done", job.name + " " + entry->version + " is already installed");
+        if (config_.installed) {
+            config_.installed(job.name, entry->version);  // an older one left by an update that stopped half-way
+        }
         return;
     }
 
@@ -601,6 +605,9 @@ void RuntimeService::run(Job& job) {
         return;
     }
     set_state(job, "done", job.name + " " + entry->version + " is installed in " + path_to_utf8(installed.dir));
+    if (config_.installed) {
+        config_.installed(job.name, entry->version);
+    }
 }
 
 }  // namespace floserver::core

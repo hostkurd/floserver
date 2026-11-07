@@ -4,6 +4,7 @@
 #include "floserver/core/database_service.h"
 #include "floserver/core/mariadb_settings.h"
 #include "floserver/core/encoding.h"
+#include "floserver/core/mailpit.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/version.h"
 
@@ -69,7 +70,12 @@ void make_private_dir(const fs::path& dir, std::error_code& ec) {
 
 }  // namespace
 
-bool reserved_project_name(std::string_view name) { return name == kPhpMyAdminHostName; }
+bool reserved_project_name(std::string_view name) { return name == kPhpMyAdminHostName || name == kMailHostName; }
+
+std::string reserved_name_message(std::string_view name) {
+    return std::string(name) + ".localhost is kept for " +
+           (name == kMailHostName ? "Mailpit's inbox" : "phpMyAdmin") + "; choose another name";
+}
 
 PhpMyAdminPaths phpmyadmin_paths(const fs::path& data) {
     PhpMyAdminPaths p;

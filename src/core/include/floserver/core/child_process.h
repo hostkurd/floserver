@@ -70,6 +70,12 @@ private:
 [[nodiscard]] std::optional<std::uintptr_t> connect_loopback(Port port, bool ipv6 = false);
 void close_socket(std::uintptr_t socket);
 
+// Sends all of `data` on a connected socket; false when the connection failed.
+bool send_all(std::uintptr_t socket, std::string_view data);
+// What the other side has sent, waiting at most `limit`: some bytes, ""
+// when it closed the connection, nothing when the time ran out or it failed.
+[[nodiscard]] std::optional<std::string> receive_some(std::uintptr_t socket, std::chrono::milliseconds limit);
+
 // Copies bytes both ways between two connected sockets until either side
 // ends, then closes both. `activity` is called whenever data passes.
 void relay_sockets(std::uintptr_t a, std::uintptr_t b, const std::function<void()>& activity);

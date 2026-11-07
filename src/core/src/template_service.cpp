@@ -205,7 +205,7 @@ std::optional<std::int64_t> TemplateService::create(const CreateRequest& request
         return std::nullopt;
     }
     if (reserved_project_name(request.name)) {
-        refusal = {"bad_name", request.name + ".localhost is kept for phpMyAdmin; choose another name"};
+        refusal = {"bad_name", reserved_name_message(request.name)};
         return std::nullopt;
     }
     std::error_code ec;
@@ -649,7 +649,13 @@ void TemplateService::run(const std::shared_ptr<Job>& job, const CreateRequest& 
             if (text.empty()) {
                 text = read_small_file(dir / ".env.example", std::size_t{1024} * 1024).value_or("");
             }
-            text = update_env_text(text, env_values(env_style(dir), *login));
+            auto values = env_values(env_style(dir), *login);
+            if (hooks_.mail_env) {
+                for (auto& line : hooks_.mail_env(dir)) {
+                    values.push_back(std::move(line));
+                }
+            }
+            text = update_env_text(text, values);
             if (!write_private_file_atomically(dir / ".env", text, error)) {
                 fail("the project was made, but .env couldn't be written: " + error);
                 return;

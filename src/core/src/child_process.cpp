@@ -179,6 +179,36 @@ std::optional<std::uintptr_t> connect_loopback(Port port, bool ipv6) {
 
 void close_socket(std::uintptr_t socket) { closesocket(static_cast<SOCKET>(socket)); }
 
+bool send_all(std::uintptr_t socket, std::string_view data) {
+    const SOCKET s = static_cast<SOCKET>(socket);
+    for (std::size_t sent = 0; sent < data.size();) {
+        const int chunk = static_cast<int>(std::min<std::size_t>(data.size() - sent, 65536));
+        const int w = send(s, data.data() + sent, chunk, 0);
+        if (w <= 0) {
+            return false;
+        }
+        sent += static_cast<std::size_t>(w);
+    }
+    return true;
+}
+
+std::optional<std::string> receive_some(std::uintptr_t socket, std::chrono::milliseconds limit) {
+    const SOCKET s = static_cast<SOCKET>(socket);
+    fd_set set;
+    FD_ZERO(&set);
+    FD_SET(s, &set);
+    timeval wait{static_cast<long>(limit.count() / 1000), static_cast<long>((limit.count() % 1000) * 1000)};
+    if (select(0, &set, nullptr, nullptr, &wait) <= 0) {
+        return std::nullopt;
+    }
+    std::array<char, 16384> buf{};
+    const int n = recv(s, buf.data(), static_cast<int>(buf.size()), 0);
+    if (n < 0) {
+        return std::nullopt;
+    }
+    return std::string(buf.data(), static_cast<std::size_t>(n));
+}
+
 void relay_sockets(std::uintptr_t a, std::uintptr_t b, const std::function<void()>& activity) {
     const SOCKET sa = static_cast<SOCKET>(a);
     const SOCKET sb = static_cast<SOCKET>(b);
@@ -422,6 +452,32 @@ std::optional<std::uintptr_t> connect_loopback(Port port, bool ipv6) {
 }
 
 void close_socket(std::uintptr_t socket) { close(static_cast<int>(socket)); }
+
+bool send_all(std::uintptr_t socket, std::string_view data) {
+    const int s = static_cast<int>(socket);
+    for (std::size_t sent = 0; sent < data.size();) {
+        const ssize_t w = send(s, data.data() + sent, data.size() - sent, MSG_NOSIGNAL);
+        if (w <= 0) {
+            return false;
+        }
+        sent += static_cast<std::size_t>(w);
+    }
+    return true;
+}
+
+std::optional<std::string> receive_some(std::uintptr_t socket, std::chrono::milliseconds limit) {
+    const int s = static_cast<int>(socket);
+    pollfd fd{s, POLLIN, 0};
+    if (poll(&fd, 1, static_cast<int>(std::min<std::int64_t>(limit.count(), 3600000))) <= 0) {
+        return std::nullopt;
+    }
+    std::array<char, 16384> buf{};
+    const ssize_t n = recv(s, buf.data(), buf.size(), 0);
+    if (n < 0) {
+        return std::nullopt;
+    }
+    return std::string(buf.data(), static_cast<std::size_t>(n));
+}
 
 void relay_sockets(std::uintptr_t a, std::uintptr_t b, const std::function<void()>& activity) {
     const int sa = static_cast<int>(a);

@@ -29,6 +29,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace floserver::core {
@@ -48,6 +49,9 @@ struct TemplateHooks {
         add_project;
     // The project's database login (made the first time).
     std::function<std::optional<DatabaseLogin>(const std::string& project, std::string& error)> database_login;
+    // The mail lines for a new project's .env (Mailpit, D27): empty when
+    // Mailpit isn't installed or the project takes none. May be empty.
+    std::function<std::vector<std::pair<std::string, std::string>>(const std::filesystem::path& dir)> mail_env;
 };
 
 struct CreateRequest {

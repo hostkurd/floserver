@@ -47,6 +47,9 @@ struct RuntimeServiceConfig {
     // The templates used when no signed list with templates can be had
     // (offline, first run): a JSON array, normally kBuiltInTemplatesJson.
     std::string builtin_templates_json = "[]";
+    // Called on the install's thread after an install finished ("done"),
+    // with its name and version: Mailpit is updated in place (mailpit.h).
+    std::function<void(const std::string& name, const std::string& version)> installed;
 };
 
 // Why a request was refused; the codes go out on the channel.
@@ -70,7 +73,8 @@ public:
     // thread; for a process about to exit.
     void stop();
 
-    // Installed runtimes and the ones the list offers for this platform.
+    // Installed runtimes and the ones the list offers for this platform
+    // (never a Mailpit older than kMinMailpitVersion, mailpit.h).
     // With `refresh`, the list is fetched again even when it's fresh. With
     // `cached_only` (and no `refresh`), nothing goes online: the list in
     // hand however old, else the last signed list kept on disk.

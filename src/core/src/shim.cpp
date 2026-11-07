@@ -1,6 +1,7 @@
 #include "floserver/core/shim.h"
 
 #include "floserver/core/app_runner.h"
+#include "floserver/core/mailpit.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/php_pool.h"
 #include "floserver/core/php_settings.h"
@@ -111,8 +112,12 @@ std::optional<ShimTarget> php_target(const InstalledRuntime& php, const ProjectC
     const PhpSettings all = app ? read_php_settings(*app) : PhpSettings{};
     const std::string series = php_series_of(php.version).value_or(php.version);
     const auto found = all.find(series);
-    const PhpIniSettings settings = effective_php_settings(series, found != all.end() ? &found->second : nullptr,
-                                                           read_php_custom_ini(data_dir, series), &project);
+    PhpIniSettings settings = effective_php_settings(series, found != all.end() ? &found->second : nullptr,
+                                                     read_php_custom_ini(data_dir, series), &project);
+    // PHP's mail() to Mailpit, as in the pools (D27).
+    if (app) {
+        settings.mail_ini = mail_php_ini(*app, list_installed(runtimes_dir(data_dir)));
+    }
     const std::string key =
         php.version + (php.variant.empty() ? std::string() : "-" + php.variant) + php_settings_key(settings);
     const fs::path folder = data_dir / "cli" / "php";  // not in the shims folder: "php" is a shim there

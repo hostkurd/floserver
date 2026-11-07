@@ -7,6 +7,7 @@
 #include "floserver/core/request_log.h"
 #include "floserver/core/nginx_config.h"
 #include "floserver/core/paths.h"
+#include "floserver/core/mailpit.h"
 #include "floserver/core/phpmyadmin.h"
 #include "floserver/core/process.h"
 #include "floserver/core/project_registry.h"
@@ -897,7 +898,37 @@ void WebService::reload_locked() {
         phpmyadmin_files_.clear();  // installed again later: written again
     }
 
-    if (serve.empty() && !shared_spec && !pma_spec) {
+    // Mailpit's inbox, when it's installed: mail.localhost.
+    std::optional<NginxMail> mail_spec;
+    if (const auto inbox = config_.mail_inbox ? config_.mail_inbox() : std::nullopt) {
+        Site site;
+        if (find_project(*app, kMailHostName) != nullptr) {
+            site.state_override = "problem";
+            site.problem = "the project " + std::string(kMailHostName) + " has the address " +
+                           std::string(kMailHostName) + ".localhost, so Mailpit's inbox can't use it";
+            site.name_taken = true;
+        } else if (nginx == nullptr) {
+            site.state_override = "needs_download";
+            site.missing = {"nginx"};
+        } else {
+            NginxMail ns;
+            ns.port = inbox->port;
+            ns.auth_include = inbox->auth_include;
+            if (tls_) {
+                std::string cert_error;
+                if (const auto cert = certs_.ensure_site(std::string(kMailHostName), cert_error)) {
+                    ns.tls = NginxTls{cert->certificate, cert->key};
+                } else {
+                    error_ = "no certificate for Mailpit's inbox: " + cert_error;
+                }
+            }
+            site.address = ns.tls ? "https" : "http";
+            mail_spec = std::move(ns);
+        }
+        sites[std::string(kMailSiteName)] = site;
+    }
+
+    if (serve.empty() && !shared_spec && !pma_spec && !mail_spec) {
         stop_nginx_locked();  // nothing to serve: free the ports and the memory
         pools_ = std::move(pools);
         replace_apps_locked(std::move(apps));
@@ -958,6 +989,10 @@ void WebService::reload_locked() {
             site.address = site.address.empty()
                                ? std::string()
                                : site_address(std::string(kPhpMyAdminHostName), use, site.address == "https");
+        } else if (name == kMailSiteName) {
+            site.address = site.address.empty()
+                               ? std::string()
+                               : site_address(std::string(kMailHostName), use, site.address == "https");
         } else if (!site.address.empty()) {
             site.address = site_address(name, use, site.address == "https");
         }
@@ -1003,6 +1038,7 @@ void WebService::reload_locked() {
     }
     spec.shared = std::move(shared_spec);
     spec.phpmyadmin = std::move(pma_spec);
+    spec.mail = std::move(mail_spec);
     // The id comes from the config itself, so the same config has the same
     // id and an unchanged one still compares equal.
     auto text = make_nginx_config(spec, error);
@@ -1217,6 +1253,7 @@ json WebService::status_locked() const {
     json sites = json::object();
     json shared = nullptr;
     json phpmyadmin = nullptr;
+    json mail = nullptr;
     for (const auto& [name, s] : sites_) {
         json j = json::object();
         if (!s.address.empty()) {
@@ -1258,6 +1295,11 @@ json WebService::status_locked() const {
                 j["name_taken"] = true;
             }
             phpmyadmin = std::move(j);
+        } else if (name == kMailSiteName) {
+            if (s.name_taken) {
+                j["name_taken"] = true;
+            }
+            mail = std::move(j);
         } else {
             sites[name] = std::move(j);
         }
@@ -1298,6 +1340,8 @@ json WebService::status_locked() const {
                 {"shared", shared},
                 // phpMyAdmin: null when it isn't installed.
                 {"phpmyadmin", phpmyadmin},
+                // Mailpit's inbox: null when it isn't installed.
+                {"mail", mail},
                 // How long a project waits for a request before it sleeps (the window says it).
                 {"idle_after_s", config_.idle_after.count()}};
     if (!error_.empty()) {

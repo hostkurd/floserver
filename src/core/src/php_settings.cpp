@@ -341,7 +341,7 @@ std::string php_settings_key(const PhpIniSettings& settings) {
         key += "+" + e;
     }
     if (settings.removed.empty() && settings.series_ini.empty() && settings.custom_ini.empty() &&
-        settings.project_ini.empty()) {
+        settings.project_ini.empty() && settings.mail_ini.empty()) {
         return key;  // as before D20: pools without settings keep their keys
     }
     // Length-prefixed, so no two different settings give the same text.
@@ -366,6 +366,14 @@ std::string php_settings_key(const PhpIniSettings& settings) {
     for (const auto& [k, v] : settings.project_ini) {
         add(k);
         add(v);
+    }
+    // Only when there are any, so pools without Mailpit keep their keys.
+    if (!settings.mail_ini.empty()) {
+        add("mail");
+        for (const auto& [k, v] : settings.mail_ini) {
+            add(k);
+            add(v);
+        }
     }
     Sha256 hash;
     hash.update(text);

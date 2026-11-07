@@ -15,6 +15,20 @@
 //                        "list_error"?: "..."}
 //   runtimes.install {"name": "php", "version"?: "8.5"} -> {"job": 3}
 //   runtimes.remove  {"name": "php", "version": "8.5.12"} -> {}
+//                    Mailpit: {"name": "mailpit", "version", "keep_emails"?: bool (default true)}
+//                    -> {} or, with keep_emails false, {"emails_deleted": bool, "emails_error"?}
+//   mail.status      {} -> {"installed", "version"?, "state": "not_installed"|"asleep"|"starting"|
+//                    "running"|"failed", "error"?, "smtp_port", "inbox_url", "inbox_served",
+//                    "inbox_blocked_by"? (the project named "mail"), "unread", "total",
+//                    "size_bytes" (mailpit.db on disk), "notice_seq" (+1 each time an SMTP
+//                    connection that delivered email ends), "latest"?: {"subject", "to",
+//                    "new_in_batch"}, "settings": {"php", "notices", "keep_running", "max"}}
+//                    From the service's cache: cheap enough for a 2 s poll (D27).
+//   mail.set         {"php"?, "notices"?, "keep_running"?, "max"?} -> {"ok": true}
+//   mail.test        {"to"?} -> {"ok": true}   one email through the SMTP port (wakes Mailpit)
+//   mail.clear       {} -> {"ok": true}        every email deleted (wakes Mailpit)
+//   mail.env         {"name"} -> {"env": [[key, value]...], "env_file"}   the project's mail
+//                    lines alone (databases.login's "env" has them too), for flo env
 //   jobs.get         {"id": 3} -> runtime_service.h, RuntimeService::job()
 //   jobs.cancel      {"id": 3} -> {"cancelled": bool}
 //   projects.list    {} -> project_service.h, ProjectService::list()

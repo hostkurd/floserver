@@ -326,7 +326,7 @@ std::optional<Project> add_project(AppConfig& config, const fs::path& dir, std::
         error = "there's already a project called " + chosen;
         return std::nullopt;
     } else if (reserved_project_name(chosen)) {
-        error = chosen + ".localhost is kept for phpMyAdmin; choose another name";
+        error = reserved_name_message(chosen);
         return std::nullopt;
     } else if (const Project* other = project_with_database(config, project_database_name(chosen))) {
         error = "the database " + project_database_name(chosen) + " is " + other->name + "'s; choose another name";
@@ -375,7 +375,7 @@ Project* rename_project(AppConfig& config, std::string_view name, std::string_vi
         return nullptr;
     }
     if (reserved_project_name(chosen)) {
-        error = chosen + ".localhost is kept for phpMyAdmin; choose another name";
+        error = reserved_name_message(chosen);
         return nullptr;
     }
     // The database keeps its name; one FloServer never makes (MariaDB's
