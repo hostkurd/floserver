@@ -55,3 +55,7 @@ The same as FloCMS Studio:
 - Everything listens on 127.0.0.1 only. A port is "free" only if we can listen
   on it; never connect to another program's port to test it.
 - No admin rights, no Windows services, no hosts-file edits.
+
+## Licence
+
+FloServer is free, closed-source software by HostKurd. Its licence is the End-User Licence Agreement in [LICENSE.txt](LICENSE.txt), the same text the installer shows (`installer/License.rtf`; change both together). The window shows it in Settings → General → About → Licences. Third-party code keeps its own licences (`third_party/`).

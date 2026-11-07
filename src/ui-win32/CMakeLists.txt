@@ -27,8 +27,22 @@ add_library(floserver_ui_model STATIC
     model/pages_access.cpp
     model/settings_access.cpp
     model/backup_dialogs.cpp
-    model/start_measure.cpp)
+    model/start_measure.cpp
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/eula_text.cpp)
 target_include_directories(floserver_ui_model PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+# FloServer's licence (the EULA the installer shows) for the licences file in
+# Settings → General → About. LICENSE.txt is installer/License.rtf as plain
+# text: change both together.
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/generated/eula_text.cpp
+    COMMAND ${CMAKE_COMMAND} -DIN=${PROJECT_SOURCE_DIR}/LICENSE.txt
+            -DOUT=${CMAKE_CURRENT_BINARY_DIR}/generated/eula_text.cpp -DFUNCTION=eula_text
+            -DHEADER=model/general_page.h
+            -P ${PROJECT_SOURCE_DIR}/cmake/EmbedText.cmake
+    DEPENDS ${PROJECT_SOURCE_DIR}/LICENSE.txt ${PROJECT_SOURCE_DIR}/cmake/EmbedText.cmake
+    COMMENT "Embedding LICENSE.txt"
+    VERBATIM)
+set_source_files_properties(${CMAKE_CURRENT_BINARY_DIR}/generated/eula_text.cpp PROPERTIES SKIP_LINTING ON)
 # Core for paths.h's file helpers (window.json is read and written here, testably).
 target_link_libraries(floserver_ui_model PUBLIC floserver_third_party PRIVATE floserver_core)
 floserver_code_rules(floserver_ui_model)
