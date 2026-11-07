@@ -368,6 +368,60 @@ SaveChoice ask_to_save(HWND owner, Lang lang, const std::string& question) {
     return pressed == IDNO ? SaveChoice::DontSave : SaveChoice::Cancel;
 }
 
+bool open_address_in_browser(HWND owner, const std::string& address) {
+    return reinterpret_cast<INT_PTR>(
+               ShellExecuteW(owner, L"open", win::widen(address).c_str(), nullptr, nullptr, SW_SHOWNORMAL)) > 32;
+}
+
+namespace {
+
+// A TaskDialog with Remove/Delete and Cancel (the default); `box`, when given, is the
+// unticked verification checkbox. Falls back to a plain question without common controls 6.
+bool ask_two_buttons(HWND owner, Lang lang, const std::string& question, Str yes, const Str* box_text, bool* box) {
+    const std::wstring title = win::widen(text(lang, Str::SettingsTitle));
+    const std::wstring main = win::widen(question);
+    const std::wstring yes_text = win::widen(text(lang, yes));
+    const std::wstring box_label = box_text != nullptr ? win::widen(text(lang, *box_text)) : std::wstring();
+    const std::array<TASKDIALOG_BUTTON, 1> buttons{{{IDYES, yes_text.c_str()}}};
+    TASKDIALOGCONFIG config{};
+    config.cbSize = sizeof config;
+    config.hwndParent = owner;
+    config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW |
+                     (is_rtl(lang) ? TDF_RTL_LAYOUT : 0);
+    config.dwCommonButtons = TDCBF_CANCEL_BUTTON;
+    config.pszWindowTitle = title.c_str();
+    config.pszMainInstruction = main.c_str();
+    config.cButtons = static_cast<UINT>(buttons.size());
+    config.pButtons = buttons.data();
+    config.nDefaultButton = IDCANCEL;  // Enter and Esc keep everything
+    if (box_text != nullptr) {
+        config.pszVerificationText = box_label.c_str();  // unticked: no TDF_VERIFICATION_FLAG_CHECKED
+    }
+    int pressed = IDCANCEL;
+    BOOL ticked = FALSE;
+    if (FAILED(TaskDialogIndirect(&config, &pressed, nullptr, &ticked))) {
+        pressed = MessageBoxW(owner, main.c_str(), title.c_str(),
+                              MB_OKCANCEL | MB_DEFBUTTON2 | MB_ICONQUESTION |
+                                  (is_rtl(lang) ? MB_RTLREADING | MB_RIGHT : 0U));
+        pressed = pressed == IDOK ? IDYES : IDCANCEL;
+        ticked = FALSE;
+    }
+    if (box != nullptr) {
+        *box = pressed == IDYES && ticked != FALSE;
+    }
+    return pressed == IDYES;
+}
+
+}  // namespace
+
+bool ask_delete_mails(HWND owner, Lang lang, const std::string& question) {
+    return ask_two_buttons(owner, lang, question, Str::MailDeleteConfirm, nullptr, nullptr);
+}
+
+bool ask_remove_mailpit(HWND owner, Lang lang, const std::string& question, bool& emails) {
+    const Str box = Str::MailRemoveEmails;
+    return ask_two_buttons(owner, lang, question, Str::SettingsRemove, &box, &emails);
+}
 
 namespace {
 

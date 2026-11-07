@@ -31,7 +31,16 @@ Toast toast_with(const Toast& shown, std::string text, ToastKind kind, std::stri
     if (text.empty()) {
         return shown;  // nothing to say: what's shown stays
     }
-    return Toast{std::move(text), kind, shown.hovered && !shown.text.empty(), std::move(action)};
+    return Toast{std::move(text), kind, shown.hovered && !shown.text.empty(), std::move(action), {}, false};
+}
+
+Toast toast_mail(const Toast& shown, std::string title, std::string detail, std::string action) {
+    if (title.empty()) {
+        return shown;
+    }
+    Toast out{std::move(title), ToastKind::Info, shown.hovered && !shown.text.empty(), std::move(action), {}, true};
+    out.detail = std::move(detail);
+    return out;
 }
 
 bool toast_timer_runs(const Toast& toast) {

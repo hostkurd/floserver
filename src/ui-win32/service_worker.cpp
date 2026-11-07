@@ -206,8 +206,8 @@ void ServiceWorker::start_refresh() {
     }).detach();
 }
 void ServiceWorker::watch_runtimes(bool on) { push({Command::Kind::WatchRuntimes, {}, on, {}, std::nullopt, {}, {}}); }
-void ServiceWorker::remove_runtime(const std::string& name, const std::string& folder) {
-    push({Command::Kind::RemoveRuntime, name, false, folder, std::nullopt, {}, {}});
+void ServiceWorker::remove_runtime(const std::string& name, const std::string& folder, bool keep_emails) {
+    push({Command::Kind::RemoveRuntime, name, keep_emails, folder, std::nullopt, {}, {}});
 }
 void ServiceWorker::set_default(const std::string& name, const std::optional<std::string>& series) {
     push({Command::Kind::SetDefault, name, false, {}, series, {}, {}});
@@ -242,8 +242,9 @@ void ServiceWorker::database_call(const std::string& method, const nlohmann::jso
     // projects.remove from the window: dropping its database may start
     // MariaDB first (a minute, its first time). One at a time per project.
     // projects.rename reloads the web server and may wait for a folder.
+    // Mail (D27): mail.test talks to Mailpit's SMTP and mail.clear deletes files.
     if (method == "folders.get" || method == "folders.clean" || method == "projects.remove" ||
-        method == "projects.rename") {
+        method == "projects.rename" || method == "mail.test" || method == "mail.clear") {
         start_side_call(method, params, purpose.empty() ? method : purpose);
         return;
     }
@@ -794,7 +795,7 @@ void ServiceWorker::run(const std::stop_token& stop) {
                     const bool rtl = is_rtl(lang_);
                     if (!client) {
                         settings_error = fill(lang_, Str::SettingsRemoveFailed, {label, lost});
-                    } else if (reply = client->call("runtimes.remove", {{"name", c.project}, {"version", c.key}}); !reply) {
+                    } else if (reply = client->call("runtimes.remove", runtimes_remove_params(c.project, c.key, c.flag)); !reply) {
                         client.reset();
                         settings_error = fill(lang_, Str::SettingsRemoveFailed, {label, lost});
                     } else if (!reply->ok) {
@@ -805,6 +806,10 @@ void ServiceWorker::run(const std::stop_token& stop) {
                     } else {
                         need_installed = true;
                         refetch_runtimes = refetch_runtimes || watching;
+                        // Mailpit asked to delete its emails: removed, but they may have stayed.
+                        if (c.project == "mailpit" && !c.flag) {
+                            settings_error = mail_remove_emails_error(reply->result, lang_);
+                        }
                     }
                     break;
                 }
@@ -933,6 +938,7 @@ void ServiceWorker::run(const std::stop_token& stop) {
         std::optional<core::protocol::Reply> log;
         std::optional<core::protocol::Reply> shared;
         std::optional<core::protocol::Reply> updates;
+        std::optional<core::protocol::Reply> mail;
         if (client) {
             list = client->call("projects.list");
             status = list ? client->call("status") : std::nullopt;
@@ -949,7 +955,10 @@ void ServiceWorker::run(const std::stop_token& stop) {
             shared = databases ? client->call("shared.get", {{"folders", false}}) : std::nullopt;
             // App updates (Q5): an older service doesn't know it, and nothing is shown.
             updates = shared ? client->call("updates.status") : std::nullopt;
-            if (!databases || !shared || !updates) {
+            // Mail (D27): only while the service answers; cheap and cached on its side. An
+            // older service doesn't know mail.status: Mailpit counts as not installed.
+            mail = updates ? client->call("mail.status") : std::nullopt;
+            if (!databases || !shared || !updates || !mail) {
                 client.reset();
             }
             ++polls;
@@ -1147,6 +1156,16 @@ void ServiceWorker::run(const std::stop_token& stop) {
             // An older service doesn't know shared.get: the row isn't shown.
             latest_.shared = shared && shared->ok ? shared_from_reply(shared->result) : SharedSites{};
             latest_.updates = updates && updates->ok ? update_status_from(updates->result) : UpdateStatus{};
+            if (mail && mail->ok) {
+                if (auto fresh_mail = mail_status_from_reply(mail->result)) {
+                    latest_.mail = std::move(*fresh_mail);
+                }
+            } else if (mail && mail->error_code == kUnknownMethod) {
+                latest_.mail = mail_not_installed();
+            } else if (mail && latest_.mail) {
+                // Failed some other way: the old numbers aren't kept on show.
+                latest_.mail->stale = true;
+            }
             if (installed && installed->ok) {
                 latest_.installed = installed_from_list(installed->result);
                 latest_.has_installed = true;

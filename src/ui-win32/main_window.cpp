@@ -297,6 +297,7 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
                                   hit.part == Part::FrChange ||
                                   hit.part == Part::PanelAddress || hit.part == Part::PanelKeep ||
                                   hit.part == Part::SharedSwitch || hit.part == Part::SharedEnd ||
+                                  hit.part == Part::MailLink ||
                                   (hit.part == Part::Banner && status_line().clickable);
                 SetCursor(LoadCursorW(nullptr, hand ? IDC_HAND : IDC_ARROW));
                 return TRUE;
@@ -473,7 +474,9 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
         case kToastMessage:
             // Its button: the backup it names, in its folder; then it goes.
             if (wparam == kToastActionClicked) {
-                if (!toast_.action.empty() && !toast_file_.empty()) {
+                if (toast_.mail) {
+                    open_mail_inbox();  // New mail's Open
+                } else if (!toast_.action.empty() && !toast_file_.empty()) {
                     show_file_in_folder(toast_file_);
                 }
                 toast_event(ToastEvent::Close);
@@ -789,6 +792,7 @@ void MainWindow::on_snapshot() {
     if (first_run_open() && first_run_.step == FirstRunStep::Runtimes && first_run_.list == FirstRunList::Idle) {
         first_run_ask_list();
     }
+    on_mail_snapshot();
     if (just_made && wizard_.studio) {
         // The new project's folder, from the list that came with the answer.
         const auto made = std::find_if(snap_.rows.begin(), snap_.rows.end(),
@@ -1389,6 +1393,9 @@ MainWindow::Hit MainWindow::hit_test(int x, int y) const {
     if (!status_line().text.empty() && contains(footer_rect(), x, y)) {
         return {Part::Banner, -1, {}};
     }
+    if (mail_link_visible() && contains(mail_link_rect(), x, y)) {
+        return {Part::MailLink, -1, {}};
+    }
     if (panel_bar_.over(x, y) || (list_bar_.over(x, y) && !(panel_open() && contains(panel_geometry_.panel, x, y)))) {
         return {};  // a scroll bar's
     }
@@ -1475,6 +1482,7 @@ void MainWindow::on_click(const Hit& clicked) {
     if (!is_update_part(hit.part)) {
         update_focus_ = -1;
     }
+    mail_focused_ = false;  // a click isn't a keyboard stop
     // In the panel, the keys carry on from what was clicked.
     if (is_panel_part(hit.part)) {
         const std::vector<Hit> order = panel_focus_order();
@@ -1566,6 +1574,9 @@ void MainWindow::on_click(const Hit& clicked) {
         case Part::Settings:
             open_settings();
             break;
+        case Part::MailLink:
+            open_mail_inbox();
+            break;
         case Part::FrLang:
         case Part::FrTick:
         case Part::FrCancel:
@@ -1642,6 +1653,10 @@ void MainWindow::on_key(WPARAM key) {
         on_wizard_key(key);
         return;
     }
+    if (mail_keys()) {
+        on_mail_key(key);
+        return;
+    }
     if (update_focus_ >= 0) {
         on_update_key(key);
         return;
@@ -1666,6 +1681,14 @@ void MainWindow::on_key(WPARAM key) {
                 focus_ = -1;
                 shared_focused_ = true;
                 shared_part_ = 0;
+                show_focus_ = true;
+                InvalidateRect(hwnd_, nullptr, FALSE);
+                return;
+            }
+            // No such row (an older service): the Mail button.
+            if (focus_ == count - 1 && count > 0 && mail_link_visible()) {
+                focus_ = -1;
+                mail_focused_ = true;
                 show_focus_ = true;
                 InvalidateRect(hwnd_, nullptr, FALSE);
                 return;
@@ -1771,6 +1794,17 @@ LRESULT CALLBACK MainWindow::search_proc(HWND hwnd, UINT msg, WPARAM wparam, LPA
             if (wparam == VK_TAB && (GetKeyState(VK_SHIFT) & 0x8000) == 0 && self->focus_update_banner(false)) {
                 return 0;
             }
+            // Shift+Tab: back to the status line's Mail button, the stop before the box.
+            if (wparam == VK_TAB && (GetKeyState(VK_SHIFT) & 0x8000) != 0 && !self->first_run_open() &&
+                !self->wizard_open() && self->mail_link_visible()) {
+                SetFocus(self->hwnd_);
+                self->focus_ = -1;
+                self->shared_focused_ = false;
+                self->mail_focused_ = true;
+                self->show_focus_ = true;
+                InvalidateRect(self->hwnd_, nullptr, FALSE);
+                return 0;
+            }
             if (wparam == VK_DOWN || wparam == VK_TAB || wparam == VK_RETURN) {
                 SetFocus(self->hwnd_);
                 if (self->focus_ < 0 && !self->visible_.empty()) {
@@ -1791,6 +1825,9 @@ LRESULT CALLBACK MainWindow::search_proc(HWND hwnd, UINT msg, WPARAM wparam, LPA
             break;
         case WM_SETFOCUS:
         case WM_KILLFOCUS:
+            if (msg == WM_SETFOCUS) {
+                self->mail_focused_ = false;  // the keys are the box's now (click, Tab or Ctrl+F)
+            }
             InvalidateRect(hwnd, nullptr, TRUE);
             break;
         case WM_PAINT: {
@@ -1960,6 +1997,143 @@ void MainWindow::sync_toast_timer() {
         SetTimer(hwnd_, kToastTimer, static_cast<UINT>(kToastInfoTime.count()), nullptr);
     } else {
         KillTimer(hwnd_, kToastTimer);
+    }
+}
+
+// --- Mail (D27) ---------------------------------------------------------------------
+
+bool MainWindow::mail_link_visible() const {
+    return !first_run_open() && mail_link_shown(snap_.mail) && shows_rows() && snap_.link == Link::Connected &&
+           status_line().text.empty();
+}
+
+RECT MainWindow::mail_link_rect(HDC dc) const {
+    if (!mail_link_visible()) {
+        return {};
+    }
+    const RECT f = footer_rect();
+    const int label_w = Canvas::measure(dc, w(mail_link_text(*snap_.mail, lang_)), fonts_.caption.get(), rtl_);
+    const int memory_w = Canvas::measure(dc, w(snap_.footer.memory), fonts_.caption.get(), rtl_);
+    // Its icon, then its words, with a little room round them.
+    const int total = px(6) + px(14) + px(6) + label_w + px(6);
+    const int right = f.right - px(kPad) - memory_w - px(14);
+    const int h = px(20);
+    const int top = (f.top + f.bottom - h) / 2;
+    return {right - total, top, right, top + h};
+}
+
+RECT MainWindow::mail_link_rect() const {
+    const HDC dc = GetDC(hwnd_);
+    if (dc == nullptr) {
+        return {};
+    }
+    const RECT r = mail_link_rect(dc);
+    ReleaseDC(hwnd_, dc);
+    return r;
+}
+
+bool MainWindow::mail_keys() const {
+    // Only while the others don't have the keys.
+    return mail_focused_ && mail_link_visible() && focus_ < 0 && panel_focus_ < 0 && update_focus_ < 0 &&
+           !shared_focused_ && !wizard_open();
+}
+
+void MainWindow::paint_mail_link(Canvas& c, const RECT& r, bool text_pass) const {
+    if (r.right <= r.left) {
+        return;
+    }
+    const Palette& p = palette(dark_);
+    const bool hovered = hover_.part == Part::MailLink;
+    if (!text_pass) {
+        if (hovered) {
+            c.round_rect(r, pxf(4), p.row_hover);
+        }
+        if (show_focus_ && GetFocus() == hwnd_ && mail_keys()) {
+            RECT ring = r;
+            InflateRect(&ring, px(1), px(1));
+            c.round_outline(ring, pxf(5), p.focus, pxf(2));
+        }
+        // The mail icon, 14 x 14: the envelope's body and the flap's V.
+        const int ix = r.left + px(6);
+        const int iy = (r.top + r.bottom) / 2 - px(7);
+        const float k = pxf(1.0F) * 14.0F / 16.0F;
+        const auto fx = static_cast<float>(ix);
+        const auto fy = static_cast<float>(iy);
+        c.round_outline({ix + px(1), iy + px(2), ix + px(13), iy + px(12)}, pxf(1.5F), p.link, 1.4F * k);
+        c.line(fx + 2 * k, fy + 4 * k, fx + 7 * k, fy + 8.5F * k, p.link, 1.4F * k);
+        c.line(fx + 7 * k, fy + 8.5F * k, fx + 12 * k, fy + 4 * k, p.link, 1.4F * k);
+        return;
+    }
+    const RECT label{r.left + px(6) + px(14) + px(6), r.top, r.right - px(2), r.bottom};
+    c.text(label, w(mail_link_text(*snap_.mail, lang_)), fonts_.caption.get(), p.link, Align::Start, false);
+}
+
+void MainWindow::open_mail_inbox() {
+    const std::string address = snap_.mail ? mail_inbox_address(*snap_.mail) : std::string("https://mail.localhost");
+    if (!open_address_in_browser(hwnd_, address)) {
+        show_notice(fill(lang_, Str::MailOpenFailed, {address}), true);
+    }
+}
+
+void MainWindow::on_mail_key(WPARAM key) {
+    const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+    const auto back = [this] {
+        // To the Shared sites row, else the last project.
+        if (width_of(shared_geometry_.row) > 0) {
+            mail_focused_ = false;
+            shared_focused_ = true;
+            shared_part_ = static_cast<int>(shared_focus_order().size()) - 1;
+        } else if (!visible_.empty()) {
+            mail_focused_ = false;
+            focus_ = static_cast<int>(visible_.size()) - 1;
+            ensure_visible(focus_);
+        } else {
+            return;  // nothing before it: it keeps the keys
+        }
+        show_focus_ = true;
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    };
+    switch (key) {
+        case VK_RETURN:
+        case VK_SPACE:
+            open_mail_inbox();
+            return;
+        case VK_UP:
+            back();
+            return;
+        case VK_TAB:
+            if (shift) {
+                back();
+            } else {
+                mail_focused_ = false;
+                SetFocus(search_);
+            }
+            return;
+        case VK_ESCAPE:
+            close_panel();
+            return;
+        case VK_F5:
+            if (worker_) {
+                worker_->refresh();
+            }
+            return;
+        default:
+            return;
+    }
+}
+
+void MainWindow::on_mail_snapshot() {
+    // A new email earns a toast (approved 7 Nov): Mailpit's notice_seq grew since the last poll.
+    const std::optional<MailStatus> status = snap_.link == Link::Connected ? snap_.mail : std::nullopt;
+    const auto now = static_cast<std::int64_t>(GetTickCount64());
+    // An error on screen keeps the notice pending; it comes once that's dismissed.
+    const bool error_shown = !toast_.text.empty() && toast_.kind == ToastKind::Error;
+    if (const auto notice = mail_notice_step(mail_notice_, status, now, lang_, error_shown)) {
+        toast_ = toast_mail(toast_, notice->title, notice->detail, std::string(text(lang_, Str::MailToastOpen)));
+        // Said by a screen reader as it comes, without moving the focus.
+        access_.notify(access_join(lang_, {notice->title, notice->detail}), false);
+        sync_toast_timer();
+        InvalidateRect(hwnd_, nullptr, FALSE);
     }
 }
 
@@ -2335,6 +2509,9 @@ void MainWindow::paint_footer(Canvas& c, HDC dc, bool text_pass) const {
                                                  : (snap_.footer.any_running ? p.footer_dot : p.text_subtle);
             c.ellipse(static_cast<float>(px(kPad)) + pxf(4), static_cast<float>(mid), pxf(4), dot);
         }
+        if (live) {
+            paint_mail_link(c, mail_link_rect(dc), false);
+        }
         return;
     }
     if (!status.text.empty()) {
@@ -2355,10 +2532,13 @@ void MainWindow::paint_footer(Canvas& c, HDC dc, bool text_pass) const {
     const std::wstring memory = w(t.memory);
     const int memory_w = Canvas::measure(dc, memory, fonts_.caption.get(), rtl_);
     const int memory_left = f.right - px(kPad) - memory_w;
-    if (!t.nginx.empty() && x < memory_left - px(16)) {
-        c.text({x, f.top, memory_left - px(16), f.bottom}, w(t.nginx), fonts_.caption.get(), p.text_subtle,
-               Align::Start, false);
+    // Mail · N new sits before the memory figure, and the nginx words end before it.
+    const RECT mail = mail_link_rect(dc);
+    const int nginx_end = (mail.right > mail.left ? static_cast<int>(mail.left) : memory_left) - px(16);
+    if (!t.nginx.empty() && x < nginx_end) {
+        c.text({x, f.top, nginx_end, f.bottom}, w(t.nginx), fonts_.caption.get(), p.text_subtle, Align::Start, false);
     }
+    paint_mail_link(c, mail, true);
     c.text({memory_left - px(2), f.top, f.right - px(kPad), f.bottom}, memory, fonts_.caption.get(), p.text_subtle,
            Align::End, false);
 }

@@ -110,6 +110,12 @@ inline constexpr int kRuntimeGridMaxColumns = 2;
 // The install running for a row, or nullptr.
 [[nodiscard]] const RuntimeJob* job_for(const RuntimeRow& row, const std::vector<RuntimeJob>& jobs);
 
+// runtimes.remove's parameters. Mailpit's also say whether its caught emails
+// stay (`keep_emails`, D27); the one place to adjust if the service wants
+// another shape.
+[[nodiscard]] nlohmann::json runtimes_remove_params(const std::string& name, const std::string& version,
+                                                    bool keep_emails);
+
 // The key Settings' downloads go under in the worker ("_settings/php/8.3.29");
 // project names can't have '_' or '/', so it's never a project's.
 [[nodiscard]] std::string settings_install_key(const std::string& name, const std::string& version);

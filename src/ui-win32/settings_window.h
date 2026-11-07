@@ -17,6 +17,10 @@
 // database.set on Save; the server's state comes from the main window's
 // databases.list snapshot.
 //
+// Mail (D27) comes after Database: Mailpit's state, its inbox and SMTP
+// addresses, four options and the emails. mail.status once when it's opened,
+// mail.set on Save; Send a test email and Delete all emails are sent at once.
+//
 // Apache is the fifth: the shared Apache's version, its modules and the
 // user's own httpd.conf lines. apache.get once when it's opened (the service
 // reads the modules folder then), apache.set on Save.
@@ -55,6 +59,7 @@
 #include "model/database_page.h"
 #include "model/general_page.h"
 #include "model/folders_page.h"
+#include "model/mail_page.h"
 #include "model/php_page.h"
 #include "model/ports_page.h"
 #include "model/runtimes_page.h"
@@ -153,11 +158,12 @@ public:
 private:
     // In the sidebar's order: the sidebar's entries, its focus order and its
     // hit groups are this enum's values. Nothing is saved by number.
-    enum class Section : std::uint8_t { General, Runtimes, Php, Ports, Database, Apache, Folders, Shared };
-    static constexpr std::size_t kSections = 8;
+    enum class Section : std::uint8_t { General, Runtimes, Php, Ports, Database, Mail, Apache, Folders, Shared };
+    static constexpr std::size_t kSections = 9;
     static_assert(kSections == kSettingsSidebar.size(), "a sidebar label for each Section, in its order");
     static_assert(kSettingsSidebar[static_cast<std::size_t>(Section::General)] == Str::SettingsGeneral &&
                       kSettingsSidebar[static_cast<std::size_t>(Section::Runtimes)] == Str::SettingsRuntimes &&
+                      kSettingsSidebar[static_cast<std::size_t>(Section::Mail)] == Str::SettingsMail &&
                       kSettingsSidebar[static_cast<std::size_t>(Section::Shared)] == Str::SharedSites,
                   "Section and kSettingsSidebar list the sections in the same order");
     enum class Part : std::uint8_t {
@@ -206,6 +212,18 @@ private:
         DbDiscard,
         DbSave,
         DbPhpMyAdmin,   // Open phpMyAdmin (as root, this series)
+        // Settings > Mail (D27).
+        MailInstall,
+        MailInboxLink,   // the address, a link
+        MailCopyInbox,
+        MailOpenInbox,
+        MailCopySmtp,
+        MailSwitch,      // row 0: PHP's mail, 1: notices, 2: keep running
+        MailMax,         // an edit
+        MailTest,
+        MailDelete,
+        MailDiscard,
+        MailSave,
         // Settings > Apache; `row` is the module's cell.
         ApacheVersion,
         ApacheRuntimes,  // "Go to Runtimes" when no Apache is installed
@@ -410,6 +428,46 @@ private:
         RECT discard{};
         RECT save{};
     };
+    struct MailGeometry {
+        RECT note{};          // Loading…
+        RECT pill{};          // the state, as a pill
+        RECT version{};       // "Mailpit 1.27.3"
+        RECT failed{};        // why it failed
+        RECT install_note{};  // not installed
+        RECT install{};       // Install, or the progress line in its place
+        RECT progress_text{};
+        RECT progress_bar{};
+        RECT addr_card{};
+        RECT addr_title{};
+        RECT inbox_label{};
+        RECT inbox_link{};
+        RECT inbox_copy{};
+        RECT inbox_open{};
+        RECT smtp_label{};
+        RECT smtp_value{};
+        RECT smtp_note{};
+        RECT smtp_copy{};
+        RECT env_note{};
+        RECT not_served{};
+        RECT opt_card{};
+        RECT opt_title{};
+        std::array<RECT, 3> rows{};         // the whole row of each switch
+        std::array<RECT, 3> labels{};
+        std::array<RECT, 3> notes{};
+        std::array<RECT, 3> switches{};
+        RECT max_label{};
+        RECT max_box{};
+        RECT max_after{};
+        RECT max_bad{};
+        RECT emails_card{};
+        RECT emails_title{};
+        RECT emails_count{};
+        RECT test{};
+        RECT del{};
+        RECT footer_text{};
+        RECT discard{};
+        RECT save{};
+    };
     // A radio button's or a switch's row: the whole row, its label and the note under it.
     struct ChoiceGeometry {
         RECT row{};
@@ -511,6 +569,7 @@ private:
         PhpGeometry php;
         PortsGeometry ports;
         DbGeometry db;
+        MailGeometry mail;
         ApacheGeometry apache;
         FoldersGeometry folders;
         SharedGeometry shared;
@@ -636,6 +695,30 @@ private:
     void paint_db_shapes(Canvas& c) const;
     void paint_db_text(Canvas& c) const;
     [[nodiscard]] static bool is_db_part(Part part) { return part >= Part::DbVersion && part <= Part::DbPhpMyAdmin; }
+
+    // --- Settings > Mail (settings_mail.cpp) ---
+    [[nodiscard]] bool settle_mail_changes(AfterSave then);
+    void load_mail();
+    // True when a Save chosen on the way out is done and the window should close.
+    [[nodiscard]] bool on_mail_answers(const Snapshot& snap);
+    void make_mail_edits();
+    void place_mail_edits();
+    void set_mail_read_only(bool read_only);
+    void layout_mail(HDC dc, Geometry& g, int x0, int x1, int y) const;
+    [[nodiscard]] const RECT* mail_rect_of(const Hit& hit) const;
+    void mail_focus_order(std::vector<Hit>& order) const;
+    void on_mail_click(const Hit& hit);
+    bool save_mail();
+    void discard_mail();
+    void install_mailpit();
+    void copy_mail_text(std::string text);
+    void open_inbox();
+    void send_test_mail();
+    void delete_all_mail();
+    [[nodiscard]] bool mailpit_installing() const;
+    void paint_mail_shapes(Canvas& c) const;
+    void paint_mail_text(Canvas& c) const;
+    [[nodiscard]] static bool is_mail_part(Part part) { return part >= Part::MailInstall && part <= Part::MailSave; }
 
     // --- Settings > Apache (settings_apache.cpp) ---
     [[nodiscard]] bool settle_apache_changes(AfterSave then);
@@ -856,6 +939,15 @@ private:
     std::string password_error_;
     // The port, the my.ini fields, then the new root password; only while the section is shown.
     std::vector<std::unique_ptr<FieldEdit>> db_edits_;
+    // Settings > Mail: mail.status as the section's own request and the main
+    // window's poll said it, the changes not saved yet, and what's on its way.
+    std::optional<MailStatus> mail_;
+    bool mail_loading_ = false;
+    bool mail_saving_ = false;
+    bool mail_busy_ = false;  // mail.test or mail.clear is on its way
+    MailChanges mail_changes_;
+    std::size_t php_projects_ = 0;  // projects that run PHP: the first switch restarts it for them
+    std::vector<std::unique_ptr<FieldEdit>> mail_edits_;  // the number of emails kept; only while the section is shown
     // Settings > Apache: apache.get's answer and the changes not saved yet.
     std::optional<ApacheInfo> apache_;
     bool apache_loading_ = false;

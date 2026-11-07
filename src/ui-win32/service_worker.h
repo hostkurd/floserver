@@ -3,14 +3,15 @@
 // The window's link to floserverd (D2). One background thread connects
 // (starting the service the way the CLI does), asks for projects.list,
 // status, web.status, databases.list, shared.get (without the www
-// folder's folders: nothing reads it in the background) and updates.status
-// every 2 seconds,
+// folder's folders: nothing reads it in the background), updates.status and
+// mail.status (D27) every 2 seconds,
 // and sends the user's changes. While a project's panel is open it also asks for that
 // project's log. The UI thread never waits on the pipe: the worker keeps the
 // latest snapshot and posts a message to the window when it changes.
 
 #include "model/app_update.h"
 #include "model/first_run.h"
+#include "model/mail_page.h"
 #include "model/runtimes_page.h"
 #include "model/ui_strings.h"
 #include "model/view_model.h"
@@ -73,6 +74,9 @@ struct Snapshot {
     std::string projects_dir;  // projects.list's, or empty
     SharedSites shared;        // Shared sites (D19): shared.get's answer
     UpdateStatus updates;      // App updates (Q5): updates.status's answer (Unknown: an older service)
+    // Mail (D27): mail.status, asked with each poll while the service answers.
+    // Nothing until the first answer; an older service counts as not installed.
+    std::optional<MailStatus> mail;
     // New project (D9): the templates, once asked for.
     bool templates_loaded = false;
     std::string templates_error;
@@ -173,7 +177,8 @@ public:
     // makes the worker ask runtimes.list again (cached). Never a timer.
     void watch_runtimes(bool on);
     // runtimes.remove; settled reports remove_key(name, folder).
-    void remove_runtime(const std::string& name, const std::string& folder);
+    // `keep_emails` is for Mailpit's: its caught emails stay unless it's false.
+    void remove_runtime(const std::string& name, const std::string& folder, bool keep_emails = true);
     // runtimes.default; nothing clears it. settled reports default_key(name).
     void set_default(const std::string& name, const std::optional<std::string>& series);
     void cancel_job(std::int64_t id);

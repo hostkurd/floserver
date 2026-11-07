@@ -733,6 +733,67 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     RestoreNotRecycled,       // {0}: the project, {1}: why
     RestoreNothing,
     BackupForeignNote,        // under Install the packages, for a backup made on another computer
+    // Settings > Mail, the status line's Mail button, the new-mail toast (D27).
+    SettingsMail,
+    MailHint,
+    MailStateAsleep,
+    MailStateRunning,
+    MailStateStarting,
+    MailStateFailed,
+    MailVersion,            // {0}: "1.27.3"
+    MailFailed,             // {0}: the service's reason
+    MailNotInstalledNote,
+    MailInstall,
+    MailAddresses,
+    MailInbox,
+    MailSmtpServer,
+    MailNoLogin,
+    MailOpenInbox,
+    MailEnvNote,
+    MailNotServed,          // {0}: "https://mail.localhost", {1}: the project that has the address
+    MailNotServedNoWhy,     // {0}: "https://mail.localhost"
+    MailCopied,
+    MailOptions,
+    MailPhp,
+    MailPhpNote,
+    MailNotices,
+    MailNoticesNote,
+    MailKeepRunning,
+    MailKeepRunningNote,
+    MailKeepLast,
+    MailKeepLastAfter,
+    MailMaxBad,
+    MailEmails,
+    MailCount,              // {0}: how many, {1}: "3.4 MB"
+    MailCountOne,           // {0}: "3.4 MB"
+    MailSendTest,
+    MailTestSent,
+    MailTestFailed,         // {0}: the service's reason
+    MailDeleteAll,
+    MailDeleteAsk,          // {0}: how many
+    MailDeleteConfirm,
+    MailDeleted,
+    MailDeleteFailed,       // {0}: the service's reason
+    MailReadFailed,         // {0}: the service's reason
+    MailSaveApplies,
+    MailSaveAppliesPhp,     // {0}: "3 projects"
+    MailOpenFailed,         // {0}: the reason
+    MailLink,               // the status line's button
+    MailLinkNew,            // {0}: how many are new
+    MailLinkHelp,
+    MailToastOne,           // {0}: the subject
+    MailToastTo,            // {0}: the address it went to
+    MailToastMany,          // {0}: how many
+    MailToastLatest,        // {0}: the newest one's subject
+    MailToastOpen,
+    MailNoSubject,
+    MailRemoveAsk,          // {0}: "Mailpit 1.27.3"
+    MailRemoveEmails,
+    FirstRunWhatMailpit,
+    MailAskSave,
+    MailDeleteAskOne,
+    MailRemoveEmailsFailed,
+    MailRemoveEmailsFailedNoWhy,
     Count_,
 };
 
@@ -740,9 +801,9 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
 
 // The Settings sidebar, top to bottom (SettingsWindow::Section has the same
 // order). Opening Settings with no section asked for opens the first.
-inline constexpr std::array<Str, 8> kSettingsSidebar = {
-    Str::SettingsGeneral,  Str::SettingsRuntimes, Str::SettingsPhp,     Str::SettingsPorts,
-    Str::SettingsDatabase, Str::SettingsApache,   Str::SettingsFolders, Str::SharedSites};
+inline constexpr std::array<Str, 9> kSettingsSidebar = {
+    Str::SettingsGeneral, Str::SettingsRuntimes, Str::SettingsPhp,     Str::SettingsPorts,  Str::SettingsDatabase,
+    Str::SettingsMail,    Str::SettingsApache,   Str::SettingsFolders, Str::SharedSites};
 
 // U+202A LEFT-TO-RIGHT EMBEDDING, the text, U+202C POP DIRECTIONAL
 // FORMATTING. Embeddings, not the newer isolates (U+2066...), because

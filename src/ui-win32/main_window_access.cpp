@@ -73,6 +73,8 @@ std::string MainWindow::access_id(const Hit& hit) const {
             return "top/settings";
         case Part::Banner:
             return "status";
+        case Part::MailLink:
+            return "mail/link";
         case Part::UpdateNotes:
             return "update/notes";
         case Part::UpdateCancel:
@@ -184,6 +186,9 @@ std::string MainWindow::access_focus_id() const {
     if (wizard_open()) {
         return access_id(wizard_focus());
     }
+    if (mail_keys()) {
+        return "mail/link";
+    }
     if (update_focus_ >= 0) {
         const std::vector<Part> order = update_focus_order();
         return std::cmp_less(update_focus_, order.size())
@@ -266,12 +271,20 @@ AccessTree MainWindow::build_access_tree() const {
             AccessNode n = footer_node(snap_.footer, lang_);
             n.bounds = ar(footer_rect());
             t.add(-1, std::move(n));
+            // Mail · N new (D27): a button on the status line, once Mailpit is installed.
+            if (mail_link_visible()) {
+                AccessNode mail = mail_link_node(mail_link_text(*snap_.mail, lang_), lang_);
+                mail.bounds = ar(mail_link_rect());
+                mail.target = target(Part::MailLink, -1, {});
+                t.add(-1, std::move(mail));
+            }
         }
     }
 
     // A toast, where its popup is.
     if (!toast_.text.empty() && shown(toast_geometry_.card)) {
-        ToastNodes nodes = toast_nodes(toast_.text, lang_, toast_.action);
+        ToastNodes nodes = toast_nodes(toast_.mail ? access_join(lang_, {toast_.text, toast_.detail}) : toast_.text,
+                                       lang_, toast_.action);
         nodes.group.bounds = ar(toast_geometry_.card);
         nodes.text.bounds = ar(toast_geometry_.text);
         nodes.close.bounds = ar(toast_geometry_.close);
@@ -1200,6 +1213,12 @@ void MainWindow::access_focus(const Hit& hit) {
             shared_focused_ = true;
             shared_part_ = static_cast<int>(it - order.begin());
         }
+    } else if (hit.part == Part::MailLink) {
+        focus_ = -1;
+        panel_focus_ = -1;
+        update_focus_ = -1;
+        shared_focused_ = false;
+        mail_focused_ = true;
     } else if (hit.part == Part::Row) {
         if (const int row = visible_index(hit.project); row >= 0) {
             focus_ = row;

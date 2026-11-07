@@ -83,8 +83,8 @@ TEST_CASE("the Settings sidebar starts with General") {
         }
         return out;
     }();
-    CHECK(en == std::vector<std::string>{"General", "Runtimes", "PHP", "Ports & HTTPS", "Database", "Apache", "Folders",
-                                         "Shared sites"});
+    CHECK(en == std::vector<std::string>{"General", "Runtimes", "PHP", "Ports & HTTPS", "Database", "Mail", "Apache",
+                                         "Folders", "Shared sites"});
 }
 
 TEST_CASE("Same as Windows: only Sorani is Kurdish; Kurmanji falls back") {
