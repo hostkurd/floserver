@@ -45,6 +45,8 @@ $files = @(
     @{ Path = "nginx/1.30.6/nginx-1.30.6.zip";                  Orig = "https://nginx.org/download/nginx-1.30.6.zip" },
     @{ Path = "wordpress/7.1.4/wordpress-7.1.4.zip";            Orig = "https://wordpress.org/wordpress-7.1.4.zip" },
     @{ Path = "wordpress/7.0.8/wordpress-7.0.8.zip";            Orig = "https://wordpress.org/wordpress-7.0.8.zip" },
+    # Mailpit publishes no checksum file; the GitHub release download is the original.
+    @{ Path = "mailpit/1.33.0/mailpit-windows-amd64.zip";       Orig = "https://github.com/axllent/mailpit/releases/download/v1.33.0/mailpit-windows-amd64.zip" },
     @{ Path = "apache/2.4.69/httpd-2.4.69-261002-Win64-VS18.zip"; Orig = "https://www.apachelounge.com/download/VS18/binaries/httpd-2.4.69-261002-Win64-VS18.zip" },
     # FloServer's own installer (the list's "app"): no Sums or Orig, so it says CHECK BY HAND;
     # compare its SHA-256 with the CI artifact's, then build with --accept and --app-notes, e.g.

@@ -319,6 +319,66 @@ TEST_CASE("publisher: phpMyAdmin is checked against its own .sha256 and listed f
     CHECK(floserver::core::runtimes_for(*opened.manifest, "phpmyadmin", "windows-x64").empty());
 }
 
+TEST_CASE("publisher: Mailpit is compared with its GitHub download and listed for Windows (D27)") {
+    FakeCdn cdn;
+    const std::string path = "mailpit/1.33.0/mailpit-windows-amd64.zip";
+    const std::string body = "mailpit zip";
+    cdn.http.serve(kTestCdn + "/" + path, {200, body});
+
+    const OfficialSource source = official_source(path);
+    CHECK(source.kind == OfficialSource::Kind::Original);
+    CHECK(source.urls == std::vector<std::string>{
+                             "https://github.com/axllent/mailpit/releases/download/v1.33.0/mailpit-windows-amd64.zip"});
+    cdn.http.serve(source.urls.front(), {200, body});
+
+    const AddResult added = new_file(kTestCdn + "/" + path, kTestCdn, cdn.files);
+    REQUIRE_MESSAGE(added.file, added.error);
+    CHECK(added.file->title == "Mailpit 1.33.0");
+    PublishFile f = *added.file;
+    CheckContext ctx{cdn.http, kTestCdn};
+    check_file(ctx, f);
+    CHECK(f.state == CheckState::Ok);
+
+    // A CDN file that differs from the original is refused.
+    PublishFile bad = *added.file;
+    cdn.http.serve(kTestCdn + "/" + path, {200, "something else"});
+    check_file(ctx, bad);
+    CHECK(bad.state == CheckState::Failed);
+    cdn.http.serve(kTestCdn + "/" + path, {200, body});
+
+    // Other builds of the release aren't listed; a mismatched version is an error.
+    CHECK(describe_cdn_path(path).listable);
+    CHECK_FALSE(describe_cdn_path("mailpit/1.33.0/mailpit-windows-arm64.zip").listable);
+    CHECK(describe_cdn_path("mailpit/1.33.0/mailpit-windows-arm64.zip").problem.find("another build") !=
+          std::string::npos);
+    CHECK(describe_cdn_path("mailpit/1.33.0/mailpit-linux-amd64.tar.gz").problem.find("not listed") !=
+          std::string::npos);
+    CHECK_FALSE(describe_cdn_path("mailpit/1.33.1/mailpit-windows-amd64.exe").listable);
+
+    cdn.files.push_back(f);
+    const auto now = at("2026-11-07T12:00:00Z");
+    const BuiltList built = build_next_list(kTestCdn, cdn.files, 6, now);
+    REQUIRE_MESSAGE(built.manifest_json, (built.errors.empty() ? "" : built.errors.front()));
+    const auto doc = nlohmann::json::parse(*built.manifest_json);
+    const auto entry = std::find_if(doc.at("runtimes").begin(), doc.at("runtimes").end(),
+                                    [](const nlohmann::json& r) { return r.at("name").get<std::string>() == "mailpit"; });
+    REQUIRE(entry != doc.at("runtimes").end());
+    CHECK(entry->at("version").get<std::string>() == "1.33.0");
+    CHECK(entry->at("platform").get<std::string>() == "windows-x64");
+    CHECK(entry->at("archive").get<std::string>() == "zip");
+    CHECK(entry->at("license").get<std::string>() == "MIT");
+    CHECK(entry->at("urls") == nlohmann::json::array({kTestCdn + "/" + path, source.urls.front()}));
+
+    floserver::core::ManifestCheck check;
+    check.trusted_keys = cdn.keys();
+    check.now = now;
+    const auto opened = floserver::core::open_manifest(*built.manifest_json, cdn.key.sign(*built.manifest_json, "test-key"),
+                                                       check);
+    REQUIRE(opened.manifest);
+    CHECK(opened.warnings.empty());
+    CHECK(floserver::core::runtimes_for(*opened.manifest, "mailpit", "windows-x64").size() == 1);
+}
+
 TEST_CASE("publisher: official checksums are read from the usual list formats") {
     const std::string h = std::string(63, 'a') + "b";
     CHECK(find_official_hash(h + "  file.zip\n", "file.zip") == h);

@@ -38,7 +38,7 @@ struct CatalogEntry {
 
 // The runtimes FloServer 1.0 knows (Windows x64). Add a row here before
 // publishing a new kind of runtime.
-constexpr std::array<CatalogEntry, 9> kCatalog = {{
+constexpr std::array<CatalogEntry, 10> kCatalog = {{
     {"php", R"(php-{v}(-\d+)?-Win32-vs1[67]-x64\.zip)", "PHP-3.01", "windows-x64", "nts", R"(php-{v}(-\d+)?-nts-Win32-vs1[67]-x64\.zip)",
      "https://downloads.php.net/~windows/releases/archives/{file}"},
     {"mariadb", "", "GPL-2.0", "windows-x64", "", R"(mariadb-{v}-winx64\.zip)",
@@ -58,6 +58,9 @@ constexpr std::array<CatalogEntry, 9> kCatalog = {{
     // phpMyAdmin (an optional tool): PHP code, the same files on every platform.
     {"phpmyadmin", R"(phpMyAdmin-{v}-(english|source)\.(zip|tar\.gz|tar\.xz|7z))", "GPL-2.0-or-later", "any", "",
      R"(phpMyAdmin-{v}-all-languages\.zip)", "https://files.phpmyadmin.net/phpMyAdmin/{v}/{file}"},
+    // Mailpit (an optional tool, D27): one Go program; its other builds aren't listed.
+    {"mailpit", R"(mailpit-(windows-arm64\.zip|(linux|darwin)-[a-z0-9]+\.tar\.gz))", "MIT", "windows-x64", "",
+     R"(mailpit-windows-amd64\.zip)", "https://github.com/axllent/mailpit/releases/download/v{v}/{file}"},
 }};
 
 std::string join(std::initializer_list<std::string_view> parts) {
