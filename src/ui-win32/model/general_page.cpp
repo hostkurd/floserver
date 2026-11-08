@@ -496,6 +496,7 @@ std::string licences_text(Lang lang, std::string_view version, const json* runti
     };
     std::string out = fill_pattern(text(lang, Str::LicencesTitle), false, {version}) + "\n\n";
     out += plain(Str::LicencesOwn) + "\n\n";
+    out += std::string(eula_text()) + "\n";
     out += plain(Str::LicencesLibraries) + "\n";
     for (const LicenceLine& l : library_licences()) {
         out += line(l);

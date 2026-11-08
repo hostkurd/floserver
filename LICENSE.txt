@@ -1,0 +1,107 @@
+FloServer End-User Licence Agreement
+
+1. This agreement
+
+This End-User Licence Agreement ("Agreement") is between you and HostKurd ("we"), which develops and maintains FloServer.
+
+"FloServer" means the FloServer program for Windows: the window, the background service, the flo and floserver commands, its installer and updates, and its documentation. FloServer is free, closed-source software: a native desktop application written in C++. It sets up and runs a local web development environment on your own computer.
+
+By installing or using FloServer, you accept this Agreement. If you don't accept it, don't install or use FloServer. If you accept it for a company or another organisation, you confirm that you may do so on its behalf.
+
+2. Licence
+
+FloServer is free of charge, but it is not open source. HostKurd gives you a free, non-exclusive, non-transferable licence to:
+
+• install FloServer on any number of computers that you own or control;
+• use it to build, run and test websites and applications, for personal, educational or commercial work, including work you do for clients.
+
+What you build with FloServer is yours. This Agreement gives HostKurd no rights in your projects, code, databases or files.
+
+3. What you may not do
+
+Unless the law where you live allows it despite this Agreement, you may not:
+
+• sell, rent, lease or sublicense FloServer, or charge anyone for FloServer itself;
+• distribute FloServer or its installer. Point people to the official download at floserver.org instead;
+• change, translate or make works based on FloServer, or remove or change its notices, names or logos;
+• reverse engineer, decompile or disassemble FloServer;
+• get around its security features, such as the signature checks on the runtime list and the downloaded files;
+• use FloServer to break the law or anyone else's rights.
+
+4. Ownership
+
+FloServer is licensed to you, not sold. HostKurd and its licensors own FloServer and every copy of it, including its code, design, icons and the FloServer name, and keep all rights this Agreement doesn't expressly give you. FloServer is closed-source software. Its source code is confidential and not part of this licence, and you get FloServer only as ready-made programs.
+
+5. Third-party software
+
+FloServer doesn't include PHP, databases or web servers. When you choose one, FloServer downloads it from cdn.floserver.org or from its project's official site. Each runtime is someone else's software under its own licence, not this Agreement. FloServer shows the licence before the first download, and HostKurd doesn't change or rebrand them:
+
+• PHP (The PHP Group): PHP License 3.01
+• MariaDB (MariaDB Foundation): GNU GPL 2
+• nginx (nginx project): 2-clause BSD
+• Apache HTTP Server, Apache Lounge build (Apache Software Foundation): Apache License 2.0
+• Node.js (OpenJS Foundation): MIT
+• Python (Python Software Foundation): PSF License
+• Composer (Nils Adermann, Jordi Boggiano): MIT
+• phpMyAdmin (phpMyAdmin project): GNU GPL 2
+• WordPress, as a template (WordPress Foundation): GNU GPL 2 or later
+
+FloServer itself contains these open-source libraries, used under their licences: nlohmann/json (MIT), Monocypher (2-clause BSD or CC0) and miniz (MIT). It also contains Microsoft's Visual C++ runtime, under Microsoft's terms for redistributing it. The full notices are in FloServer under Settings > General > Licences.
+
+Where a third-party licence gives you rights this Agreement doesn't, that licence wins for that software.
+
+6. What FloServer changes on your computer
+
+FloServer installs for your Windows user only and needs no administrator rights. To do its job it:
+
+• puts its programs in %LOCALAPPDATA%\Programs\FloServer, and its runtimes, settings and databases in %LOCALAPPDATA%\FloServer;
+• adds its command folder and its terminal commands (php, node, composer, python and others) to your user's Path;
+• creates a local certificate authority and, after Windows asks you, adds it to your user's trusted certificates, so your projects open on https. It can only vouch for localhost addresses, and its private key never leaves your computer;
+• runs web servers and databases that listen on your computer only (127.0.0.1), on ports such as 80, 443, 8080 and 3306;
+• starts when you sign in to Windows, if you turn that on in Settings.
+
+Uninstalling FloServer from Windows removes its programs, its Path entries, its start-up entry and its certificate authority. Your projects, databases and downloaded runtimes stay until you delete them, for example with Remove FloServer... in Settings.
+
+7. Privacy and internet connections
+
+FloServer collects no personal data and sends no usage statistics, crash reports or telemetry. Your projects, code and databases stay on your computer.
+
+FloServer connects to the internet only to:
+
+• download the signed list of runtimes and app updates from cdn.floserver.org, once a day and when you ask;
+• download the runtimes and templates you choose, from cdn.floserver.org or, if that fails, from each project's official site;
+• open links you click, such as floserver.org, in your browser.
+
+Those servers see what any web server sees, such as your IP address and the file requested, as described in https://floserver.org/privacy/. If HostKurd ever offers crash reports, they will be off until you turn them on.
+
+8. Updates and future paid versions
+
+FloServer checks for new versions once a day and tells you when one is ready. It installs an update only when you click Update. Updates are covered by this Agreement unless they come with new terms, which FloServer shows you before installing.
+
+FloServer is free today. HostKurd may later offer paid editions or paid features. If it does, the version you already have keeps working under this Agreement, and nothing you use for free today will start costing money without you agreeing first.
+
+9. For local development; no warranty
+
+FloServer is made for developing and testing on your own computer. It is not made to host live websites or to serve the public, and its servers are set up for convenience, not for the internet.
+
+FloServer is provided "as is" and "as available", without warranty of any kind. To the extent the law allows, HostKurd disclaims all warranties, express or implied, including that it is fit for a particular purpose, free of errors or uninterrupted. Keep backups of your projects and databases.
+
+10. Limitation of liability
+
+To the extent the law allows, HostKurd is not liable for any indirect, incidental, special or consequential damages, or for lost data, profits or business, arising from FloServer or your use of it, even if told such damage was possible. Because FloServer is free, HostKurd's total liability to you is limited to USD 50.
+
+Nothing in this Agreement limits liability that the law where you live does not allow to be limited.
+
+11. Ending this agreement
+
+You can end this Agreement at any time by uninstalling FloServer. It ends on its own if you break it. When it ends, stop using FloServer and uninstall it. Sections 4, 5, 9, 10 and 12 still apply afterwards.
+
+12. Governing law, changes and contact
+
+This Agreement is governed by the laws of the Kurdistan Region of Iraq. Disputes go to the courts of Sulaymaniyah, unless the law where you live gives you the right to use your own courts.
+
+HostKurd may update this Agreement for new versions of FloServer. A new version's installer or update shows the new terms, and they apply to that version once you accept them.
+
+If a part of this Agreement can't be enforced, the rest still applies. This is the whole agreement between you and HostKurd about FloServer.
+
+Questions: dev@floserver.org - HostKurd, Darawaza City Mix Tower, Floor 5, Sulaymaniyah, Kurdistan Region of Iraq - floserver.org

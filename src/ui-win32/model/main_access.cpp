@@ -180,4 +180,24 @@ std::vector<std::string> log_access_lines(const std::vector<LogLine>& lines, std
     return out;
 }
 
+bool AccessGate::may_run(bool open) {
+    if (running_) {
+        return false;  // the one running goes on to the next when it's done
+    }
+    if (open) {
+        waiting_ = true;
+        return false;
+    }
+    waiting_ = false;
+    return true;
+}
+
+bool AccessGate::replay(bool open, bool queue_empty) {
+    if (!waiting_ || open || running_) {
+        return false;
+    }
+    waiting_ = false;
+    return !queue_empty;
+}
+
 }  // namespace floserver::ui

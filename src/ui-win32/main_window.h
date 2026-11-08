@@ -11,6 +11,7 @@
 #include "form_parts.h"
 #include "model/code_editor.h"
 #include "model/first_run.h"
+#include "model/main_access.h"
 #include "model/mail_page.h"
 #include "model/php_page.h"
 #include "model/project_menu.h"
@@ -827,6 +828,34 @@ private:
     void run_access_requests();
     void run_access(const AccessNode& node, AccessAction action);
     void access_focus(const Hit& hit);
+    // A menu, a question or a picker is open (its own message loop runs):
+    // a screen reader's requests wait for it to close (AccessGate).
+    [[nodiscard]] bool modal_open() const { return modal_ > 0 || asking_ || picking_folder_; }
+    // A menu or question has closed: the requests that waited for it are posted.
+    void modal_closed();
+    // A menu as TrackPopupMenuEx shows it; modal_ is up meanwhile.
+    UINT track_menu(HMENU menu, UINT flags, POINT at);
+    // Windows' own window (a menu, a file picker, a message box) open for
+    // as long as it lives, when nothing else (asking_) says so.
+    class ModalScope {
+    public:
+        explicit ModalScope(MainWindow& window) : window_(window) { ++window_.modal_; }
+        ModalScope(const ModalScope&) = delete;
+        ModalScope& operator=(const ModalScope&) = delete;
+        ModalScope(ModalScope&&) = delete;
+        ModalScope& operator=(ModalScope&&) = delete;
+        ~ModalScope() {
+            --window_.modal_;
+            window_.modal_closed();
+        }
+
+    private:
+        MainWindow& window_;
+    };
+    // Quit has begun: a FloServer.exe started meanwhile waits for this one to
+    // end (main.cpp). `update`: Update now's quit, after which the updater
+    // runs: one started meanwhile says an update is being installed.
+    void mark_quitting(bool update = false);
 
     HINSTANCE instance_;
     Lang lang_;
@@ -1019,7 +1048,9 @@ private:
     bool access_dirty_ = true;
     std::optional<AccessTree> access_said_;
     std::vector<std::pair<std::string, AccessAction>> access_queue_;
-    bool access_running_ = false;  // a request is being run (it may have a menu open)
+    AccessGate access_gate_;  // when they run: never inside another, nor under a menu or question
+    int modal_ = 0;           // menus and Windows' own windows open (asking_ covers our questions)
+    win::UniqueHandle quitting_mark_;  // quitting_mark_name(): held from Quit until the process ends
     // A page was just opened (not a window made again in another language):
     // its step is said even when it's the first thing a screen reader is told.
     bool access_page_opened_ = false;

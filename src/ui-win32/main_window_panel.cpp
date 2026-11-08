@@ -1106,6 +1106,7 @@ void MainWindow::add_existing_folder() {
     if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog))) ||
         dialog == nullptr) {
         picking_folder_ = false;
+        modal_closed();
         show_notice(fill(lang_, Str::OpenFailed, {"folder picker"}), true);
         return;
     }
@@ -1133,6 +1134,7 @@ void MainWindow::add_existing_folder() {
     }
     dialog->Release();
     picking_folder_ = false;
+    modal_closed();
     if (failed) {
         show_notice(fill(lang_, Str::OpenFailed, {"folder picker"}), true);
     } else if (!path.empty() && worker_) {
@@ -1170,7 +1172,7 @@ void MainWindow::show_field_menu(std::size_t index) {
     ClientToScreen(hwnd_, &at);
     UINT flags = TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTBUTTON | TPM_TOPALIGN;
     flags |= rtl_ ? UINT{TPM_RIGHTALIGN | TPM_LAYOUTRTL} : UINT{TPM_LEFTALIGN};
-    const auto command = static_cast<UINT>(TrackPopupMenuEx(menu.get(), flags, at.x, at.y, hwnd_, nullptr));
+    const UINT command = track_menu(menu.get(), flags, at);
     if (command < kFirstChoice || command - kFirstChoice >= field.choices.size()) {
         return;
     }

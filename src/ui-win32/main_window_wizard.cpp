@@ -280,7 +280,12 @@ void MainWindow::wizard_browse() {
     dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR);
     const std::wstring title = w(text(lang_, Str::WizardFolder));
     dialog->SetTitle(title.c_str());
-    if (SUCCEEDED(dialog->Show(hwnd_))) {
+    HRESULT shown = E_FAIL;
+    {
+        const ModalScope modal(*this);  // its own message loop
+        shown = dialog->Show(hwnd_);
+    }
+    if (SUCCEEDED(shown)) {
         IShellItem* item = nullptr;
         if (SUCCEEDED(dialog->GetResult(&item)) && item != nullptr) {
             PWSTR chosen = nullptr;
@@ -323,7 +328,7 @@ void MainWindow::wizard_field_menu(std::size_t index) {
     ClientToScreen(hwnd_, &at);
     UINT flags = TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTBUTTON | TPM_TOPALIGN;
     flags |= rtl_ ? UINT{TPM_RIGHTALIGN | TPM_LAYOUTRTL} : UINT{TPM_LEFTALIGN};
-    const auto command = static_cast<UINT>(TrackPopupMenuEx(menu.get(), flags, at.x, at.y, hwnd_, nullptr));
+    const UINT command = track_menu(menu.get(), flags, at);
     if (command >= 100 && command - 100 < field.choices.size() && wizard_.open && wizard_.step == 2) {
         wizard_.picks[field.key] = command - 100;
         InvalidateRect(hwnd_, nullptr, FALSE);

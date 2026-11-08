@@ -3,6 +3,17 @@ target_link_libraries(floserverd PRIVATE floserver_core)
 floserver_code_rules(floserverd)
 set_target_properties(floserverd PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${FLOSERVER_BIN_DIR})
 
+# On Windows a Windows program, not a console one: no console window ever
+# flashes when the window, flo, Start with Windows or the installer starts
+# it. main() stays the entry point (MinGW's -mwindows keeps it; MSVC is told).
+# What it prints reaches a console it was typed in (use_parent_console()).
+if(WIN32)
+    set_target_properties(floserverd PROPERTIES WIN32_EXECUTABLE TRUE)
+    if(MSVC)
+        target_link_options(floserverd PRIVATE /ENTRY:mainCRTStartup)
+    endif()
+endif()
+
 # The Microsoft Visual C++ runtime DLLs, shipped next to floserverd: the
 # programs use them, and the service copies them into each runtime it
 # installs (PHP, nginx, Apache need them), so users never install the

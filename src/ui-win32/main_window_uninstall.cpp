@@ -70,6 +70,7 @@ void MainWindow::open_uninstall(bool quit_on_cancel) {
     std::string error;
     setup_dll_ = setup_dll(error);
     if (setup_dll_ == nullptr) {
+        const ModalScope modal(*this);  // the message boxes run their own message loop
         // Without its screens, Windows' own uninstall of the MSI still
         // removes the program (FloServer's entry in Settings -> Apps leads
         // here, so this is the way left there).
@@ -245,6 +246,7 @@ void MainWindow::on_uninstall() {
                     asking_ = true;
                     const bool removed = core::untrust_ca(answer.ca_der, cancelled, error);
                     asking_ = false;
+                    modal_closed();
                     if (!removed) {
                         // "No" already says nothing was changed.
                         uninstall_failed(cancelled ? std::string(text(kSetupLang, Str::UninstallCaNo))

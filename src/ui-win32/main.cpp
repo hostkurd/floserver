@@ -62,6 +62,73 @@ bool hand_over_to_running_window(const std::wstring& class_name, const std::stri
     return false;
 }
 
+bool mark_exists(const std::wstring& name) {
+    return floserver::ui::win::UniqueHandle(OpenMutexW(SYNCHRONIZE, FALSE, name.c_str())) != nullptr;
+}
+
+bool event_exists(const std::wstring& name) {
+    return floserver::ui::win::UniqueHandle(OpenEventW(SYNCHRONIZE, FALSE, name.c_str())) != nullptr;
+}
+
+// The open FloServer is quitting, or an update is on its way (the window
+// quit for it, or the updater has begun): nothing should open now.
+bool quitting_mark_exists(const std::string& service_instance) {
+    return event_exists(floserver::ui::quitting_mark_name(service_instance));
+}
+bool updating_now(const std::string& service_instance) {
+    return mark_exists(floserver::ui::updating_mark_name(service_instance)) ||
+           event_exists(floserver::ui::update_quitting_mark_name(service_instance));
+}
+
+// How waiting for a FloServer that's quitting ended.
+enum class QuitWait : std::uint8_t { Gone, Running, Updating, TooLong };
+
+// Started again while the open FloServer quits (its projects and the
+// service stopping can take a while): it would find that one's mark and
+// end, and nothing would open. Instead this one waits, with nothing shown,
+// for that process to end, which hands it the mark (`single`, a mutex the
+// process with the window owns), then opens as usual. Another copy may
+// have been handed it first (Running: that one's window is brought
+// forward). An update wins: its installer waits for the mark to go.
+QuitWait wait_for_quitting_window(HANDLE single, const std::string& service_instance, const std::wstring& class_name) {
+    constexpr DWORD kStepMs = 100;
+    constexpr DWORD kLimitMs = 30000;
+    for (DWORD waited = 0; waited < kLimitMs; waited += kStepMs) {
+        if (updating_now(service_instance)) {
+            return QuitWait::Updating;
+        }
+        DWORD got = WaitForSingleObject(single, kStepMs);
+        if (got == WAIT_TIMEOUT && !quitting_mark_exists(service_instance)) {
+            // The one quitting has dropped its quitting mark. It may still be
+            // ending (its window gone, the mark not yet free): keep waiting
+            // then. Only a window that's there means another copy opened.
+            got = WaitForSingleObject(single, 0);
+            if (got == WAIT_TIMEOUT && FindWindowW(class_name.c_str(), nullptr) != nullptr) {
+                return QuitWait::Running;
+            }
+        }
+        if (got == WAIT_OBJECT_0 || got == WAIT_ABANDONED) {
+            // The mark is this process's now. An update that started just
+            // before still comes first.
+            if (updating_now(service_instance)) {
+                ReleaseMutex(single);
+                return QuitWait::Updating;
+            }
+            return QuitWait::Gone;
+        }
+        if (got != WAIT_TIMEOUT) {
+            break;
+        }
+    }
+    return QuitWait::TooLong;
+}
+
+void say_update_in_progress() {
+    const floserver::ui::Lang lang = floserver::ui::window_lang(floserver::ui::load_window_prefs());
+    MessageBoxW(nullptr, widen(floserver::ui::text(lang, floserver::ui::Str::UpdateInProgress)).c_str(), L"FloServer",
+                MB_OK | MB_ICONINFORMATION | (floserver::ui::is_rtl(lang) ? UINT{MB_RTLREADING | MB_RIGHT} : 0U));
+}
+
 // FloServer.exe's arguments, without the program: [--tray] [--instance
 // <suffix>] as the Run entry writes them, --measure <file> for CI (D15), or
 // --apply-update <msi> ... for the copy that installs an update.
@@ -209,27 +276,50 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE /*prev*/, PWSTR /*cmd*/, int s
     const std::wstring class_name = L"FloServerWindow." + widen(service_instance);
     const std::wstring mutex_name = floserver::ui::window_mark_name(service_instance);
 
-    // An update is being installed (apply_update.h): no window now, or it
-    // would start floserverd again in the middle. The new one opens by itself.
-    if (const floserver::ui::win::UniqueHandle updating(
-            OpenMutexW(SYNCHRONIZE, FALSE, floserver::ui::updating_mark_name(service_instance).c_str()));
-        updating) {
+    // An update is being installed (apply_update.h), or the window has just
+    // quit for one: no window now, or it would start floserverd again in the
+    // middle. The new one opens by itself.
+    if (updating_now(service_instance)) {
         if (!tray) {
-            const floserver::ui::Lang lang = floserver::ui::window_lang(floserver::ui::load_window_prefs());
-            MessageBoxW(nullptr, widen(floserver::ui::text(lang, floserver::ui::Str::UpdateInProgress)).c_str(),
-                        L"FloServer",
-                        MB_OK | MB_ICONINFORMATION |
-                            (floserver::ui::is_rtl(lang) ? UINT{MB_RTLREADING | MB_RIGHT} : 0U));
+            say_update_in_progress();
         }
         return 0;
     }
 
-    const floserver::ui::win::UniqueHandle single(CreateMutexW(nullptr, FALSE, mutex_name.c_str()));
+    // Owned by this process's thread for as long as it runs: when it ends,
+    // a copy waiting for it (wait_for_quitting_window) is handed the mark.
+    const floserver::ui::win::UniqueHandle single(CreateMutexW(nullptr, TRUE, mutex_name.c_str()));
     if (single && GetLastError() == ERROR_ALREADY_EXISTS) {
-        if (tray && !uninstall) {
-            return 0;  // already running: nothing to bring forward at sign-in
+        // Left by a FloServer that ended without letting go (it crashed):
+        // nobody owns it, so it's this one's and it opens as usual.
+        const DWORD left_free = WaitForSingleObject(single.get(), 0);
+        if (left_free != WAIT_OBJECT_0 && left_free != WAIT_ABANDONED) {
+            const auto bring_forward = [&] {
+                if (tray && !uninstall) {
+                    return 0;  // already running: nothing to bring forward at sign-in
+                }
+                return hand_over_to_running_window(class_name, args.open, uninstall) ? 0 : 1;
+            };
+            if (!quitting_mark_exists(service_instance) && bring_forward() == 0) {
+                return 0;
+            }
+            // Quitting, or the hand-over failed: it may have begun quitting
+            // meanwhile, or be in its last moments (window gone, mark not yet
+            // free). Wait for the mark instead of ending with nothing open.
+            switch (wait_for_quitting_window(single.get(), service_instance, class_name)) {
+                case QuitWait::Gone:
+                    break;  // opens as usual
+                case QuitWait::Running:
+                    return bring_forward();
+                case QuitWait::Updating:
+                    if (!tray) {
+                        say_update_in_progress();
+                    }
+                    return 0;
+                case QuitWait::TooLong:
+                    return 1;  // still quitting: starting FloServer again later opens it
+            }
         }
-        return hand_over_to_running_window(class_name, args.open, uninstall) ? 0 : 1;
     }
 
     // Opening an address goes through the shell, which may use COM.

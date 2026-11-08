@@ -242,7 +242,11 @@ void MainWindow::show_project_menu(const std::string& project, POINT at) {
         return;
     }
     hover_ = {};
-    const MenuCommand command = track(hwnd_, menu.get(), at, rtl_, items);
+    MenuCommand command = MenuCommand::None;
+    {
+        const ModalScope modal(*this);
+        command = track(hwnd_, menu.get(), at, rtl_, items);
+    }
     if (command != MenuCommand::None) {
         run_project_command(project, command);
     }
@@ -258,7 +262,12 @@ void MainWindow::show_shared_menu(POINT at) {
         return;
     }
     hover_ = {};
-    switch (track(hwnd_, menu.get(), at, rtl_, items)) {
+    MenuCommand command = MenuCommand::None;
+    {
+        const ModalScope modal(*this);
+        command = track(hwnd_, menu.get(), at, rtl_, items);
+    }
+    switch (command) {
         case MenuCommand::OpenBrowser:
             open_shared_address();
             break;
@@ -389,6 +398,7 @@ void MainWindow::ask_remove_now(const std::string& project, const std::string& f
     bool trash = false;
     const bool remove = ask_remove_project(hwnd_, lang_, question, drop, trash);
     asking_ = false;
+    modal_closed();
     first_run_after_ask();
     if (quit_after_ask_) {
         quit_after_ask_ = false;
@@ -467,6 +477,7 @@ void MainWindow::ask_rename(const std::string& project) {
         hwnd_, lang, row.name,
         [&](const std::string& typed) { return rename_question(row, typed, rows, footer, lang); }, new_name, folder);
     asking_ = false;
+    modal_closed();
     first_run_after_ask();
     if (quit_after_ask_) {
         quit_after_ask_ = false;

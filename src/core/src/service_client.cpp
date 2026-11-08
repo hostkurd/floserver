@@ -67,7 +67,8 @@ StartResult start_service(const std::string& instance, std::string& error, std::
         error = "floserverd wasn't found next to this program";
         return StartResult::Failed;
     }
-    if (!spawn_detached(*program, {}, error)) {
+    // --spawned: started by a program, not typed in a console (floserverd prints nothing then).
+    if (!spawn_detached(*program, {"--spawned"}, error)) {
         return StartResult::Failed;
     }
     const auto deadline = Clock::now() + wait;

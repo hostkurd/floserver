@@ -73,6 +73,9 @@ std::wstring w(std::string_view s) { return win::widen(s); }
 struct Box {
     std::mutex mutex;
     HWND dialog = nullptr;
+    // The window's Update-now mark (update_quitting_mark_name), held from the
+    // start until the updating mark is made, or the update fails before it.
+    win::UniqueHandle quit_mark;
     std::string error;
     MsiProgress progress;
     int last_permille = -1;
@@ -222,6 +225,7 @@ bool still_checked(const UpdateStatus& checked, const std::string& msi, win::Uni
 void apply(const std::shared_ptr<Box>& box, const ApplyUpdateArgs& args, Lang lang) {
     const std::string instance = core::ipc::default_instance();
     const auto fail = [&](std::string message) {
+        box->quit_mark.reset();  // only this thread uses it once it runs
         {
             const std::lock_guard lock(box->mutex);
             box->error = std::move(message);
@@ -259,6 +263,7 @@ void apply(const std::shared_ptr<Box>& box, const ApplyUpdateArgs& args, Lang la
         fail(std::string(text(lang, Str::UpdateErrBusy)));
         return;
     }
+    box->quit_mark.reset();  // the updating mark keeps FloServer from opening now
     const std::wstring mark = window_mark_name(instance);
     bool window_gone = false;
     for (int i = 0; i < 100 && !window_gone; ++i) {
@@ -604,10 +609,21 @@ std::wstring updating_mark_name(const std::string& service_instance) {
     return L"Local\\FloServerUpdating." + w(service_instance);
 }
 
+std::wstring quitting_mark_name(const std::string& service_instance) {
+    return L"Local\\FloServerQuitting." + w(service_instance);
+}
+
+std::wstring update_quitting_mark_name(const std::string& service_instance) {
+    return L"Local\\FloServerQuitting." + w(service_instance) + L".update";
+}
+
 int run_apply_update(HINSTANCE instance, Lang lang, const ApplyUpdateArgs& args) {
     Dialog d;
     d.lang = lang;
     d.args = args;
+    // Taken before the dialog shows: the window waits for that (WaitForInputIdle) before it goes.
+    d.box->quit_mark.reset(
+        OpenEventW(SYNCHRONIZE, FALSE, update_quitting_mark_name(core::ipc::default_instance()).c_str()));
     // The version for the title, from the installer's name (FloServer-<x.y.z>-x64.msi).
     const std::string name = core::path_to_utf8(core::path_from_utf8(args.msi).filename());
     if (name.starts_with("FloServer-") && name.ends_with("-x64.msi")) {
