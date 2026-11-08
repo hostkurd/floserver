@@ -90,7 +90,7 @@ enum class QuitWait : std::uint8_t { Gone, Running, Updating, TooLong };
 // process with the window owns), then opens as usual. Another copy may
 // have been handed it first (Running: that one's window is brought
 // forward). An update wins: its installer waits for the mark to go.
-QuitWait wait_for_quitting_window(HANDLE single, const std::string& service_instance) {
+QuitWait wait_for_quitting_window(HANDLE single, const std::string& service_instance, const std::wstring& class_name) {
     constexpr DWORD kStepMs = 100;
     constexpr DWORD kLimitMs = 30000;
     for (DWORD waited = 0; waited < kLimitMs; waited += kStepMs) {
@@ -99,10 +99,12 @@ QuitWait wait_for_quitting_window(HANDLE single, const std::string& service_inst
         }
         DWORD got = WaitForSingleObject(single, kStepMs);
         if (got == WAIT_TIMEOUT && !quitting_mark_exists(service_instance)) {
-            // The one quitting has gone, unless it went just now: then the mark is free.
+            // The one quitting has dropped its quitting mark. It may still be
+            // ending (its window gone, the mark not yet free): keep waiting
+            // then. Only a window that's there means another copy opened.
             got = WaitForSingleObject(single, 0);
-            if (got == WAIT_TIMEOUT) {
-                return QuitWait::Running;  // another copy opened meanwhile
+            if (got == WAIT_TIMEOUT && FindWindowW(class_name.c_str(), nullptr) != nullptr) {
+                return QuitWait::Running;
             }
         }
         if (got == WAIT_OBJECT_0 || got == WAIT_ABANDONED) {
@@ -298,14 +300,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE /*prev*/, PWSTR /*cmd*/, int s
                 }
                 return hand_over_to_running_window(class_name, args.open, uninstall) ? 0 : 1;
             };
-            if (!quitting_mark_exists(service_instance)) {
-                const int handed = bring_forward();
-                // A failed hand-over: it may have begun quitting meanwhile (its window went).
-                if (handed == 0 || !quitting_mark_exists(service_instance)) {
-                    return handed;
-                }
+            if (!quitting_mark_exists(service_instance) && bring_forward() == 0) {
+                return 0;
             }
-            switch (wait_for_quitting_window(single.get(), service_instance)) {
+            // Quitting, or the hand-over failed: it may have begun quitting
+            // meanwhile, or be in its last moments (window gone, mark not yet
+            // free). Wait for the mark instead of ending with nothing open.
+            switch (wait_for_quitting_window(single.get(), service_instance, class_name)) {
                 case QuitWait::Gone:
                     break;  // opens as usual
                 case QuitWait::Running:
