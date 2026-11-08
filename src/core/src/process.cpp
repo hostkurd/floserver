@@ -164,6 +164,9 @@ bool spawn_detached(const fs::path& program, const std::vector<std::string>& arg
     }
     STARTUPINFOW startup{};
     startup.cb = sizeof startup;
+    // A Windows program (floserverd is one) would show the busy cursor
+    // until it opens a window, which it never does.
+    startup.dwFlags = STARTF_FORCEOFFFEEDBACK;
     PROCESS_INFORMATION info{};
     // No console window, its own process group (Ctrl+C in the caller's
     // console doesn't reach it), no inherited handles.

@@ -157,12 +157,12 @@ struct LicenceLine {
 [[nodiscard]] std::vector<LicenceLine> library_licences();
 // runtimes.list's "installed", by name then version; each folder once.
 [[nodiscard]] std::vector<LicenceLine> runtime_licences(const nlohmann::json& runtimes_reply);
-// The text opened in Notepad. `runtimes_reply` is null when runtimes.list
-// hasn't answered yet.
 // FloServer's own licence: the EULA (LICENSE.txt, the same text the installer
 // shows), built in from the repository. English, as in the installer.
 [[nodiscard]] std::string_view eula_text();
 
+// The text opened in Notepad. `runtimes_reply` is null when runtimes.list
+// hasn't answered yet.
 [[nodiscard]] std::string licences_text(Lang lang, std::string_view version, const nlohmann::json* runtimes_reply);
 
 }  // namespace floserver::ui

@@ -823,6 +823,7 @@ void MainWindow::on_snapshot() {
     }
     if (quit_done) {
         if (!quit_error.empty()) {
+            const ModalScope modal(*this);  // the message box runs its own message loop
             const std::wstring message = w(fill(lang_, Str::ServiceFailed, {quit_error}));
             MessageBoxW(nullptr, message.c_str(), L"FloServer",
                         MB_OK | MB_ICONWARNING | (rtl_ ? MB_RTLREADING | MB_RIGHT : 0U));
@@ -869,12 +870,13 @@ void MainWindow::quit() {
     worker_->quit_service();
 }
 
-void MainWindow::mark_quitting() {
+void MainWindow::mark_quitting(bool update) {
     // A manual-reset event that's only ever looked for: it goes with this
-    // process, as the window mark does.
+    // process, as the window mark does (an update's is held by the updater too).
     if (!quitting_mark_) {
-        quitting_mark_.reset(
-            CreateEventW(nullptr, TRUE, TRUE, quitting_mark_name(core::ipc::default_instance()).c_str()));
+        const std::string instance = core::ipc::default_instance();
+        const std::wstring name = update ? update_quitting_mark_name(instance) : quitting_mark_name(instance);
+        quitting_mark_.reset(CreateEventW(nullptr, TRUE, TRUE, name.c_str()));
     }
 }
 

@@ -1124,6 +1124,11 @@ void MainWindow::run_access_requests() {
     // Never inside another: a picker's menu runs messages, and a second menu
     // or Remove's question must not open over it. Nor inside a menu or
     // question opened by the mouse or the keys: they wait for it to close.
+    // Quitting: nothing more is done (its last message box may be open).
+    if (quitting_) {
+        access_queue_.clear();
+        return;
+    }
     if (!access_gate_.may_run(modal_open())) {
         return;
     }

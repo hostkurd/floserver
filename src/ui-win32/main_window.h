@@ -852,8 +852,10 @@ private:
     private:
         MainWindow& window_;
     };
-    // Quit has begun: a FloServer.exe started meanwhile waits for this one to end (main.cpp).
-    void mark_quitting();
+    // Quit has begun: a FloServer.exe started meanwhile waits for this one to
+    // end (main.cpp). `update`: Update now's quit, after which the updater
+    // runs: one started meanwhile says an update is being installed.
+    void mark_quitting(bool update = false);
 
     HINSTANCE instance_;
     Lang lang_;

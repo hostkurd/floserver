@@ -353,14 +353,23 @@ void MainWindow::start_update() {
         const std::wstring dir = copy.parent_path().wstring();
         if (command.empty()) {
             error = u.file;
-        } else if (CreateProcessW(copy.c_str(), command.data(), nullptr, nullptr, FALSE, 0, nullptr, dir.c_str(), &si,
-                                  &pi) == FALSE) {
-            error = core::error_text({static_cast<int>(GetLastError()), std::system_category()});
         } else {
-            // Its dialog comes to the front: this window is about to go.
-            AllowSetForegroundWindow(pi.dwProcessId);
-            CloseHandle(pi.hThread);
-            CloseHandle(pi.hProcess);
+            // Marked before the updater starts, which holds the mark too
+            // until its own is made: a FloServer started in between says
+            // an update is being installed instead of opening.
+            mark_quitting(true);
+            if (CreateProcessW(copy.c_str(), command.data(), nullptr, nullptr, FALSE, 0, nullptr, dir.c_str(), &si,
+                               &pi) == FALSE) {
+                error = core::error_text({static_cast<int>(GetLastError()), std::system_category()});
+                quitting_mark_.reset();
+            } else {
+                // Its dialog comes to the front: this window is about to go,
+                // once the updater is up (it has taken the mark by then).
+                AllowSetForegroundWindow(pi.dwProcessId);
+                WaitForInputIdle(pi.hProcess, 5000);
+                CloseHandle(pi.hThread);
+                CloseHandle(pi.hProcess);
+            }
         }
     }
     if (!error.empty()) {
@@ -373,8 +382,7 @@ void MainWindow::start_update() {
         settings_->destroy_now();
         settings_.reset();
     }
-    quitting_ = true;
-    mark_quitting();  // the FloServer the update opens at its end waits for this one to end
+    quitting_ = true;  // marked as Update now's quit above
     DestroyWindow(hwnd_);
 }
 

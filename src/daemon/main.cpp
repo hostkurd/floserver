@@ -1853,7 +1853,8 @@ floserver::core::BackupHooks backup_hooks(const std::shared_ptr<Service>& servic
 void use_parent_console() {
     const auto missing = [](DWORD which) {
         HANDLE handle = GetStdHandle(which);
-        return handle == nullptr || handle == INVALID_HANDLE_VALUE;
+        // Inherited but unusable (a closed or odd handle) counts as none.
+        return handle == nullptr || handle == INVALID_HANDLE_VALUE || GetFileType(handle) == FILE_TYPE_UNKNOWN;
     };
     const bool out = missing(STD_OUTPUT_HANDLE);
     const bool err = missing(STD_ERROR_HANDLE);
@@ -1872,14 +1873,19 @@ void use_parent_console() {
 void use_parent_console() {}
 #endif
 
-int run() {
+// `spawned`: started by flo or the window (--spawned), which read the
+// service's state themselves; nothing is printed into their console.
+// `listening` is set once it serves: a failure after that isn't one at start.
+int run(bool spawned, bool& listening) {
     const std::string instance = ipc::default_instance();
     std::unique_ptr<ipc::Server> server;
     std::string error;
     switch (ipc::Server::listen(instance, server, error)) {
         case ipc::ListenStatus::AlreadyRunning:
-            use_parent_console();
-            std::cout << "FloServer is already running.\n";
+            if (!spawned) {
+                use_parent_console();
+                std::cout << "FloServer is already running.\n";
+            }
             return 0;
         case ipc::ListenStatus::Failed:
             use_parent_console();
@@ -1888,6 +1894,7 @@ int run() {
         case ipc::ListenStatus::Listening:
             break;
     }
+    listening = true;
 
     auto service = std::make_shared<Service>();
     std::thread integration_thread;
@@ -2068,13 +2075,21 @@ int main(int argc, char** argv) {
         std::cout << "floserverd " << floserver::core::kVersion << "\n";
         return 0;
     }
+    const bool spawned = argc > 1 && std::string_view(argv[1]) == "--spawned";
+    // A failure hours after it started isn't said in a console: the one it
+    // was started from may be gone, its process number someone else's.
+    bool listening = false;
     try {
-        return run();
+        return run(spawned, listening);
     } catch (const std::exception& e) {
-        use_parent_console();
+        if (!listening) {
+            use_parent_console();
+        }
         std::cerr << "floserverd: " << e.what() << "\n";
     } catch (...) {
-        use_parent_console();
+        if (!listening) {
+            use_parent_console();
+        }
         std::cerr << "floserverd: unexpected error\n";
     }
     return 1;

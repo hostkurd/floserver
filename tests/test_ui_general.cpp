@@ -242,7 +242,18 @@ TEST_CASE("licences: the libraries, and the runtimes installed") {
     const std::string text = licences_text(Lang::En, "0.9.0", &reply);
     CHECK(text.starts_with("FloServer 0.9.0: licences\n"));
     // FloServer's own EULA (LICENSE.txt) follows the "made by HostKurd" line.
-    CHECK(eula_text().starts_with("FloServer End-User Licence Agreement\n"));
+    {
+        // On failure, show the first bytes (a Windows-only difference was seen once).
+        std::string head;
+        for (const char c : eula_text().substr(0, 48)) {
+            static constexpr std::string_view kHex = "0123456789abcdef";
+            const auto b = static_cast<unsigned char>(c);
+            head += kHex[b >> 4U];
+            head += kHex[b & 0x0FU];
+            head += ' ';
+        }
+        CHECK_MESSAGE(eula_text().starts_with("FloServer End-User Licence Agreement\n"), head);
+    }
     CHECK(eula_text().find("FloServer is free of charge, but it is not open source.") != std::string_view::npos);
     CHECK(text.find("FloServer End-User Licence Agreement\n\n1. This agreement") != std::string::npos);
     CHECK(text.find("End-User Licence Agreement") < text.find("  Monocypher"));

@@ -43,6 +43,9 @@ namespace floserver::ui {
 [[nodiscard]] std::wstring window_mark_name(const std::string& service_instance);
 [[nodiscard]] std::wstring updating_mark_name(const std::string& service_instance);
 [[nodiscard]] std::wstring quitting_mark_name(const std::string& service_instance);
+// The window quitting for Update now: held by the updater too, from its start
+// until its own updating mark is made, so no FloServer opens in between.
+[[nodiscard]] std::wstring update_quitting_mark_name(const std::string& service_instance);
 
 // FloServer.exe and the DLLs beside it (floserver-setup.dll among them),
 // copied into a new folder of their own under %TEMP%
