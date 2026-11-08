@@ -2,18 +2,16 @@
 # file (the EULA, LICENSE.txt), so the window can show it without shipping a
 # second copy. Run as:
 #   cmake -DIN=<file> -DOUT=<cpp> -DFUNCTION=<name> -DHEADER=<include> -P EmbedText.cmake
-# Line ends become \n whatever the checkout did (Windows CI checks out CRLF).
-file(READ "${IN}" content)
-string(REPLACE "\r" "" content "${content}")
-file(WRITE "${OUT}.txt" "${content}")
-file(READ "${OUT}.txt" hex HEX)
-file(REMOVE "${OUT}.txt")
-string(LENGTH "${hex}" hex_length)
-math(EXPR byte_count "${hex_length} / 2")
-# \xNN escapes in pieces of 1024 bytes (MSVC limits one string literal piece).
+# Line ends become \n whatever the checkout did (Windows CI checks out CRLF):
+# carriage returns are dropped from the bytes themselves. (Not by writing a
+# cleaned copy: file(WRITE) on Windows turns each \n back into \r\n.)
+file(READ "${IN}" hex HEX)
 string(REGEX REPLACE "([0-9a-f][0-9a-f])" "\\\\x\\1" escaped "${hex}")
-set(pieces "")
+string(REPLACE "\\x0d" "" escaped "${escaped}")
 string(LENGTH "${escaped}" escaped_length)
+math(EXPR byte_count "${escaped_length} / 4")
+# \xNN escapes in pieces of 1024 bytes (MSVC limits one string literal piece).
+set(pieces "")
 set(offset 0)
 while(offset LESS escaped_length)
     string(SUBSTRING "${escaped}" ${offset} 4096 piece)
