@@ -794,6 +794,47 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     MailDeleteAskOne,
     MailRemoveEmailsFailed,
     MailRemoveEmailsFailedNoWhy,
+    // Redis (D30)
+    SettingsRedis,
+    RedisHint,
+    RedisVersion,
+    RedisFailed,
+    RedisNotInstalledNote,
+    RedisInstall,
+    RedisAddress,
+    RedisServer,
+    RedisPassword,
+    RedisPasswordNote,
+    RedisEnvNote,
+    RedisOptions,
+    RedisKeepRunning,
+    RedisKeepRunningNote,
+    RedisMemory,
+    RedisMemoryUnit,
+    RedisMemoryBad,
+    RedisData,
+    RedisKeys,
+    RedisKeysOne,
+    RedisUsedBy,
+    RedisUsedByOne,
+    RedisUsedByNone,
+    RedisFlush,
+    RedisFlushAsk,
+    RedisFlushed,
+    RedisFlushFailed,
+    RedisUnsupported,
+    RedisFooter,
+    RedisAskSave,
+    RedisReadFailed,
+    RedisCopyFailed,
+    PanelRedis,
+    PanelRedisNote,
+    PanelRedisPhpredis,
+    PanelRedisPredis,
+    PanelRedisNotInstalled,
+    ChipRedis,
+    FirstRunWhatGarnet,
+    RedisCopied,
     Count_,
 };
 
@@ -801,9 +842,9 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
 
 // The Settings sidebar, top to bottom (SettingsWindow::Section has the same
 // order). Opening Settings with no section asked for opens the first.
-inline constexpr std::array<Str, 9> kSettingsSidebar = {
-    Str::SettingsGeneral, Str::SettingsRuntimes, Str::SettingsPhp,     Str::SettingsPorts,  Str::SettingsDatabase,
-    Str::SettingsMail,    Str::SettingsApache,   Str::SettingsFolders, Str::SharedSites};
+inline constexpr std::array<Str, 10> kSettingsSidebar = {
+    Str::SettingsGeneral, Str::SettingsRuntimes, Str::SettingsPhp,    Str::SettingsPorts,   Str::SettingsDatabase,
+    Str::SettingsMail,    Str::SettingsRedis,    Str::SettingsApache, Str::SettingsFolders, Str::SharedSites};
 
 // U+202A LEFT-TO-RIGHT EMBEDDING, the text, U+202C POP DIRECTIONAL
 // FORMATTING. Embeddings, not the newer isolates (U+2066...), because

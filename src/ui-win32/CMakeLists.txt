@@ -11,6 +11,7 @@ add_library(floserver_ui_model STATIC
     model/scrollbar.cpp
     model/apache_page.cpp
     model/mail_page.cpp
+    model/redis_page.cpp
     model/general_page.cpp
     model/folders_page.cpp
     model/first_run.cpp

@@ -363,7 +363,7 @@ RuntimesPage runtimes_page(const json& reply, const Installed* installed, const 
     }
 
     // Tools: phpMyAdmin, with how it's served on the newest install's row,
-    // then Mailpit (D27). Full width after Web servers (the user, 1 Nov: a
+    // then Mailpit (D27) and Garnet (D30). Full width after Web servers (the user, 1 Nov: a
     // third card in a row cut its rows off), before Node.js and Python.
     RuntimeGroup tools;
     tools.title = std::string(text(lang, Str::SettingsTools));
@@ -384,6 +384,12 @@ RuntimesPage runtimes_page(const json& reply, const Installed* installed, const 
     }
     for (RuntimeRow& row : take_rows("mailpit")) {
         row.label = "Mailpit " + row.label;
+        tools.rows.push_back(std::move(row));
+    }
+    // Then Garnet, the projects' Redis (D30). Its .NET runtime and phpredis
+    // come with it and aren't shown: their rows are never taken.
+    for (RuntimeRow& row : take_rows("garnet")) {
+        row.label = "Garnet (Redis) " + row.label;
         tools.rows.push_back(std::move(row));
     }
     if (!tools.rows.empty()) {

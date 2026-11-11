@@ -34,6 +34,7 @@ struct Wants {
     // The project's own PHP changes (D20): "bcmath", "-exif"; "memory_limit" -> "1024M".
     std::vector<std::string> extensions;
     std::map<std::string, std::string> php_ini;
+    bool redis = false;  // "redis": true (D30)
 };
 
 struct ProjectRow {
@@ -114,6 +115,9 @@ struct FooterText {
 // The installed versions per runtime ("php" -> {"8.5.12", "8.4.27"}), newest
 // first, from runtimes.list's "installed".
 using Installed = std::map<std::string, std::vector<std::string>>;
+// Also under kInstalledPhpRedisSeries: the PHP series phpredis is installed
+// for ("8.4"), from php-redis's variants (D30).
+inline constexpr std::string_view kInstalledPhpRedisSeries = "php-redis:series";
 [[nodiscard]] Installed installed_from_list(const nlohmann::json& result);
 
 // "8.4.27" -> "8.4" (PHP, MariaDB, Python); Node keeps only its major: "24".
