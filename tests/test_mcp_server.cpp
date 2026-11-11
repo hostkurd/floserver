@@ -608,7 +608,7 @@ TEST_CASE("mcp: floserver.json is read only as the project's own plain file") {
     CHECK_FALSE(mcp::read_project_json(dir.path() / "missing"));
     // Too big.
     const fs::path big = dir.path() / "big";
-    test_util::write_file(big / "floserver.json", std::string(300 * 1024, ' '));
+    test_util::write_file(big / "floserver.json", std::string(std::size_t{300} * 1024, ' '));
     CHECK_FALSE(mcp::read_project_json(big));
     // A link to a file elsewhere (~/.docker/config.json, say) is refused.
     test_util::write_file(dir.path() / "docker" / "config.json", R"({"auths": {"x": {"auth": "c2VjcmV0"}}})");

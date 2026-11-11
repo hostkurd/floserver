@@ -497,7 +497,7 @@ json shown_scalar(const json& v) {
         return v;
     }
     if (v.is_string()) {
-        const std::string& s = v.get_ref<const std::string&>();
+        const auto& s = v.get_ref<const std::string&>();
         return secret_value(s) ? json("[hidden]") : json(clean_error_text(s, 200));
     }
     return "(set)";

@@ -173,7 +173,7 @@ std::vector<std::string> parse_text_log(std::string_view text, std::size_t max_l
     std::deque<std::string> kept;
     while (!text.empty() && max_lines > 0) {
         const std::size_t nl = text.find('\n');
-        std::string_view line = text.substr(0, nl);
+        const std::string_view line = text.substr(0, nl);
         text = nl == std::string_view::npos ? std::string_view() : text.substr(nl + 1);
         // Control characters (a terminal's escapes) as spaces; bidi, zero-width
         // and tag characters out; bad UTF-8 as U+FFFD (clean_error_text).

@@ -1954,6 +1954,9 @@ public:
             if (!client_ && !connect(error)) {
                 return std::nullopt;
             }
+            if (!client_) {
+                return std::nullopt;
+            }
             if (auto reply = client_->call(method, params)) {
                 return reply;
             }
@@ -1993,7 +1996,6 @@ private:
         return client_.has_value();
     }
 
-private:
     std::optional<floserver::core::ServiceClient> client_;
 };
 
