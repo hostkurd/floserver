@@ -68,7 +68,7 @@ void print_help(std::ostream& out) {
         << "  rename <name> <new> [--folder]  Rename a project (its address follows); --folder: its folder too\n"
         << "  backup <project> [--to <zip>] [--no-database]  Back up a project as a .zip (Documents\\FloServer Backups)\n"
         << "  restore <project> <zip>    Put a project's files and database back from a backup\n"
-        << "  use <php|node|python|mariadb> <v> Set a version in this project's floserver.json\n"
+        << "  use <php|node|python|mariadb|mysql> <v>  Set a version in this project's floserver.json\n"
         << "  use php <none|newest|auto>  ...no PHP, always the newest PHP, or PHP when there are .php files\n"
         << "  php <series>               PHP settings for a series (8.5): extensions and php.ini values\n"
         << "  php <series> ext <name> <on|off|default>   ...turn an extension on or off for every project on it\n"
@@ -78,7 +78,7 @@ void print_help(std::ostream& out) {
         << "  db                         Show the databases and the projects using them\n"
         << "  shared [on|off]            Shared sites: every folder in the www folder at localhost (D19)\n"
         << "  shared php <v|newest>      ...their PHP version; shared web <apache|nginx>; shared dir <folder|default>\n"
-        << "  shared db <11.4|none>      ...their database; shared login [--show]: its user and password\n"
+        << "  shared db <11.4|mysql-8.4|none>  ...their database; shared login [--show]: its user and password\n"
         << "  env [project] [--write]    A project's database (and Mailpit) settings as .env lines (--show: the password)\n"
         << "  mail                       Mailpit: where email goes (SMTP), the inbox's address, how many emails\n"
         << "  mail open                  Open the inbox in your browser\n"
@@ -610,7 +610,7 @@ int remove_cmd(const std::vector<std::string>& args) {
         std::cerr << "Usage: flo remove <name> [--drop-database] [--yes]   (see your projects with: flo projects)\n";
         return 2;
     }
-    // Dropping may start MariaDB first (its first start sets it up).
+    // Dropping may start MariaDB or MySQL first (its first start sets it up).
     auto client = connect_or_start(drop ? std::chrono::seconds(200) : std::chrono::seconds(15));
     if (!client) {
         return 1;
@@ -752,7 +752,7 @@ int backup(const std::vector<std::string>& args, const std::vector<fs::path>& pa
         const fs::path file = fs::absolute(*to, ec).lexically_normal();
         params["to"] = shown(file);
     }
-    // Saving the database may start MariaDB first.
+    // Saving the database may start MariaDB or MySQL first.
     auto client = connect_or_start(std::chrono::seconds(200));
     if (!client) {
         return 1;
@@ -1021,8 +1021,10 @@ std::optional<fs::path> project_folder_for(const fs::path& here) {
 // here. PHP also takes none (false: no PHP), newest (always PHP, the newest
 // installed) and auto (no key: the folder decides).
 int use(const std::vector<std::string>& args) {
-    if (args.size() != 3 || (args[1] != "php" && args[1] != "node" && args[1] != "python" && args[1] != "mariadb")) {
-        std::cerr << "Usage: flo use <php|node|python|mariadb> <version>   for example: flo use php 8.4\n"
+    if (args.size() != 3 || (args[1] != "php" && args[1] != "node" && args[1] != "python" && args[1] != "mariadb" &&
+                             args[1] != "mysql")) {
+        std::cerr << "Usage: flo use <php|node|python|mariadb|mysql> <version>   for example: flo use php 8.4\n"
+                  << "       flo use mariadb 11.4, or flo use mysql 8.4: the project's one database (the other goes)\n"
                   << "       flo use php <none|newest|auto>   no PHP, always the newest PHP, or as the folder says\n";
         return 2;
     }
@@ -1341,7 +1343,7 @@ int check(const fs::path& start) {
     return 0;
 }
 
-// flo db: the MariaDB servers and the projects using each.
+// flo db: the MariaDB and MySQL servers and the projects using each.
 // Shared sites (D19): flo shared [on|off|php <v>|web <apache|nginx>|dir <folder>].
 int shared(const std::vector<std::string>& args) {
     nlohmann::json changes = nlohmann::json::object();
@@ -1352,7 +1354,10 @@ int shared(const std::vector<std::string>& args) {
     } else if (args.size() == 3 && args[1] == "web") {
         changes["web"] = args[2];
     } else if (args.size() == 3 && args[1] == "db") {
-        changes["database"] = args[2] == "none" ? nlohmann::json(nullptr) : nlohmann::json("mariadb-" + args[2]);
+        // "11.4" is MariaDB's; "mysql-8.4" (or "mariadb-11.4") names the engine too (D28).
+        const bool named = args[2].find('-') != std::string::npos;
+        changes["database"] = args[2] == "none" ? nlohmann::json(nullptr)
+                                                : nlohmann::json(named ? args[2] : "mariadb-" + args[2]);
     } else if ((args.size() == 2 || args.size() == 3) && args[1] == "login") {
         const bool show = args.size() == 3 && args[2] == "--show";
         if (args.size() == 3 && !show) {
@@ -1368,7 +1373,7 @@ int shared(const std::vector<std::string>& args) {
             return print_refusal(reply);
         }
         const auto& r = reply->result;
-        std::cout << "Shared sites' database login (MariaDB):\n"
+        std::cout << "Shared sites' database login:\n"
                   << "  host:     " << text_of(r, "host") << "\n"
                   << "  port:     " << r.value("port", 0) << "\n"
                   << "  user:     " << text_of(r, "user") << "\n"
@@ -1600,7 +1605,8 @@ int db() {
     }
     const auto& servers = reply->result["servers"];
     if (servers.empty()) {
-        std::cout << "No database is in use. A project asks for one in its floserver.json: flo use mariadb 11.4\n";
+        std::cout << "No database is in use. A project asks for one in its floserver.json: flo use mariadb 11.4 "
+                     "(or flo use mysql 8.4)\n";
         return 0;
     }
     for (const auto& s : servers) {
@@ -1611,7 +1617,8 @@ int db() {
         if (s.value("shared", false)) {
             projects += (projects.empty() ? "" : ", ") + std::string("shared sites");
         }
-        std::cout << "MariaDB " << text_of(s, "version") << "  127.0.0.1:" << s.value("port", 0) << "  "
+        std::cout << floserver::core::database_family_title(s.contains("family") ? text_of(s, "family") : "mariadb")
+                  << " " << text_of(s, "version") << "  127.0.0.1:" << s.value("port", 0) << "  "
                   << text_of(s, "state") << (s.value("keep_running", false) ? " (keep running)" : "") << "  " << projects
                   << "\n";
         if (s.contains("error")) {
@@ -1639,7 +1646,7 @@ int env(const std::vector<std::string>& args) {
             return 2;
         }
     }
-    auto client = connect_or_start(std::chrono::seconds(180));  // the first time, MariaDB sets up its data folder
+    auto client = connect_or_start(std::chrono::seconds(180));  // the first time, MariaDB (MySQL) sets up its data folder
     if (!client) {
         return 1;
     }
@@ -1663,7 +1670,7 @@ int env(const std::vector<std::string>& args) {
             return 2;
         }
     }
-    // The first time can take a while: MariaDB sets up its data folder.
+    // The first time can take a while: MariaDB (MySQL) sets up its data folder.
     auto reply = client->call("databases.login", {{"name", name}});
     if (reply && !reply->ok && reply->error_code == "no_database") {
         // No database: Mailpit's lines alone, when it's installed and the project takes some.

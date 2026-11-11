@@ -120,8 +120,14 @@ std::string phpmyadmin_lang(std::string_view code) {
     return "en";
 }
 
-std::string signon_session_name(std::string_view series) {
+std::string signon_session_name(std::string_view series, std::string_view family) {
     std::string name = "FloServerSignon_";
+    if (family != kMariaDbFamily) {
+        for (const char c : family) {
+            name += (c >= 'a' && c <= 'z') ? c : '_';
+        }
+        name += '_';
+    }
     for (const char c : series) {
         name += (c >= '0' && c <= '9') ? c : '_';
     }
@@ -129,8 +135,15 @@ std::string signon_session_name(std::string_view series) {
 }
 
 std::vector<PhpMyAdminServer> phpmyadmin_servers(std::vector<PhpMyAdminServer> servers) {
-    std::erase_if(servers, [](const PhpMyAdminServer& s) { return !is_series(s.series) || s.port == 0; });
-    std::stable_sort(servers.begin(), servers.end(), [](const PhpMyAdminServer& a, const PhpMyAdminServer& b) {
+    std::erase_if(servers, [](const PhpMyAdminServer& s) {
+        return !is_series(s.series) || s.port == 0 || !mysql_protocol_family(s.family);
+    });
+    // MariaDB's first (server 1 stays MariaDB's, as before D28), then MySQL's.
+    const auto rank = [](const PhpMyAdminServer& s) { return s.family == kMariaDbFamily ? 0 : 1; };
+    std::stable_sort(servers.begin(), servers.end(), [&rank](const PhpMyAdminServer& a, const PhpMyAdminServer& b) {
+        if (rank(a) != rank(b)) {
+            return rank(a) < rank(b);
+        }
         const auto va = Version::parse(a.series);
         const auto vb = Version::parse(b.series);
         if (va && vb && *va != *vb) {
@@ -139,7 +152,9 @@ std::vector<PhpMyAdminServer> phpmyadmin_servers(std::vector<PhpMyAdminServer> s
         return a.series < b.series;
     });
     servers.erase(std::unique(servers.begin(), servers.end(),
-                              [](const PhpMyAdminServer& a, const PhpMyAdminServer& b) { return a.series == b.series; }),
+                              [](const PhpMyAdminServer& a, const PhpMyAdminServer& b) {
+                                  return a.family == b.family && a.series == b.series;
+                              }),
                   servers.end());
     return servers;
 }
@@ -176,13 +191,14 @@ std::optional<std::string> phpmyadmin_config(const PhpMyAdminConfigSpec& spec, s
         "$cfg['ServerDefault'] = 1;\n\n"
         "$i = 0;\n";
     for (const PhpMyAdminServer& s : phpmyadmin_servers(spec.servers)) {
-        const std::string session = signon_session_name(s.series);
-        out.append("\n// MariaDB ").append(s.series);
+        const std::string session = signon_session_name(s.series, s.family);
+        const std::string title = database_family_title(s.family);
+        out.append("\n// ").append(title).append(" ").append(s.series);
         out.append(": FloServer's one-click login (signon), or phpMyAdmin's own login form\n"
                    "// when it wasn't opened from FloServer.\n"
                    "$i++;\n"
-                   "$cfg['Servers'][$i]['verbose'] = 'MariaDB ");
-        out.append(s.series).append("';\n$cfg['Servers'][$i]['host'] = '127.0.0.1';\n$cfg['Servers'][$i]['port'] = '");
+                   "$cfg['Servers'][$i]['verbose'] = '");
+        out.append(title).append(" ").append(s.series).append("';\n$cfg['Servers'][$i]['host'] = '127.0.0.1';\n$cfg['Servers'][$i]['port'] = '");
         out.append(std::to_string(s.port));
         out.append("';\n"
                    "$cfg['Servers'][$i]['compress'] = false;\n"
@@ -244,7 +260,7 @@ function floserver_refuse(string $message): void
     echo '<!DOCTYPE html><html><head><meta charset="utf-8"><title>phpMyAdmin</title></head>',
         '<body style="font-family: system-ui, sans-serif; margin: 3em; max-width: 40em">',
         '<p>', htmlspecialchars($message), '</p>',
-        '<p><a href="./', basename(__FILE__), '?logout=1">Sign in with a MariaDB user name and password</a></p>',
+        '<p><a href="./', basename(__FILE__), '?logout=1">Sign in with a database user name and password</a></p>',
         '</body></html>';
     exit;
 }
@@ -384,7 +400,7 @@ std::optional<std::string> create_signon_token(const fs::path& tokens_dir, const
     const auto expires = std::chrono::duration_cast<std::chrono::seconds>((now + kSignonTokenLife).time_since_epoch());
     json doc = {{"expires", expires.count()},
                 {"server", login.server},
-                {"session", signon_session_name(login.series)},
+                {"session", signon_session_name(login.series, login.family)},
                 {"user", login.user},
                 {"password", login.password},
                 {"host", login.host},
@@ -470,13 +486,15 @@ std::optional<std::string> phpmyadmin_login(DatabaseService& databases, PhpMyAdm
         if (!own) {
             return std::nullopt;
         }
-        // Its series: the server on its port.
+        // Its series and family: the server on its port.
         const json status = databases.status();
         if (status.contains("servers") && status.at("servers").is_array()) {
             for (const json& s : status.at("servers")) {
                 if (s.is_object() && s.contains("port") && s.at("port").is_number_unsigned() &&
                     s.at("port").get<std::uint64_t>() == own->port && s.contains("series") && s.at("series").is_string()) {
                     login.series = s.at("series").get<std::string>();
+                    login.family = s.contains("family") && s.at("family").is_string() ? s.at("family").get<std::string>()
+                                                                                      : std::string(kMariaDbFamily);
                 }
             }
         }
@@ -486,11 +504,11 @@ std::optional<std::string> phpmyadmin_login(DatabaseService& databases, PhpMyAdm
         login.only_db = std::move(own->database);
     } else {
         const auto series = mariadb_request_series(request.series);
-        if (!series) {
-            refusal = {"bad_params", "name a MariaDB series such as 11.4, or a project"};
+        if (!series || !request_database_family(request.family, login.family)) {
+            refusal = {"bad_params", "name a MariaDB or MySQL series such as 11.4 (with its family), or a project"};
             return std::nullopt;
         }
-        auto root = databases.root_login(*series, refusal);
+        auto root = databases.root_login(*series, refusal, login.family);
         if (!root) {
             return std::nullopt;
         }
@@ -506,11 +524,12 @@ std::optional<std::string> phpmyadmin_login(DatabaseService& databases, PhpMyAdm
         return std::nullopt;
     }
     const auto index = std::find_if(listed.begin(), listed.end(), [&login](const PhpMyAdminServer& s) {
-        return s.series == login.series && s.port == login.port;
+        return s.family == login.family && s.series == login.series && s.port == login.port;
     });
     if (login.series.empty() || index == listed.end()) {
         // Its server was replaced meanwhile (a new port, a newer release).
-        refusal = {"database_off", "MariaDB " + (login.series.empty() ? std::string("for this project") : login.series) +
+        refusal = {"database_off", (login.series.empty() ? std::string("The database for this project")
+                                                         : database_family_title(login.family) + " " + login.series) +
                                        " is moving to another port; try again in a few seconds"};
         return std::nullopt;
     }

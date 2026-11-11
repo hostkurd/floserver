@@ -48,6 +48,7 @@ add_library(floserver_core STATIC
     src/ipc_posix.cpp
     src/ipc_windows.cpp
     src/manifest.cpp
+    src/database_engine.cpp
     src/mariadb.cpp
     src/mariadb_settings.cpp
     src/database_service.cpp

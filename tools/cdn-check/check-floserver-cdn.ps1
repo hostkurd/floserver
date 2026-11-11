@@ -2,13 +2,13 @@
 # Checks every runtime file on cdn.floserver.org:
 #   1. the CDN serves it (HTTP 200, from the R2 bucket floserver-cdn through Cloudflare)
 #   2. its SHA-256 matches the checksum the official project publishes
-#      (nginx and Apache publish none, so their originals are downloaded and compared)
+#      (nginx, Apache and MySQL publish none, so their originals are downloaded and compared)
 # Then checks that Cloudflare doesn't cache manifest.json (the cache rule).
 #
 # Run in PowerShell:
 #   powershell -ExecutionPolicy Bypass -File .\check-floserver-cdn.ps1
 #
-# It downloads about 800 MB into a temporary folder and deletes it at the end.
+# It downloads about 1.1 GB into a temporary folder and deletes it at the end.
 # Two reports are saved next to this script:
 #   floserver-cdn-report.txt   to read
 #   floserver-cdn-report.json  for: floserver-manifest build floserver-cdn-report.json --sequence N
@@ -45,6 +45,8 @@ $files = @(
     @{ Path = "nginx/1.30.6/nginx-1.30.6.zip";                  Orig = "https://nginx.org/download/nginx-1.30.6.zip" },
     @{ Path = "wordpress/7.1.4/wordpress-7.1.4.zip";            Orig = "https://wordpress.org/wordpress-7.1.4.zip" },
     @{ Path = "wordpress/7.0.8/wordpress-7.0.8.zip";            Orig = "https://wordpress.org/wordpress-7.0.8.zip" },
+    # Oracle publishes MD5 sums and signatures for MySQL, not SHA-256: the original is downloaded and compared.
+    @{ Path = "mysql/8.4.11/mysql-8.4.11-winx64.zip";           Orig = "https://cdn.mysql.com/Downloads/MySQL-8.4/mysql-8.4.11-winx64.zip" },
     # Mailpit publishes no checksum file; the GitHub release download is the original.
     @{ Path = "mailpit/1.33.0/mailpit-windows-amd64.zip";       Orig = "https://github.com/axllent/mailpit/releases/download/v1.33.0/mailpit-windows-amd64.zip" },
     @{ Path = "apache/2.4.69/httpd-2.4.69-261002-Win64-VS18.zip"; Orig = "https://www.apachelounge.com/download/VS18/binaries/httpd-2.4.69-261002-Win64-VS18.zip" },

@@ -110,6 +110,10 @@ IntegrationInfo collect_integration(const fs::path& data, const nlohmann::json& 
             if (port <= 0 || !s.contains("series") || !s["series"].is_string()) {
                 continue;  // not given a port yet, or no series to name it by
             }
+            // FloCMS Studio uses MariaDB's servers (D14); MySQL's (D28) aren't its.
+            if (s.contains("family") && s["family"] != "mariadb") {
+                continue;
+            }
             const std::string version =
                 s.contains("version") && s["version"].is_string() ? s["version"].get<std::string>() : std::string();
             info.databases.push_back({s["series"].get<std::string>(), version, port});

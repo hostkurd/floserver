@@ -6,7 +6,7 @@
 //     "php": "8.2",                  // or false (never PHP), or "newest"
 //     "node": "22",
 //     "python": "3.13",
-//     "database": "mariadb-11.4",
+//     "database": "mariadb-11.4",   // or "mysql-8.4" (D28); also "mysql": "8.4"
 //     "web": "nginx",
 //     "root": "public",
 //     "extensions": ["intl", "gd", "-exif"],
@@ -30,7 +30,7 @@ namespace floserver::core {
 enum class WebServer : std::uint8_t { Nginx, Apache };
 
 struct DatabaseSpec {
-    std::string family;   // "mariadb" (1.0); "mysql" may follow (Q7)
+    std::string family;   // "mariadb" or "mysql" (D28), database_engine.h
     std::string version;  // "11.4"
     bool operator==(const DatabaseSpec&) const = default;
 };
@@ -103,15 +103,16 @@ inline constexpr std::string_view kProjectConfigFileName = "floserver.json";
 // The keys the window and `flo use` change one at a time.
 enum class ConfigKey : std::uint8_t { Php, Node, Python, Database, Web };
 
-// "php", "node", "python", "database" (also "mariadb", as in `flo use
-// mariadb 11.4`), "web". Nothing for anything else.
+// "php", "node", "python", "database" (also "mariadb" and "mysql", as in
+// `flo use mysql 8.4`), "web". Nothing for anything else.
 [[nodiscard]] std::optional<ConfigKey> parse_config_key(std::string_view name);
 
 // Sets one key in the text of a floserver.json, keeping every other key and
 // its order; nothing for `value` removes the key. Versions are checked
 // (Version::parse), and "php" also takes "none" (written as false) and
-// "newest"; "database" takes "mariadb-11.4", and "mariadb" takes the
-// version alone; "web" takes "nginx" (the default, so the key is removed) or
+// "newest"; "database" takes "mariadb-11.4" or "mysql-8.4", and "mariadb"
+// and "mysql" take the version alone (written as "database": "mysql-8.4",
+// and a "mariadb" or "mysql" key written by hand goes: one engine); "web" takes "nginx" (the default, so the key is removed) or
 // "apache". Empty text is an empty file. Returns the new text, or nothing
 // with `error` (plain English) when the old text or the new value is wrong.
 [[nodiscard]] std::optional<std::string> set_project_config_value(std::string_view text, ConfigKey key,

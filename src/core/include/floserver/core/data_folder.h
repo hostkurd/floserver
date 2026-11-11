@@ -170,6 +170,7 @@ struct CleanResult {
 //     <data>/state/manifest.json and manifest.json.sig   the runtime list kept for offline use
 //   Databases:
 //     <data>/data/mariadb-<series>/   each MariaDB's data folder
+//     <data>/data/mysql-<series>/     each MySQL's (D28)
 //
 // Never: config.json and the other settings, logs, certificates, secrets,
 // the projects folder (the window moves it to the Recycle Bin when asked), a

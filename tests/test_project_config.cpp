@@ -105,13 +105,59 @@ TEST_CASE("bad values are errors on their own key") {
     CHECK(has_error(parse_project_config(R"({"extensions": ["a b"]})"), "extensions[0]"));
 }
 
-TEST_CASE("MySQL is refused with a pointer to MariaDB (Q7)") {
-    for (const char* text : {R"({"database": "mysql-8.0"})", R"({"database": "mysql"})"}) {
+TEST_CASE("MySQL is a database family beside MariaDB (D28); one engine per project") {
+    for (const char* text : {R"({"database": "mysql-8.4"})", R"({"mysql": "8.4"})", R"({"database": "MySQL-08.4"})"}) {
         CAPTURE(text);
         const auto r = parse_project_config(text);
-        REQUIRE(has_error(r, "database"));
-        CHECK(r.errors[0].message.find("use MariaDB") != std::string::npos);
+        REQUIRE(r.config.has_value());
+        REQUIRE(r.config->database.has_value());
+        CHECK(r.config->database->family == "mysql");
+        CHECK(r.config->database->version == "8.4");
+        CHECK(r.warnings.empty());
     }
+    const auto maria = parse_project_config(R"({"mariadb": "11.4"})");
+    REQUIRE(maria.config.has_value());
+    CHECK(maria.config->database == DatabaseSpec{"mariadb", "11.4"});
+    // Written back as "database": the one key FloServer writes.
+    CHECK(write_project_config(*parse_project_config(R"({"mysql": "8.4"})").config).find(R"("database": "mysql-8.4")") !=
+          std::string::npos);
+
+    // Two engines named: a clear problem.
+    for (const char* text : {R"({"mariadb": "11.4", "mysql": "8.4"})", R"({"database": "mariadb-11.4", "mysql": "8.4"})"}) {
+        CAPTURE(text);
+        const auto r = parse_project_config(text);
+        CHECK_FALSE(r.config.has_value());
+        REQUIRE(!r.errors.empty());
+        CHECK(r.errors[0].message.find("a project has one database") != std::string::npos);
+    }
+    // Bad values.
+    CHECK(has_error(parse_project_config(R"({"database": "mysql"})"), "database"));
+    CHECK(has_error(parse_project_config(R"({"mysql": "eight"})"), "mysql"));
+    CHECK(has_error(parse_project_config(R"({"mysql": 8.4})"), "mysql"));
+    const auto other = parse_project_config(R"({"database": "oracle-23"})");
+    REQUIRE(has_error(other, "database"));
+    CHECK(other.errors[0].message.find("MariaDB or MySQL") != std::string::npos);
+}
+
+TEST_CASE("flo use mysql 8.4 writes the database key and drops the other engine (D28)") {
+    std::string error;
+    auto text = set_project_config_value(R"({"php": "8.4", "mariadb": "11.4"})", ConfigKey::Database, "mysql",
+                                         std::string("8.4"), error);
+    REQUIRE_MESSAGE(text, error);
+    CHECK(text->find(R"("database": "mysql-8.4")") != std::string::npos);
+    CHECK(text->find("mariadb") == std::string::npos);
+    CHECK(text->find(R"("php": "8.4")") != std::string::npos);
+    text = set_project_config_value(*text, ConfigKey::Database, "mariadb", std::string("11.8"), error);
+    REQUIRE_MESSAGE(text, error);
+    CHECK(text->find(R"("database": "mariadb-11.8")") != std::string::npos);
+    CHECK(text->find("mysql") == std::string::npos);
+    CHECK_FALSE(set_project_config_value("{}", ConfigKey::Database, "mysql", std::string("x"), error));
+    CHECK(error.find("8.4") != std::string::npos);
+    CHECK(parse_config_key("mysql") == ConfigKey::Database);
+    // No value: the database goes, whichever key named it.
+    text = set_project_config_value(R"({"mysql": "8.4"})", ConfigKey::Database, "database", std::nullopt, error);
+    REQUIRE(text);
+    CHECK(parse_project_config(*text).config->database == std::nullopt);
 }
 
 TEST_CASE("names and versions are tidied") {

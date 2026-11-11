@@ -1,5 +1,6 @@
 #include "floserver/core/project_config.h"
 
+#include "floserver/core/database_engine.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/php_settings.h"
 #include "floserver/core/version.h"
@@ -133,34 +134,64 @@ void read_php(const json& doc, ProjectConfig& config, ConfigResult& result) {
     config.php = version->to_string();
 }
 
+// "database": "mariadb-11.4" or "mysql-8.4" (D28); also written as
+// "mariadb": "11.4" or "mysql": "8.4". A project has one database engine.
 void read_database(const json& doc, ProjectConfig& config, ConfigResult& result) {
-    const auto it = doc.find("database");
-    if (it == doc.end() || it->is_null()) {
+    std::vector<std::string> named;
+    for (const char* key : {"database", "mariadb", "mysql"}) {
+        if (doc.contains(key) && !doc.at(key).is_null()) {
+            named.emplace_back(key);
+        }
+    }
+    if (named.size() > 1) {
+        std::string list;
+        for (std::size_t i = 0; i < named.size(); ++i) {
+            list.append(i == 0 ? "" : (i + 1 == named.size() ? " and " : ", ")).append("\"" + named[i] + "\"");
+        }
+        result.errors.push_back({named[1], "a project has one database: floserver.json names " + list +
+                                               "; keep one, such as \"database\": \"mysql-8.4\""});
         return;
     }
-    if (!it->is_string()) {
-        result.errors.push_back({"database", R"(must be text such as "mariadb-11.4")"});
+    if (named.empty()) {
         return;
     }
-    const auto& text = it->get_ref<const std::string&>();
+    const std::string& key = named.front();
+    const json& value = doc.at(key);
+    if (key != "database") {
+        // "mysql": "8.4": the version alone.
+        const auto version = value.is_string() ? Version::parse(value.get_ref<const std::string&>()) : std::nullopt;
+        if (!version) {
+            result.errors.push_back({key, R"(must be a version in quotes such as ")" +
+                                              std::string(key == "mysql" ? "8.4" : "11.4") + "\""});
+            return;
+        }
+        config.database = DatabaseSpec{key, version->to_string()};
+        return;
+    }
+    if (!value.is_string()) {
+        result.errors.push_back({"database", R"(must be text such as "mariadb-11.4" or "mysql-8.4")"});
+        return;
+    }
+    const auto& text = value.get_ref<const std::string&>();
     const auto dash = text.find('-');
     std::string family = text.substr(0, dash);
     std::transform(family.begin(), family.end(), family.begin(), [](char c) {
         return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
     });
-    if (family != "mariadb") {
-        // Q7: MariaDB only in 1.0. MySQL may come later through the manifest.
+    if (!known_database_family(family)) {
         result.errors.push_back({"database", "\"" + text +
-                                                 R"(" isn't available; use MariaDB, such as "mariadb-11.4")"});
+                                                 R"(" isn't available; use MariaDB or MySQL, such as "mariadb-11.4" or "mysql-8.4")"});
         return;
     }
     if (dash == std::string::npos) {
-        result.errors.push_back({"database", "\"" + text + R"(" needs a version, such as "mariadb-11.4")"});
+        result.errors.push_back({"database", "\"" + text + "\" needs a version, such as \"" + family +
+                                                 (family == kMySqlFamily ? "-8.4" : "-11.4") + "\""});
         return;
     }
     const auto version = Version::parse(std::string_view(text).substr(dash + 1));
     if (!version) {
-        result.errors.push_back({"database", "\"" + text.substr(dash + 1) + R"(" is not a version such as "11.4")"});
+        result.errors.push_back({"database", "\"" + text.substr(dash + 1) + "\" is not a version such as \"" +
+                                                 (family == kMySqlFamily ? "8.4" : "11.4") + "\""});
         return;
     }
     DatabaseSpec spec{family, version->to_string()};
@@ -306,9 +337,9 @@ ConfigResult parse_project_config(std::string_view json_text) {
         return result;
     }
 
-    static const std::set<std::string, std::less<>> known = {"php",  "node",       "python", "database",
-                                                             "web",  "root",       "extensions", "command",
-                                                             "php_ini"};
+    static const std::set<std::string, std::less<>> known = {"php",     "node",  "python", "database",
+                                                             "mariadb", "mysql", "web",    "root",
+                                                             "extensions", "command", "php_ini"};
     for (const auto& item : doc.items()) {
         if (!known.contains(item.key())) {
             result.warnings.push_back({item.key(), "is not a FloServer setting and is ignored"});
@@ -402,7 +433,7 @@ std::optional<ConfigKey> parse_config_key(std::string_view name) {
     if (name == "python") {
         return ConfigKey::Python;
     }
-    if (name == "database" || name == "mariadb") {
+    if (name == "database" || name == "mariadb" || name == "mysql") {
         return ConfigKey::Database;
     }
     if (name == "web") {
@@ -474,15 +505,20 @@ std::optional<std::string> set_project_config_value(std::string_view text, Confi
             }
             break;
         case ConfigKey::Database:
+            // One database engine: "mariadb": "11.4" or "mysql": "8.4"
+            // written by hand go, the "database" key takes their place.
+            doc.erase("mariadb");
+            doc.erase("mysql");
             if (value) {
-                // `flo use mariadb 11.4` gives the version alone.
-                if (key_name == "mariadb") {
+                // `flo use mariadb 11.4`, `flo use mysql 8.4` give the version alone.
+                if (key_name == "mariadb" || key_name == "mysql") {
                     const auto v = Version::parse(*value);
                     if (!v) {
-                        error = "\"" + *value + "\" is not a version such as 11.4";
+                        error = "\"" + *value + "\" is not a version such as " +
+                                (key_name == "mysql" ? "8.4" : "11.4");
                         return std::nullopt;
                     }
-                    stored = "mariadb-" + v->to_string();
+                    stored = std::string(key_name) + "-" + v->to_string();
                 } else {
                     stored = *value;
                 }

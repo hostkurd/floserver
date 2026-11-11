@@ -203,7 +203,7 @@ LiveResult fetch_live_list(HttpTransport& http, std::string_view cdn,
 }
 
 std::string runtime_title(std::string_view runtime, std::string_view version) {
-    static constexpr std::array<std::pair<std::string_view, std::string_view>, 11> kNames = {{
+    static constexpr std::array<std::pair<std::string_view, std::string_view>, 12> kNames = {{
         {"php", "PHP"},
         {"mariadb", "MariaDB"},
         {"node", "Node.js"},
@@ -214,6 +214,7 @@ std::string runtime_title(std::string_view runtime, std::string_view version) {
         {"python", "Python"},
         {"phpmyadmin", "phpMyAdmin"},
         {"mailpit", "Mailpit"},
+        {"mysql", "MySQL"},
         {kAppFolder, "FloServer"},
     }};
     std::string name(runtime);
@@ -364,6 +365,11 @@ OfficialSource official_source(std::string_view path) {
     } else if (p.runtime == "nginx") {
         s.kind = Kind::Original;
         s.urls = {"https://nginx.org/download/" + p.file};
+    } else if (p.runtime == "mysql") {
+        // Oracle publishes MD5 sums and GPG signatures, no SHA-256: the
+        // download itself is compared (D28, 8.4 LTS only).
+        s.kind = Kind::Original;
+        s.urls = {"https://cdn.mysql.com/Downloads/MySQL-8.4/" + p.file};
     } else if (p.runtime == "wordpress") {
         s.kind = Kind::Original;
         s.urls = {"https://wordpress.org/" + p.file};

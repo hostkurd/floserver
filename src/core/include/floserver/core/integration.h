@@ -10,7 +10,7 @@
 //   {"schema": 1, "floserver_version": "0.1.0",
 //    "cli": "C:\\...\\flo.exe", "shims": "C:\\...\\FloServer\\shims",
 //    "runtimes": [{"name": "php", "version": "8.5.12"}, ...],
-//    "databases": [{"series": "11.4", "version": "11.4.13", "port": 3306}]}
+//    "databases": [{"series": "11.4", "version": "11.4.13", "port": 3306}]}  (MariaDB's only)
 //
 // The file stays when the service stops, so Studio can still find `flo`
 // (which starts the service). The ports are the last ones known: Studio asks

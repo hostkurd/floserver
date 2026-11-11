@@ -75,17 +75,29 @@ std::string mariadb_series(std::string_view version) {
     return std::to_string(v->parts()[0]) + "." + std::to_string(v->parts()[1]);
 }
 
-MariaDbFiles mariadb_files(const fs::path& install_dir, const std::string& version, const fs::path& data) {
+MariaDbFiles mariadb_files(const fs::path& install_dir, const std::string& version, const fs::path& data,
+                           std::string_view family) {
     MariaDbFiles f;
+    f.family = std::string(family);
     f.series = mariadb_series(version);
     f.base_dir = install_dir;
     const fs::path bin = install_dir / "bin";
-    f.server = first_existing({bin, install_dir / "sbin"}, {"mariadbd", "mysqld"});
-    f.install_db = first_existing({bin, install_dir / "scripts"}, {"mariadb-install-db", "mysql_install_db"});
-    f.admin = first_existing({bin}, {"mariadb-admin", "mysqladmin"});
-    f.client = first_existing({bin}, {"mariadb", "mysql"});
-    f.dump = first_existing({bin}, {"mariadb-dump", "mysqldump"});
-    f.folder = data / "data" / path_from_utf8("mariadb-" + f.series);
+    const bool mysql = family == kMySqlFamily;
+    if (mysql) {
+        // mysqld sets up its own data folder (--initialize-insecure).
+        f.server = first_existing({bin, install_dir / "sbin"}, {"mysqld"});
+        f.install_db = f.server;
+        f.admin = first_existing({bin}, {"mysqladmin"});
+        f.client = first_existing({bin}, {"mysql"});
+        f.dump = first_existing({bin}, {"mysqldump"});
+    } else {
+        f.server = first_existing({bin, install_dir / "sbin"}, {"mariadbd", "mysqld"});
+        f.install_db = first_existing({bin, install_dir / "scripts"}, {"mariadb-install-db", "mysql_install_db"});
+        f.admin = first_existing({bin}, {"mariadb-admin", "mysqladmin"});
+        f.client = first_existing({bin}, {"mariadb", "mysql"});
+        f.dump = first_existing({bin}, {"mariadb-dump", "mysqldump"});
+    }
+    f.folder = data / "data" / path_from_utf8(database_server_key(family, f.series));
     f.data_dir = f.folder / "data";
 #ifdef _WIN32
     f.config = f.folder / "my.ini";
@@ -93,8 +105,8 @@ MariaDbFiles mariadb_files(const fs::path& install_dir, const std::string& versi
     f.config = f.folder / "my.cnf";
     f.socket = f.data_dir / "mysqld.sock";
 #endif
-    f.error_log = f.data_dir / "mariadbd.err";
-    f.pid_file = f.data_dir / "mariadbd.pid";
+    f.error_log = f.data_dir / (mysql ? "mysqld.err" : "mariadbd.err");
+    f.pid_file = f.data_dir / (mysql ? "mysqld.pid" : "mariadbd.pid");
     f.init_file = f.data_dir / "init.sql";
     f.installed_marker = f.folder / "installed";
     return f;
@@ -108,11 +120,12 @@ std::string mariadb_config(const MariaDbFiles& files, Port port, bool as_root, b
     const char* nl = "\n";
 #endif
     std::ostringstream c;
-    c << "# Written by FloServer for its MariaDB " << files.series << ". It is rewritten at every start." << nl
-      << "[mysqld]" << nl;
+    const bool mysql = files.family == kMySqlFamily;
+    c << "# Written by FloServer for its " << database_family_title(files.family) << " " << files.series
+      << ". It is rewritten at every start." << nl << "[mysqld]" << nl;
     // A development server: small memory, no name lookups (slow on some
     // networks), utf8mb4 everywhere. Settings > Database may change these.
-    for (const auto& [key, value] : mariadb_ini_defaults()) {
+    for (const auto& [key, value] : mariadb_ini_defaults(files.family)) {
         c << key << "=" << value << nl;
     }
     c << "skip-name-resolve" << nl;
@@ -130,7 +143,7 @@ std::string mariadb_config(const MariaDbFiles& files, Port port, bool as_root, b
             const auto end = text.find('\n', pos);
             const std::string line = text.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
             pos = end == std::string::npos ? text.size() : end + 1;
-            // MariaDB reads 4 KB at a time: a longer line's end would be a line of its own.
+            // MariaDB (and MySQL) read 4 KB at a time: a longer line's end would be a line of its own.
             if (line.size() <= kMaxConfigLine) {
                 c << line << nl;
             }
@@ -138,7 +151,8 @@ std::string mariadb_config(const MariaDbFiles& files, Port port, bool as_root, b
     }
     // FloServer's own lines come last, in a group of their own, so nothing
     // above (a [group] in custom.ini included) changes them.
-    c << nl << "# Set by FloServer: where MariaDB keeps its files, and 127.0.0.1 only on FloServer's port." << nl
+    c << nl << "# Set by FloServer: where " << database_family_title(files.family)
+      << " keeps its files, and 127.0.0.1 only on FloServer's port." << nl
       << "[mysqld]" << nl
 #ifndef _WIN32
       // On Windows mariadbd finds its own folder; a full path there would
@@ -167,9 +181,17 @@ std::string mariadb_config(const MariaDbFiles& files, Port port, bool as_root, b
     }
     // Never without passwords, and reached only through FloServer's port.
     c << "skip-grant-tables=0" << nl << "skip-networking=0" << nl;
+    if (mysql) {
+        // No X Protocol (its own listener on every address, port 33060, one
+        // for all servers), and no binary log (it grows until the disk is
+        // full; a development server has no replica). loose-: a build
+        // without the X Plugin starts anyway.
+        c << "loose-mysqlx=OFF" << nl << "skip-log-bin" << nl;
+    }
 #ifdef _WIN32
     // loose-: a build without one of these (MariaDB on Windows has no
     // shared-memory option) warns and starts, instead of refusing to start.
+    // MySQL has both; the same rule keeps it safe.
     c << "loose-named-pipe=0" << nl << "loose-shared-memory=0" << nl;
 #endif
     c << nl << "[client]" << nl << "port=" << port << nl;
@@ -188,6 +210,9 @@ std::vector<std::string> mariadb_command_line_guards(const MariaDbFiles& files, 
 #endif
     if (!files.socket.empty()) {
         args.push_back("--socket=" + path_to_utf8(files.socket.filename()));
+    }
+    if (files.family == kMySqlFamily) {
+        args.emplace_back("--loose-mysqlx=OFF");
     }
     return args;
 }
@@ -222,11 +247,25 @@ std::string sql_string(std::string_view text) {
     return out + "'";
 }
 
-std::string root_password_sql(const std::string& password) {
+std::string root_password_sql(const std::string& password, std::string_view family) {
     const std::string value = sql_string(password);
     std::string sql;
+    if (family == kMySqlFamily) {
+        // MySQL's set-up makes root@localhost only; FloServer logs in over
+        // TCP from 127.0.0.1, which skip-name-resolve doesn't match to it.
+        for (const char* host : {"127.0.0.1", "::1"}) {
+            const std::string account = std::string("'root'@'") + host + "'";
+            sql.append("CREATE USER IF NOT EXISTS ").append(account).append(" IDENTIFIED BY ").append(value).append(";\n");
+            sql.append("GRANT ALL PRIVILEGES ON *.* TO ").append(account).append(" WITH GRANT OPTION;\n");
+        }
+    }
     for (const char* host : {"localhost", "127.0.0.1", "::1"}) {
         sql += "ALTER USER IF EXISTS 'root'@'" + std::string(host) + "' IDENTIFIED BY " + value + ";\n";
+    }
+    if (family == kMySqlFamily) {
+        // No anonymous logins (MySQL's set-up makes none; one made by hand
+        // would match before a named one). Account statements need no FLUSH.
+        return sql + "DROP USER IF EXISTS ''@'localhost', ''@'127.0.0.1', ''@'%';\n";
     }
     // Only those three root accounts (install-db also makes one for this
     // computer's name), and never anonymous logins (an empty user matches
@@ -247,40 +286,48 @@ std::string grant_pattern(std::string_view database) {
     return sql_identifier(escaped);
 }
 
-std::string project_database_sql(const std::string& database, const std::string& user, const std::string& password) {
+std::string project_database_sql(const std::string& database, const std::string& user, const std::string& password,
+                                 std::string_view family) {
+    const bool mysql = family == kMySqlFamily;
     const std::string db = sql_identifier(database);
     const std::string pw = sql_string(password);
-    std::string sql = "CREATE DATABASE IF NOT EXISTS " + db + " CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\n";
+    std::string sql = "CREATE DATABASE IF NOT EXISTS " + db + " CHARACTER SET utf8mb4 COLLATE " +
+                      (mysql ? "utf8mb4_0900_ai_ci" : "utf8mb4_unicode_ci") + ";\n";
     for (const char* host : {"localhost", "127.0.0.1"}) {
         const std::string account = sql_string(user) + "@'" + host + "'";
+        // MySQL's users keep its default login method, caching_sha2_password.
         sql.append("CREATE USER IF NOT EXISTS ").append(account).append(" IDENTIFIED BY ").append(pw).append(";\n");
         sql.append("ALTER USER ").append(account).append(" IDENTIFIED BY ").append(pw).append(";\n");
         // In a GRANT, '_' and '%' in the name are wildcards: escaped, so
         // my_shop's user gets my_shop only, not myashop or another project's
-        // database. The unescaped grant earlier versions made is removed.
-        sql.append("DELETE FROM mysql.db WHERE User = ").append(sql_string(user)).append(" AND Host = '").append(host)
-            .append("' AND Db = ").append(sql_string(database)).append(";\n");
-        sql.append("FLUSH PRIVILEGES;\n");
+        // database. The unescaped grant earlier versions made is removed
+        // (MariaDB's: no FloServer made one on MySQL).
+        if (!mysql) {
+            sql.append("DELETE FROM mysql.db WHERE User = ").append(sql_string(user)).append(" AND Host = '").append(host)
+                .append("' AND Db = ").append(sql_string(database)).append(";\n");
+            sql.append("FLUSH PRIVILEGES;\n");
+        }
         sql.append("GRANT ALL PRIVILEGES ON ").append(grant_pattern(database)).append(".* TO ").append(account).append(";\n");
     }
-    return sql + "FLUSH PRIVILEGES;\n";
+    return mysql ? sql : sql + "FLUSH PRIVILEGES;\n";
 }
 
-std::string drop_project_database_sql(const std::string& database, const std::string& user) {
+std::string drop_project_database_sql(const std::string& database, const std::string& user, std::string_view family) {
     std::string sql = "DROP DATABASE IF EXISTS " + sql_identifier(database) + ";\n";
     for (const char* host : {"localhost", "127.0.0.1", "::1"}) {
         sql.append("DROP USER IF EXISTS ").append(sql_string(user)).append("@'").append(host).append("';\n");
     }
-    return sql + "FLUSH PRIVILEGES;\n";
+    return family == kMySqlFamily ? sql : sql + "FLUSH PRIVILEGES;\n";
 }
 
-std::string shared_database_sql(const std::string& password) {
+std::string shared_database_sql(const std::string& password, std::string_view family) {
+    const bool mysql = family == kMySqlFamily;
     const std::string user(kSharedDatabaseUser);
     const std::string pw = sql_string(password);
     // The pattern's '_' is escaped so it means an underscore, not any character.
     const std::string pattern = "`" + std::string(kSharedDatabaseUser) + "\\_%`";
-    std::string sql = "CREATE DATABASE IF NOT EXISTS " + sql_identifier(user) +
-                      " CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\n";
+    std::string sql = "CREATE DATABASE IF NOT EXISTS " + sql_identifier(user) + " CHARACTER SET utf8mb4 COLLATE " +
+                      (mysql ? "utf8mb4_0900_ai_ci" : "utf8mb4_unicode_ci") + ";\n";
     for (const char* host : {"localhost", "127.0.0.1"}) {
         const std::string account = sql_string(user) + "@'" + host + "'";
         sql.append("CREATE USER IF NOT EXISTS ").append(account).append(" IDENTIFIED BY ").append(pw).append(";\n");
@@ -288,7 +335,7 @@ std::string shared_database_sql(const std::string& password) {
         sql.append("GRANT ALL PRIVILEGES ON ").append(grant_pattern(user)).append(".* TO ").append(account).append(";\n");
         sql.append("GRANT ALL PRIVILEGES ON ").append(pattern).append(".* TO ").append(account).append(";\n");
     }
-    return sql + "FLUSH PRIVILEGES;\n";
+    return mysql ? sql : sql + "FLUSH PRIVILEGES;\n";
 }
 
 std::string project_database_name(std::string_view project) {

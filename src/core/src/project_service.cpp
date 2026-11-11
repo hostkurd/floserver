@@ -689,7 +689,7 @@ std::optional<json> ProjectService::use(const std::string& name, const std::stri
         return std::nullopt;
     }
     const auto parsed_key = parse_config_key(key);
-    if (!parsed_key || key == "mariadb") {
+    if (!parsed_key || key == "mariadb" || key == "mysql") {
         refusal = {"bad_params", "the key is php, node, python, database or web"};
         return std::nullopt;
     }
@@ -760,7 +760,7 @@ std::optional<json> ProjectService::describe_shared(const AppConfig& config, Ser
 
 namespace {
 
-constexpr std::array<std::string_view, 4> kDefaultRuntimes = {"php", "mariadb", "node", "python"};
+constexpr std::array<std::string_view, 5> kDefaultRuntimes = {"php", "mariadb", "mysql", "node", "python"};
 
 // config.json's "defaults", keeping only what this version understands.
 json read_defaults(const AppConfig& config) {
@@ -815,7 +815,7 @@ std::optional<json> ProjectService::defaults(ServiceRefusal& refusal) const {
 std::optional<json> ProjectService::set_default(const std::string& runtime, const std::optional<std::string>& series,
                                                 ServiceRefusal& refusal) {
     if (std::find(kDefaultRuntimes.begin(), kDefaultRuntimes.end(), runtime) == kDefaultRuntimes.end()) {
-        refusal = {"bad_params", "a default can be set for php, mariadb, node or python, not \"" + runtime + "\""};
+        refusal = {"bad_params", "a default can be set for php, mariadb, mysql, node or python, not \"" + runtime + "\""};
         return std::nullopt;
     }
     if (series && !Version::parse(*series)) {
@@ -1217,24 +1217,32 @@ std::optional<fs::path> ProjectService::php_final_ini(const std::string& series_
 
 namespace {
 
-std::optional<std::string> request_database_series(const std::string& series, ServiceRefusal& refusal) {
+std::optional<std::string> request_database_series(const std::string& series, std::string_view family,
+                                                   ServiceRefusal& refusal) {
+    if (!mysql_protocol_family(family)) {
+        refusal = {"bad_params", "\"" + std::string(family) + "\" isn't a database FloServer runs (mariadb or mysql)"};
+        return std::nullopt;
+    }
     auto out = mariadb_request_series(series);
     if (!out) {
-        refusal = {"bad_params", "\"" + series + "\" isn't a MariaDB series such as 11.4"};
+        refusal = {"bad_params", "\"" + series + "\" isn't a " + database_family_title(family) + " series such as " +
+                                     (family == kMySqlFamily ? "8.4" : "11.4")};
     }
     return out;
 }
 
-// The newest install of a MariaDB series, or nothing.
-const InstalledRuntime* newest_mariadb(const std::vector<InstalledRuntime>& installed, const std::string& series) {
-    const InstalledRuntime* r = best_installed(installed, "mariadb", series);
+// The newest install of a MariaDB (or `family`'s) series, or nothing.
+const InstalledRuntime* newest_mariadb(const std::vector<InstalledRuntime>& installed, std::string_view family,
+                                       const std::string& series) {
+    const InstalledRuntime* r = best_installed(installed, std::string(family), series);
     return r != nullptr && mariadb_series(r->version) == series ? r : nullptr;
 }
 
 }  // namespace
 
-std::optional<json> ProjectService::database_get(const std::string& series_text, ServiceRefusal& refusal) const {
-    const auto series = request_database_series(series_text, refusal);
+std::optional<json> ProjectService::database_get(const std::string& series_text, ServiceRefusal& refusal,
+                                                 std::string_view family) const {
+    const auto series = request_database_series(series_text, family, refusal);
     if (!series) {
         return std::nullopt;
     }
@@ -1248,18 +1256,19 @@ std::optional<json> ProjectService::database_get(const std::string& series_text,
         config = std::move(*loaded);
     }
     std::vector<std::string> problems;
-    const MariaDbSettings all = read_mariadb_settings(config, &problems);
+    const MariaDbSettings all = read_mariadb_settings(config, &problems, family);
     const auto found = all.find(*series);
     const MariaDbSeriesSettings settings = found != all.end() ? found->second : MariaDbSeriesSettings{};
     const auto installed = list_installed(runtimes_dir(data_dir_));
-    const InstalledRuntime* db = newest_mariadb(installed, *series);
+    const InstalledRuntime* db = newest_mariadb(installed, family, *series);
 
-    json out = {{"series", *series},
+    json out = {{"family", family},
+                {"series", *series},
                 {"version", db != nullptr ? json(db->version) : json(nullptr)},
                 {"port", settings.port ? json(*settings.port) : json(nullptr)},
                 {"keep_running", settings.keep_running}};
     json ini = json::object();
-    for (const auto& [k, v] : mariadb_ini_defaults()) {
+    for (const auto& [k, v] : mariadb_ini_defaults(family)) {
         ini[k] = v;
     }
     for (const auto& [k, v] : settings.ini) {
@@ -1268,11 +1277,11 @@ std::optional<json> ProjectService::database_get(const std::string& series_text,
     out["ini"] = std::move(ini);
     out["changed"] = settings.ini;
 
-    const fs::path custom = mariadb_custom_ini_file(data_dir_, *series);
+    const fs::path custom = mariadb_custom_ini_file(data_dir_, *series, family);
     std::error_code ec;
     out["custom_ini"] = path_to_utf8(custom);
     out["custom_ini_exists"] = fs::is_regular_file(custom, ec);
-    const FilteredCustomIni filtered = filter_mariadb_custom_ini(read_mariadb_custom_ini(data_dir_, *series));
+    const FilteredCustomIni filtered = filter_mariadb_custom_ini(read_mariadb_custom_ini(data_dir_, *series, family));
     if (!filtered.problems.empty()) {
         out["custom_problems"] = filtered.problems;
     }
@@ -1283,8 +1292,8 @@ std::optional<json> ProjectService::database_get(const std::string& series_text,
     std::set<std::string> users;
     const auto by_runtime = floserver::core::runtime_users(config, read_project_config_file, installed, std::nullopt);
     for (const InstalledRuntime& r : installed) {
-        if (r.name == "mariadb" && mariadb_series(r.version) == *series) {
-            const auto it = by_runtime.find("mariadb/" + path_to_utf8(r.dir.filename()));
+        if (r.name == family && mariadb_series(r.version) == *series) {
+            const auto it = by_runtime.find(std::string(family) + "/" + path_to_utf8(r.dir.filename()));
             if (it != by_runtime.end()) {
                 users.insert(it->second.begin(), it->second.end());
             }
@@ -1301,10 +1310,10 @@ std::optional<json> ProjectService::database_get(const std::string& series_text,
     if (!problems.empty()) {
         out["problems"] = problems;
     }
-    // The names MariaDB knows, so the window can warn about one it would refuse.
+    // The names MariaDB (MySQL) knows, so the window can warn about one it would refuse.
     if (db != nullptr) {
-        const MariaDbFiles files = mariadb_files(db->dir, db->version, data_dir_);
-        const std::string dir = "mariadb\n" + path_to_utf8(db->dir);
+        const MariaDbFiles files = mariadb_files(db->dir, db->version, data_dir_, family);
+        const std::string dir = std::string(family) + "\n" + path_to_utf8(db->dir);
         const fs::path cache = custom.parent_path() /
                                path_from_utf8("known-options-" + path_to_utf8(db->dir.filename()) + ".json");
         const auto now = std::chrono::steady_clock::now();
@@ -1337,9 +1346,10 @@ std::optional<json> ProjectService::database_get(const std::string& series_text,
 }
 
 std::optional<json> ProjectService::database_set(const std::string& series_text, const json& ini, const json* port,
-                                                 const json* keep_running, bool& changed_ini, ServiceRefusal& refusal) {
+                                                 const json* keep_running, bool& changed_ini, ServiceRefusal& refusal,
+                                                 std::string_view family) {
     changed_ini = false;
-    const auto series = request_database_series(series_text, refusal);
+    const auto series = request_database_series(series_text, family, refusal);
     if (!series) {
         return std::nullopt;
     }
@@ -1362,10 +1372,11 @@ std::optional<json> ProjectService::database_set(const std::string& series_text,
         if (!config) {
             return std::nullopt;
         }
-        const MariaDbSettings all = read_mariadb_settings(*config);
+        const MariaDbSettings all = read_mariadb_settings(*config, nullptr, family);
         const auto found = all.find(*series);
         MariaDbSeriesSettings settings = found != all.end() ? found->second : MariaDbSeriesSettings{};
         const auto before = settings.ini;
+        const std::string own_key = database_server_key(family, *series);
         if (ini.is_object()) {
             for (const auto& [key, value] : ini.items()) {
                 if (const auto problem = mariadb_option_problem(key)) {
@@ -1404,26 +1415,40 @@ std::optional<json> ProjectService::database_set(const std::string& series_text,
                     refusal = {"bad_params", "port " + std::to_string(*wanted) + " is one FloServer uses inside (33100-33199)"};
                     return std::nullopt;
                 }
-                for (const auto& [other, s] : all) {
-                    if (other != *series && s.port == wanted) {
-                        refusal = {"port_taken", "port " + std::to_string(*wanted) + " is MariaDB " + other + "'s"};
-                        return std::nullopt;
+                // Every family's servers: MariaDB's and MySQL's share one set of ports (D28).
+                std::set<std::string> chosen_keys;
+                for (const std::string& f : database_families()) {
+                    if (!mysql_protocol_family(f)) {
+                        continue;
+                    }
+                    for (const auto& [other, s] : read_mariadb_settings(*config, nullptr, f)) {
+                        const std::string key = database_server_key(f, other);
+                        chosen_keys.insert(key);
+                        if (key != own_key && s.port == wanted) {
+                            refusal = {"port_taken", "port " + std::to_string(*wanted) + " is " +
+                                                         database_family_title(f) + " " + other + "'s"};
+                            return std::nullopt;
+                        }
                     }
                 }
                 const fs::path data = data_dir_ / "data";
                 std::error_code ec;
                 for (fs::directory_iterator it(data, ec), end; !ec && it != end; it.increment(ec)) {
                     const std::string name = path_to_utf8(it->path().filename());
-                    if (!name.starts_with("mariadb-") || name == "mariadb-" + *series || all.contains(name.substr(8))) {
+                    const auto dash = name.find('-');
+                    if (dash == std::string::npos || !mysql_protocol_family(std::string_view(name).substr(0, dash)) ||
+                        name == own_key || chosen_keys.contains(name)) {
                         continue;
                     }
                     const auto saved = read_small_file(it->path() / "port", 32);
                     if (saved && saved->substr(0, saved->find_first_of("\r\n")) == std::to_string(*wanted)) {
-                        refusal = {"port_taken", "port " + std::to_string(*wanted) + " is MariaDB " + name.substr(8) + "'s"};
+                        refusal = {"port_taken", "port " + std::to_string(*wanted) + " is " +
+                                                     database_family_title(name.substr(0, dash)) + " " +
+                                                     name.substr(dash + 1) + "'s"};
                         return std::nullopt;
                     }
                 }
-                const auto own = read_small_file(data / path_from_utf8("mariadb-" + *series) / "port", 32);
+                const auto own = read_small_file(data / path_from_utf8(own_key) / "port", 32);
                 const bool current = own && own->substr(0, own->find_first_of("\r\n")) == std::to_string(*wanted);
                 if (!current && !can_listen_on_loopback(*wanted)) {
                     refusal = {"port_taken", "port " + std::to_string(*wanted) + " is in use by another program"};
@@ -1436,25 +1461,26 @@ std::optional<json> ProjectService::database_set(const std::string& series_text,
             settings.keep_running = keep_running->get<bool>();
         }
         changed_ini = settings.ini != before;
-        write_mariadb_series(*config, *series, settings);
+        write_mariadb_series(*config, *series, settings, family);
         if (!save(*config, refusal)) {
             return std::nullopt;
         }
     }
-    return database_get(*series, refusal);
+    return database_get(*series, refusal, family);
 }
 
-std::optional<fs::path> ProjectService::database_custom_ini(const std::string& series_text, ServiceRefusal& refusal) const {
-    const auto series = request_database_series(series_text, refusal);
+std::optional<fs::path> ProjectService::database_custom_ini(const std::string& series_text, ServiceRefusal& refusal,
+                                                            std::string_view family) const {
+    const auto series = request_database_series(series_text, family, refusal);
     if (!series) {
         return std::nullopt;
     }
     std::string error;
-    if (!ensure_mariadb_custom_ini(data_dir_, *series, error)) {
+    if (!ensure_mariadb_custom_ini(data_dir_, *series, error, family)) {
         refusal = {"folder_unwritable", error};
         return std::nullopt;
     }
-    return mariadb_custom_ini_file(data_dir_, *series);
+    return mariadb_custom_ini_file(data_dir_, *series, family);
 }
 
 std::optional<json> ProjectService::project_php(const std::string& name, const json& extensions, const json& ini,

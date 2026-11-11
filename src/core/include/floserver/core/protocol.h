@@ -38,12 +38,12 @@
 //   projects.remove  {"name": "shop", "drop_database"?: bool} -> {} or, with drop_database,
 //                    {"database_dropped": bool} (false: there was none to drop)
 //                    (the folder is never touched)
-//                    drop_database: first the project's own MariaDB database and
+//                    drop_database: first the project's own MariaDB (or MySQL) database and
 //                    user (named by the service: "my-shop" -> my_shop, never by
 //                    the request) are dropped and their password deleted from the
 //                    secure store; reserved or shared names are refused, and a
 //                    failed drop keeps the project. Nothing to drop when that
-//                    MariaDB isn't installed. No login makes it again meanwhile.
+//                    server isn't installed. No login makes it again meanwhile.
 //   projects.set     {"name": "shop", "on"?: bool, "keep_running"?: bool} -> the project
 //   projects.rename  {"name": "shop", "new_name": "store", "rename_folder"?: bool}
 //                    -> the project, with "old_name", "old_path" and "old_database_name" (D22)

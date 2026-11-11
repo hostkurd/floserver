@@ -38,7 +38,7 @@ struct CatalogEntry {
 
 // The runtimes FloServer 1.0 knows (Windows x64). Add a row here before
 // publishing a new kind of runtime.
-constexpr std::array<CatalogEntry, 10> kCatalog = {{
+constexpr std::array<CatalogEntry, 11> kCatalog = {{
     {"php", R"(php-{v}(-\d+)?-Win32-vs1[67]-x64\.zip)", "PHP-3.01", "windows-x64", "nts", R"(php-{v}(-\d+)?-nts-Win32-vs1[67]-x64\.zip)",
      "https://downloads.php.net/~windows/releases/archives/{file}"},
     {"mariadb", "", "GPL-2.0", "windows-x64", "", R"(mariadb-{v}-winx64\.zip)",
@@ -46,6 +46,10 @@ constexpr std::array<CatalogEntry, 10> kCatalog = {{
     {"node", "", "MIT", "windows-x64", "", R"(node-v{v}-win-x64\.zip)",
      "https://nodejs.org/dist/v{v}/{file}"},
     {"composer", "", "MIT", "any", "", R"(composer\.phar)", "https://getcomposer.org/download/{v}/{file}"},
+    // MySQL Community Server (D28): the 8.4 LTS series only, Oracle's ZIP
+    // ("noinstall"); its MSI and debug/test builds aren't listed.
+    {"mysql", R"(mysql-{v}-winx64(-debug-test\.zip|\.msi))", "GPL-2.0", "windows-x64", "", R"(mysql-{v}-winx64\.zip)",
+     "https://cdn.mysql.com/Downloads/MySQL-8.4/{file}"},
     {"nginx", "", "BSD-2-Clause", "windows-x64", "", R"(nginx-{v}\.zip)",
      "https://nginx.org/download/{file}"},
     {"apache", "", "Apache-2.0", "windows-x64", "", R"(httpd-{v}-\d+-Win64-VS1[78]\.zip)", ""},
@@ -211,6 +215,11 @@ Classified classify(const std::string& path) {
     }
     if (!Version::parse(version)) {
         c.message = join({path, ": \"", version, "\" isn't a version folder such as 8.5.12"});
+        return c;
+    }
+    // D28: MySQL 8.4 LTS only, never an Innovation release (9.x).
+    if (name == "mysql" && !version.starts_with("8.4.")) {
+        c.message = join({path, ": FloServer lists MySQL 8.4 LTS only (8.4.<n>), not ", version});
         return c;
     }
     const std::regex pattern(
