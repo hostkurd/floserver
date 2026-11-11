@@ -11,7 +11,7 @@ bool cpu_has_avx2() {
     constexpr DWORD kAvx2Feature = 40;  // PF_AVX2_INSTRUCTIONS_AVAILABLE
     return IsProcessorFeaturePresent(kAvx2Feature) != FALSE;
 #elif defined(__x86_64__) || defined(__i386__)
-    return __builtin_cpu_supports("avx2") != 0;
+    return __builtin_cpu_supports("avx2");
 #else
     return true;
 #endif
