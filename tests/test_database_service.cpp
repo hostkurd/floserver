@@ -26,6 +26,7 @@
 #include <cstdio>
 #include <unistd.h>
 
+#include <set>
 #include <thread>
 
 using namespace floserver::core;
@@ -44,9 +45,11 @@ void fake_runtime(const fs::path& data, const std::string& name, const std::stri
                               .dump());
 }
 
-// The mariadb client's output for `sql`, or "ERROR..." when it failed.
-std::string query(Port port, const std::string& user, const std::string& password, const std::string& sql) {
-    const std::string cmd = "MYSQL_PWD='" + password + "' /usr/bin/mariadb --no-defaults --protocol=TCP --host=127.0.0.1 --port=" +
+// The mariadb client's output for `sql`, or "ERROR..." when it failed
+// (`client`: another one, such as MySQL's own).
+std::string query(Port port, const std::string& user, const std::string& password, const std::string& sql,
+                  const std::string& client = "/usr/bin/mariadb") {
+    const std::string cmd = "MYSQL_PWD='" + password + "' '" + client + "' --no-defaults --protocol=TCP --host=127.0.0.1 --port=" +
                             std::to_string(port) + " --user=" + user + " --batch --skip-column-names -e \"" + sql + "\" 2>&1";
     FILE* p = popen(cmd.c_str(), "r");  // NOLINT(cert-env33-c): a test, fixed text
     if (p == nullptr) {
@@ -62,6 +65,22 @@ std::string query(Port port, const std::string& user, const std::string& passwor
         out.pop_back();
     }
     return rc == 0 ? out : "ERROR " + out;
+}
+
+// The output of a shell command line, and whether it ended with 0.
+std::string run_command(const std::string& cmd, bool& ok) {
+    FILE* p = popen((cmd + " 2>&1").c_str(), "r");  // NOLINT(cert-env33-c): a test, fixed text
+    if (p == nullptr) {
+        ok = false;
+        return {};
+    }
+    std::string out;
+    char buf[512];  // NOLINT(modernize-avoid-c-arrays)
+    while (fgets(buf, sizeof buf, p) != nullptr) {
+        out += buf;
+    }
+    ok = pclose(p) == 0;
+    return out;
 }
 
 nlohmann::json server_status(const DatabaseService& db) {
@@ -875,6 +894,234 @@ TEST_CASE("backups on the real MariaDB: a project's database dumped with its own
     CHECK(refusal.message.find("didn't finish in 1 seconds") != std::string::npos);
     CHECK(std::chrono::steady_clock::now() - started < 10s);
     db.stop();
+}
+
+// MySQL 8.4 (D28), when FLOSERVER_TEST_MYSQL names an install of it (a
+// folder with bin/mysqld, bin/mysql, bin/mysqladmin and bin/mysqldump, such
+// as Oracle's Linux tarball unpacked). CI has no MySQL 8.4, so it's skipped
+// there; with MariaDB installed too, both run side by side.
+TEST_CASE("MySQL 8.4 beside MariaDB: set up, a project's own login (caching_sha2), sleep, ports, backup, drop") {
+    const auto install = get_env("FLOSERVER_TEST_MYSQL");
+    std::error_code ec;
+    if (!install || !fs::is_regular_file(fs::path(*install) / "bin" / "mysqld", ec)) {
+        MESSAGE("FLOSERVER_TEST_MYSQL doesn't name a MySQL 8.4 install; skipped");
+        return;
+    }
+    const fs::path mysql_home(*install);
+    const std::string client = (mysql_home / "bin" / "mysql").string();
+    const bool with_mariadb = fs::is_regular_file("/usr/sbin/mariadbd", ec) && fs::is_regular_file("/usr/bin/mariadb-install-db", ec);
+    const test_util::TempDir tmp;
+    const fs::path data = tmp.path() / "data";
+    fake_runtime(data, "php", "8.3.6", "nts");
+    fake_runtime(data, "mysql", "8.4.2", "");
+    const fs::path my = runtimes_dir(data) / "mysql" / "8.4.2";
+    for (const char* sub : {"bin", "share", "lib"}) {
+        if (fs::exists(mysql_home / sub, ec)) {
+            fs::create_directory_symlink(mysql_home / sub, my / sub);
+        }
+    }
+    if (with_mariadb) {
+        fake_runtime(data, "mariadb", "10.11.14", "");
+        const fs::path m = runtimes_dir(data) / "mariadb" / "10.11.14";
+        fs::create_directories(m / "bin");
+        fs::create_directories(m / "sbin");
+        for (const char* t : {"mariadb", "mariadb-admin", "mariadb-install-db", "my_print_defaults", "resolveip"}) {
+            fs::create_symlink(fs::path("/usr/bin") / t, m / "bin" / t, ec);
+        }
+        fs::create_symlink("/usr/sbin/mariadbd", m / "sbin" / "mariadbd");
+        fs::create_directory_symlink("/usr/share", m / "share");
+    }
+    AppConfig app;
+    std::string error;
+    const fs::path shop = tmp.path() / "my-shop";
+    test_util::write_file(shop / "index.php", "<?php echo 1;");
+    test_util::write_file(shop / "floserver.json", R"({"php": "8.3", "mysql": "8.4"})");
+    REQUIRE(add_project(app, shop, "", error));
+    const fs::path copy_dir = tmp.path() / "shop-copy";
+    test_util::write_file(copy_dir / "floserver.json", R"({"database": "mysql-8.4"})");
+    REQUIRE(add_project(app, copy_dir, "", error));
+    const fs::path sys_dir = tmp.path() / "sys";  // MySQL's own database's name
+    test_util::write_file(sys_dir / "floserver.json", R"({"database": "mysql-8.4"})");
+    REQUIRE(add_project(app, sys_dir, "", error));
+    if (with_mariadb) {
+        const fs::path blog = tmp.path() / "blog";
+        test_util::write_file(blog / "floserver.json", R"({"database": "mariadb-10.11"})");
+        REQUIRE(add_project(app, blog, "", error));
+    }
+    for (Project& p : app.projects) {
+        p.on = true;
+    }
+    REQUIRE(save_app_config(app_config_file(data), app, error));
+
+    const SecretStore secrets(data);
+    DatabaseServiceConfig cfg;
+    cfg.data_dir = data;
+    cfg.idle_after = 4s;
+    cfg.reload_every = 1s;
+    cfg.probe = [](Port p) {
+        return p != 3306 && (p < kFirstInternalDatabasePort || p >= kFirstInternalDatabasePort + 50) &&
+               can_listen_on_loopback(p);
+    };
+    DatabaseService db(cfg, secrets);
+    db.start();
+
+    // One server per family and series, one port rule for both: 3307 and
+    // the next free one (3306 is left to this machine's own servers here).
+    const auto servers = db.status()["servers"];
+    REQUIRE(servers.size() == (with_mariadb ? 2U : 1U));
+    nlohmann::json mysql_server;
+    std::set<Port> ports;
+    for (const auto& one : servers) {
+        ports.insert(one["port"].get<Port>());
+        if (one["family"] == "mysql") {
+            mysql_server = one;
+        }
+    }
+    REQUIRE(mysql_server.is_object());
+    CHECK(mysql_server["series"] == "8.4");
+    CHECK(mysql_server["state"] == "sleeping");
+    CHECK(mysql_server["projects"] == nlohmann::json{"my-shop", "shop-copy", "sys"});
+    CHECK(ports.size() == servers.size());
+    const Port port = mysql_server["port"].get<Port>();
+    CHECK(port >= 3307);
+    CHECK(port < kFirstInternalDatabasePort);
+    const fs::path folder = data / "data" / "mysql-8.4";
+
+    ServiceRefusal refusal;
+    CHECK_FALSE(db.project_login("sys", refusal));
+    CHECK(refusal.code == "reserved_name");
+
+    // The first login sets MySQL up (mysqld --initialize-insecure, root's
+    // password from the init file) and makes the project's own user.
+    const auto login = db.project_login("my-shop", refusal);
+    REQUIRE_MESSAGE(login, refusal.message);
+    CHECK(login->port == port);
+    CHECK(login->database == "my_shop");
+    CHECK(fs::exists(folder / "installed"));
+    CHECK(fs::exists(folder / "data" / "mysqld.err"));
+    CHECK_FALSE(fs::exists(folder / "data" / "init.sql"));
+    CHECK(fs::exists(folder / "my.cnf"));
+    const std::string cnf = test_util::read_file(folder / "my.cnf");
+    CHECK(cnf.find("init-file") == std::string::npos);
+    CHECK(cnf.find("loose-mysqlx=OFF") != std::string::npos);
+    CHECK(cnf.find(login->password) == std::string::npos);
+
+    // PHP's mysqlnd logs in with caching_sha2_password on its first
+    // connection, over TCP through FloServer's port (no TLS asked for).
+    bool ok = false;
+    const std::string php_check = run_command("php -m", ok);
+    if (ok && php_check.find("pdo_mysql") != std::string::npos) {
+        const std::string php2 = run_command(
+            "PW='" + login->password + "' php -r '$p = new PDO(\"mysql:host=127.0.0.1;port=" + std::to_string(port) +
+                ";dbname=my_shop\", \"my_shop\", getenv(\"PW\")); echo $p->query(\"SELECT CURRENT_USER()\")->fetchColumn();'",
+            ok);
+        CHECK_MESSAGE(ok, php2);
+        CHECK(php2 == "my_shop@127.0.0.1");
+    } else {
+        MESSAGE("PHP with pdo_mysql isn't installed here; its login skipped");
+    }
+
+    // The project's own user: its database only, MySQL's default login method.
+    CHECK(query(port, "my_shop", login->password, "USE my_shop; CREATE TABLE t (a INT, b TEXT); "
+                                                  "INSERT INTO t VALUES (1, 'it''s'), (2, 'two'); "
+                                                  "CREATE PROCEDURE p() SELECT 42; SELECT COUNT(*) FROM t",
+                client) == "2");
+    CHECK(query(port, "my_shop", login->password, "CREATE DATABASE other", client).starts_with("ERROR"));
+    const auto root = secrets.read("mysql-8.4/root");
+    REQUIRE(root);
+    CHECK(query(port, "root", *root, "SELECT plugin FROM mysql.user WHERE user = 'my_shop' AND host = '127.0.0.1'", client) ==
+          "caching_sha2_password");
+    CHECK(query(port, "root", *root, "SELECT COUNT(*) FROM mysql.user WHERE user = 'root'", client) == "3");
+    CHECK(query(port, "root", "", "SELECT 1", client).starts_with("ERROR"));
+    // No X Protocol listener, no binary log.
+    CHECK(query(port, "root", *root, "SELECT @@log_bin", client) == "0");
+    CHECK(query(port, "root", *root, "SELECT COUNT(*) FROM information_schema.plugins WHERE plugin_name = 'mysqlx' "
+                                     "AND plugin_status = 'ACTIVE'", client) == "0");
+    CHECK(query(port, "root", *root, "SELECT @@bind_address", client) == "127.0.0.1");
+    CHECK(db.series_status("8.4", "mysql")["databases"] == nlohmann::json{"my-shop"});
+    CHECK(db.series_status("8.4")["server"].is_null());  // "8.4" alone is MariaDB's, and there is none
+
+    // Beside MariaDB: both running at once, each on its own port.
+    if (with_mariadb) {
+        const auto blog = db.project_login("blog", refusal);
+        REQUIRE_MESSAGE(blog, refusal.message);
+        CHECK(blog->port != port);
+        CHECK(query(blog->port, "blog", blog->password, "SELECT 1") == "1");
+        CHECK(query(port, "my_shop", login->password, "SELECT 1", client) == "1");
+        CHECK(secrets.read("mariadb-10.11/blog"));
+        CHECK_FALSE(secrets.read("mariadb-10.11/my_shop"));
+    }
+
+    // Backups (D22): mysqldump with the project's own login, loaded into another project.
+    const fs::path work = tmp.path() / "work";
+    fs::create_directories(work);
+    const std::atomic<bool> go{false};
+    REQUIRE_MESSAGE(db.dump_project_database("my-shop", work, go, refusal), refusal.message);
+    const std::string dump = test_util::read_file(work / "database.sql");
+    CHECK(dump.find("INSERT INTO `t`") != std::string::npos);
+    CHECK(dump.find("PROCEDURE `p`") != std::string::npos);
+    bool extras = false;
+    REQUIRE(prepare_sql_for_load(work / "database.sql", work / "load.sql", work / "extras.sql", "shop_copy", extras, error));
+    std::string warning;
+    REQUIRE_MESSAGE(db.load_project_database("shop-copy", work / "load.sql", go, refusal, work / "extras.sql", &warning),
+                    refusal.message);
+    CHECK_MESSAGE(warning.empty(), warning);
+    const auto copy = db.project_login("shop-copy", refusal);
+    REQUIRE(copy);
+    CHECK(query(port, "shop_copy", copy->password, "USE shop_copy; SELECT a, b FROM t ORDER BY a", client) ==
+          "1\tit's\n2\ttwo");
+    CHECK(query(port, "shop_copy", copy->password, "USE shop_copy; CALL p()", client) == "42");
+    CHECK(db.project_database_bytes("my-shop").value_or(0) > 0);
+
+    // Settings > Database: root's login, a new root password, the final my.ini.
+    const auto root_login = db.root_login("8.4", refusal, "mysql");
+    REQUIRE_MESSAGE(root_login, refusal.message);
+    CHECK(root_login->password == *root);
+    REQUIRE_MESSAGE(db.set_root_password("8.4", "New-pass-84", refusal, "mysql"), refusal.message);
+    CHECK(query(port, "root", "New-pass-84", "SELECT 1", client) == "1");
+    CHECK(secrets.read("mysql-8.4/root") == std::optional<std::string>("New-pass-84"));
+    const auto final_ini = db.final_ini("8.4", refusal, "mysql");
+    REQUIRE_MESSAGE(final_ini, refusal.message);
+    CHECK(*final_ini == data / "mysql" / "8.4" / "final-my.ini");
+    CHECK(test_util::read_file(*final_ini).find("What MySQL 8.4 reads") != std::string::npos);
+
+    // Idle: shut down cleanly (mysqladmin shutdown); a connection wakes it.
+    const auto pid = db.series_status("8.4", "mysql")["server"]["pid"].get<std::uint32_t>();
+    CHECK(eventually([&] { return db.series_status("8.4", "mysql")["server"]["state"] == "sleeping"; }, 30s));
+    CHECK(eventually([&] { return ::kill(static_cast<pid_t>(pid), 0) != 0; }, 10s));
+    CHECK(query(port, "my_shop", login->password, "USE my_shop; SELECT COUNT(*) FROM t", client) == "2");
+    CHECK(db.series_status("8.4", "mysql")["server"]["state"] == "running");
+    // The relay's TLS: MySQL's own certificates reach the client through it.
+    CHECK(query(port, "my_shop", login->password, "SHOW STATUS LIKE 'Ssl_version'", client).find("TLS") != std::string::npos);
+
+    // projects.remove's drop_database: its database and user go, nothing else.
+    {
+        const auto hold = db.hold_project("my-shop");
+        bool dropped = false;
+        REQUIRE_MESSAGE(db.drop_project_database("my-shop", refusal, dropped), refusal.message);
+        CHECK(dropped);
+    }
+    CHECK(query(port, "root", "New-pass-84", "SELECT COUNT(*) FROM mysql.user WHERE user = 'my_shop'", client) == "0");
+    CHECK(query(port, "root", "New-pass-84", "SHOW DATABASES LIKE 'my\\\\_shop'", client).empty());
+    CHECK_FALSE(secrets.read("mysql-8.4/my_shop"));
+    CHECK(query(port, "shop_copy", copy->password, "SELECT 1", client) == "1");
+
+    // Removing the install: its server shuts down first and isn't made again meanwhile.
+    const auto live = db.series_status("8.4", "mysql")["server"]["pid"].get<std::uint32_t>();
+    {
+        const auto hold = db.hold_for_removal("8.4.2", "mysql");
+        CHECK(hold.held());
+        CHECK(::kill(static_cast<pid_t>(live), 0) != 0);
+        CHECK(db.series_status("8.4", "mysql")["server"].is_null());
+    }
+    CHECK(eventually([&] { return db.series_status("8.4", "mysql")["server"].is_object(); }, 10s));
+    CHECK(db.series_status("8.4", "mysql")["server"]["port"] == port);  // kept
+
+    // stop() leaves no mysqld behind.
+    CHECK(query(port, "shop_copy", copy->password, "SELECT 1", client) == "1");
+    const auto last = db.series_status("8.4", "mysql")["server"]["pid"].get<std::uint32_t>();
+    db.stop();
+    CHECK(::kill(static_cast<pid_t>(last), 0) != 0);
 }
 
 #endif
