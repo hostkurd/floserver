@@ -579,7 +579,8 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     GeneralAiNote,
     GeneralAiCommand,      // the label before "flo mcp"
     GeneralAiClaude,       // the label before Claude Code's command
-    GeneralAiOthers,       // the label before the JSON block: "Cursor, VS Code"
+    GeneralAiOthers,       // the label before the mcpServers JSON: "Cursor, Claude Desktop"
+    GeneralAiVsCode,       // the label before VS Code's JSON
     GeneralAiFullPath,     // flo isn't on the Path, so the lines name it in full
     GeneralAiFooter,
     UninstallTitle,

@@ -44,7 +44,8 @@ namespace floserver::core::mcp {
 
 // The stateless revision, and the handshake ones, newest first.
 inline constexpr std::string_view kModernVersion = "2026-07-28";
-inline constexpr std::array<std::string_view, 3> kLegacyVersions = {"2025-11-25", "2025-06-18", "2025-03-26"};
+inline constexpr std::array<std::string_view, 4> kLegacyVersions = {"2025-11-25", "2025-06-18", "2025-03-26",
+                                                                   "2024-11-05"};
 
 // JSON-RPC's codes, and MCP's own.
 inline constexpr int kParseError = -32700;
@@ -57,6 +58,8 @@ inline constexpr int kUnsupportedProtocolVersion = -32022;
 // The most lines read_log gives, and emails recent_mail gives.
 inline constexpr int kMaxLogLines = 200;
 inline constexpr int kMaxMails = 20;
+// The deepest nesting a message (or a floserver.json) may have.
+inline constexpr int kMaxDepth = 64;
 // The longest line read from stdin; a longer one is a parse error.
 inline constexpr std::size_t kMaxLine = std::size_t{4} * 1024 * 1024;
 
@@ -83,13 +86,28 @@ public:
 // returns a password. Every other one is refused before it's sent.
 [[nodiscard]] bool read_only_method(std::string_view method);
 
-// True for a key named like a secret ("password", "DB_PASSWORD", "secret",
-// "api_token", "credentials", "private_key"...), compared without case.
+// True for a key named like a secret, compared without case: containing
+// pass, pwd, secret, token, cookie, credential, dsn, apikey, privatekey,
+// passphrase, authorization, authentication or bearer, or with auth, auths,
+// key, keys, pw or sig as a part of its own (APP_KEY, BASIC_AUTH, default_pw).
 [[nodiscard]] bool secret_key(std::string_view key);
 
-// Every value under a secret_key() is replaced with "[hidden]", at any depth;
-// so is the second item of a [key, value] pair whose key is one (.env lines).
+// True for a string that looks like it holds a secret: a URL with a
+// password (mysql://root:pw@host), or NAME=value with a secret_key() name
+// (DB_PASSWORD=..., password=..., API_TOKEN=...) at its start or after a
+// space, ';', '&', ',' or a quote.
+[[nodiscard]] bool secret_value(std::string_view value);
+
+// The second line of defence, after each tool picked what it shows: every
+// value under a secret_key() becomes "[hidden]", and every string that is a
+// secret_value(), at any depth.
 void redact_secrets(nlohmann::json& value);
+
+// <folder>/floserver.json's text for project_info: only a regular file
+// that's no link (symbolic or hard) and whose real path is in the folder's
+// real path, at most 256 KiB. Nothing otherwise: a floserver.json that
+// leads elsewhere (to ~/.docker/config.json, say) is never read.
+[[nodiscard]] std::optional<std::string> read_project_json(const std::filesystem::path& folder);
 
 // The tools as tools/list gives them, in a fixed order. `version` picks
 // what that revision has (2025-03-26 has no title or outputSchema).

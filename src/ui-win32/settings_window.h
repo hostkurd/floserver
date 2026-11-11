@@ -259,7 +259,7 @@ private:
         GeneralUpdates,      // Updates' Check now (Q5)
         GeneralUpdateNotes,  // What's new, beside a ready update
         GeneralUpdateNow,
-        GeneralAiCopy,     // AI coding tools' Copy: row 0 the command, 1 Claude Code's, 2 the JSON
+        GeneralAiCopy,     // AI coding tools' Copy: row 0 the command, 1 Claude Code's, 2 mcpServers, 3 VS Code
         GeneralLicences,
         GeneralRemove,     // Remove FloServer…
     };
@@ -509,9 +509,9 @@ private:
         RECT ai_card{};  // AI coding tools (D32), above About
         RECT ai_title{};
         RECT ai_note{};
-        std::array<RECT, 3> ai_labels{};  // Command, Claude Code, Cursor, VS Code
-        std::array<RECT, 3> ai_values{};  // the JSON's is a box
-        std::array<RECT, 3> ai_copy{};
+        std::array<RECT, 4> ai_labels{};  // Command, Claude Code, Cursor and Claude Desktop, VS Code
+        std::array<RECT, 4> ai_values{};  // the two JSON ones are boxes
+        std::array<RECT, 4> ai_copy{};
         RECT ai_path_note{};  // flo isn't on the Path; empty when it is
         RECT ai_footer{};
         RECT about_card{};

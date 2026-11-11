@@ -527,33 +527,8 @@ struct Service {
     [[nodiscard]] std::string php_log_reply(std::int64_t id, const std::string& name, std::size_t lines) const {
         namespace core = floserver::core;
         const json status = web ? web->status() : json::object();
-        const json pools = status.value("pools", json::array());
-        for (const json& pool : pools) {
-            const json sites = pool.is_object() ? pool.value("sites", json::array()) : json::array();
-            if (!sites.is_array() ||
-                std::none_of(sites.begin(), sites.end(), [&](const json& s) { return s.is_string() && s.get<std::string>() == name; })) {
-                continue;
-            }
-            const std::string key = pool.value("key", std::string());
-            if (key.empty() || key.find_first_of("/\\:") != std::string::npos || key.find("..") != std::string::npos) {
-                break;
-            }
-            const std::string file = key + ".php-errors.log";
-            json out_lines = json::array();
-            for (std::string& line :
-                 core::read_text_log(core::web_dir(data.value_or(std::filesystem::path())) / "logs" / core::path_from_utf8(file), lines)) {
-                out_lines.push_back(std::move(line));
-            }
-            json others = json::array();
-            for (const json& s : sites) {
-                if (s.is_string() && s.get<std::string>() != name) {
-                    others.push_back(s);
-                }
-            }
-            return protocol::make_result(id, {{"lines", std::move(out_lines)},
-                                              {"file", file},
-                                              {"php", pool.value("version", std::string())},
-                                              {"shared_with", std::move(others)}});
+        if (auto log = core::pool_php_log(status, core::web_dir(data.value_or(std::filesystem::path())), name, lines)) {
+            return protocol::make_result(id, *log);
         }
         return protocol::make_error(id, "no_php",
                                     name + " doesn't run PHP right now (it's off, can't start, or doesn't use PHP)");

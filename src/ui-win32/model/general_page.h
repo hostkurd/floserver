@@ -146,13 +146,16 @@ inline constexpr std::string_view kUninstallFlag = "--uninstall";
 // --- AI coding tools (D32) -------------------------------------------------------
 
 // What the AI coding tools card shows, and its Copy buttons copy: the
-// command, Claude Code's line and the JSON for Cursor and VS Code. With
+// command, Claude Code's line, the JSON for Cursor and Claude Desktop
+// ("mcpServers") and the JSON for VS Code's mcp.json ("servers"). With
 // `on_path` (the flo a new terminal finds is this FloServer's) they say
-// "flo"; otherwise `flo_exe`'s full path, quoted where it has a space.
+// "flo"; otherwise `flo_exe`'s full path: quoted where it has a space, and
+// the command as PowerShell runs it (& "C:\...\flo.exe" mcp).
 struct McpLines {
     std::string command;  // flo mcp
     std::string claude;   // claude mcp add floserver -- flo mcp
     std::string json;     // { "mcpServers": { "floserver": { "command": "flo", "args": ["mcp"] } } }
+    std::string vscode;   // { "servers": { "floserver": { "type": "stdio", "command": "flo", "args": ["mcp"] } } }
     bool full_path = false;
 };
 [[nodiscard]] McpLines mcp_lines(const std::filesystem::path& flo_exe, bool on_path);

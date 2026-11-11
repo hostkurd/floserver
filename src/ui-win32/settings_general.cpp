@@ -209,7 +209,7 @@ void SettingsWindow::load_mcp_lines() {
 }
 
 const std::string& SettingsWindow::mcp_line(std::size_t row) const {
-    return row == 0 ? mcp_lines_.command : row == 1 ? mcp_lines_.claude : mcp_lines_.json;
+    return row == 0 ? mcp_lines_.command : row == 1 ? mcp_lines_.claude : row == 2 ? mcp_lines_.json : mcp_lines_.vscode;
 }
 
 bool SettingsWindow::shown_start_tray() const {
@@ -594,7 +594,7 @@ void SettingsWindow::layout_general(HDC dc, Geometry& g, int x0, int x1, int y) 
         const int ai_note_h = height(text(lang_, Str::GeneralAiNote), fonts_.caption.get(), cx1 - cx0);
         gg.ai_note = {cx0, yy - px(2), cx1, yy - px(2) + ai_note_h};
         yy = static_cast<int>(gg.ai_note.bottom) + px(10);
-        const int label_w = std::min(px(140), (cx1 - cx0) / 4);
+        const int label_w = std::min(px(170), (cx1 - cx0) / 4);
         const int copy_w = measure(text(lang_, Str::DbCopy), fonts_.button.get()) + px(24);
         for (std::size_t i = 0; i < gg.ai_copy.size(); ++i) {
             gg.ai_labels.at(i) = {cx0, yy, cx0 + label_w, yy + px(kControlH)};
@@ -747,9 +747,11 @@ void SettingsWindow::paint_general_shapes(Canvas& c) const {
           &gg.ai_card, &gg.about_card, &gg.remove_card}) {
         c.round_rect(*card, pxf(8), p.card, p.card_border, border);
     }
-    // AI coding tools: the JSON's box, and the Copy buttons.
-    if (!is_empty(gg.ai_values[2])) {
-        c.round_rect(gg.ai_values[2], pxf(4), p.input, p.input_border, border);
+    // AI coding tools: the JSON's boxes, and the Copy buttons.
+    for (const std::size_t box : {std::size_t{2}, std::size_t{3}}) {
+        if (!is_empty(gg.ai_values.at(box))) {
+            c.round_rect(gg.ai_values.at(box), pxf(4), p.input, p.input_border, border);
+        }
     }
     for (std::size_t i = 0; i < gg.ai_copy.size(); ++i) {
         const Hit copy{Part::GeneralAiCopy, -1, static_cast<int>(i)};
@@ -903,15 +905,17 @@ void SettingsWindow::paint_general_text(Canvas& c) const {
     title(gg.ai_title, Str::GeneralAiTitle);
     c.paragraph(gg.ai_note, w(text(lang_, Str::GeneralAiNote)), fonts_.caption.get(), p.text_subtle);
     for (std::size_t i = 0; i < gg.ai_copy.size(); ++i) {
-        static constexpr std::array<Str, 3> kLabels = {Str::GeneralAiCommand, Str::GeneralAiClaude, Str::GeneralAiOthers};
+        static constexpr std::array<Str, 4> kLabels = {Str::GeneralAiCommand, Str::GeneralAiClaude, Str::GeneralAiOthers,
+                                                       Str::GeneralAiVsCode};
         c.text(gg.ai_labels.at(i), w(text(lang_, kLabels.at(i))), fonts_.caption.get(), p.text_subtle, Align::Start, false);
-        // Commands read left to right in every language; the box's text sits inside its padding.
+        // Commands read left to right in every language (embedded, as paths
+        // are, in Arabic and Kurdish); the boxes' text sits inside their padding.
         RECT value = gg.ai_values.at(i);
-        if (i == 2) {
+        if (i >= 2) {
             value.left += px(8);
             value.right -= px(8);
         }
-        c.text(value, w(mcp_line(i)), fonts_.mono.get(), p.text, Align::Start, true);
+        c.text(value, w(rtl_ ? isolate_ltr(mcp_line(i)) : mcp_line(i)), fonts_.mono.get(), p.text, Align::Start, true);
         c.text(gg.ai_copy.at(i), w(text(lang_, Str::DbCopy)), fonts_.button.get(), p.text, Align::Center, false);
     }
     if (!is_empty(gg.ai_path_note)) {

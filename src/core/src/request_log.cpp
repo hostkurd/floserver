@@ -1,5 +1,6 @@
 #include "floserver/core/request_log.h"
 
+#include "floserver/core/mailpit.h"
 #include "floserver/core/paths.h"
 
 #include <algorithm>
@@ -130,6 +131,11 @@ namespace {
 // that's a newline, the tail starts on a whole line). `mid_line`: the read
 // didn't start at the file's start. Nothing when there's no file or it's empty.
 std::optional<std::string> read_tail(const fs::path& file, bool& mid_line) {
+    // The log itself: never through a link (a link to a file elsewhere would show that file).
+    std::error_code ec;
+    if (!fs::is_regular_file(fs::symlink_status(file, ec)) || ec || fs::hard_link_count(file, ec) != 1 || ec) {
+        return std::nullopt;
+    }
     std::ifstream in(file, std::ios::binary);
     if (!in) {
         return std::nullopt;
@@ -169,18 +175,16 @@ std::vector<std::string> parse_text_log(std::string_view text, std::size_t max_l
         const std::size_t nl = text.find('\n');
         std::string_view line = text.substr(0, nl);
         text = nl == std::string_view::npos ? std::string_view() : text.substr(nl + 1);
-        if (line.size() > kTextLogLineLimit) {
-            line = line.substr(0, kTextLogLineLimit);
-        }
-        std::string shown;
-        shown.reserve(line.size());
-        for (const char c : line) {
-            const auto u = static_cast<unsigned char>(c);
-            if (c == '\t') {
-                shown += ' ';
-            } else if (u >= 0x20 && u != 0x7F) {
-                shown += c;  // control characters (a terminal's escapes) never pass
+        // Control characters (a terminal's escapes) as spaces; bidi, zero-width
+        // and tag characters out; bad UTF-8 as U+FFFD (clean_error_text).
+        std::string shown = clean_error_text(line.substr(0, kTextLogLineLimit * 2), kTextLogLineLimit);
+        if (shown.size() > kTextLogLineLimit) {
+            // At most the limit in bytes, cut before a character, never inside one.
+            std::size_t cut = kTextLogLineLimit;
+            while (cut > 0 && (static_cast<unsigned char>(shown[cut]) & 0xC0U) == 0x80U) {
+                --cut;
             }
+            shown.resize(cut);
         }
         while (!shown.empty() && shown.back() == ' ') {
             shown.pop_back();
@@ -200,6 +204,43 @@ std::vector<std::string> read_text_log(const fs::path& file, std::size_t max_lin
     bool mid_line = false;
     const auto text = read_tail(file, mid_line);
     return text ? parse_text_log(*text, max_lines, mid_line) : std::vector<std::string>{};
+}
+
+std::optional<nlohmann::json> pool_php_log(const nlohmann::json& web_status, const fs::path& web_dir,
+                                           const std::string& project, std::size_t max_lines) {
+    using nlohmann::json;
+    const json& pools = web_status.is_object() && web_status.contains("pools") ? web_status.at("pools") : json();
+    if (!pools.is_array()) {
+        return std::nullopt;
+    }
+    for (const json& pool : pools) {
+        if (!pool.is_object() || !pool.contains("sites") || !pool.at("sites").is_array()) {
+            continue;
+        }
+        const json& sites = pool.at("sites");
+        if (std::none_of(sites.begin(), sites.end(),
+                         [&](const json& s) { return s.is_string() && s.get_ref<const std::string&>() == project; })) {
+            continue;
+        }
+        const std::string key = pool.contains("key") && pool.at("key").is_string() ? pool.at("key").get<std::string>()
+                                                                                   : std::string();
+        // The web service's own key ("php-8.4.27+gd-1a2b"): a file name, never a path.
+        if (key.empty() || key.find_first_of("/\\:") != std::string::npos || key.find("..") != std::string::npos) {
+            return std::nullopt;
+        }
+        const std::string file = key + ".php-errors.log";
+        json others = json::array();
+        for (const json& s : sites) {
+            if (s.is_string() && s.get_ref<const std::string&>() != project) {
+                others.push_back(s);
+            }
+        }
+        return json{{"lines", read_text_log(web_dir / "logs" / path_from_utf8(file), max_lines)},
+                    {"file", file},
+                    {"php", pool.contains("version") && pool.at("version").is_string() ? pool.at("version") : json("")},
+                    {"shared_with", std::move(others)}};
+    }
+    return std::nullopt;
 }
 
 }  // namespace floserver::core

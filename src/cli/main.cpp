@@ -1951,12 +1951,8 @@ public:
         }
         // Once more on a fresh connection when it broke (the service restarted, say).
         for (int attempt = 0; attempt < 2; ++attempt) {
-            if (!client_) {
-                client_ = connect_or_start(std::chrono::seconds(60));
-                if (!client_) {
-                    error = "see FloServer's window, or run: flo service start";
-                    return std::nullopt;
-                }
+            if (!client_ && !connect(error)) {
+                return std::nullopt;
             }
             if (auto reply = client_->call(method, params)) {
                 return reply;
@@ -1968,19 +1964,33 @@ public:
     }
 
     std::optional<std::string> project_file(const fs::path& folder) override {
-        const fs::path file = folder / "floserver.json";
-        std::error_code ec;
-        const auto size = fs::file_size(file, ec);
-        if (ec || size > std::uintmax_t{256} * 1024 || !fs::is_regular_file(file, ec)) {
-            return std::nullopt;
+        return floserver::core::mcp::read_project_json(folder);
+    }
+
+private:
+    // As connect_or_start(), with the reason kept for the tool's answer (and stderr).
+    bool connect(std::string& why) {
+        namespace core = floserver::core;
+        const std::string instance = core::ipc::default_instance();
+        const auto timeout = std::chrono::seconds(60);
+        std::string error;
+        client_ = core::ServiceClient::connect(instance, error, timeout);
+        if (!client_ && error.empty()) {
+            if (core::start_service(instance, error) == core::StartResult::Failed) {
+                why = "it didn't start: " + (error.empty() ? std::string("no reason given") : error);
+            } else {
+                client_ = core::ServiceClient::connect(instance, error, timeout);
+                if (!client_) {
+                    why = "it started but can't be reached" + (error.empty() ? std::string() : ": " + error);
+                }
+            }
+        } else if (!client_) {
+            why = error;
         }
-        const std::ifstream in(file, std::ios::binary);
-        if (!in) {
-            return std::nullopt;
+        if (!client_) {
+            std::cerr << "FloServer: " << why << "\n";
         }
-        std::ostringstream text;
-        text << in.rdbuf();
-        return text.str();
+        return client_.has_value();
     }
 
 private:

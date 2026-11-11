@@ -224,7 +224,7 @@ TEST_CASE("mcp: the 2025-11-25 handshake, then tools and ping") {
     // Before initialize, a request without the per-request _meta is refused (and says why).
     const json early = ask(server, request(1, "tools/list"));
     CHECK(early["error"]["code"] == mcp::kInvalidParams);
-    CHECK(early["error"]["data"]["supported"].size() == 4);
+    CHECK(early["error"]["data"]["supported"].size() == 5);
     CHECK(early["id"] == 1);
 
     const json init = ask(server, request(2, "initialize",
@@ -273,7 +273,7 @@ TEST_CASE("mcp: initialize negotiates a version this server has") {
     mcp::Server server(backend);
     CHECK(ask(server, request(1, "initialize", {{"protocolVersion", "2025-06-18"}, {"capabilities", json::object()}}))
               ["result"]["protocolVersion"] == "2025-06-18");
-    CHECK(ask(server, request(2, "initialize", {{"protocolVersion", "2024-11-05"}, {"capabilities", json::object()}}))
+    CHECK(ask(server, request(2, "initialize", {{"protocolVersion", "2024-10-07"}, {"capabilities", json::object()}}))
               ["result"]["protocolVersion"] == "2025-11-25");
     CHECK(ask(server, request(3, "initialize", {{"protocolVersion", "2099-01-01"}}))["result"]["protocolVersion"] ==
           "2025-11-25");
@@ -290,6 +290,14 @@ TEST_CASE("mcp: initialize negotiates a version this server has") {
     const json call = ask(server, request(7, "tools/call", {{"name", "list_projects"}, {"arguments", json::object()}}));
     CHECK_FALSE(call["result"].contains("structuredContent"));
     CHECK(call["result"]["content"][0]["type"] == "text");
+
+    // 2024-11-05, the first revision: answered too, without annotations.
+    CHECK(ask(server, request(8, "initialize", {{"protocolVersion", "2024-11-05"}}))["result"]["protocolVersion"] ==
+          "2024-11-05");
+    for (const json& t : ask(server, request(9, "tools/list"))["result"]["tools"]) {
+        CHECK_FALSE(t.contains("annotations"));
+        CHECK_FALSE(t.contains("outputSchema"));
+    }
 }
 
 TEST_CASE("mcp: the stateless 2026-07-28 revision") {
@@ -301,7 +309,7 @@ TEST_CASE("mcp: the stateless 2026-07-28 revision") {
     CHECK(discover["id"] == 1);
     const json& d = discover["result"];
     CHECK(d["resultType"] == "complete");
-    CHECK(d["supportedVersions"] == json::array({"2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26"}));
+    CHECK(d["supportedVersions"] == json::array({"2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"}));
     CHECK(d["capabilities"] == json{{"tools", json::object()}});
     CHECK(d["_meta"]["io.modelcontextprotocol/serverInfo"]["name"] == "floserver");
     CHECK(d["ttlMs"].is_number_integer());
@@ -379,6 +387,13 @@ TEST_CASE("mcp: what isn't a request") {
     const std::string huge(mcp::kMaxLine + 1, ' ');
     const std::string long_line = R"({"jsonrpc":"2.0","id":1,"method":"ping","x":")" + huge + "\"}";
     CHECK(line(long_line)["error"]["code"] == mcp::kParseError);
+    // Nested past 64 levels: a parse error, not a crash (20,000 used to overflow the stack).
+    std::string deep = R"({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"x":)";
+    deep += std::string(20000, '[') + std::string(20000, ']') + "}}";
+    CHECK(line(deep)["error"]["code"] == mcp::kParseError);
+    std::string ok_depth = R"({"jsonrpc":"2.0","id":1,"method":"ping","params":{"x":)";
+    ok_depth += std::string(60, '[') + std::string(60, ']') + "}}";
+    CHECK(line(ok_depth)["result"] == json::object());
     // Not UTF-8: a parse error, not a crash.
     CHECK(line("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"\xC3\x28\"}")["error"]["code"] == mcp::kParseError);
 }
@@ -408,6 +423,10 @@ TEST_CASE("mcp: tools/call's protocol errors and tool errors") {
     CHECK(tool_error("read_log", {{"name", "shop"}, {"path", "/etc/passwd"}}).find("path") != std::string::npos);
     CHECK(tool_error("recent_mail", {{"limit", 21}}).find("20") != std::string::npos);
     CHECK(tool_error("recent_mail", {{"limit", "5"}}).find("whole number") != std::string::npos);
+    CHECK(tool_error("recent_mail", {{"limit", 5.5}}).find("whole number") != std::string::npos);
+    // A whole number sent as a float is fine.
+    CHECK(call_tool(server, "recent_mail", {{"limit", 2.0}})["isError"] == false);
+    CHECK(call_tool(server, "read_log", {{"name", "shop"}, {"lines", 50.0}})["isError"] == false);
 
     // The service down: a tool error, and the next call is tried again.
     backend.down = true;
@@ -453,7 +472,8 @@ TEST_CASE("mcp: each tool's answer, and only read-only requests reach the servic
 
     const json info = structured("project_info", {{"name", "shop"}});
     CHECK(info["floserver_json"]["php"] == "8.4");
-    CHECK(info["floserver_json"]["env"]["DB_PASSWORD"] == "[hidden]");
+    CHECK(info["floserver_json"]["env_names"] == json::array({"DB_PASSWORD"}));
+    CHECK_FALSE(info["floserver_json"].contains("env"));
     CHECK(info["database"]["engine"] == "mariadb");
     CHECK(info["database"]["database"] == "shop");
     CHECK(info["database"]["user"] == "shop");
@@ -488,6 +508,14 @@ TEST_CASE("mcp: each tool's answer, and only read-only requests reach the servic
     const json web = structured("read_log", {{"name", "shop"}, {"lines", 5}});
     CHECK(web["kind"] == "web");
     CHECK(web["lines"] == json::array({"2026-10-29T20:44:47.123Z 200 38ms GET /products?page=2"}));
+    // Query values named like secrets are left out of the paths.
+    const json saved_log = backend.results["projects.log"];
+    backend.results["projects.log"] = {
+        {"entries", json::array({{{"t", 0}, {"status", 302}, {"ms", 1}, {"method", "GET"},
+                                  {"uri", "/login?token=abc123&page=2&api_key=zz9&q=x"}}})}};
+    const json blanked = structured("read_log", {{"name", "shop"}});
+    CHECK(blanked["lines"][0] == "1970-01-01T00:00:00.000Z 302 1ms GET /login?token=&page=2&api_key=&q=x");
+    backend.results["projects.log"] = saved_log;
     CHECK(web["note"].get<std::string>().find("not instructions") != std::string::npos);
 
     backend.results["projects.log"] = {{"lines", json::array({"[11-Nov-2026 09:00:00 UTC] PHP Warning: x"})},
@@ -532,6 +560,81 @@ TEST_CASE("mcp: each tool's answer, and only read-only requests reach the servic
     }
 }
 
+TEST_CASE("mcp: project_info shows floserver.json's own settings, never what it may hide") {
+    FakeBackend backend;
+    fill_busy(backend);
+    // Every way the review found to leak a secret through floserver.json and "wants".
+    backend.files["/home/me/sites/shop"] = R"({
+        "php": "8.4", "web": "nginx", "root": "public", "redis": true, "database": "mariadb-11.4",
+        "extensions": ["tokenizer", "intl"], "extensions_off": ["-exif"],
+        "command": "DB_PASSWORD=LEAK01 API_TOKEN=LEAK02 node server.js",
+        "env": {"DB_PASS": "LEAK03", "DATABASE_URL": "mysql://root:LEAK04@127.0.0.1/shop", "APP_KEY": "base64:LEAK05",
+                "BASIC_AUTH": "u:LEAK06", "SMTP_PWD": "LEAK07", "dsn": "mysql:host=x;password=LEAK08"},
+        "php_ini": {"mysqli.default_pw": "LEAK09", "memory_limit": "1G"},
+        "notes": ["DB_PASSWORD=LEAK10"], "auths": {"reg": {"auth": "LEAK11"}},
+        "custom": {"deep": {"x": "mysql://a:LEAK12@h"}}})";
+    backend.results["projects.list"]["projects"][0]["wants"] = {
+        {"web", "nginx"}, {"php", "8.4"}, {"extensions", json::array({"tokenizer", "intl"})},
+        {"php_ini", {{"mysqli.default_pw", "LEAK13"}, {"memory_limit", "1G"}}}};
+    mcp::Server server(backend);
+    const json r = call_tool(server, "project_info", {{"name", "shop"}});
+    INFO(r.dump(2));
+    REQUIRE(r["isError"] == false);
+    CHECK(r.dump().find("LEAK") == std::string::npos);
+    const json& c = r["structuredContent"]["floserver_json"];
+    CHECK(c["php"] == "8.4");
+    CHECK(c["root"] == "public");
+    CHECK(c["database"] == "mariadb-11.4");
+    CHECK(c["extensions"] == json::array({"tokenizer", "intl"}));
+    CHECK(c["extensions_off"] == json::array({"-exif"}));
+    CHECK(c["command_set"] == true);
+    CHECK_FALSE(c.contains("command"));
+    CHECK(c["env_names"] == json::array({"APP_KEY", "BASIC_AUTH", "DATABASE_URL", "DB_PASS", "SMTP_PWD", "dsn"}));
+    CHECK(c["php_ini_names"] == json::array({"memory_limit", "mysqli.default_pw"}));
+    CHECK(c["other_settings"] == json::array({"auths", "custom", "notes"}));
+    const json& asked = r["structuredContent"]["runtimes"]["asked_for"];
+    CHECK(asked["php_ini_names"] == json::array({"memory_limit", "mysqli.default_pw"}));
+    CHECK(asked["extensions"] == json::array({"tokenizer", "intl"}));
+    CHECK(r["structuredContent"]["redis"]["on"] == true);
+    // The text the model reads is the same data.
+    CHECK(r["content"][0]["text"].get<std::string>().find("LEAK") == std::string::npos);
+}
+
+TEST_CASE("mcp: floserver.json is read only as the project's own plain file") {
+    const test_util::TempDir dir;
+    const fs::path project = dir.path() / "shop";
+    test_util::write_file(project / "floserver.json", R"({"php": "8.4"})");
+    CHECK(mcp::read_project_json(project) == std::optional<std::string>(R"({"php": "8.4"})"));
+    CHECK_FALSE(mcp::read_project_json(dir.path() / "missing"));
+    // Too big.
+    const fs::path big = dir.path() / "big";
+    test_util::write_file(big / "floserver.json", std::string(300 * 1024, ' '));
+    CHECK_FALSE(mcp::read_project_json(big));
+    // A link to a file elsewhere (~/.docker/config.json, say) is refused.
+    test_util::write_file(dir.path() / "docker" / "config.json", R"({"auths": {"x": {"auth": "c2VjcmV0"}}})");
+    const fs::path linked = dir.path() / "linked";
+    fs::create_directories(linked);
+    std::error_code ec;
+    fs::create_symlink(dir.path() / "docker" / "config.json", linked / "floserver.json", ec);
+    if (!ec) {
+        CHECK_FALSE(mcp::read_project_json(linked));
+        // A project folder that is itself a link is fine: its own file is read.
+        fs::create_directory_symlink(project, dir.path() / "shop-link", ec);
+        if (!ec) {
+            CHECK(mcp::read_project_json(dir.path() / "shop-link").has_value());
+        }
+    } else {
+        MESSAGE("symbolic links can't be made here; that part skipped");
+    }
+    // A hard link to it is refused too.
+    const fs::path hard = dir.path() / "hard";
+    fs::create_directories(hard);
+    fs::create_hard_link(dir.path() / "docker" / "config.json", hard / "floserver.json", ec);
+    if (!ec) {
+        CHECK_FALSE(mcp::read_project_json(hard));
+    }
+}
+
 TEST_CASE("mcp: only read-only service methods, and secrets hidden at any depth") {
     for (const char* m : {"status", "projects.list", "projects.log", "runtimes.list", "web.status", "databases.list",
                           "mail.status", "mail.recent"}) {
@@ -542,21 +645,41 @@ TEST_CASE("mcp: only read-only service methods, and secrets hidden at any depth"
                           "php.custom_ini", "backup.start"}) {
         CHECK_FALSE(mcp::read_only_method(m));
     }
-    for (const char* k : {"password", "DB_PASSWORD", "root_password", "secret", "client-secret", "api_token",
-                          "TOKEN", "credentials", "API_KEY", "private_key", "passphrase", "Authorization", "pwd"}) {
+    for (const char* k : {"password", "DB_PASSWORD", "root_password", "secret", "client-secret", "api_token", "TOKEN",
+                          "credentials", "API_KEY", "private_key", "passphrase", "Authorization", "pwd", "DB_PASS",
+                          "APP_KEY", "BASIC_AUTH", "SMTP_PWD", "dsn", "DATABASE_DSN", "mysqli.default_pw", "auths",
+                          "auth", "apiKey", "session_cookie", "keys", "bearer"}) {
+        INFO(k);
         CHECK(mcp::secret_key(k));
     }
-    for (const char* k : {"name", "port", "user", "database", "path", "pass_through_x", "key", "author"}) {
+    for (const char* k : {"name", "port", "user", "database", "path", "author", "monkey", "keep_running", "smtp_port",
+                          "php_ini", "extensions_off", "shared_with", "inbox", "used_by", "memory_limit", "keyboard"}) {
+        INFO(k);
         CHECK_FALSE(mcp::secret_key(k));
     }
+    for (const char* v : {"mysql://root:pw@127.0.0.1/shop", "postgres://u:p@h:5432/db", "x password=abc",
+                          "PASSWORD=abc", "DB_PASSWORD=pw8", "API_TOKEN=abc node server.js",
+                          "mysql:host=x;password=pw", "a SECRET_KEY=1", "\"APP_KEY=base64:zz\""}) {
+        INFO(v);
+        CHECK(mcp::secret_value(v));
+    }
+    for (const char* v : {"https://shop.localhost:8443", "http://user@host/x", "page=2", "token=", "password= x",
+                          "/home/me/sites/shop", "Shop <shop@example.test>", "8.4", "memory_limit"}) {
+        INFO(v);
+        CHECK_FALSE(mcp::secret_value(v));
+    }
     json j = {{"a", {{"b", {{"password", "x"}, {"list", json::array({{{"secret", 5}}})}}}}},
-              {"env", json::array({json::array({"DB_PASSWORD", "y"}), json::array({"DB_USER", "u"})})},
+              {"extensions", json::array({"tokenizer", "intl"})},
+              {"pair", json::array({"DB_PASSWORD", "y"})},
+              {"lines", json::array({"DB_PASSWORD=pw8", "fine"})},
               {"token", nullptr}};
     mcp::redact_secrets(j);
     CHECK(j["a"]["b"]["password"] == "[hidden]");
     CHECK(j["a"]["b"]["list"][0]["secret"] == "[hidden]");
-    CHECK(j["env"][0][1] == "[hidden]");
-    CHECK(j["env"][1][1] == "u");
+    CHECK(j["extensions"] == json::array({"tokenizer", "intl"}));  // a pair of names isn't a key and its value
+    CHECK(j["pair"] == json::array({"DB_PASSWORD", "y"}));
+    CHECK(j["lines"][0].get<std::string>().starts_with("[hidden"));
+    CHECK(j["lines"][1] == "fine");
     CHECK(j["token"].is_null());
     // Deep documents don't recurse.
     json deep = json::object();
@@ -572,8 +695,15 @@ TEST_CASE("mcp: only read-only service methods, and secrets hidden at any depth"
 TEST_CASE("request_log: a plain text log's last lines") {
     const std::string text = "partial line\nfirst\n\n\tsecond with tab\x1b[31m red\x07\nthird";
     const auto lines = parse_text_log(text, 10, true);
-    CHECK(lines == std::vector<std::string>{"first", " second with tab[31m red", "third"});
-    CHECK(parse_text_log(text, 2, false) == std::vector<std::string>{" second with tab[31m red", "third"});
+    CHECK(lines == std::vector<std::string>{"first", " second with tab [31m red", "third"});
+    CHECK(parse_text_log(text, 2, false) == std::vector<std::string>{" second with tab [31m red", "third"});
+    // Bidi, zero-width and tag characters out; C1 controls as spaces.
+    const std::string tricky = "Pay\u202Efdp.exe\u2066x\u2069\u200By\U000E0041z\u0085w\n";
+    CHECK(parse_text_log(tricky, 5, false) == std::vector<std::string>{"Payfdp.exexyz w"});
+    // Cut at the limit in bytes, never inside a character.
+    const auto cut = parse_text_log(std::string(kTextLogLineLimit - 1, 'a') + "\u0628\n", 5, false);
+    REQUIRE(cut.size() == 1);
+    CHECK(cut[0] == std::string(kTextLogLineLimit - 1, 'a'));
     CHECK(parse_text_log(text, 10, false).front() == "partial line");
     CHECK(parse_text_log("", 10, false).empty());
     CHECK(parse_text_log(std::string(5000, 'a') + "\n", 10, false).front().size() == kTextLogLineLimit);
@@ -589,15 +719,54 @@ TEST_CASE("request_log: a plain text log's last lines") {
     const auto tail = read_text_log(dir.path() / "php.log", 3);
     CHECK(tail == std::vector<std::string>{"line 19997", "line 19998", "line 19999"});
     CHECK(read_text_log(dir.path() / "php.log", 1000).size() == kRequestLogMaxEntries);
+    // Never through a link: a log that's a link to another file reads as nothing.
+    test_util::write_file(dir.path() / "elsewhere.txt", "SECRET=1\n");
+    std::error_code ec;
+    fs::create_symlink(dir.path() / "elsewhere.txt", dir.path() / "linked.log", ec);
+    if (!ec) {
+        CHECK(read_text_log(dir.path() / "linked.log", 10).empty());
+        CHECK(read_request_log(dir.path() / "linked.log", 10).empty());
+    }
+    fs::create_hard_link(dir.path() / "elsewhere.txt", dir.path() / "hard.log", ec);
+    if (!ec) {
+        CHECK(read_text_log(dir.path() / "hard.log", 10).empty());
+    }
+}
+
+TEST_CASE("projects.log kind php: the pool's own log, named by its key") {
+    const test_util::TempDir dir;
+    test_util::write_file(dir.path() / "logs" / "php-8.4.27.php-errors.log",
+                          "[11-Nov-2026 09:00:00 UTC] PHP Warning:  Undefined variable $x in /s/index.php on line 3\n"
+                          "[11-Nov-2026 09:00:01 UTC] PHP Fatal error:  boom\n");
+    const json status = {{"pools", json::array({{{"key", "php-8.4.27"}, {"version", "8.4.27"},
+                                                 {"sites", json::array({"shop", "blog"})}},
+                                                {{"key", "../../etc/passwd"}, {"version", "8.3.1"},
+                                                 {"sites", json::array({"evil"})}}})}};
+    const auto log = pool_php_log(status, dir.path(), "shop", 50);
+    REQUIRE(log);
+    CHECK((*log)["file"] == "php-8.4.27.php-errors.log");
+    CHECK((*log)["php"] == "8.4.27");
+    CHECK((*log)["shared_with"] == json::array({"blog"}));
+    REQUIRE((*log)["lines"].size() == 2);
+    CHECK((*log)["lines"][1] == "[11-Nov-2026 09:00:01 UTC] PHP Fatal error:  boom");
+    CHECK(pool_php_log(status, dir.path(), "shop", 1)->at("lines").size() == 1);
+    CHECK_FALSE(pool_php_log(status, dir.path(), "nobody", 50));
+    CHECK_FALSE(pool_php_log(status, dir.path(), "evil", 50));  // a key that's a path is never used
+    CHECK_FALSE(pool_php_log(json::object(), dir.path(), "shop", 50));
 }
 
 namespace {
 
+// Empty: taken out of the environment.
 void set_env(const char* name, const std::string& value) {
 #ifdef _WIN32
     (void)_putenv_s(name, value.c_str());
 #else
-    (void)setenv(name, value.c_str(), 1);  // NOLINT(concurrency-mt-unsafe)
+    if (value.empty()) {
+        (void)unsetenv(name);  // NOLINT(concurrency-mt-unsafe)
+    } else {
+        (void)setenv(name, value.c_str(), 1);  // NOLINT(concurrency-mt-unsafe)
+    }
 #endif
 }
 
@@ -641,9 +810,29 @@ std::vector<json> run_flo_mcp(const fs::path& flo, const fs::path& work, const s
 }  // namespace
 
 TEST_CASE("the real flo mcp against the real service, over stdio") {
+    // Put back as they were, and the service stopped, however the test ends.
+    struct Restore {
+        std::optional<std::string> instance = get_env("FLOSERVER_INSTANCE");
+        std::optional<std::string> data_dir = get_env("FLOSERVER_DATA_DIR");
+        std::string started;  // the service's instance, once it may run
+        Restore() = default;
+        Restore(const Restore&) = delete;
+        Restore& operator=(const Restore&) = delete;
+        Restore(Restore&&) = delete;
+        Restore& operator=(Restore&&) = delete;
+        ~Restore() {
+            std::string ignored;
+            if (!started.empty()) {
+                (void)stop_service(started, ignored);
+            }
+            set_env("FLOSERVER_INSTANCE", instance.value_or(""));
+            set_env("FLOSERVER_DATA_DIR", data_dir.value_or(""));
+        }
+    } restore;
     std::random_device rd;
     set_env("FLOSERVER_INSTANCE", "mcp-" + std::to_string(current_pid()) + "-" + std::to_string(rd() % 100000));
     const std::string instance = ipc::default_instance();
+    restore.started = instance;
     const test_util::TempDir data;
     set_env("FLOSERVER_DATA_DIR", path_to_utf8(data.path()));
 #ifdef _WIN32
@@ -720,7 +909,7 @@ TEST_CASE("the real flo mcp against the real service, over stdio") {
     INFO(second[2].dump());
     CHECK(second[2]["result"]["isError"] == false);
     CHECK(second[2]["result"]["structuredContent"]["floserver_json"]["php"] == "8.4");
-    CHECK(second[2]["result"]["structuredContent"]["floserver_json"]["secret_note"] == "[hidden]");
+    CHECK(second[2]["result"]["structuredContent"]["floserver_json"]["other_settings"] == json::array({"secret_note"}));
     CHECK(second[2].dump().find("keep out") == std::string::npos);
     CHECK(second[2].dump().find("never-shown") == std::string::npos);
     CHECK(second[3]["result"]["isError"] == false);
