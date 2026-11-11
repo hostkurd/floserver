@@ -62,7 +62,7 @@ TEST_CASE("Settings > Redis's words: the address, the masked password, the data 
     const RedisStatus s = *redis_status_from_reply(status_reply());
     CHECK(redis_address_text(s) == "127.0.0.1 : 6380");
     CHECK(redis_address_copy(s) == "127.0.0.1:6380");
-    CHECK(redis_password_mask().find("a") == std::string_view::npos);
+    CHECK(redis_password_mask().find('a') == std::string_view::npos);
     CHECK(redis_password_mask().size() == 36);  // twelve bullets, never the password's length
     CHECK(redis_data_text(s, Lang::En) == "42 keys \xC2\xB7 used by 3 projects");
     RedisStatus one = s;

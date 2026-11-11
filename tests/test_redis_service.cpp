@@ -105,7 +105,7 @@ std::string talk(Port port, const std::string& bytes, std::chrono::milliseconds 
                 ++replies;
             }
             std::size_t asked = 0;
-            for (std::size_t p = 0; (p = bytes.find("*", p)) != std::string::npos; ++p) {
+            for (std::size_t p = 0; (p = bytes.find('*', p)) != std::string::npos; ++p) {
                 if (p == 0 || bytes[p - 1] == '\n') {
                     ++asked;
                 }
@@ -142,7 +142,7 @@ std::string garnet_cmdlines(const fs::path& data) {
 
 void run_service_test(bool real) {
     const test_util::TempDir tmp;
-    const fs::path data = tmp.path();
+    const fs::path& data = tmp.path();
     if (!install_garnet(data, real)) {
         MESSAGE("no Garnet here (FLOSERVER_TEST_GARNET, FLOSERVER_TEST_DOTNET); skipped");
         return;
@@ -273,7 +273,7 @@ TEST_CASE("the real Garnet behind the service, when it's on this machine") {
 
 TEST_CASE("without .NET, or with the port taken, the status says why") {
     const test_util::TempDir tmp;
-    const fs::path data = tmp.path();
+    const fs::path& data = tmp.path();
     marker(runtimes_dir(data) / "garnet" / "2.2.4", "garnet", "2.2.4");
     test_util::write_file(runtimes_dir(data) / "garnet" / "2.2.4" / "GarnetServer.dll", "x");
     AppConfig app;

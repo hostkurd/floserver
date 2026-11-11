@@ -732,8 +732,11 @@ void RuntimeService::run(Job& job) {
         }
         const auto series = php_redis_series_of_variant(r.variant).value_or(r.variant);
         if (!fetch_install(job, r, base, error) && !job.cancel) {
-            notes.push_back("phpredis for PHP " + series + " couldn't be installed (" + error +
-                            "), so its projects use predis");
+            std::string note = "phpredis for PHP " + series;
+            note += " couldn't be installed (";
+            note += error;
+            note += "), so its projects use predis";
+            notes.push_back(std::move(note));
         }
         base += r.size;
     }

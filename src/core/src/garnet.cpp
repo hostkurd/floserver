@@ -415,7 +415,7 @@ std::optional<std::string> php_redis_series_of_file(std::string_view version, st
     if (dash == std::string_view::npos) {
         return std::nullopt;
     }
-    const std::string series(rest.substr(0, dash));
+    std::string series(rest.substr(0, dash));
     if (php_redis_file_name(version, series) != file) {
         return std::nullopt;
     }

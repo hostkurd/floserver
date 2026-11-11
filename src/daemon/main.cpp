@@ -1137,10 +1137,10 @@ struct Service {
                         env.push_back({key, value});
                     }
                     // And Redis when the project has it on (D30).
-                    if (parsed.config) {
-                        for (const auto& [key, value] : redis_env_lines(name, *parsed.config)) {
-                            env.push_back({key, value});
-                        }
+                    // (No floserver.json to read: the defaults, Redis off.)
+                    for (const auto& [key, value] :
+                         redis_env_lines(name, parsed.config.value_or(core::ProjectConfig{}))) {
+                        env.push_back({key, value});
                     }
                     result["env_style"] = laravel ? "laravel" : "flocms";
                     result["env"] = env;
@@ -1319,10 +1319,8 @@ struct Service {
         for (const auto& [key, value] : mail_env_lines(p->dir, parsed.config && parsed.config->python)) {
             env.push_back({key, value});
         }
-        if (parsed.config) {
-            for (const auto& [key, value] : redis_env_lines(name, *parsed.config)) {
-                env.push_back({key, value});  // D30
-            }
+        for (const auto& [key, value] : redis_env_lines(name, parsed.config.value_or(core::ProjectConfig{}))) {
+            env.push_back({key, value});  // D30
         }
         return protocol::make_result(r.id, {{"env", env}, {"env_file", core::path_to_utf8(p->dir / ".env")}});
     }
