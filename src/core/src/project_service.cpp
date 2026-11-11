@@ -690,7 +690,7 @@ std::optional<json> ProjectService::use(const std::string& name, const std::stri
     }
     const auto parsed_key = parse_config_key(key);
     if (!parsed_key || key == "mariadb") {
-        refusal = {"bad_params", "the key is php, node, python, database or web"};
+        refusal = {"bad_params", "the key is php, node, python, database, web or redis"};
         return std::nullopt;
     }
     const Project* project = find_project(*config, name);

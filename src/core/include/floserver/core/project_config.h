@@ -11,7 +11,8 @@
 //     "root": "public",
 //     "extensions": ["intl", "gd", "-exif"],
 //     "php_ini": {"memory_limit": "1024M"},
-//     "command": "npm run serve -- --port {port}"
+//     "command": "npm run serve -- --port {port}",
+//     "redis": true                  // D30: the shared Redis (Garnet), keys prefixed <name>_
 //   }
 //
 // Every key is optional. Unknown keys are kept as warnings, not errors, so a
@@ -61,6 +62,9 @@ struct ProjectConfig {
     // instead of what FloServer would pick; {port} is replaced by the
     // port to listen on, which is also in the PORT variable.
     std::optional<std::string> command;
+    // Redis (D30): the project uses the shared Garnet server; its .env lines
+    // get REDIS_* and its PHP loads phpredis where there's a build for it.
+    bool redis = false;
 
     bool operator==(const ProjectConfig&) const = default;
 };
@@ -101,10 +105,10 @@ find_project_config(const std::filesystem::path& start);
 inline constexpr std::string_view kProjectConfigFileName = "floserver.json";
 
 // The keys the window and `flo use` change one at a time.
-enum class ConfigKey : std::uint8_t { Php, Node, Python, Database, Web };
+enum class ConfigKey : std::uint8_t { Php, Node, Python, Database, Web, Redis };
 
 // "php", "node", "python", "database" (also "mariadb", as in `flo use
-// mariadb 11.4`), "web". Nothing for anything else.
+// mariadb 11.4`), "web", "redis". Nothing for anything else.
 [[nodiscard]] std::optional<ConfigKey> parse_config_key(std::string_view name);
 
 // Sets one key in the text of a floserver.json, keeping every other key and
@@ -112,7 +116,8 @@ enum class ConfigKey : std::uint8_t { Php, Node, Python, Database, Web };
 // (Version::parse), and "php" also takes "none" (written as false) and
 // "newest"; "database" takes "mariadb-11.4", and "mariadb" takes the
 // version alone; "web" takes "nginx" (the default, so the key is removed) or
-// "apache". Empty text is an empty file. Returns the new text, or nothing
+// "apache"; "redis" takes "on" (written as true) or "off" (the default, so
+// the key is removed). Empty text is an empty file. Returns the new text, or nothing
 // with `error` (plain English) when the old text or the new value is wrong.
 [[nodiscard]] std::optional<std::string> set_project_config_value(std::string_view text, ConfigKey key,
                                                                   std::string_view key_name,

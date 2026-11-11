@@ -2,6 +2,7 @@
 
 #include "floserver/core/paths.h"
 #include "floserver/core/downloader.h"
+#include "floserver/core/garnet.h"
 #include "floserver/core/mailpit.h"
 #include "floserver/core/runtime_store.h"
 #include "floserver/core/version.h"
@@ -60,6 +61,7 @@ struct RuntimeService::Job {
     std::int64_t id = 0;
     std::string name;
     std::string requested;
+    std::string variant;  // asked for (php-redis); empty: plain or NTS
     std::string version;
     std::string state = "queued";
     std::string message;
@@ -320,13 +322,17 @@ std::optional<std::vector<ProjectTemplate>> RuntimeService::offline_templates(st
 }
 
 std::optional<std::int64_t> RuntimeService::install(const std::string& name, const std::string& version,
-                                                    ServiceRefusal& refusal) {
+                                                    ServiceRefusal& refusal, const std::string& variant) {
     if (!is_runtime_name(name)) {
         refusal = {"bad_params", "\"" + name + "\" isn't a runtime name such as php, mariadb or node"};
         return std::nullopt;
     }
     if (!version.empty() && !Version::parse(version)) {
         refusal = {"bad_params", "\"" + version + "\" isn't a version such as 8.5 or 8.5.12"};
+        return std::nullopt;
+    }
+    if (!variant.empty() && !is_runtime_name(variant)) {
+        refusal = {"bad_params", "\"" + variant + "\" isn't a variant such as php8-4"};
         return std::nullopt;
     }
     if (!transport_) {
@@ -344,7 +350,8 @@ std::optional<std::int64_t> RuntimeService::install(const std::string& name, con
     }
     std::size_t waiting = 0;
     for (const auto& [id, job] : jobs_) {
-        if (job->name == name && job->requested == version && !is_finished(job->state) && !job->cancel) {
+        if (job->name == name && job->requested == version && job->variant == variant && !is_finished(job->state) &&
+            !job->cancel) {
             return id;
         }
         if (!is_finished(job->state)) {
@@ -359,6 +366,7 @@ std::optional<std::int64_t> RuntimeService::install(const std::string& name, con
     job->id = next_job_++;
     job->name = name;
     job->requested = version;
+    job->variant = variant;
     jobs_[job->id] = job;
     queue_.push_back(job);
 
@@ -465,6 +473,7 @@ json RuntimeService::describe(const Job& job) {
             {"kind", "install"},
             {"name", job.name},
             {"requested", job.requested},
+            {"variant", job.variant},
             {"version", job.version},
             {"state", job.state},
             {"received", job.received},
@@ -506,6 +515,106 @@ void RuntimeService::worker() {
     }
 }
 
+namespace {
+
+// The newest entry of `name` for this platform (or "any") matching `wanted`
+// and, when given, `variant` exactly; else only plain and NTS builds.
+// `offered` gets every version looked at.
+std::optional<RuntimeFile> pick_entry(const Manifest& manifest, const std::string& name, const std::string& platform,
+                                      const std::string& wanted_text, const std::string& variant,
+                                      std::vector<std::string>* offered = nullptr) {
+    const auto wanted = wanted_text.empty() ? std::optional<Version>() : Version::parse(wanted_text);
+    std::vector<RuntimeFile> candidates = runtimes_for(manifest, name, platform);
+    for (RuntimeFile& r : runtimes_for(manifest, name, "any")) {
+        candidates.push_back(std::move(r));
+    }
+    std::stable_sort(candidates.begin(), candidates.end(), [](const RuntimeFile& a, const RuntimeFile& b) {
+        return Version::parse(a.version).value_or(Version{}) > Version::parse(b.version).value_or(Version{});
+    });
+    std::optional<RuntimeFile> entry;
+    for (const RuntimeFile& r : candidates) {
+        const bool kind = variant.empty() ? (r.variant.empty() || r.variant == "nts") : r.variant == variant;
+        if (!kind || !runtime_version_allowed(r.name, r.version)) {
+            continue;  // a Mailpit with a known security problem is never installed
+        }
+        if (offered != nullptr) {
+            offered->push_back(r.version);
+        }
+        const auto v = Version::parse(r.version);
+        if (!entry && v && (!wanted || wanted->matches(*v))) {
+            entry = r;
+        }
+    }
+    return entry;
+}
+
+// The PHP series ("8.4") of the NTS PHP installs, oldest first, each once.
+std::vector<std::string> installed_php_series(const std::vector<InstalledRuntime>& installed) {
+    std::vector<std::string> out;
+    for (const InstalledRuntime& r : installed) {
+        if (r.name != "php" || (!r.variant.empty() && r.variant != "nts")) {
+            continue;
+        }
+        const auto v = Version::parse(r.version);
+        if (v && v->parts().size() >= 2) {
+            const std::string s = std::to_string(v->parts()[0]) + "." + std::to_string(v->parts()[1]);
+            if (std::find(out.begin(), out.end(), s) == out.end()) {
+                out.push_back(s);
+            }
+        }
+    }
+    std::sort(out.begin(), out.end(), [](const std::string& a, const std::string& b) {
+        return Version::parse(a).value_or(Version{}) < Version::parse(b).value_or(Version{});
+    });
+    return out;
+}
+
+}  // namespace
+
+bool RuntimeService::fetch_install(Job& job, const RuntimeFile& entry, std::uint64_t base, std::string& error,
+                                   fs::path* dir) {
+    const std::string folder = runtime_folder(entry);
+    if (folder.empty()) {
+        error = "the runtime list names " + entry.name + " in a way FloServer can't install";
+        return false;
+    }
+    set_state(job, "downloading");
+    const fs::path archive =
+        downloads_dir(config_.data_dir) / path_from_utf8(entry.name + "-" + folder + ".download");
+    DownloadOptions options;
+    options.progress = [&](const DownloadProgress& p) {
+        {
+            const std::lock_guard lock(jobs_mutex_);
+            job.received = base + p.received;
+        }
+        return !job.cancel.load();
+    };
+    options.cancel = &job.cancel;
+    const DownloadResult downloaded = download_file(*transport_, entry, archive, options);
+    if (downloaded.cancelled || job.cancel) {
+        std::error_code ignored;
+        fs::remove(archive, ignored);
+        error.clear();
+        return false;
+    }
+    if (!downloaded.ok) {
+        error = downloaded.message;
+        return false;
+    }
+    set_state(job, "installing");
+    const InstallResult installed = install_runtime(entry, archive, runtimes_root(), config_.vc_runtime_dir);
+    std::error_code ignored;
+    fs::remove(archive, ignored);
+    if (!installed.ok) {
+        error = installed.message;
+        return false;
+    }
+    if (dir != nullptr) {
+        *dir = installed.dir;
+    }
+    return true;
+}
+
 void RuntimeService::run(Job& job) {
     if (job.cancel) {
         set_state(job, "cancelled", "cancelled");
@@ -520,29 +629,13 @@ void RuntimeService::run(Job& job) {
     }
 
     // Newest first; PHP's thread-safe builds aren't what FloServer runs.
-    const auto wanted = job.requested.empty() ? std::optional<Version>() : Version::parse(job.requested);
-    std::optional<RuntimeFile> entry;
     std::vector<std::string> offered;
-    std::vector<RuntimeFile> candidates = runtimes_for(cached->manifest, job.name, config_.platform);
-    for (RuntimeFile& r : runtimes_for(cached->manifest, job.name, "any")) {
-        candidates.push_back(std::move(r));
-    }
-    std::stable_sort(candidates.begin(), candidates.end(), [](const RuntimeFile& a, const RuntimeFile& b) {
-        return Version::parse(a.version).value_or(Version{}) > Version::parse(b.version).value_or(Version{});
-    });
-    for (const RuntimeFile& r : candidates) {
-        if ((!r.variant.empty() && r.variant != "nts") || !runtime_version_allowed(r.name, r.version)) {
-            continue;  // a Mailpit with a known security problem is never installed
-        }
-        offered.push_back(r.version);
-        const auto v = Version::parse(r.version);
-        if (!entry && v && (!wanted || wanted->matches(*v))) {
-            entry = r;
-        }
-    }
+    const std::optional<RuntimeFile> entry =
+        pick_entry(cached->manifest, job.name, config_.platform, job.requested, job.variant, &offered);
     if (!entry) {
         std::string message = "the runtime list has no " + job.name +
-                              (job.requested.empty() ? "" : " " + job.requested) + " for " + config_.platform;
+                              (job.requested.empty() ? "" : " " + job.requested) +
+                              (job.variant.empty() ? "" : " (" + job.variant + ")") + " for " + config_.platform;
         if (!offered.empty()) {
             message += " (it has";
             for (const auto& v : offered) {
@@ -553,60 +646,103 @@ void RuntimeService::run(Job& job) {
         set_state(job, "failed", message);
         return;
     }
+    const fs::path root = runtimes_root();
+    const auto installed_now = list_installed(root);
+
+    // What comes with it (D30): for Garnet, the .NET runtime first (it
+    // can't run without it) and phpredis for each PHP series; for a PHP
+    // while Garnet is installed, its series' phpredis.
+    std::optional<RuntimeFile> dotnet;
+    std::vector<RuntimeFile> extras;  // phpredis builds: a failure is only noted
+    std::vector<std::string> notes;
+    const auto add_php_redis = [&](const std::string& series) {
+        if (const auto r = pick_entry(cached->manifest, std::string(kPhpRedisRuntime), config_.platform, "",
+                                      php_redis_variant(series))) {
+            if (!is_installed(root, *r)) {
+                extras.push_back(*r);
+            }
+        } else {
+            notes.push_back("there's no phpredis for PHP " + series + " in the runtime list, so its projects use predis");
+        }
+    };
+    if (job.name == kGarnetRuntime) {
+        dotnet = pick_entry(cached->manifest, std::string(kDotnetRuntime), config_.platform,
+                            std::string(kGarnetDotnetSeries), "");
+        if (!dotnet) {
+            set_state(job, "failed",
+                      "the runtime list has no .NET " + std::string(kGarnetDotnetSeries) + " runtime, which Garnet needs");
+            return;
+        }
+        if (is_installed(root, *dotnet)) {
+            dotnet.reset();
+        }
+        for (const std::string& series : installed_php_series(installed_now)) {
+            add_php_redis(series);
+        }
+    } else if (job.name == "php" && newest_garnet(installed_now) != nullptr) {
+        const auto v = Version::parse(entry->version);
+        if (v && v->parts().size() >= 2) {
+            add_php_redis(std::to_string(v->parts()[0]) + "." + std::to_string(v->parts()[1]));
+        }
+    }
+
+    const bool main_installed = is_installed(root, *entry);
     {
         const std::lock_guard lock(jobs_mutex_);
         job.version = entry->version;
-        job.total = entry->size;
-    }
-    const fs::path root = runtimes_root();
-    if (is_installed(root, *entry)) {
-        set_state(job, "done", job.name + " " + entry->version + " is already installed");
-        if (config_.installed) {
-            config_.installed(job.name, entry->version);  // an older one left by an update that stopped half-way
+        job.total = (main_installed ? 0 : entry->size) + (dotnet ? dotnet->size : 0);
+        for (const RuntimeFile& r : extras) {
+            job.total += r.size;
         }
-        return;
     }
-
-    const std::string folder = runtime_folder(*entry);
-    if (folder.empty()) {
-        set_state(job, "failed", "the runtime list names " + job.name + " in a way FloServer can't install");
-        return;
-    }
-    set_state(job, "downloading");
-    const fs::path archive =
-        downloads_dir(config_.data_dir) / path_from_utf8(entry->name + "-" + folder + ".download");
-    DownloadOptions options;
-    options.progress = [&](const DownloadProgress& p) {
-        {
-            const std::lock_guard lock(jobs_mutex_);
-            job.received = p.received;
+    std::uint64_t base = 0;
+    const auto cancelled = [&] {
+        if (job.cancel) {
+            set_state(job, "cancelled", "cancelled");
+            return true;
         }
-        return !job.cancel.load();
+        return false;
     };
-    options.cancel = &job.cancel;
-    const DownloadResult downloaded = download_file(*transport_, *entry, archive, options);
-    if (downloaded.cancelled || job.cancel) {
-        std::error_code ignored;
-        fs::remove(archive, ignored);
-        set_state(job, "cancelled", "cancelled");
-        return;
+    if (dotnet) {
+        if (!fetch_install(job, *dotnet, base, error)) {
+            if (!cancelled()) {
+                set_state(job, "failed", "the .NET runtime Garnet needs couldn't be installed: " + error);
+            }
+            return;
+        }
+        base += dotnet->size;
     }
-    if (!downloaded.ok) {
-        set_state(job, "failed", downloaded.message);
-        return;
+    std::string done_message;
+    if (main_installed) {
+        done_message = job.name + " " + entry->version + " is already installed";
+    } else {
+        fs::path dir;
+        if (!fetch_install(job, *entry, base, error, &dir)) {
+            if (!cancelled()) {
+                set_state(job, "failed", error);
+            }
+            return;
+        }
+        base += entry->size;
+        done_message = job.name + " " + entry->version + " is installed in " + path_to_utf8(dir);
     }
-
-    set_state(job, "installing");
-    const InstallResult installed = install_runtime(*entry, archive, root, config_.vc_runtime_dir);
-    std::error_code ignored;
-    fs::remove(archive, ignored);
-    if (!installed.ok) {
-        set_state(job, "failed", installed.message);
-        return;
+    for (const RuntimeFile& r : extras) {
+        if (job.cancel) {
+            break;  // the main install is done: what's left comes with the next install
+        }
+        const auto series = php_redis_series_of_variant(r.variant).value_or(r.variant);
+        if (!fetch_install(job, r, base, error) && !job.cancel) {
+            notes.push_back("phpredis for PHP " + series + " couldn't be installed (" + error +
+                            "), so its projects use predis");
+        }
+        base += r.size;
     }
-    set_state(job, "done", job.name + " " + entry->version + " is installed in " + path_to_utf8(installed.dir));
+    for (const std::string& n : notes) {
+        done_message += "; " + n;
+    }
+    set_state(job, "done", done_message);
     if (config_.installed) {
-        config_.installed(job.name, entry->version);
+        config_.installed(job.name, entry->version);  // an older one left by an update that stopped half-way, too
     }
 }
 

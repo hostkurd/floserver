@@ -340,8 +340,11 @@ std::string php_settings_key(const PhpIniSettings& settings) {
     for (const std::string& e : settings.extensions) {
         key += "+" + e;
     }
+    if (!settings.redis_extension.empty()) {
+        key += "+redis";
+    }
     if (settings.removed.empty() && settings.series_ini.empty() && settings.custom_ini.empty() &&
-        settings.project_ini.empty() && settings.mail_ini.empty()) {
+        settings.project_ini.empty() && settings.mail_ini.empty() && settings.redis_extension.empty()) {
         return key;  // as before D20: pools without settings keep their keys
     }
     // Length-prefixed, so no two different settings give the same text.
@@ -374,6 +377,12 @@ std::string php_settings_key(const PhpIniSettings& settings) {
             add(k);
             add(v);
         }
+    }
+    // The DLL's path: a new phpredis install restarts the pool.
+    if (!settings.redis_extension.empty()) {
+        add("redis");
+        const std::u8string path = settings.redis_extension.u8string();
+        add(std::string(path.begin(), path.end()));
     }
     Sha256 hash;
     hash.update(text);

@@ -133,6 +133,11 @@ PhpIniResult make_php_ini(const fs::path& php_dir, const PhpIniSettings& setting
         // Xdebug hooks into the engine, so it loads as a Zend extension.
         ini << (e == "xdebug" ? "zend_extension = " : "extension = ") << e << "\n";
     }
+    if (!settings.redis_extension.empty()) {
+        // phpredis (D30): FloServer's copy, by full path, outside the PHP
+        // install so a PHP update keeps it.
+        ini << "extension = " << ini_path(settings.redis_extension) << "\n";
+    }
 #else
     // Extensions come with the build here (the system's packages, or the
     // static builds of D5), so none are named.
