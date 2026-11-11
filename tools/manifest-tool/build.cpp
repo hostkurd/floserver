@@ -38,7 +38,7 @@ struct CatalogEntry {
 
 // The runtimes FloServer 1.0 knows (Windows x64). Add a row here before
 // publishing a new kind of runtime.
-constexpr std::array<CatalogEntry, 10> kCatalog = {{
+constexpr std::array<CatalogEntry, 13> kCatalog = {{
     {"php", R"(php-{v}(-\d+)?-Win32-vs1[67]-x64\.zip)", "PHP-3.01", "windows-x64", "nts", R"(php-{v}(-\d+)?-nts-Win32-vs1[67]-x64\.zip)",
      "https://downloads.php.net/~windows/releases/archives/{file}"},
     {"mariadb", "", "GPL-2.0", "windows-x64", "", R"(mariadb-{v}-winx64\.zip)",
@@ -61,6 +61,18 @@ constexpr std::array<CatalogEntry, 10> kCatalog = {{
     // Mailpit (an optional tool, D27): one Go program; its other builds aren't listed.
     {"mailpit", R"(mailpit-(windows-arm64\.zip|(linux|darwin)-[a-z0-9]+\.tar\.gz))", "MIT", "windows-x64", "",
      R"(mailpit-windows-amd64\.zip)", "https://github.com/axllent/mailpit/releases/download/v{v}/{file}"},
+    // Bun (D31): one program. Two files of one release are listed, the regular
+    // build and the "baseline" one for a CPU without AVX2; the installer picks
+    // by CPU feature. Its other platforms (FreeBSD and Android too) and profile
+    // builds aren't listed.
+    {"bun", R"(bun-[a-z0-9-]+\.zip)", "MIT", "windows-x64", "", R"(bun-windows-x64\.zip)",
+     "https://github.com/oven-sh/bun/releases/download/bun-v{v}/{file}"},
+    {"bun", "", "MIT", "windows-x64", "baseline", R"(bun-windows-x64-baseline\.zip)",
+     "https://github.com/oven-sh/bun/releases/download/bun-v{v}/{file}"},
+    // Deno (D31): one program; its other builds (and denort, the compile
+    // runtime) aren't listed.
+    {"deno", R"(denort?-[a-z0-9_]+-[a-z0-9-]+\.zip)", "MIT", "windows-x64", "", R"(deno-x86_64-pc-windows-msvc\.zip)",
+     "https://github.com/denoland/deno/releases/download/v{v}/{file}"},
 }};
 
 std::string join(std::initializer_list<std::string_view> parts) {
@@ -203,8 +215,10 @@ Classified classify(const std::string& path) {
         }
         return c;
     }
-    const auto entry = std::find_if(kCatalog.begin(), kCatalog.end(),
-                                     [&](const CatalogEntry& e) { return e.name == name; });
+    // A runtime may have several rows (Bun's regular and baseline builds): the
+    // one whose file name pattern matches, else the first, for its messages.
+    const auto named = [&](const CatalogEntry& e) { return e.name == name; };
+    auto entry = std::find_if(kCatalog.begin(), kCatalog.end(), named);
     if (entry == kCatalog.end()) {
         c.message = join({path, ": \"", name, "\" isn't a runtime FloServer knows; add it to the catalog"});
         return c;
@@ -213,9 +227,18 @@ Classified classify(const std::string& path) {
         c.message = join({path, ": \"", version, "\" isn't a version folder such as 8.5.12"});
         return c;
     }
-    const std::regex pattern(
-        replace_all(std::string(entry->file_pattern), "{v}", regex_escape(version)));
-    if (!std::regex_match(file, pattern)) {
+    const auto pattern_of = [&version](const CatalogEntry& e) {
+        return std::regex(replace_all(std::string(e.file_pattern), "{v}", regex_escape(version)));
+    };
+    const auto first_row = entry;
+    for (auto row = entry; row != kCatalog.end(); row = std::find_if(row + 1, kCatalog.end(), named)) {
+        if (std::regex_match(file, pattern_of(*row))) {
+            entry = row;
+            break;
+        }
+    }
+    if (!std::regex_match(file, pattern_of(*entry))) {
+        entry = first_row;
         const bool source = file.ends_with(".tar.gz") || file.ends_with(".tar.xz");
         const bool other_build =
             !entry->other_builds.empty() &&
@@ -232,6 +255,7 @@ Classified classify(const std::string& path) {
         return c;
     }
     c.entry = &*entry;
+    c.parts.variant = std::string(entry->variant);
     return c;
 }
 
@@ -393,7 +417,7 @@ BuildResult build_manifest(std::string_view report_json, const BuildOptions& opt
             fail(path + ": the report has no valid sha256");
             continue;
         }
-        if (!seen_runtimes.insert(join({name, "/", version, "/", entry->platform})).second) {
+        if (!seen_runtimes.insert(join({name, "/", version, "/", entry->platform, "/", entry->variant})).second) {
             fail(path + ": a second file for the same runtime and version");
             continue;
         }

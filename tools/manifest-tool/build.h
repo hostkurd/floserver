@@ -59,6 +59,7 @@ struct CdnPath {
     std::string runtime;
     std::string version;
     std::string file;
+    std::string variant;    // the catalog's, such as Bun's "baseline"; empty for most
     bool listable = false;  // the list can carry it
     std::string problem;    // why not, when it can't ("<path>: ...")
 };

@@ -9,7 +9,10 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
+#include <cctype>
 #include <fstream>
+#include <span>
 #include <system_error>
 #include <thread>
 
@@ -95,11 +98,11 @@ void set_environment(ChildOptions& o, const AppSpec& app, Port port) {
         if (const auto py = python_program(app.runtime_dir)) {
             first.push_back(path_to_utf8(py->parent_path()));
         }
-        if (const auto node = app.node_dir.empty() ? std::nullopt : node_program(app.node_dir)) {
-            first.push_back(path_to_utf8(node->parent_path()));
+        if (const auto js = app.node_dir.empty() ? std::nullopt : js_program(app.tools_name, app.node_dir)) {
+            first.push_back(path_to_utf8(js->parent_path()));
         }
-    } else if (const auto node = node_program(app.runtime_dir)) {
-        first.push_back(path_to_utf8(node->parent_path()));
+    } else if (const auto js = js_program(app_runtime_name(app.kind), app.runtime_dir)) {
+        first.push_back(path_to_utf8(js->parent_path()));
     }
     std::string path;
     for (const std::string& p : first) {
@@ -119,6 +122,11 @@ void set_environment(ChildOptions& o, const AppSpec& app, Port port) {
              {"NO_COLOR", "1"},
              {"FORCE_COLOR", "0"},
              {"PATH", path}};
+    if (app.kind == AppKind::Bun) {
+        o.env.emplace_back("BUN_CONFIG_NO_CLEAR_TERMINAL_ON_RELOAD", "true");  // no screen-clearing codes in the log
+    } else if (app.kind == AppKind::Deno) {
+        o.env.emplace_back("DENO_NO_UPDATE_CHECK", "1");  // never a message about a newer Deno
+    }
     if (app.kind == AppKind::Python) {
         o.env.emplace_back("VIRTUAL_ENV", path_to_utf8(venv_dir(app)));
         o.env.emplace_back("PYTHONUNBUFFERED", "1");  // the log shows output as it comes
@@ -211,8 +219,10 @@ std::optional<AppLaunch> python_launch(const AppSpec& app, Port port, std::strin
     return std::nullopt;
 }
 
+}  // namespace
+
 // package.json lists packages and node_modules isn't there yet.
-bool needs_npm_install(const fs::path& dir) {
+bool needs_package_install(const fs::path& dir) {
     std::error_code ec;
     if (fs::exists(dir / "node_modules", ec) || !is_file(dir / "package.json")) {
         return false;
@@ -230,6 +240,8 @@ bool needs_npm_install(const fs::path& dir) {
     }
     return false;
 }
+
+namespace {
 
 std::string replace_all(std::string text, std::string_view from, const std::string& to) {
     for (std::size_t at = text.find(from); at != std::string::npos; at = text.find(from, at + to.size())) {
@@ -256,6 +268,34 @@ std::optional<fs::path> npm_script(const fs::path& node_dir) {
     fs::path p = node_dir / "lib" / "node_modules" / "npm" / "bin" / "npm-cli.js";
 #endif
     return is_file(p) ? std::optional<fs::path>(std::move(p)) : std::nullopt;
+}
+
+std::optional<fs::path> bun_program(const fs::path& bun_dir) {
+#ifdef _WIN32
+    fs::path p = bun_dir / "bun.exe";
+#else
+    fs::path p = bun_dir / "bun";
+#endif
+    return is_file(p) ? std::optional<fs::path>(std::move(p)) : std::nullopt;
+}
+
+std::optional<fs::path> deno_program(const fs::path& deno_dir) {
+#ifdef _WIN32
+    fs::path p = deno_dir / "deno.exe";
+#else
+    fs::path p = deno_dir / "deno";
+#endif
+    return is_file(p) ? std::optional<fs::path>(std::move(p)) : std::nullopt;
+}
+
+std::optional<fs::path> js_program(std::string_view runtime, const fs::path& dir) {
+    if (runtime == "bun") {
+        return bun_program(dir);
+    }
+    if (runtime == "deno") {
+        return deno_program(dir);
+    }
+    return node_program(dir);
 }
 
 std::vector<std::string> port_arguments(const std::string& script, Port port) {
@@ -319,8 +359,11 @@ std::optional<std::vector<AppSetupStep>> app_setup(const AppSpec& app, Port port
     if (app.kind == AppKind::Apache) {
         return steps;  // its config is written as it starts (app_launch)
     }
+    if (app.kind == AppKind::Bun || app.kind == AppKind::Deno) {
+        return steps;  // packages are the project's own to install (`bun install`, `deno install`)
+    }
     if (app.kind == AppKind::Node) {
-        if (!needs_npm_install(app.dir)) {
+        if (!needs_package_install(app.dir)) {
             return steps;
         }
         const auto node = node_program(app.runtime_dir);
@@ -430,6 +473,189 @@ std::optional<std::vector<AppSetupStep>> app_setup(const AppSpec& app, Port port
     return steps;
 }
 
+namespace {
+
+// The first of `names` that is a file in the project.
+std::optional<std::string> first_entry(const fs::path& dir, std::span<const char* const> names) {
+    for (const char* name : names) {
+        if (is_file(dir / path_from_utf8(name))) {
+            return std::string(name);
+        }
+    }
+    return std::nullopt;
+}
+
+std::string list_names(std::span<const char* const> names) {
+    std::string out;
+    for (const char* name : names) {
+        out += (out.empty() ? "" : ", ") + std::string(name);
+    }
+    return out;
+}
+
+// deno.jsonc may end a list or object with a comma, which JSON doesn't allow
+// and nlohmann::json can't skip: those commas (outside strings and comments)
+// are taken out.
+std::string without_trailing_commas(const std::string& text) {
+    std::string out;
+    out.reserve(text.size());
+    bool in_string = false;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        if (in_string) {
+            out += c;
+            if (c == '\\' && i + 1 < text.size()) {
+                out += text[++i];
+            } else if (c == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+        if (c == '"') {
+            in_string = true;
+        } else if (c == '/' && i + 1 < text.size() && (text[i + 1] == '/' || text[i + 1] == '*')) {
+            const bool line = text[i + 1] == '/';
+            const std::size_t end = line ? text.find('\n', i) : text.find("*/", i + 2);
+            const std::size_t stop = end == std::string::npos ? text.size() : (line ? end : end + 2);
+            out.append(text, i, stop - i);
+            i = stop - 1;
+            continue;
+        } else if (c == ',') {
+            // Is the next thing, past spaces and comments, a closing bracket?
+            std::size_t j = i + 1;
+            while (j < text.size()) {
+                if (std::isspace(static_cast<unsigned char>(text[j])) != 0) {
+                    ++j;
+                } else if (text.compare(j, 2, "//") == 0) {
+                    const std::size_t end = text.find('\n', j);
+                    j = end == std::string::npos ? text.size() : end;
+                } else if (text.compare(j, 2, "/*") == 0) {
+                    const std::size_t end = text.find("*/", j + 2);
+                    j = end == std::string::npos ? text.size() : end + 2;
+                } else {
+                    break;
+                }
+            }
+            if (j < text.size() && (text[j] == '}' || text[j] == ']')) {
+                continue;  // a trailing comma
+            }
+        }
+        out += c;
+    }
+    return out;
+}
+
+// "dev" scripts or tasks: a string, or (deno.json) an object with "command".
+std::optional<std::string> script_text(const json& scripts, const char* name) {
+    if (!scripts.is_object() || !scripts.contains(name)) {
+        return std::nullopt;
+    }
+    const json& one = scripts.at(name);
+    if (one.is_string()) {
+        return one.get<std::string>();
+    }
+    if (one.is_object() && one.contains("command") && one.at("command").is_string()) {
+        return one.at("command").get<std::string>();
+    }
+    return std::nullopt;
+}
+
+// `extra` after the script, as `npm run dev -- --port N` has it; Bun and
+// Deno take them straight after the script's name.
+void add_port_arguments(AppLaunch& launch, const std::string& script, Port port, bool separator) {
+    const auto extra = port_arguments(script, port);
+    if (extra.empty()) {
+        return;
+    }
+    if (separator) {
+        launch.options.args.emplace_back("--");
+        launch.shown += " --";
+    }
+    for (const std::string& a : extra) {
+        launch.options.args.push_back(a);
+        launch.shown += " " + a;
+    }
+}
+
+constexpr std::array<const char*, 6> kBunEntries = {"index.ts",     "index.js",     "server.ts",
+                                                    "server.js",    "src/index.ts", "src/index.js"};
+constexpr std::array<const char*, 4> kDenoEntries = {"main.ts", "server.ts", "main.js", "src/main.ts"};
+
+// Bun (D31): `bun run dev` when package.json has a "dev" script, else
+// `bun --hot` on the first entry file.
+std::optional<AppLaunch> bun_launch(AppLaunch launch, const AppSpec& app, Port port, std::string& error) {
+    const auto program = bun_program(app.runtime_dir);
+    if (!program) {
+        error = "bun is missing from " + path_to_utf8(app.runtime_dir);
+        return std::nullopt;
+    }
+    launch.options.program = *program;
+    const fs::path package = app.dir / "package.json";
+    if (is_file(package)) {
+        const auto text = read_small_file(package, kMaxPackageJson);
+        const json doc = text ? json::parse(*text, nullptr, false) : json();
+        if (!doc.is_object()) {
+            error = "package.json can't be read or isn't valid JSON";
+            return std::nullopt;
+        }
+        if (const auto dev = doc.contains("scripts") ? script_text(doc.at("scripts"), "dev") : std::nullopt) {
+            launch.options.args = {"run", "dev"};
+            launch.shown = "bun run dev";
+            add_port_arguments(launch, *dev, port, false);
+            return launch;
+        }
+    }
+    if (const auto entry = first_entry(app.dir, kBunEntries)) {
+        launch.options.args = {"--hot", *entry};
+        launch.shown = "bun --hot " + *entry;
+        return launch;
+    }
+    error = "FloServer can't tell how to start this Bun project (no \"dev\" script in package.json, and none of " +
+            list_names(kBunEntries) + "); add one, or a \"command\" in floserver.json";
+    return std::nullopt;
+}
+
+// Deno (D31): `deno task dev` when deno.json or deno.jsonc has a "dev" task,
+// else `deno run --watch` on the first entry file, with only the permissions
+// a web server needs.
+std::optional<AppLaunch> deno_launch(AppLaunch launch, const AppSpec& app, Port port, std::string& error) {
+    const auto program = deno_program(app.runtime_dir);
+    if (!program) {
+        error = "deno is missing from " + path_to_utf8(app.runtime_dir);
+        return std::nullopt;
+    }
+    launch.options.program = *program;
+    for (const char* file : {"deno.json", "deno.jsonc"}) {
+        const fs::path config = app.dir / file;
+        if (!is_file(config)) {
+            continue;
+        }
+        const auto text = read_small_file(config, kMaxPackageJson);
+        // deno.jsonc has comments and may end lists with a comma.
+        const json doc = text ? json::parse(without_trailing_commas(*text), nullptr, false, true) : json();
+        if (!doc.is_object()) {
+            error = std::string(file) + " can't be read or isn't valid JSON";
+            return std::nullopt;
+        }
+        if (const auto dev = doc.contains("tasks") ? script_text(doc.at("tasks"), "dev") : std::nullopt) {
+            launch.options.args = {"task", "dev"};
+            launch.shown = "deno task dev";
+            add_port_arguments(launch, *dev, port, false);
+            return launch;
+        }
+    }
+    if (const auto entry = first_entry(app.dir, kDenoEntries)) {
+        launch.options.args = {"run", "--watch", "--allow-net", "--allow-read", "--allow-env", *entry};
+        launch.shown = "deno run --watch --allow-net --allow-read --allow-env " + *entry;
+        return launch;
+    }
+    error = "FloServer can't tell how to start this Deno project (no \"dev\" task in deno.json or deno.jsonc, and "
+            "none of " + list_names(kDenoEntries) + "); add one, or a \"command\" in floserver.json";
+    return std::nullopt;
+}
+
+}  // namespace
+
 std::optional<AppLaunch> app_launch(const AppSpec& app, Port port, std::string& error) {
     AppLaunch launch;
     set_environment(launch.options, app, port);
@@ -473,6 +699,12 @@ std::optional<AppLaunch> app_launch(const AppSpec& app, Port port, std::string& 
     if (app.kind == AppKind::Python) {
         return python_launch(app, port, error);
     }
+    if (app.kind == AppKind::Bun) {
+        return bun_launch(std::move(launch), app, port, error);
+    }
+    if (app.kind == AppKind::Deno) {
+        return deno_launch(std::move(launch), app, port, error);
+    }
     const fs::path package = app.dir / "package.json";
     const auto text = is_file(package) ? read_small_file(package, kMaxPackageJson) : std::nullopt;
     if (!text) {
@@ -508,14 +740,7 @@ std::optional<AppLaunch> app_launch(const AppSpec& app, Port port, std::string& 
     launch.options.program = *node;
     launch.options.args = {path_to_utf8(*npm), "run", script_name};
     launch.shown = "npm run " + script_name;
-    if (const auto extra = port_arguments(script, port); !extra.empty()) {
-        launch.options.args.emplace_back("--");
-        launch.shown += " --";
-        for (const std::string& a : extra) {
-            launch.options.args.push_back(a);
-            launch.shown += " " + a;
-        }
-    }
+    add_port_arguments(launch, script, port, true);
     return launch;
 }
 

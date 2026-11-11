@@ -1,7 +1,8 @@
 #pragma once
 
 // A project that runs its own server, which nginx forwards the project's
-// address to: a Node dev server (D11) or a Python app's (D17).
+// address to: a Node dev server (D11), a Python app's (D17), or a Bun or
+// Deno one (D31).
 //
 // A dev server binds its own port and can't be handed a listening socket the
 // way php-cgi is (Q1), so it sleeps the way MariaDB does: the service holds
@@ -24,7 +25,15 @@
 // How it starts: "command" from floserver.json, run by the system's shell
 // (for Python with .venv first on PATH); else, for Node, package.json's
 // "dev" script, else its "start" script, through the npm that comes with the
-// project's Node; for Python, Django (manage.py runserver), FastAPI (uvicorn
+// project's Node; for Bun, `bun run dev` when package.json has a "dev" script,
+// else `bun --hot` on the first of index.ts, index.js, server.ts, server.js,
+// src/index.ts, src/index.js; for Deno, `deno task dev` when deno.json or
+// deno.jsonc has a "dev" task, else `deno run --watch --allow-net
+// --allow-read --allow-env` on the first of main.ts, server.ts, main.js,
+// src/main.ts (only the permissions a web server needs, not -A). Bun and Deno
+// install no packages themselves: `bun install` and `deno install` are the
+// project's to run (the window says when node_modules is missing for Bun).
+// For Python, Django (manage.py runserver), FastAPI (uvicorn
 // with --reload, the app in main.py, app/main.py or app.py) or Flask (flask
 // run --debug, the app in app.py or wsgi.py). The port to listen on is in PORT
 // (HOST is 127.0.0.1); for dev servers known to ignore PORT (Vite, Next.js,
@@ -52,6 +61,16 @@
 namespace floserver::core {
 
 inline constexpr Port kFirstAppInternalPort = 9600;
+
+// The bun program in a Bun install, the deno program in a Deno install, and
+// the JavaScript runtime's program by its name ("node", "bun" or "deno").
+[[nodiscard]] std::optional<std::filesystem::path> bun_program(const std::filesystem::path& bun_dir);
+[[nodiscard]] std::optional<std::filesystem::path> deno_program(const std::filesystem::path& deno_dir);
+[[nodiscard]] std::optional<std::filesystem::path> js_program(std::string_view runtime,
+                                                              const std::filesystem::path& dir);
+// package.json lists packages and node_modules isn't there yet (what `npm
+// install` or `bun install` would fix).
+[[nodiscard]] bool needs_package_install(const std::filesystem::path& dir);
 
 // The node program and npm's script in a Node install.
 [[nodiscard]] std::optional<std::filesystem::path> node_program(const std::filesystem::path& node_dir);

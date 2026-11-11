@@ -2,6 +2,7 @@
 
 #include "floserver/core/shared_sites.h"
 
+#include "floserver/core/app_runner.h"
 #include "floserver/core/database_service.h"  // kFirstInternalDatabasePort
 #include "floserver/core/mailpit.h"
 #include "floserver/core/mariadb.h"
@@ -77,9 +78,14 @@ json site_json(const Project& project, const PlannedSite& site, const WebPlan& p
     }
     if (site.app) {
         const AppSpec& app = plan.apps.at(*site.app);
-        out[app.kind == AppKind::Python ? "python" : "node"] = app.version;
+        out[app_runtime_name(app.kind)] = app.version;
         if (!app.node_version.empty()) {
-            out["node"] = app.node_version;
+            out[app.tools_name] = app.node_version;
+        }
+        // Bun runs the project's packages from node_modules, which `bun
+        // install` makes: the window says so (FloServer installs nothing).
+        if (app.kind == AppKind::Bun && needs_package_install(app.dir)) {
+            out["packages_missing"] = "bun install";
         }
     }
     if (!site.problem.empty()) {
@@ -101,6 +107,12 @@ json site_json(const Project& project, const PlannedSite& site, const WebPlan& p
         }
         if (c.node) {
             wants["node"] = *c.node;
+        }
+        if (c.bun) {
+            wants["bun"] = *c.bun;
+        }
+        if (c.deno) {
+            wants["deno"] = *c.deno;
         }
         if (c.python) {
             wants["python"] = *c.python;
@@ -690,7 +702,7 @@ std::optional<json> ProjectService::use(const std::string& name, const std::stri
     }
     const auto parsed_key = parse_config_key(key);
     if (!parsed_key || key == "mariadb") {
-        refusal = {"bad_params", "the key is php, node, python, database or web"};
+        refusal = {"bad_params", "the key is php, node, bun, deno, javascript, python, database or web"};
         return std::nullopt;
     }
     const Project* project = find_project(*config, name);

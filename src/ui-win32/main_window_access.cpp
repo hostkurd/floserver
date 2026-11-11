@@ -519,7 +519,7 @@ void MainWindow::add_panel_access(AccessTree& t) const {
         picker.target = target(Part::PanelField, index);
         add(std::move(picker), g.fields[i].second);
     }
-    words("php-note", php_off_note(*row, lang_), g.php_note);
+    words("php-note", field_note(*row, lang_), g.php_note);
     words("saved-in", fill(lang_, Str::SavedIn, {core::kProjectConfigFileName}), g.saved_in);
     if (shown(g.keep_switch)) {
         const bool keep = keep_value(*row);

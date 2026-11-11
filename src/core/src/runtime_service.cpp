@@ -1,5 +1,6 @@
 #include "floserver/core/runtime_service.h"
 
+#include "floserver/core/cpu_features.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/downloader.h"
 #include "floserver/core/mailpit.h"
@@ -37,6 +38,20 @@ bool runs_on(const RuntimeFile& r, std::string_view platform) {
     return r.platform == platform || r.platform == "any";
 }
 
+// Whether FloServer installs this entry of the list here: PHP's usual (NTS)
+// build, a runtime with no variant, never a Mailpit with a known security
+// problem; Bun's regular build on a CPU with AVX2 and its "baseline" build on
+// one without (D31).
+bool installable(const RuntimeFile& r, bool avx2) {
+    if (!runtime_version_allowed(r.name, r.version)) {
+        return false;
+    }
+    if (r.name == "bun") {
+        return r.variant == (avx2 ? "" : "baseline");
+    }
+    return r.variant.empty() || r.variant == "nts";
+}
+
 bool is_finished(std::string_view state) {
     return state == "done" || state == "failed" || state == "cancelled";
 }
@@ -72,6 +87,9 @@ RuntimeService::RuntimeService(RuntimeServiceConfig config, std::shared_ptr<Http
     : config_(std::move(config)), transport_(std::move(transport)) {
     if (!config_.now) {
         config_.now = system_now;
+    }
+    if (!config_.has_avx2) {
+        config_.has_avx2 = cpu_has_avx2;
     }
     // No install can be running yet: clear what a crash may have left.
     remove_leftovers(runtimes_root());
@@ -224,8 +242,9 @@ json RuntimeService::list(bool refresh, bool installed_only, bool cached_only) {
                    {"key", cached->key_id},
                    {"warnings", cached->warnings}};
     for (const RuntimeFile& r : cached->manifest.runtimes) {
-        if (!runs_on(r, config_.platform) || !runtime_version_allowed(r.name, r.version)) {
-            continue;
+        if (!runs_on(r, config_.platform) || !runtime_version_allowed(r.name, r.version) ||
+            (r.name == "bun" && !installable(r, config_.has_avx2()))) {
+            continue;  // Bun: the build this CPU runs, not both
         }
         out["available"].push_back({{"name", r.name},
                                     {"version", r.version},
@@ -530,8 +549,9 @@ void RuntimeService::run(Job& job) {
     std::stable_sort(candidates.begin(), candidates.end(), [](const RuntimeFile& a, const RuntimeFile& b) {
         return Version::parse(a.version).value_or(Version{}) > Version::parse(b.version).value_or(Version{});
     });
+    const bool avx2 = config_.has_avx2();
     for (const RuntimeFile& r : candidates) {
-        if ((!r.variant.empty() && r.variant != "nts") || !runtime_version_allowed(r.name, r.version)) {
+        if (!installable(r, avx2)) {
             continue;  // a Mailpit with a known security problem is never installed
         }
         offered.push_back(r.version);

@@ -39,8 +39,12 @@ const json& array_of(const json& j, const char* key) {
     return j.is_object() && j.contains(key) && j[key].is_array() ? j[key] : kEmpty;
 }
 
-// Only PHP's usual build is offered (the service installs nothing else).
+// Only PHP's usual build is offered (the service installs nothing else), and
+// for Bun the build its CPU runs: "baseline" when it has no AVX2 (D31).
 bool usual_variant(const std::string& variant) { return variant.empty() || variant == "nts"; }
+bool offered_variant(const std::string& name, const std::string& variant) {
+    return usual_variant(variant) || (name == "bun" && variant == "baseline");
+}
 
 std::string folder_of(const std::string& version, const std::string& variant) {
     return usual_variant(variant) ? version : version + "-" + variant;
@@ -52,8 +56,8 @@ struct Spec {
     bool picker;
 };
 // The groups in order; Web servers (nginx and Apache) go in after the wide ones.
-constexpr std::array kGroups{Spec{"php", true, true}, Spec{"mariadb", true, true}, Spec{"node", false, false},
-                             Spec{"python", false, false}};
+constexpr std::array kGroups{Spec{"php", true, true},   Spec{"mariadb", true, true}, Spec{"node", false, false},
+                             Spec{"bun", false, false}, Spec{"deno", false, false},  Spec{"python", false, false}};
 
 // "3 projects · Shared sites" and who they are, from a used_by list.
 void describe_users(const json& used_by, RuntimeRow& row, Lang lang) {
@@ -255,7 +259,7 @@ RuntimesPage runtimes_page(const json& reply, const Installed* installed, const 
             const std::string name = text_of(r, "name");
             const std::string version = text_of(r, "version");
             const std::string variant = text_of(r, "variant");
-            if (name.empty() || version.empty() || !usual_variant(variant)) {
+            if (name.empty() || version.empty() || !offered_variant(name, variant)) {
                 continue;
             }
             RuntimeRow& row = rows[name][folder_of(version, variant)];

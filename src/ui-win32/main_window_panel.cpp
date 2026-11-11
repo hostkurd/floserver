@@ -436,7 +436,7 @@ MainWindow::PanelGeometry MainWindow::panel_geometry(HDC dc) const {
         }
         const int lines = static_cast<int>((fields_.size() + 1) / 2);
         y += lines * cell_h + std::max(0, lines - 1) * px(kFieldGap);
-        if (!php_off_note(*row, lang_).empty()) {
+        if (!field_note(*row, lang_).empty()) {
             g.php_note = {x0, y + px(6), x1, y + px(6) + px(32)};  // two lines at most
             y = g.php_note.bottom;
         }
@@ -1023,8 +1023,8 @@ void MainWindow::open_folder(const std::string& path) {
 }
 
 // Windows Terminal when it's there, else Command Prompt, in the project's
-// folder, with FloServer's shims first on Path (D10) so php, node, composer
-// and python are the project's versions.
+// folder, with FloServer's shims first on Path (D10) so php, node, bun, deno,
+// composer and python are the project's versions.
 void MainWindow::open_terminal(const std::string& path) {
     const auto folder = existing_folder(path);
     if (!folder) {
@@ -1407,7 +1407,7 @@ void MainWindow::paint_panel(Canvas& c, HDC dc, bool text_pass) const {
         }
     }
     if (g.php_note.right > g.php_note.left) {
-        c.paragraph(g.php_note, w(php_off_note(*row, lang_)), fonts_.caption.get(), p.text_subtle);
+        c.paragraph(g.php_note, w(field_note(*row, lang_)), fonts_.caption.get(), p.text_subtle);
     }
     if (g.saved_in.right > g.saved_in.left) {
         c.text(g.saved_in, w(fill(lang_, Str::SavedIn, {core::kProjectConfigFileName})), fonts_.caption.get(),

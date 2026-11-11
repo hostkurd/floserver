@@ -153,11 +153,12 @@ std::optional<ShimTarget> php_target(const InstalledRuntime& php, const ProjectC
 
 const std::vector<std::string>& shim_names() {
 #ifdef _WIN32
-    static const std::vector<std::string> names = {"php", "node", "npm", "npx", "composer", "python", "pip"};
+    static const std::vector<std::string> names = {"php",    "node", "npm", "npx", "composer",
+                                                   "python", "pip",  "bun", "bunx", "deno"};
 #else
     // The names people type on macOS and Linux too.
-    static const std::vector<std::string> names = {"php",    "node", "npm",     "npx", "composer",
-                                                   "python", "pip",  "python3", "pip3"};
+    static const std::vector<std::string> names = {"php",    "node", "npm",     "npx",  "composer", "python",
+                                                   "pip",    "python3", "pip3", "bun", "bunx",     "deno"};
 #endif
     return names;
 }
@@ -288,6 +289,31 @@ std::optional<ShimTarget> resolve_installed(const std::string& tool, const fs::p
                 return std::nullopt;
             }
             t.args = {path_to_utf8(script)};
+        }
+        return guard(t, data_dir, error);
+    }
+
+    // bun, bunx, deno (D31): the project's own, else the newest installed.
+    if (tool == "bun" || tool == "bunx" || tool == "deno") {
+        const bool is_deno = tool == "deno";
+        const std::string name = is_deno ? "deno" : "bun";
+        const std::optional<std::string>& wanted = is_deno ? pc.deno : pc.bun;
+        const InstalledRuntime* runtime = newest(installed, name, wanted.value_or(""));
+        if (runtime == nullptr) {
+            error = not_installed(is_deno ? "Deno" : "Bun", name, wanted);
+            return std::nullopt;
+        }
+        const auto program = js_program(name, runtime->dir);
+        if (!program) {
+            error = std::string(is_deno ? "Deno " : "Bun ") + runtime->version + " in " + path_to_utf8(runtime->dir) +
+                    " has no " + name + " program";
+            return std::nullopt;
+        }
+        ShimTarget t;
+        t.program = *program;
+        t.version = runtime->version;
+        if (tool == "bunx") {
+            t.args = {"x"};  // bunx is `bun x`
         }
         return guard(t, data_dir, error);
     }

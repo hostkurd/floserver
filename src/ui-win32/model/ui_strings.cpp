@@ -82,7 +82,7 @@ constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
     Entry{Str::FieldPhp, "PHP", FLO_LRI "PHP" FLO_PDI, FLO_LRI "PHP" FLO_PDI},
     Entry{Str::FieldDatabase, "Database", "قاعدة البيانات", "داتابەیس"},
     Entry{Str::FieldWeb, "Web server", "خادم الويب", "سێرڤەری وێب"},
-    Entry{Str::FieldNode, "Node.js", FLO_LRI "Node.js" FLO_PDI, FLO_LRI "Node.js" FLO_PDI},
+    Entry{Str::FieldJavascript, "JavaScript", FLO_LRI "JavaScript" FLO_PDI, FLO_LRI "JavaScript" FLO_PDI},
     Entry{Str::FieldPython, "Python", FLO_LRI "Python" FLO_PDI, FLO_LRI "Python" FLO_PDI},
     Entry{Str::ChoiceNone, "None", "بلا", "هیچ"},
     Entry{Str::ChoiceNewest, "Newest installed", "أحدث إصدار مثبّت", "نوێترین وەشانی دامەزراو"},
@@ -91,6 +91,9 @@ constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
     Entry{Str::PhpOffNote, "PHP is off: .php files are sent as they are, not run.",
           FLO_LRI "PHP" FLO_PDI " متوقف: تُرسَل ملفات " FLO_LRI ".php" FLO_PDI " كما هي ولا تُشغَّل.",
           FLO_LRI "PHP" FLO_PDI " کوژاوەتەوە: فایلەکانی " FLO_LRI ".php" FLO_PDI " وەک خۆیان دەنێردرێن، کار پێناکرێن."},
+    Entry{Str::BunPackagesNote, "node_modules is missing. Run bun install in the project's terminal.",
+          "المجلد " FLO_LRI "node_modules" FLO_PDI " غير موجود. شغّل " FLO_LRI "bun install" FLO_PDI " في طرفية المشروع.",
+          "بوخچەی " FLO_LRI "node_modules" FLO_PDI " نییە. " FLO_LRI "bun install" FLO_PDI " لە تێرمیناڵی پڕۆژەکەدا جێبەجێ بکە."},
     Entry{Str::DatabaseTitle, "Database {0}", "قاعدة البيانات {0}", "داتابەیسی {0}"},
     Entry{Str::DatabaseDetail, "{0} · user {1}", "{0} · المستخدم {1}", "{0} · بەکارهێنەر {1}"},
     Entry{Str::CopyEnv, "Copy .env lines", "نسخ أسطر " FLO_LRI ".env" FLO_PDI,
@@ -1570,6 +1573,12 @@ constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
     Entry{Str::MailRemoveEmailsFailedNoWhy, "Mailpit was removed, but the emails couldn't be deleted.",
           FLO_LRI "Mailpit" FLO_PDI " أُزيل، لكن تعذّر حذف الرسائل.",
           FLO_LRI "Mailpit" FLO_PDI " لابرا، بەڵام نەتوانرا ئیمەیلەکان بسڕدرێنەوە."},
+    Entry{Str::FirstRunWhatBun, "fast JavaScript and TypeScript, with its own package manager",
+          "بيئة سريعة لـ " FLO_LRI "JavaScript" FLO_PDI " و" FLO_LRI "TypeScript" FLO_PDI " مع مدير حزم خاص بها",
+          "خێرا بۆ " FLO_LRI "JavaScript" FLO_PDI " و " FLO_LRI "TypeScript" FLO_PDI "، لەگەڵ بەڕێوەبەری پاکێجی خۆی"},
+    Entry{Str::FirstRunWhatDeno, "JavaScript and TypeScript with built-in tools and permissions",
+          FLO_LRI "JavaScript" FLO_PDI " و" FLO_LRI "TypeScript" FLO_PDI " مع أدوات وأذونات مدمجة",
+          FLO_LRI "JavaScript" FLO_PDI " و " FLO_LRI "TypeScript" FLO_PDI " لەگەڵ ئامراز و مۆڵەتی ناوەکی"},
 }};
 
 #undef FLO_LRI

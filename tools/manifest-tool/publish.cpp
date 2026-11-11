@@ -202,8 +202,8 @@ LiveResult fetch_live_list(HttpTransport& http, std::string_view cdn,
     return result;
 }
 
-std::string runtime_title(std::string_view runtime, std::string_view version) {
-    static constexpr std::array<std::pair<std::string_view, std::string_view>, 11> kNames = {{
+std::string runtime_title(std::string_view runtime, std::string_view version, std::string_view variant) {
+    static constexpr std::array<std::pair<std::string_view, std::string_view>, 13> kNames = {{
         {"php", "PHP"},
         {"mariadb", "MariaDB"},
         {"node", "Node.js"},
@@ -214,6 +214,8 @@ std::string runtime_title(std::string_view runtime, std::string_view version) {
         {"python", "Python"},
         {"phpmyadmin", "phpMyAdmin"},
         {"mailpit", "Mailpit"},
+        {"bun", "Bun"},
+        {"deno", "Deno"},
         {kAppFolder, "FloServer"},
     }};
     std::string name(runtime);
@@ -222,7 +224,13 @@ std::string runtime_title(std::string_view runtime, std::string_view version) {
             name = title;
         }
     }
-    return name + " " + std::string(version);
+    name += " " + std::string(version);
+    // PHP's "nts" is the usual build and isn't said; Bun's "baseline" build
+    // (a CPU without AVX2) is its own file in the list, so it has its own title.
+    if (!variant.empty() && variant != "nts") {
+        name += " " + std::string(variant);
+    }
+    return name;
 }
 
 std::vector<PublishFile> files_from_live(const LiveList& live, std::string_view cdn,
@@ -232,13 +240,13 @@ std::vector<PublishFile> files_from_live(const LiveList& live, std::string_view 
     for (const RuntimeFile& r : live.runtimes) {
         const std::string_view url = r.urls.empty() ? std::string_view() : std::string_view(r.urls.front());
         if (!url.starts_with(prefix)) {
-            notes.push_back(runtime_title(r.name, r.version) + " isn't on " + std::string(cdn) +
+            notes.push_back(runtime_title(r.name, r.version, r.variant) + " isn't on " + std::string(cdn) +
                             " and is left out");
             continue;
         }
         PublishFile f;
         f.path = std::string(url.substr(prefix.size()));
-        f.title = runtime_title(r.name, r.version);
+        f.title = runtime_title(r.name, r.version, r.variant);
         f.published = true;
         f.size = r.size;
         f.sha256 = to_hex(r.sha256);
@@ -326,14 +334,14 @@ AddResult new_file(std::string_view text, std::string_view cdn,
                            "). The list names one installer: remove it first to replace it.";
             return result;
         }
-        if (f.title == runtime_title(p.runtime, p.version)) {
+        if (f.title == runtime_title(p.runtime, p.version, p.variant)) {
             result.error = f.title + " is already in the list (" + f.path + "). Remove it first to replace it.";
             return result;
         }
     }
     PublishFile f;
     f.path = std::string(text);
-    f.title = runtime_title(p.runtime, p.version);
+    f.title = runtime_title(p.runtime, p.version, p.variant);
     f.notes_url = std::move(notes);
     result.file = std::move(f);
     return result;
@@ -384,6 +392,14 @@ OfficialSource official_source(std::string_view path) {
         // its release workflow), so the GitHub download itself is compared.
         s.kind = Kind::Original;
         s.urls = {"https://github.com/axllent/mailpit/releases/download/v" + v + "/" + p.file};
+    } else if (p.runtime == "bun") {
+        // One SHASUMS256.txt per release lists every build, the baseline too.
+        s.kind = Kind::Sums;
+        s.urls = {"https://github.com/oven-sh/bun/releases/download/bun-v" + v + "/SHASUMS256.txt"};
+    } else if (p.runtime == "deno") {
+        // Each download has its own checksum file next to it.
+        s.kind = Kind::Sums;
+        s.urls = {"https://github.com/denoland/deno/releases/download/v" + v + "/" + p.file + ".sha256sum"};
     } else if (p.runtime == "apache" || p.runtime == kAppFolder) {
         // Apache Lounge publishes no checksum list; FloServer's installer is
         // HostKurd's own, compared with the CI artifact.
@@ -413,6 +429,24 @@ std::optional<std::string> find_official_hash(std::string_view sums, std::string
                     return h;
                 }
             }
+        }
+    }
+    // A checksum file that names the file and holds one hash: PowerShell's
+    // Get-FileHash print, as Deno's .sha256sum files are ("Hash : CBA8...",
+    // "Path : ...\deno-x86_64-pc-windows-msvc.zip").
+    if (!name.empty()) {
+        std::optional<std::string> only;
+        bool several = false;
+        bool named = false;
+        for (const std::string_view line : lines) {
+            named = named || names_file(line, name);
+            if (const auto h = hash_on_line(line)) {
+                several = several || (only && *only != *h);
+                only = only ? only : h;
+            }
+        }
+        if (named && only && !several) {
+            return only;
         }
     }
     // composer.phar.sha256sum and similar hold just the hash, on one line.

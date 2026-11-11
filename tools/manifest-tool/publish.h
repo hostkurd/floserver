@@ -81,8 +81,10 @@ struct PublishFile {
 [[nodiscard]] std::vector<PublishFile> files_from_live(const LiveList& live, std::string_view cdn,
                                                        std::vector<std::string>& notes);
 
-// "PHP 8.5.13" for php/8.5.13/..., "FloServer 1.2.0" for app/1.2.0/...
-[[nodiscard]] std::string runtime_title(std::string_view runtime, std::string_view version);
+// "PHP 8.5.13" for php/8.5.13/..., "FloServer 1.2.0" for app/1.2.0/...; a
+// variant other than PHP's "nts" is added ("Bun 1.3.14 baseline").
+[[nodiscard]] std::string runtime_title(std::string_view runtime, std::string_view version,
+                                        std::string_view variant = {});
 
 // A new file to add: trims spaces, a leading '/' and a CDN address the user
 // pasted with it. FloServer's installer may have its "What's new" address
