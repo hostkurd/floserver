@@ -135,9 +135,13 @@ ServiceRefusal no_server_yet(std::string_view family, const std::string& series)
                                 " can't take connections yet (its port is busy); try again in a few seconds"};
 }
 
-// The family a project's floserver.json names, when the service runs it.
-bool served(const ConfigResult& cfg) {
-    return cfg.config && cfg.config->database && mysql_protocol_family(cfg.config->database->family);
+// The database a project's floserver.json names, when the service runs its
+// family; else nothing.
+const DatabaseSpec* served(const ConfigResult& cfg) {
+    if (!cfg.config || !cfg.config->database || !mysql_protocol_family(cfg.config->database->family)) {
+        return nullptr;
+    }
+    return &*cfg.config->database;
 }
 
 }  // namespace
@@ -1265,12 +1269,13 @@ std::optional<DatabaseLogin> DatabaseService::project_login(const std::string& p
                                             "or flo use mysql 8.4)"};
         return std::nullopt;
     }
-    if (!served(cfg)) {
+    const DatabaseSpec* spec = served(cfg);
+    if (spec == nullptr) {
         refusal = {"no_database", project + "'s floserver.json names " + cfg.config->database->family +
                                       ", which this FloServer doesn't run"};
         return std::nullopt;
     }
-    const std::string family = cfg.config->database->family;
+    const std::string family = spec->family;
     if (project_held(project)) {
         refusal = removing(project);
         return std::nullopt;
@@ -1295,9 +1300,9 @@ std::optional<DatabaseLogin> DatabaseService::project_login(const std::string& p
     std::shared_ptr<Server> server;
     {
         const auto installed = list_installed(runtimes_dir(config_.data_dir));
-        const InstalledRuntime* r = best_server(installed, family, cfg.config->database->version);
+        const InstalledRuntime* r = best_server(installed, family, spec->version);
         if (r == nullptr) {
-            refusal = not_installed(family, cfg.config->database->version);
+            refusal = not_installed(family, spec->version);
             return std::nullopt;
         }
         server = server_of(family, mariadb_series(r->version));
@@ -1352,15 +1357,16 @@ std::shared_ptr<DatabaseService::Server> DatabaseService::project_server(const s
         return nullptr;
     }
     const ConfigResult cfg = read_project_config_file(*p);
-    if (!served(cfg)) {
+    const DatabaseSpec* spec = served(cfg);
+    if (spec == nullptr) {
         refusal = {"no_database", project + " has no database in its floserver.json"};
         return nullptr;
     }
-    const std::string& family = cfg.config->database->family;
+    const std::string& family = spec->family;
     const auto installed = list_installed(runtimes_dir(config_.data_dir));
-    const InstalledRuntime* r = best_server(installed, family, cfg.config->database->version);
+    const InstalledRuntime* r = best_server(installed, family, spec->version);
     if (r == nullptr) {
-        refusal = not_installed(family, cfg.config->database->version);
+        refusal = not_installed(family, spec->version);
         return nullptr;
     }
     auto server = server_of(family, mariadb_series(r->version));
@@ -1484,17 +1490,18 @@ std::optional<std::uint64_t> DatabaseService::project_database_bytes(const std::
         return std::nullopt;
     }
     const ConfigResult cfg = read_project_config_file(*p);
-    if (!served(cfg)) {
+    const DatabaseSpec* spec = served(cfg);
+    if (spec == nullptr) {
         return std::nullopt;
     }
     const auto installed = list_installed(runtimes_dir(config_.data_dir));
-    const InstalledRuntime* r = best_server(installed, cfg.config->database->family, cfg.config->database->version);
+    const InstalledRuntime* r = best_server(installed, spec->family, spec->version);
     if (r == nullptr) {
         return std::nullopt;
     }
     // Its own folder in the series' data: one file per table (and the
     // folder's own .opt), so the sum is close to what the dump holds.
-    const MariaDbFiles files = mariadb_files(r->dir, r->version, config_.data_dir, cfg.config->database->family);
+    const MariaDbFiles files = mariadb_files(r->dir, r->version, config_.data_dir, spec->family);
     const fs::path folder = files.data_dir / path_from_utf8(project_database_name(*p));  // kept through a rename
     std::error_code ec;
     if (!fs::is_directory(folder, ec)) {
@@ -1575,9 +1582,10 @@ bool DatabaseService::drop_project_database(const std::string& project, ServiceR
             servers[key] = {r.name, s};
         }
     }
-    if (const ConfigResult cfg = read_project_config_file(*p); served(cfg)) {
-        const std::string& family = cfg.config->database->family;
-        if (const InstalledRuntime* r = best_server(installed, family, cfg.config->database->version)) {
+    const ConfigResult cfg = read_project_config_file(*p);
+    if (const DatabaseSpec* spec = served(cfg)) {
+        const std::string& family = spec->family;
+        if (const InstalledRuntime* r = best_server(installed, family, spec->version)) {
             servers[database_server_key(family, mariadb_series(r->version))] = {family, mariadb_series(r->version)};
         }
     }

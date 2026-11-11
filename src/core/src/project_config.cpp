@@ -149,7 +149,7 @@ void read_database(const json& doc, ProjectConfig& config, ConfigResult& result)
             list.append(i == 0 ? "" : (i + 1 == named.size() ? " and " : ", ")).append("\"" + named[i] + "\"");
         }
         result.errors.push_back({named[1], "a project has one database: floserver.json names " + list +
-                                               "; keep one, such as \"database\": \"mysql-8.4\""});
+                                               R"(; keep one, such as "database": "mysql-8.4")"});
         return;
     }
     if (named.empty()) {
