@@ -516,7 +516,7 @@ TEST_CASE("Bun installs the build that fits the CPU: AVX2 the regular zip, other
             }
             return e;
         };
-        nlohmann::json doc = {{"schema", 1},
+        const nlohmann::json doc = {{"schema", 1},
                               {"sequence", 9},
                               {"expires", "2026-12-01T00:00:00Z"},
                               {"runtimes",
@@ -559,7 +559,7 @@ TEST_CASE("Bun installs the build that fits the CPU: AVX2 the regular zip, other
     }
 
     // Both builds there: the one for this CPU goes first.
-    World w;
+    const World w;
     for (const char* folder : {"1.3.14", "1.3.14-baseline"}) {
         const fs::path dir = w.tmp.path() / "runtimes" / "bun" / folder;
         fs::create_directories(dir);

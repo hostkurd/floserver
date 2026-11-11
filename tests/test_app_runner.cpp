@@ -340,7 +340,6 @@ TEST_CASE("a Bun app starts from its dev script, else bun --hot on the first ent
     }
     SUBCASE("no dev script: bun --hot on the first of the entry files, in the documented order") {
         test_util::write_file(app.dir / "package.json", R"({"scripts": {"start": "bun server.ts"}})");  // only dev counts
-        std::vector<std::string> seen;
         for (const char* entry : {"src/index.js", "src/index.ts", "server.js", "server.ts", "index.js", "index.ts"}) {
             test_util::write_file(app.dir / entry, "");
             const auto l = app_launch(app, 9603, error);

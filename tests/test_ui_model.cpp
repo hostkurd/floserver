@@ -1650,7 +1650,7 @@ TEST_CASE("a project with Bun or Deno doesn't use PHP") {
 }
 
 TEST_CASE("Settings > Runtimes: Bun and Deno cards (D31)") {
-    json reply = {{"installed",
+    const json reply = {{"installed",
                    json::array({{{"name", "bun"}, {"version", "1.3.14"}, {"variant", ""}, {"folder", "1.3.14"},
                                  {"used_by", json::array({"edge"})}},
                                 {{"name", "nginx"}, {"version", "1.30.6"}, {"variant", ""}, {"folder", "1.30.6"},
@@ -1662,6 +1662,7 @@ TEST_CASE("Settings > Runtimes: Bun and Deno cards (D31)") {
                   {"defaults", json::object()}};
     const RuntimesPage page = runtimes_page(reply, nullptr, json(), Lang::En);
     std::vector<std::string> titles;
+    titles.reserve(page.groups.size());
     for (const RuntimeGroup& g : page.groups) {
         titles.push_back(g.title);
     }

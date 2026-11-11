@@ -348,8 +348,7 @@ std::vector<std::string> port_arguments(const std::string& script, Port port) {
     // (`bunx --bun vite`, `deno run -A npm:vite@5`, `bun run vite`).
     std::string name;
     bool after_runtime = false;
-    for (std::size_t i = 0; i < w.size(); ++i) {
-        const std::string& s = w[i];
+    for (const std::string& s : w) {
         if (s.find('=') != std::string::npos || s.starts_with('-') || s == "cross-env" || s == "env" ||
             s == "npx" || s == "pnpm" || s == "pnpx" || s == "yarn" || s == "bunx" || s == "exec" || s == "dlx") {
             continue;

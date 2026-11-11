@@ -464,6 +464,7 @@ TEST_CASE("publisher: Bun's regular and baseline builds are both listed, checked
     const auto carried = files_from_live(*live.list, kTestCdn, notes);
     CHECK(notes.empty());
     std::vector<std::string> titles;
+    titles.reserve(carried.size());
     for (const PublishFile& f : carried) {
         titles.push_back(f.title);
     }
