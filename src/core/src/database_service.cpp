@@ -1869,6 +1869,17 @@ DatabaseService::RemovalHold DatabaseService::hold_for_removal(const std::string
     for (const auto& s : going) {
         s->stop(true);  // waits for a stop under way too
     }
+    // Gone for good before the hold is handed back: the threads that still
+    // hold one (its stopper, the supervisor's list) let go within moments,
+    // and with it its port, so the series' server can be made again as soon
+    // as the hold ends.
+    std::vector<std::weak_ptr<Server>> gone(going.begin(), going.end());
+    going.clear();
+    const auto until = Clock::now() + 3s;
+    while (Clock::now() < until &&
+           std::any_of(gone.begin(), gone.end(), [](const std::weak_ptr<Server>& w) { return !w.expired(); })) {
+        std::this_thread::sleep_for(20ms);
+    }
     return hold;
 }
 
