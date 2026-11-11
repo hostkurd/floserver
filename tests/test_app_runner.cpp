@@ -52,6 +52,16 @@ fs::path fake_python(const fs::path& dir) {
     return dir;
 }
 
+// A Bun or Deno install: one program (D31), empty here.
+fs::path fake_single(const fs::path& dir, const std::string& program) {
+#ifdef _WIN32
+    test_util::write_file(dir / (program + ".exe"), "");
+#else
+    test_util::write_file(dir / program, "");
+#endif
+    return dir;
+}
+
 std::string env_of(const AppLaunch& l, const std::string& name) {
     for (const auto& [k, v] : l.options.env) {
         if (k == name) {
@@ -280,6 +290,196 @@ TEST_CASE("a Python app's setup: .venv, then its packages when the list changes"
     CHECK_FALSE(app_setup(app, 9601, error));
     CHECK(error.find("isn't a Python virtual environment") != std::string::npos);
     CHECK(fs::exists(app.dir / ".venv"));  // left as it was
+}
+
+TEST_CASE("a Bun app starts from its dev script, else bun --hot on the first entry file (D31)") {
+    const test_util::TempDir tmp;
+    AppSpec app;
+    app.name = "edge";
+    app.kind = AppKind::Bun;
+    app.dir = tmp.path() / "edge";
+    app.runtime_dir = fake_single(tmp.path() / "bun", "bun");
+    fs::create_directories(app.dir);
+    std::string error;
+
+    SUBCASE("the dev script, through the project's own bun") {
+        test_util::write_file(app.dir / "package.json", R"({"scripts": {"start": "bun x.ts", "dev": "bun --watch x.ts"}})");
+        test_util::write_file(app.dir / "index.ts", "");  // the script wins
+        const auto l = app_launch(app, 9601, error);
+        REQUIRE_MESSAGE(l, error);
+        CHECK(l->options.program == *bun_program(app.runtime_dir));
+        CHECK(l->options.args == Args{"run", "dev"});
+        CHECK(l->shown == "bun run dev");
+        CHECK(env_of(*l, "PORT") == "9601");
+        CHECK(env_of(*l, "HOST") == "127.0.0.1");
+        CHECK(env_of(*l, "BUN_CONFIG_NO_CLEAR_TERMINAL_ON_RELOAD") == "true");
+        // The project's Bun comes first on PATH.
+        CHECK(env_of(*l, "PATH").starts_with(path_to_utf8(bun_program(app.runtime_dir)->parent_path())));
+    }
+    SUBCASE("a dev script that ignores PORT is given --port, straight after the script's name") {
+        test_util::write_file(app.dir / "package.json", R"({"scripts": {"dev": "vite"}})");
+        const auto l = app_launch(app, 9602, error);
+        REQUIRE(l);
+        CHECK(l->options.args == Args{"run", "dev", "--port", "9602", "--strictPort", "--host", "127.0.0.1"});
+        CHECK(l->shown == "bun run dev --port 9602 --strictPort --host 127.0.0.1");
+    }
+    SUBCASE("no dev script: bun --hot on the first of the entry files, in the documented order") {
+        test_util::write_file(app.dir / "package.json", R"({"scripts": {"start": "bun server.ts"}})");  // only dev counts
+        std::vector<std::string> seen;
+        for (const char* entry : {"src/index.js", "src/index.ts", "server.js", "server.ts", "index.js", "index.ts"}) {
+            test_util::write_file(app.dir / entry, "");
+            const auto l = app_launch(app, 9603, error);
+            REQUIRE_MESSAGE(l, error);
+            CHECK(l->options.args == Args{"--hot", entry});
+            CHECK(l->shown == std::string("bun --hot ") + entry);
+        }
+    }
+    SUBCASE("without a package.json at all") {
+        test_util::write_file(app.dir / "server.ts", "");
+        const auto l = app_launch(app, 9604, error);
+        REQUIRE(l);
+        CHECK(l->shown == "bun --hot server.ts");
+    }
+    SUBCASE("a command from floserver.json wins, with {port} filled in, through the shell") {
+        app.command = "bun run src/server.ts --port {port}";
+        test_util::write_file(app.dir / "index.ts", "");
+        const auto l = app_launch(app, 9605, error);
+        REQUIRE(l);
+        CHECK(l->shown == "bun run src/server.ts --port 9605");
+#ifdef _WIN32
+        CHECK(l->options.program.filename() == "cmd.exe");
+#else
+        CHECK(l->options.program == "/bin/sh");
+        CHECK(l->options.args == Args{"-c", "bun run src/server.ts --port 9605"});
+#endif
+        CHECK(env_of(*l, "PATH").starts_with(path_to_utf8(bun_program(app.runtime_dir)->parent_path())));
+    }
+    SUBCASE("what's missing is said plainly") {
+        CHECK_FALSE(app_launch(app, 1, error));
+        CHECK(error.find("can't tell how to start this Bun project") != std::string::npos);
+        CHECK(error.find("index.ts, index.js, server.ts, server.js, src/index.ts, src/index.js") != std::string::npos);
+        CHECK(error.find("\"command\" in floserver.json") != std::string::npos);
+        test_util::write_file(app.dir / "package.json", "{oops");
+        CHECK_FALSE(app_launch(app, 1, error));
+        CHECK(error == "package.json can't be read or isn't valid JSON");
+        test_util::write_file(app.dir / "package.json", "{}");
+        test_util::write_file(app.dir / "index.ts", "");
+        app.runtime_dir = tmp.path() / "no-bun";
+        CHECK_FALSE(app_launch(app, 1, error));
+        CHECK(error.starts_with("bun is missing from"));
+    }
+}
+
+TEST_CASE("a Deno app starts from its dev task, else deno run --watch with only a web server's permissions (D31)") {
+    const test_util::TempDir tmp;
+    AppSpec app;
+    app.name = "fresh";
+    app.kind = AppKind::Deno;
+    app.dir = tmp.path() / "fresh";
+    app.runtime_dir = fake_single(tmp.path() / "deno", "deno");
+    fs::create_directories(app.dir);
+    std::string error;
+
+    SUBCASE("deno task dev from deno.json") {
+        test_util::write_file(app.dir / "deno.json", R"({"tasks": {"start": "deno run main.ts", "dev": "deno run -A --watch main.ts"}})");
+        test_util::write_file(app.dir / "main.ts", "");
+        const auto l = app_launch(app, 9601, error);
+        REQUIRE_MESSAGE(l, error);
+        CHECK(l->options.program == *deno_program(app.runtime_dir));
+        CHECK(l->options.args == Args{"task", "dev"});
+        CHECK(l->shown == "deno task dev");
+        CHECK(env_of(*l, "PORT") == "9601");
+        CHECK(env_of(*l, "DENO_NO_UPDATE_CHECK") == "1");
+        CHECK(env_of(*l, "PATH").starts_with(path_to_utf8(deno_program(app.runtime_dir)->parent_path())));
+    }
+    SUBCASE("deno.jsonc, with comments and a trailing comma; a task may be an object") {
+        test_util::write_file(app.dir / "deno.jsonc", R"({
+            // how this app starts
+            "tasks": {
+                "dev": {"command": "vite", "description": "serve, \"/*\" not a comment"}, /* done */
+            },
+        })");
+        const auto l = app_launch(app, 9602, error);
+        REQUIRE_MESSAGE(l, error);
+        CHECK(l->options.args == Args{"task", "dev", "--port", "9602", "--strictPort", "--host", "127.0.0.1"});
+        CHECK(l->shown == "deno task dev --port 9602 --strictPort --host 127.0.0.1");
+    }
+    SUBCASE("no dev task: deno run --watch on the first entry file, in order, never -A") {
+        test_util::write_file(app.dir / "deno.json", R"({"tasks": {"start": "deno run main.ts"}, "imports": {}})");
+        for (const char* entry : {"src/main.ts", "main.js", "server.ts", "main.ts"}) {
+            test_util::write_file(app.dir / entry, "");
+            const auto l = app_launch(app, 9603, error);
+            REQUIRE_MESSAGE(l, error);
+            CHECK(l->options.args == Args{"run", "--watch", "--allow-net", "--allow-read", "--allow-env", entry});
+            CHECK(l->shown == std::string("deno run --watch --allow-net --allow-read --allow-env ") + entry);
+            CHECK(std::find(l->options.args.begin(), l->options.args.end(), "-A") == l->options.args.end());
+            CHECK(std::find(l->options.args.begin(), l->options.args.end(), "--allow-all") == l->options.args.end());
+        }
+    }
+    SUBCASE("a command from floserver.json wins") {
+        app.command = "deno run --allow-net=127.0.0.1:{port} main.ts";
+        test_util::write_file(app.dir / "main.ts", "");
+        const auto l = app_launch(app, 9604, error);
+        REQUIRE(l);
+        CHECK(l->shown == "deno run --allow-net=127.0.0.1:9604 main.ts");
+    }
+    SUBCASE("what's missing is said plainly") {
+        CHECK_FALSE(app_launch(app, 1, error));
+        CHECK(error.find("can't tell how to start this Deno project") != std::string::npos);
+        CHECK(error.find("main.ts, server.ts, main.js, src/main.ts") != std::string::npos);
+        test_util::write_file(app.dir / "deno.json", "{oops");
+        CHECK_FALSE(app_launch(app, 1, error));
+        CHECK(error == "deno.json can't be read or isn't valid JSON");
+        fs::remove(app.dir / "deno.json");
+        test_util::write_file(app.dir / "main.ts", "");
+        app.runtime_dir = tmp.path() / "no-deno";
+        CHECK_FALSE(app_launch(app, 1, error));
+        CHECK(error.starts_with("deno is missing from"));
+    }
+}
+
+TEST_CASE("Bun and Deno install nothing themselves; the packages are the project's to install (D31)") {
+    const test_util::TempDir tmp;
+    std::string error;
+    for (const AppKind kind : {AppKind::Bun, AppKind::Deno}) {
+        AppSpec app;
+        app.name = "web";
+        app.kind = kind;
+        app.dir = tmp.path() / "web";
+        app.runtime_dir = fake_single(tmp.path() / "rt", kind == AppKind::Bun ? "bun" : "deno");
+        test_util::write_file(app.dir / "package.json", R"({"dependencies": {"hono": "^4"}})");
+        const auto steps = app_setup(app, 9601, error);
+        REQUIRE(steps);
+        CHECK(steps->empty());  // no `bun install`, where Node would run npm install
+    }
+    // What the window says: package.json lists packages and node_modules isn't there.
+    const fs::path dir = tmp.path() / "web";
+    CHECK(needs_package_install(dir));
+    fs::create_directories(dir / "node_modules");
+    CHECK_FALSE(needs_package_install(dir));
+    fs::remove_all(dir / "node_modules");
+    test_util::write_file(dir / "package.json", R"({"scripts": {"dev": "bun index.ts"}})");
+    CHECK_FALSE(needs_package_install(dir));  // nothing listed
+    test_util::write_file(dir / "package.json", "{oops");
+    CHECK_FALSE(needs_package_install(dir));
+    CHECK_FALSE(needs_package_install(tmp.path() / "nowhere"));
+}
+
+TEST_CASE("a Python app that names Bun or Deno has it on PATH (D31)") {
+    const test_util::TempDir tmp;
+    AppSpec app;
+    app.name = "api";
+    app.kind = AppKind::Python;
+    app.version = "3.13.18";
+    app.dir = tmp.path() / "api";
+    app.runtime_dir = fake_python(tmp.path() / "python");
+    test_util::write_file(app.dir / "manage.py", "");
+    app.node_dir = fake_single(tmp.path() / "bun", "bun");
+    app.tools_name = "bun";
+    std::string error;
+    const auto l = app_launch(app, 9601, error);
+    REQUIRE_MESSAGE(l, error);
+    CHECK(env_of(*l, "PATH").find(path_to_utf8(bun_program(app.node_dir)->parent_path())) != std::string::npos);
 }
 
 #ifndef _WIN32
@@ -660,6 +860,170 @@ http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
     CHECK(pips == 1);
     CHECK(log.find("--upgrade") == std::string::npos);  // the same install: nothing to move over
     runner->close();
+}
+
+namespace {
+
+// A Bun or Deno install to run for real: FLOSERVER_TEST_BUN_DIR or
+// FLOSERVER_TEST_DENO_DIR (the folder with the program), else the one on the PATH.
+std::optional<fs::path> real_js_install(const std::string& program, const char* env_name) {
+    if (const auto dir = get_env(env_name)) {
+        std::error_code ec;
+        if (fs::is_regular_file(fs::path(*dir) / program, ec)) {
+            return fs::path(*dir);
+        }
+    }
+    if (const auto found = on_path(program)) {
+        return found->parent_path();
+    }
+    return std::nullopt;
+}
+
+}  // namespace
+
+TEST_CASE("a Bun app runs bun --hot on a real Bun, sleeps when idle and wakes again (D31)") {
+    const auto install = real_js_install("bun", "FLOSERVER_TEST_BUN_DIR");
+    if (!install) {
+        MESSAGE("bun isn't installed here; skipped (set FLOSERVER_TEST_BUN_DIR to a folder with it)");
+        return;
+    }
+    const test_util::TempDir tmp;
+    AppSpec app;
+    app.name = "edge";
+    app.kind = AppKind::Bun;
+    app.dir = tmp.path() / "edge";
+    app.runtime_dir = *install;
+    app.port = free_port(19420);
+    test_util::write_file(app.dir / "server.ts", R"(
+        const message: string = "bun " + Bun.version;
+        Bun.serve({
+            port: Number(process.env.PORT),
+            hostname: process.env.HOST,
+            fetch(req) { return new Response(message + " " + new URL(req.url).pathname + " " + req.headers.get("host")); },
+        });
+    )");
+    std::string error;
+    auto runner = AppRunner::open(app, {tmp.path() / "work", nullptr, nullptr}, error);
+    REQUIRE_MESSAGE(runner, error);
+    const Pump pump(runner);
+    const std::string body = get(app.port, "/cart?x=1", 60s);
+    INFO(read_small_file(runner->log_file(), 1 << 20).value_or(""));
+    CHECK_MESSAGE(body.starts_with("200 bun 1."), body);
+    CHECK_MESSAGE(body.ends_with(" /cart web.localhost"), body);
+    CHECK(runner->describe()["command"] == "bun --hot server.ts");
+    CHECK_FALSE(fs::exists(app.dir / "node_modules"));  // FloServer ran no install
+
+    runner->tick(AppRunner::Clock::now() + 3600s, 1s);
+    CHECK(eventually([&] { return runner->state() == AppState::Sleeping; }));
+    CHECK(get(app.port, "/again", 60s).ends_with(" /again web.localhost"));
+    runner->close();
+}
+
+TEST_CASE("a Bun app runs its dev script, and Keep running starts it without a request (D31)") {
+    const auto install = real_js_install("bun", "FLOSERVER_TEST_BUN_DIR");
+    if (!install) {
+        MESSAGE("bun isn't installed here; skipped (set FLOSERVER_TEST_BUN_DIR to a folder with it)");
+        return;
+    }
+    const test_util::TempDir tmp;
+    AppSpec app;
+    app.name = "edge";
+    app.kind = AppKind::Bun;
+    app.dir = tmp.path() / "edge";
+    app.runtime_dir = *install;
+    app.keep_running = true;
+    app.port = free_port(19440);
+    test_util::write_file(app.dir / "package.json", R"({"name": "edge", "private": true, "scripts": {"dev": "bun run app.js"}})");
+    test_util::write_file(app.dir / "app.js", R"(
+        Bun.serve({port: Number(process.env.PORT), hostname: "127.0.0.1", fetch: () => new Response("dev script")});
+    )");
+    std::string error;
+    auto runner = AppRunner::open(app, {tmp.path() / "work", nullptr, nullptr}, error);
+    REQUIRE_MESSAGE(runner, error);
+    const Pump pump(runner);
+    runner->wake();  // Keep running: started by the service without a request
+    CHECK(eventually([&] { return runner->state() == AppState::Running; }, 60s));
+    CHECK(runner->describe()["command"] == "bun run dev");
+    CHECK(get(app.port, "/", 60s) == "200 dev script");
+    runner->close();
+}
+
+TEST_CASE("a Deno app runs deno run --watch on a real Deno, with no -A (D31)") {
+    const auto install = real_js_install("deno", "FLOSERVER_TEST_DENO_DIR");
+    if (!install) {
+        MESSAGE("deno isn't installed here; skipped (set FLOSERVER_TEST_DENO_DIR to a folder with it)");
+        return;
+    }
+    const test_util::TempDir tmp;
+    AppSpec app;
+    app.name = "fresh";
+    app.kind = AppKind::Deno;
+    app.dir = tmp.path() / "fresh";
+    app.runtime_dir = *install;
+    app.port = free_port(19460);
+    test_util::write_file(app.dir / "main.ts", R"(
+        const message: string = "deno " + Deno.version.deno;
+        Deno.serve({port: Number(Deno.env.get("PORT")), hostname: Deno.env.get("HOST")}, (req) =>
+            new Response(message + " " + new URL(req.url).pathname + " " + req.headers.get("host")));
+    )");
+    std::string error;
+    auto runner = AppRunner::open(app, {tmp.path() / "work", nullptr, nullptr}, error);
+    REQUIRE_MESSAGE(runner, error);
+    const Pump pump(runner);
+    const std::string body = get(app.port, "/cart", 90s);
+    INFO(read_small_file(runner->log_file(), 1 << 20).value_or(""));
+    CHECK_MESSAGE(body.starts_with("200 deno 2."), body);
+    CHECK_MESSAGE(body.ends_with(" /cart web.localhost"), body);
+    CHECK(runner->describe()["command"] ==
+          "deno run --watch --allow-net --allow-read --allow-env main.ts");
+    runner->tick(AppRunner::Clock::now() + 3600s, 1s);
+    CHECK(eventually([&] { return runner->state() == AppState::Sleeping; }));
+    CHECK(get(app.port, "/again", 90s).ends_with(" /again web.localhost"));
+    runner->close();
+}
+
+TEST_CASE("a Deno app runs its dev task; a server that can't start says why (D31)") {
+    const auto install = real_js_install("deno", "FLOSERVER_TEST_DENO_DIR");
+    if (!install) {
+        MESSAGE("deno isn't installed here; skipped (set FLOSERVER_TEST_DENO_DIR to a folder with it)");
+        return;
+    }
+    const test_util::TempDir tmp;
+    AppSpec app;
+    app.name = "fresh";
+    app.kind = AppKind::Deno;
+    app.dir = tmp.path() / "fresh";
+    app.runtime_dir = *install;
+    app.port = free_port(19480);
+    test_util::write_file(app.dir / "deno.json", R"({"tasks": {"dev": "deno run --allow-net --allow-env server.ts"}})");
+    test_util::write_file(app.dir / "server.ts", R"(
+        Deno.serve({port: Number(Deno.env.get("PORT")), hostname: "127.0.0.1"}, () => new Response("dev task"));
+    )");
+    std::string error;
+    auto runner = AppRunner::open(app, {tmp.path() / "work", nullptr, nullptr}, error);
+    REQUIRE_MESSAGE(runner, error);
+    {
+        const Pump pump(runner);
+        CHECK(get(app.port, "/", 90s) == "200 dev task");
+        CHECK(runner->describe()["command"] == "deno task dev");
+    }
+    runner->close();
+
+    // A script that throws: the page says so, and the log has Deno's words.
+    AppSpec broken = app;
+    broken.name = "broken";
+    broken.port = free_port(19500);
+    test_util::write_file(broken.dir / "deno.json", R"({"tasks": {"dev": "deno run server.ts"}})");
+    test_util::write_file(broken.dir / "server.ts", "throw new Error(\"boom from deno\");\n");
+    auto bad = AppRunner::open(broken, {tmp.path() / "work", nullptr, nullptr}, error);
+    REQUIRE_MESSAGE(bad, error);
+    {
+        const Pump pump(bad);
+        const std::string page = get(broken.port, "/", 90s);
+        CHECK(page.starts_with("502 "));
+        CHECK(page.find("boom from deno") != std::string::npos);
+    }
+    bad->close();
 }
 
 #endif

@@ -71,7 +71,7 @@ constexpr std::array<CatalogEntry, 13> kCatalog = {{
      "https://github.com/oven-sh/bun/releases/download/bun-v{v}/{file}"},
     // Deno (D31): one program; its other builds (and denort, the compile
     // runtime) aren't listed.
-    {"deno", R"(denort?-[a-z0-9_]+-[a-z0-9-]+\.zip)", "MIT", "windows-x64", "", R"(deno-x86_64-pc-windows-msvc\.zip)",
+    {"deno", R"(deno(?:rt)?-[a-z0-9_]+-[a-z0-9-]+\.zip)", "MIT", "windows-x64", "", R"(deno-x86_64-pc-windows-msvc\.zip)",
      "https://github.com/denoland/deno/releases/download/v{v}/{file}"},
 }};
 

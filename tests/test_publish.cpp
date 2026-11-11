@@ -379,6 +379,170 @@ TEST_CASE("publisher: Mailpit is compared with its GitHub download and listed fo
     CHECK(floserver::core::runtimes_for(*opened.manifest, "mailpit", "windows-x64").size() == 1);
 }
 
+TEST_CASE("publisher: Bun's regular and baseline builds are both listed, checked against SHASUMS256.txt (D31)") {
+    FakeCdn cdn;
+    const std::string regular = "bun/1.3.14/bun-windows-x64.zip";
+    const std::string baseline = "bun/1.3.14/bun-windows-x64-baseline.zip";
+    const std::string regular_body = "bun zip";
+    const std::string baseline_body = "bun baseline zip";
+    cdn.http.serve(kTestCdn + "/" + regular, {200, regular_body});
+    cdn.http.serve(kTestCdn + "/" + baseline, {200, baseline_body});
+
+    const OfficialSource source = official_source(regular);
+    CHECK(source.kind == OfficialSource::Kind::Sums);
+    CHECK(source.name == "bun-windows-x64.zip");
+    CHECK(source.urls ==
+          std::vector<std::string>{"https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/SHASUMS256.txt"});
+    CHECK(official_source(baseline).name == "bun-windows-x64-baseline.zip");
+    CHECK(official_source(baseline).urls == source.urls);
+    // One list names every build; the regular file's name is not the baseline's.
+    cdn.http.serve(source.urls.front(),
+                   {200, std::string(64, 'a') + "  bun-linux-x64.zip\n" + sha256_hex(regular_body) +
+                             "  bun-windows-x64.zip\n" + sha256_hex(baseline_body) + "  bun-windows-x64-baseline.zip\n" +
+                             std::string(64, 'b') + "  bun-windows-x64-baseline-profile.zip\n"});
+
+    // Both files can be added; the second isn't "already in the list".
+    std::vector<PublishFile> files = cdn.files;
+    const AddResult first = new_file(kTestCdn + "/" + regular, kTestCdn, files);
+    REQUIRE_MESSAGE(first.file, first.error);
+    CHECK(first.file->title == "Bun 1.3.14");
+    files.push_back(*first.file);
+    const AddResult second = new_file(kTestCdn + "/" + baseline, kTestCdn, files);
+    REQUIRE_MESSAGE(second.file, second.error);
+    CHECK(second.file->title == "Bun 1.3.14 baseline");
+    files.push_back(*second.file);
+    CHECK(new_file(kTestCdn + "/" + baseline, kTestCdn, files).error == "That file is already in the list.");
+
+    CheckContext ctx{cdn.http, kTestCdn};
+    PublishFile a = *first.file;
+    PublishFile b = *second.file;
+    check_file(ctx, a);
+    check_file(ctx, b);
+    CHECK_MESSAGE(a.state == CheckState::Ok, a.detail);
+    CHECK_MESSAGE(b.state == CheckState::Ok, b.detail);
+    // A CDN file that isn't the official one is refused.
+    PublishFile bad = *second.file;
+    cdn.http.serve(kTestCdn + "/" + baseline, {200, "something else"});
+    check_file(ctx, bad);
+    CHECK(bad.state == CheckState::Failed);
+    cdn.http.serve(kTestCdn + "/" + baseline, {200, baseline_body});
+
+    // Other builds of the release aren't listed.
+    CHECK(describe_cdn_path(regular).listable);
+    CHECK(describe_cdn_path(regular).variant.empty());
+    CHECK(describe_cdn_path(baseline).listable);
+    CHECK(describe_cdn_path(baseline).variant == "baseline");
+    for (const char* other : {"bun-linux-x64.zip", "bun-darwin-aarch64.zip", "bun-windows-aarch64.zip",
+                              "bun-windows-x64-profile.zip", "bun-windows-x64-baseline-profile.zip",
+                              "bun-freebsd-x64.zip", "bun-linux-x64-android.zip"}) {
+        const CdnPath p = describe_cdn_path(std::string("bun/1.3.14/") + other);
+        CHECK_FALSE(p.listable);
+        CHECK(p.problem.find("another build") != std::string::npos);
+    }
+    CHECK_FALSE(describe_cdn_path("bun/1.3.15/bun-windows-x64.zip.sha256").listable);
+
+    cdn.files.push_back(a);
+    cdn.files.push_back(b);
+    const auto now = at("2026-11-12T12:00:00Z");
+    cdn.publish(7, now);  // build_next_list: the app's own checks accept two Bun files
+    const LiveResult live = fetch_live_list(cdn.http, kTestCdn, cdn.keys(), now);
+    REQUIRE_MESSAGE(live.list, live.error);
+    std::vector<std::string> bun;
+    for (const floserver::core::RuntimeFile& r : live.list->runtimes) {
+        if (r.name == "bun") {
+            bun.push_back(r.version + "/" + r.variant + "/" + r.platform + "/" + r.license + "/" + r.archive + "/" +
+                          r.urls.back());
+        }
+    }
+    REQUIRE(bun.size() == 2);
+    CHECK(bun[0] == "1.3.14//windows-x64/MIT/zip/https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-windows-x64.zip");
+    CHECK(bun[1] == "1.3.14/baseline/windows-x64/MIT/zip/"
+                    "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-windows-x64-baseline.zip");
+
+    // The next list carries both over, with their own titles.
+    std::vector<std::string> notes;
+    const auto carried = files_from_live(*live.list, kTestCdn, notes);
+    CHECK(notes.empty());
+    std::vector<std::string> titles;
+    for (const PublishFile& f : carried) {
+        titles.push_back(f.title);
+    }
+    CHECK(std::find(titles.begin(), titles.end(), "Bun 1.3.14") != titles.end());
+    CHECK(std::find(titles.begin(), titles.end(), "Bun 1.3.14 baseline") != titles.end());
+    CHECK(runtime_title("bun", "1.3.14", "baseline") == "Bun 1.3.14 baseline");
+    CHECK(runtime_title("php", "8.5.12", "nts") == "PHP 8.5.12");
+}
+
+TEST_CASE("publisher: Deno is checked against its own .sha256sum, as PowerShell printed it (D31)") {
+    FakeCdn cdn;
+    const std::string path = "deno/2.9.8/deno-x86_64-pc-windows-msvc.zip";
+    const std::string body = "deno zip";
+    cdn.http.serve(kTestCdn + "/" + path, {200, body});
+
+    const OfficialSource source = official_source(path);
+    CHECK(source.kind == OfficialSource::Kind::Sums);
+    CHECK(source.urls == std::vector<std::string>{"https://github.com/denoland/deno/releases/download/v2.9.8/"
+                                                  "deno-x86_64-pc-windows-msvc.zip.sha256sum"});
+    // The file Deno's release has: Get-FileHash's print, the hash in capitals.
+    std::string upper = sha256_hex(body);
+    std::transform(upper.begin(), upper.end(), upper.begin(),
+                   [](char c) { return (c >= 'a' && c <= 'f') ? static_cast<char>(c - 32) : c; });
+    cdn.http.serve(source.urls.front(),
+                   {200, "\nAlgorithm : SHA256\nHash      : " + upper +
+                             "\nPath      : C:\\a\\deno\\deno\\target\\release\\deno-x86_64-pc-windows-msvc.zip\n\n"});
+
+    const AddResult added = new_file(kTestCdn + "/" + path, kTestCdn, cdn.files);
+    REQUIRE_MESSAGE(added.file, added.error);
+    CHECK(added.file->title == "Deno 2.9.8");
+    PublishFile f = *added.file;
+    CheckContext ctx{cdn.http, kTestCdn};
+    check_file(ctx, f);
+    CHECK_MESSAGE(f.state == CheckState::Ok, f.detail);
+
+    // Another hash in that file: refused.
+    PublishFile bad = *added.file;
+    cdn.http.serve(kTestCdn + "/" + path, {200, "something else"});
+    check_file(ctx, bad);
+    CHECK(bad.state == CheckState::Failed);
+    cdn.http.serve(kTestCdn + "/" + path, {200, body});
+
+    CHECK(describe_cdn_path(path).listable);
+    for (const char* other : {"deno-aarch64-apple-darwin.zip", "deno-x86_64-unknown-linux-gnu.zip",
+                              "denort-x86_64-pc-windows-msvc.zip"}) {
+        const CdnPath p = describe_cdn_path(std::string("deno/2.9.8/") + other);
+        CHECK_FALSE(p.listable);
+        INFO(other << ": " << p.problem);
+        CHECK(p.problem.find("another build") != std::string::npos);
+    }
+    CHECK(describe_cdn_path("deno/2.9.8/deno_src.tar.gz").problem.find("not listed") != std::string::npos);
+
+    cdn.files.push_back(f);
+    const auto now = at("2026-11-12T12:00:00Z");
+    const BuiltList built = build_next_list(kTestCdn, cdn.files, 8, now);
+    REQUIRE_MESSAGE(built.manifest_json, (built.errors.empty() ? "" : built.errors.front()));
+    const auto doc = nlohmann::json::parse(*built.manifest_json);
+    const auto entry = std::find_if(doc.at("runtimes").begin(), doc.at("runtimes").end(),
+                                    [](const nlohmann::json& r) { return r.at("name").get<std::string>() == "deno"; });
+    REQUIRE(entry != doc.at("runtimes").end());
+    CHECK(entry->at("version").get<std::string>() == "2.9.8");
+    CHECK(entry->at("platform").get<std::string>() == "windows-x64");
+    CHECK_FALSE(entry->contains("variant"));
+    CHECK(entry->at("license").get<std::string>() == "MIT");
+    CHECK(entry->at("urls").back().get<std::string>() ==
+          "https://github.com/denoland/deno/releases/download/v2.9.8/deno-x86_64-pc-windows-msvc.zip");
+}
+
+TEST_CASE("publisher: a checksum file naming the file with one hash is read (PowerShell's Get-FileHash)") {
+    const std::string h = std::string(63, 'a') + "b";
+    std::string upper = h;
+    upper[0] = 'A';
+    const std::string text = "Algorithm : SHA256\r\nHash      : " + upper + "\r\nPath      : C:\\x\\file.zip\r\n";
+    CHECK(find_official_hash(text, "file.zip") == std::string("a") + h.substr(1));
+    CHECK_FALSE(find_official_hash(text, "other.zip"));  // it names another file
+    // Two different hashes and no line naming the file: not guessed.
+    CHECK_FALSE(find_official_hash(h + "  a.zip\n" + std::string(64, 'c') + "  b.zip\n", "file.zip"));
+}
+
 TEST_CASE("publisher: official checksums are read from the usual list formats") {
     const std::string h = std::string(63, 'a') + "b";
     CHECK(find_official_hash(h + "  file.zip\n", "file.zip") == h);

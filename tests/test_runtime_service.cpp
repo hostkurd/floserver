@@ -499,3 +499,56 @@ TEST_CASE("the leftover clean-up and installs hold each other off") {
     REQUIRE(s.begin_cleanup());
     s.end_cleanup();
 }
+
+TEST_CASE("Bun installs the build that fits the CPU: AVX2 the regular zip, otherwise the baseline (D31)") {
+    const std::string regular = make_zip("bun.exe", "MZ bun");
+    const std::string baseline = make_zip("bun.exe", "MZ bun baseline");
+
+    for (const bool avx2 : {true, false}) {
+        INFO("avx2: " << avx2);
+        World w;
+        auto bun = [&](const std::string& bytes, const char* variant, const char* file) {
+            auto e = w.entry("bun", "1.3.14", bytes);
+            e["license"] = "MIT";
+            e["urls"] = {"https://cdn.example.org/bun/1.3.14/" + std::string(file)};
+            if (*variant != '\0') {
+                e["variant"] = variant;
+            }
+            return e;
+        };
+        nlohmann::json doc = {{"schema", 1},
+                              {"sequence", 9},
+                              {"expires", "2026-12-01T00:00:00Z"},
+                              {"runtimes",
+                               {bun(regular, "", "bun-windows-x64.zip"),
+                                bun(baseline, "baseline", "bun-windows-x64-baseline.zip")}}};
+        const std::string bytes = doc.dump();
+        w.transport->serve(kSource.manifest_url, {200, bytes});
+        w.transport->serve(kSource.signature_url, {200, kKey.sign(bytes, kKeyId)});
+        w.transport->serve("https://cdn.example.org/bun/1.3.14/bun-windows-x64.zip", {200, regular});
+        w.transport->serve("https://cdn.example.org/bun/1.3.14/bun-windows-x64-baseline.zip", {200, baseline});
+
+        RuntimeServiceConfig config = w.config();
+        config.has_avx2 = [avx2] { return avx2; };
+        RuntimeService s(config, w.transport);
+
+        // Only the build for this CPU is on offer.
+        const auto listed = s.list(false);
+        INFO(listed.dump(2));
+        REQUIRE(listed["available"].size() == 1);
+        CHECK(listed["available"][0]["name"] == "bun");
+        CHECK(listed["available"][0]["variant"].get<std::string>() == (avx2 ? "" : "baseline"));
+
+        ServiceRefusal refusal;
+        const auto id = s.install("bun", "1.3", refusal);
+        REQUIRE_MESSAGE(id.has_value(), refusal.message);
+        const auto job = wait_for(s, *id);
+        INFO(job.dump(2));
+        CHECK(job["state"] == "done");
+        CHECK(job["version"] == "1.3.14");
+        const fs::path dir = w.tmp.path() / "runtimes" / "bun" / (avx2 ? "1.3.14" : "1.3.14-baseline");
+        CHECK(read_file(dir / "bun.exe") == (avx2 ? "MZ bun" : "MZ bun baseline"));
+        CHECK(w.transport->requests("https://cdn.example.org/bun/1.3.14/bun-windows-x64.zip") == (avx2 ? 1 : 0));
+        CHECK(w.transport->requests("https://cdn.example.org/bun/1.3.14/bun-windows-x64-baseline.zip") == (avx2 ? 0 : 1));
+    }
+}

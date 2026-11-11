@@ -308,8 +308,10 @@ RuntimesPage runtimes_page(const json& reply, const Installed* installed, const 
         const std::string stored = text_of(defaults, spec.runtime);
         const bool stored_here = std::find(series.begin(), series.end(), stored) != series.end();
         const std::string effective = stored_here ? stored : (series.empty() ? std::string() : series.front());
+        // Bun and Deno have no default: a project names one itself (D31).
+        const bool has_default = g.runtime != "bun" && g.runtime != "deno";
         for (RuntimeRow& row : g.rows) {
-            if (row.installed && version_series(g.runtime, row.version) == effective) {
+            if (has_default && row.installed && version_series(g.runtime, row.version) == effective) {
                 row.is_default = true;  // the newest of that series: the rows are newest first
                 break;
             }

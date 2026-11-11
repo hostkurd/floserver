@@ -136,6 +136,12 @@ TEST_CASE("access: a project row's name, in each language") {
     CHECK(project_row_name(row, state_of(row, Lang::Ku), Lang::Ku) ==
           "my-shop، هەڵکراوە، خەوتووە، PHP 8.2، MariaDB 11.4، https://my-shop.localhost");
 
+    // A Bun project's row says "Bun 1.3.14" like the others say their runtime.
+    ProjectRow bun = row;
+    bun.chips = {"Bun 1.3.14"};
+    CHECK(project_row_name(bun, state_of(bun, Lang::En), Lang::En) ==
+          "my-shop, on, Sleeping, Bun 1.3.14, https://my-shop.localhost");
+
     // On and on: the state isn't said twice. Off: the detail instead of an address.
     ProjectRow on = row;
     on.state = RowState::On;
@@ -208,6 +214,17 @@ TEST_CASE("access: a version picker, a tab, Keep running") {
     CHECK(picker.value == "8.4");
     CHECK(picker.expandable);
     CHECK(picker_node("p", field, 7).value.empty());
+
+    // The JavaScript picker (D31): its name and value are said plainly, in each language.
+    for (const Lang lang : {Lang::En, Lang::Ar, Lang::Ku}) {
+        const VersionField js{Field::Javascript, "javascript", std::string(text(lang, Str::FieldJavascript)),
+                              {{"None", std::nullopt}, {"Bun 1.3", "bun-1.3"}}, 1, false};
+        const AccessNode node = picker_node("panel/edge/field/javascript", js, 1);
+        CHECK(node.role == AccessRole::ComboBox);
+        CHECK(node.name == "JavaScript");
+        CHECK(node.value == "Bun 1.3");
+        CHECK(node.expandable);
+    }
 
     const AccessNode tab = tab_node("panel/my-shop/tab/1", std::string(text(Lang::Ku, Str::Log)), false, 3, 4);
     CHECK(tab.role == AccessRole::TabItem);

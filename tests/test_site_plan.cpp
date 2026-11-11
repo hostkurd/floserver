@@ -49,7 +49,7 @@ ConfigReader reader(std::map<std::string, std::string> files) {
 const std::vector<InstalledRuntime> kInstalled = {
     runtime("php", "8.4.27"), runtime("php", "8.4.3"),  runtime("php", "8.5.12"), runtime("php", "8.3.36", "ts"),
     runtime("mariadb", "11.4.13"), runtime("node", "24.22.1"), runtime("nginx", "1.30.6"),
-    runtime("python", "3.13.18"),
+    runtime("python", "3.13.18"), runtime("bun", "1.3.14"), runtime("bun", "1.2.9"), runtime("deno", "2.9.8"),
 };
 
 }  // namespace
@@ -641,4 +641,91 @@ TEST_CASE("runtime_users: a project waiting for one download still uses the rest
     users = runtime_users(config, files, installed, std::nullopt);
     CHECK_FALSE(users.contains("php/8.5.12"));
     CHECK_FALSE(users.contains("apache/2.4.66"));
+}
+
+TEST_CASE("Bun and Deno projects run their own server, like Node ones (D31)") {
+    AppConfig config;
+    config.projects = {project("edge", true, true), project("fresh"), project("old"), project("none"), project("mixed")};
+    auto plan = plan_sites(config,
+                           reader({{"edge", R"({"bun": "1.3", "command": "bun run src/server.ts --port {port}"})"},
+                                   {"fresh", R"({"deno": "2.9"})"},
+                                   {"old", R"({"bun": "1.4"})"},
+                                   {"none", R"({"deno": "3"})"},
+                                   {"mixed", R"({"php": "8.5", "bun": "1.3"})"}}),
+                           kInstalled, std::nullopt);
+    REQUIRE(plan.apps.size() == 2);
+    const AppSpec& edge = plan.apps[0];
+    CHECK(edge.kind == AppKind::Bun);
+    CHECK(std::string(app_runtime_name(edge.kind)) == "bun");
+    CHECK(edge.version == "1.3.14");
+    CHECK(edge.runtime_dir == kBase / "runtimes" / "bun" / "1.3.14");
+    CHECK(edge.command == "bun run src/server.ts --port {port}");
+    CHECK(edge.keep_running);
+    CHECK(plan.sites[0].state == SiteState::Ready);
+    CHECK(plan.sites[0].app == std::optional<std::size_t>(0));
+    const AppSpec& fresh = plan.apps[1];
+    CHECK(fresh.kind == AppKind::Deno);
+    CHECK(fresh.version == "2.9.8");
+    CHECK(fresh.runtime_dir == kBase / "runtimes" / "deno" / "2.9.8");
+    CHECK_FALSE(fresh.keep_running);
+    CHECK(plan.sites[2].state == SiteState::NeedsDownload);
+    CHECK(plan.sites[2].missing == std::vector<std::string>{"bun 1.4"});
+    CHECK(plan.sites[3].missing == std::vector<std::string>{"deno 3"});
+    // With PHP, Bun is only a requirement (its tools), and still has to be installed.
+    CHECK(plan.sites[4].pool.has_value());
+    CHECK_FALSE(plan.sites[4].app);
+    CHECK(plan.sites[4].config->bun == std::optional<std::string>("1.3"));
+
+    REQUIRE(assign_pool_ports(plan, {}, [](Port) { return true; }));
+    REQUIRE(assign_app_ports(plan, {}, [](Port) { return true; }));
+    CHECK(plan.apps[0].port == 9300);
+    CHECK(plan.apps[1].port == 9301);
+}
+
+TEST_CASE("a project has one JavaScript runtime: two named is a problem with a clear message (D31)") {
+    AppConfig config;
+    config.projects = {project("both"), project("three"), project("fine")};
+    const auto plan = plan_sites(config,
+                                 reader({{"both", R"({"node": "24", "bun": "1.3"})"},
+                                         {"three", R"({"bun": "1.3", "deno": "2.9", "node": "24"})"},
+                                         {"fine", R"({"deno": "2.9"})"}}),
+                                 kInstalled, std::nullopt);
+    CHECK(plan.sites[0].state == SiteState::Problem);
+    CHECK(plan.sites[0].problem ==
+          "bun is named together with \"node\", but a project runs on one JavaScript runtime: keep one of node and "
+          "bun in floserver.json");
+    CHECK(plan.sites[1].state == SiteState::Problem);
+    CHECK(plan.sites[1].problem.find("one JavaScript runtime") != std::string::npos);
+    CHECK(plan.sites[1].problem.find("node, bun and deno") != std::string::npos);
+    CHECK(plan.sites[2].state == SiteState::Ready);
+    CHECK(plan.apps.size() == 1);
+}
+
+TEST_CASE("Python names Bun or Deno for their tools, as it does Node (D31)") {
+    AppConfig config;
+    config.projects = {project("api"), project("gone")};
+    const auto plan = plan_sites(config,
+                                 reader({{"api", R"({"python": "3.13", "deno": "2.9"})"},
+                                         {"gone", R"({"python": "3.13", "bun": "1.9"})"}}),
+                                 kInstalled, std::nullopt);
+    REQUIRE(plan.apps.size() == 1);
+    CHECK(plan.apps[0].kind == AppKind::Python);
+    CHECK(plan.apps[0].tools_name == "deno");
+    CHECK(plan.apps[0].node_dir == kBase / "runtimes" / "deno" / "2.9.8");
+    CHECK(plan.apps[0].node_version == "2.9.8");
+    CHECK(plan.sites[1].state == SiteState::NeedsDownload);
+    CHECK(plan.sites[1].missing == std::vector<std::string>{"bun 1.9"});
+}
+
+TEST_CASE("Settings' users of each runtime include Bun and Deno (D31)") {
+    AppConfig config;
+    config.projects = {project("edge"), project("fresh"), project("off", false)};
+    const auto users = runtime_users(config,
+                                     reader({{"edge", R"({"bun": "1.3"})"},
+                                             {"fresh", R"({"deno": "2.9"})"},
+                                             {"off", R"({"bun": "1.3"})"}}),
+                                     kInstalled, std::nullopt);
+    CHECK(users.at("bun/1.3.14") == std::vector<std::string>{"edge", "off"});
+    CHECK(users.at("deno/2.9.8") == std::vector<std::string>{"fresh"});
+    CHECK_FALSE(users.contains("bun/1.2.9"));
 }

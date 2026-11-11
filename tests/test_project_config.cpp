@@ -347,3 +347,97 @@ TEST_CASE("setting a key writes the project's own floserver.json") {
     CHECK_FALSE(set_project_config_file_value(other.path(), ConfigKey::Php, "php", std::string("8.4"), error));
     CHECK(error.find("plain file") != std::string::npos);
 }
+
+// --- Bun and Deno (D31) ----------------------------------------------------------------
+
+TEST_CASE("bun and deno are versions, and a project has one JavaScript runtime") {
+    auto r = parse_project_config(R"({"bun": "1.3", "root": "public"})");
+    REQUIRE(r.config);
+    CHECK(r.config->bun == std::optional<std::string>("1.3"));
+    CHECK_FALSE(r.config->deno);
+    CHECK(r.warnings.empty());
+    REQUIRE(js_runtime(*r.config));
+    CHECK(js_runtime(*r.config)->name == "bun");
+    CHECK(js_runtime(*r.config)->version == "1.3");
+    CHECK(write_project_config(*r.config) == "{\n  \"bun\": \"1.3\",\n  \"root\": \"public\"\n}\n");
+
+    r = parse_project_config(R"({"deno": "02.9.8"})");
+    REQUIRE(r.config);
+    CHECK(r.config->deno == std::optional<std::string>("2.9.8"));
+    CHECK(js_runtime(*r.config)->name == "deno");
+
+    r = parse_project_config(R"({"node": "24"})");
+    REQUIRE(r.config);
+    CHECK(js_runtime(*r.config)->name == "node");
+    CHECK_FALSE(js_runtime(*parse_project_config("{}").config));
+
+    // PHP and Python may name one, as they name Node today.
+    r = parse_project_config(R"({"php": "8.5", "deno": "2.9", "python": "3.13"})");
+    REQUIRE(r.config);
+
+    // Two named: an error that says what to do, against the second one.
+    r = parse_project_config(R"({"node": "24", "bun": "1.3"})");
+    CHECK_FALSE(r.config);
+    REQUIRE(r.errors.size() == 1);
+    CHECK(r.errors[0].key == "bun");
+    CHECK(r.errors[0].message ==
+          "is named together with \"node\", but a project runs on one JavaScript runtime: keep one of node and bun in "
+          "floserver.json");
+    r = parse_project_config(R"({"bun": "1.3", "deno": "2.9"})");
+    CHECK_FALSE(r.config);
+    REQUIRE(r.errors.size() == 1);
+    CHECK(r.errors[0].key == "deno");
+    CHECK(r.errors[0].message.find("\"bun\"") != std::string::npos);
+    r = parse_project_config(R"({"deno": "2.9", "node": "24", "bun": "1"})");
+    CHECK_FALSE(r.config);
+    REQUIRE(r.errors.size() == 1);
+    CHECK(r.errors[0].message.find("node, bun and deno") != std::string::npos);
+
+    // A bad version is that key's own error.
+    r = parse_project_config(R"({"bun": 1.3})");
+    CHECK_FALSE(r.config);
+    REQUIRE(r.errors.size() == 1);
+    CHECK(r.errors[0].key == "bun");
+    r = parse_project_config(R"({"deno": "latest"})");
+    CHECK_FALSE(r.config);
+    CHECK(r.errors[0].key == "deno");
+}
+
+TEST_CASE("flo use bun and flo use deno, and the window's JavaScript key, replace the project's runtime") {
+    std::string error;
+    CHECK(parse_config_key("bun") == ConfigKey::Bun);
+    CHECK(parse_config_key("deno") == ConfigKey::Deno);
+    CHECK(parse_config_key("javascript") == ConfigKey::Javascript);
+
+    auto out = set_project_config_value(R"({"php": false, "node": "22"})", ConfigKey::Bun, "bun", std::string("1.3.14"), error);
+    REQUIRE_MESSAGE(out, error);
+    CHECK(*out == "{\n  \"php\": false,\n  \"bun\": \"1.3.14\"\n}\n");  // node is gone: one runtime
+    out = set_project_config_value(*out, ConfigKey::Deno, "deno", std::string("2.9"), error);
+    REQUIRE(out);
+    CHECK(*out == "{\n  \"php\": false,\n  \"deno\": \"2.9\"\n}\n");
+    out = set_project_config_value(*out, ConfigKey::Node, "node", std::string("24"), error);
+    REQUIRE(out);
+    CHECK(*out == "{\n  \"php\": false,\n  \"node\": \"24\"\n}\n");
+    // Removing one key removes only it.
+    out = set_project_config_value(*out, ConfigKey::Bun, "bun", std::nullopt, error);
+    REQUIRE(out);
+    CHECK(out->find("\"node\": \"24\"") != std::string::npos);
+
+    // "javascript": "<runtime>-<version>", or nothing for none.
+    out = set_project_config_value(R"({"deno": "2.9", "root": "public"})", ConfigKey::Javascript, "javascript",
+                                   std::string("bun-1.3"), error);
+    REQUIRE_MESSAGE(out, error);
+    CHECK(*out == "{\n  \"root\": \"public\",\n  \"bun\": \"1.3\"\n}\n");
+    out = set_project_config_value(*out, ConfigKey::Javascript, "javascript", std::string("node-24"), error);
+    REQUIRE(out);
+    CHECK(out->find("\"node\": \"24\"") != std::string::npos);
+    CHECK(out->find("bun") == std::string::npos);
+    out = set_project_config_value(*out, ConfigKey::Javascript, "javascript", std::nullopt, error);
+    REQUIRE(out);
+    CHECK(*out == "{\n  \"root\": \"public\"\n}\n");
+    for (const char* bad : {"ruby-3.4", "bun", "bun-", "bun-latest", "php-8.4", "javascript-1"}) {
+        CHECK_FALSE(set_project_config_value("{}", ConfigKey::Javascript, "javascript", std::string(bad), error));
+        CHECK(error.find("bun-1.3") != std::string::npos);
+    }
+    CHECK_FALSE(set_project_config_value("{}", ConfigKey::Bun, "bun", std::string("fast"), error));
+}
