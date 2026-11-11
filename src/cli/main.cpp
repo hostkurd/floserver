@@ -70,6 +70,7 @@ void print_help(std::ostream& out) {
         << "  restore <project> <zip>    Put a project's files and database back from a backup\n"
         << "  use <php|node|python|mariadb> <v> Set a version in this project's floserver.json\n"
         << "  use php <none|newest|auto>  ...no PHP, always the newest PHP, or PHP when there are .php files\n"
+        << "  use redis <on|off>         The shared Redis server for this project (its .env gets REDIS_*)\n"
         << "  php <series>               PHP settings for a series (8.5): extensions and php.ini values\n"
         << "  php <series> ext <name> <on|off|default>   ...turn an extension on or off for every project on it\n"
         << "  php <series> ini <key> <value|default>     ...set a php.ini value: flo php 8.5 ini memory_limit 1G\n"
@@ -84,6 +85,8 @@ void print_help(std::ostream& out) {
         << "  mail open                  Open the inbox in your browser\n"
         << "  mail test [address]        Send a test email to the inbox\n"
         << "  mail clear [--yes]         Delete every email in the inbox\n"
+        << "  redis                      Redis (Garnet): its state, address and key count\n"
+        << "  redis flush [--yes]        Delete every key on the shared Redis server\n"
         << "  trust                      Let your browsers trust FloServer's HTTPS certificates\n"
         << "  untrust                    Remove FloServer's certificate authority\n"
         << "  check [folder]             Check the floserver.json for a project\n"
@@ -1021,15 +1024,18 @@ std::optional<fs::path> project_folder_for(const fs::path& here) {
 // here. PHP also takes none (false: no PHP), newest (always PHP, the newest
 // installed) and auto (no key: the folder decides).
 int use(const std::vector<std::string>& args) {
-    if (args.size() != 3 || (args[1] != "php" && args[1] != "node" && args[1] != "python" && args[1] != "mariadb")) {
+    const bool redis_word = args.size() == 3 && args[1] == "redis" && (args[2] == "on" || args[2] == "off");
+    if (args.size() != 3 ||
+        (args[1] != "php" && args[1] != "node" && args[1] != "python" && args[1] != "mariadb" && !redis_word)) {
         std::cerr << "Usage: flo use <php|node|python|mariadb> <version>   for example: flo use php 8.4\n"
-                  << "       flo use php <none|newest|auto>   no PHP, always the newest PHP, or as the folder says\n";
+                  << "       flo use php <none|newest|auto>   no PHP, always the newest PHP, or as the folder says\n"
+                  << "       flo use redis <on|off>   the shared Redis server (Garnet) for this project\n";
         return 2;
     }
     const bool php_word = args[1] == "php" && (args[2] == floserver::core::kPhpNone ||
                                                args[2] == floserver::core::kPhpNewest || args[2] == "auto");
     const auto version = floserver::core::Version::parse(args[2]);
-    if (!version && !php_word) {
+    if (!version && !php_word && !redis_word) {
         std::cerr << "\"" << args[2] << "\" is not a version such as 8.4 or 8.4.27"
                   << (args[1] == "php" ? " (or none, newest or auto)" : "") << "\n";
         return 2;
@@ -1052,7 +1058,7 @@ int use(const std::vector<std::string>& args) {
         std::cerr << shown(file) << ": " << error << "\n";
         return 1;
     }
-    std::cout << shown(file) << ": " << args[1] << " " << (version ? version->to_string() : args[2]) << "\n";
+    std::cout << shown(file) << ": " << args[1] << " " << (version && !redis_word ? version->to_string() : args[2]) << "\n";
     if (!registered) {
         std::cout << "(This folder isn't a FloServer project yet. Add it with: flo add)\n";
     }
@@ -1666,7 +1672,7 @@ int env(const std::vector<std::string>& args) {
     // The first time can take a while: MariaDB sets up its data folder.
     auto reply = client->call("databases.login", {{"name", name}});
     if (reply && !reply->ok && reply->error_code == "no_database") {
-        // No database: Mailpit's lines alone, when it's installed and the project takes some.
+        // No database: Mailpit's and Redis's lines alone, when there are any (D27, D30).
         const auto mail = client->call("mail.env", {{"name", name}});
         if (mail && mail->ok && mail->result.contains("env") && mail->result["env"].is_array() &&
             !mail->result["env"].empty()) {
@@ -1867,6 +1873,71 @@ int mail(const std::vector<std::string>& args) {
     return 0;
 }
 
+// flo redis [flush [--yes]]: the shared Redis server, Garnet (D30).
+int redis(const std::vector<std::string>& args) {
+    const std::string what = args.size() > 1 ? args[1] : "";
+    bool yes = false;
+    bool bad = !(what.empty() || what == "flush");
+    for (std::size_t i = 2; i < args.size() && !bad; ++i) {
+        if (what == "flush" && (args[i] == "--yes" || args[i] == "-y")) {
+            yes = true;
+        } else {
+            bad = true;
+        }
+    }
+    if (bad) {
+        std::cerr << "Usage: flo redis | flo redis flush [--yes]\n";
+        return 2;
+    }
+    auto client = connect_or_start(std::chrono::seconds(60));
+    if (!client) {
+        return 1;
+    }
+    const auto status = client->call("redis.status");
+    if (!status || !status->ok) {
+        return print_mail_refusal(status);
+    }
+    const auto& st = status->result;
+    if (!st.value("installed", false)) {
+        std::cout << "Redis (Garnet) isn't installed. Install it with: flo install garnet\n";
+        return what.empty() ? 0 : 1;
+    }
+    if (what.empty()) {
+        std::cout << "Redis (Garnet " << printable(st, "version") << ")  " << printable(st, "state") << "\n"
+                  << "  Address  127.0.0.1:" << st.value("port", 0) << "   (password: flo env shows it in REDIS_PASSWORD)\n"
+                  << "  Keys     " << st.value("keys", 0) << "\n";
+        std::string names;
+        if (st.contains("projects") && st["projects"].is_array()) {
+            for (const auto& n : st["projects"]) {
+                if (n.is_string()) {
+                    names += (names.empty() ? "" : ", ") + floserver::core::clean_error_text(n.get<std::string>());
+                }
+            }
+        }
+        std::cout << "  Projects " << (names.empty() ? std::string("none has Redis on (flo use redis on)") : names) << "\n";
+        if (st.contains("error")) {
+            std::cout << "  " << printable(st, "error") << "\n";
+        }
+        std::cout << "  Not supported by Garnet: streams (XADD, XREAD) and WAIT.\n";
+        return 0;
+    }
+    if (!yes) {
+        std::cout << "Delete all " << st.value("keys", 0)
+                  << " keys on the shared Redis server, for every project? This can't be undone. [y/N] " << std::flush;
+        std::string answer;
+        if (!std::getline(std::cin, answer) || (answer != "y" && answer != "Y" && answer != "yes")) {
+            std::cout << "Nothing was deleted.\n";
+            return 1;
+        }
+    }
+    const auto reply = client->call("redis.flush");
+    if (!reply || !reply->ok) {
+        return print_mail_refusal(reply);
+    }
+    std::cout << "Redis is empty.\n";
+    return 0;
+}
+
 // flo studio [project|folder]: opens a FloCMS project in FloCMS Studio (D14).
 // A name is a project's; anything else is a folder; nothing is the project
 // this folder is in, else this folder.
@@ -2010,6 +2081,9 @@ int run_command(const std::vector<std::string>& args, const std::vector<fs::path
     }
     if (args[0] == "mail") {
         return mail(args);
+    }
+    if (args[0] == "redis") {
+        return redis(args);
     }
     if (args[0] == "shims") {
         return shims(args);

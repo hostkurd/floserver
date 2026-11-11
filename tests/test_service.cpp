@@ -138,6 +138,37 @@ TEST_CASE("the real service starts, answers, refuses a second copy and stops") {
     REQUIRE(still.has_value());
     CHECK(still->ok);
     CHECK(std::filesystem::is_regular_file(data.path() / "config.json"));
+
+    // Redis (D30): a project turns it on in its floserver.json; without
+    // Garnet installed the status says so and nothing listens.
+    const auto redis_on = client->call("projects.use", {{"name", "my-shop"}, {"key", "redis"}, {"value", "on"}});
+    REQUIRE(redis_on.has_value());
+    INFO(redis_on->error_message);
+    REQUIRE(redis_on->ok);
+    CHECK(redis_on->result["wants"]["redis"] == true);
+    CHECK(test_util::read_file(shop / "floserver.json").find("\"redis\": true") != std::string::npos);
+    const auto redis_status = client->call("redis.status");
+    REQUIRE(redis_status.has_value());
+    REQUIRE(redis_status->ok);
+    CHECK(redis_status->result["state"] == "not_installed");
+    CHECK(redis_status->result["projects"] == nlohmann::json::array({"my-shop"}));
+    CHECK(redis_status->result["settings"]["memory_mb"] == 256);
+    const auto redis_password = client->call("redis.password");
+    REQUIRE(redis_password.has_value());
+    CHECK(redis_password->error_code == "not_installed");
+    const auto redis_set = client->call("redis.set", {{"memory_mb", 128}, {"keep_running", false}});
+    REQUIRE(redis_set.has_value());
+    CHECK(redis_set->ok);
+    const auto redis_bad = client->call("redis.set", {{"memory_mb", "lots"}});
+    REQUIRE(redis_bad.has_value());
+    CHECK(redis_bad->error_code == "bad_params");
+    const auto redis_flush = client->call("redis.flush");
+    REQUIRE(redis_flush.has_value());
+    CHECK(redis_flush->error_code == "not_installed");
+    const auto redis_off = client->call("projects.use", {{"name", "my-shop"}, {"key", "redis"}, {"value", "off"}});
+    REQUIRE(redis_off.has_value());
+    CHECK(redis_off->ok);
+    CHECK_FALSE(redis_off->result["wants"].contains("redis"));
     const auto removed = client->call("projects.remove", {{"name", "my-shop"}});
     REQUIRE(removed.has_value());
     CHECK(removed->ok);
