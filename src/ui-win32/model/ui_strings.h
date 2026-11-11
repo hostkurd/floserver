@@ -271,11 +271,11 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     PortsOpenFailed,  // {0}: the reason
     PortsChanging,
     PortsCertUnreadable,  // a reason, after "Not added: "
-    // Settings > Database (MariaDB).
+    // Settings > Database (MariaDB, MySQL: one tab per engine).
     SettingsDatabase,
     DbTitle,
     DbHint,
-    DbNoneInstalled,
+    DbNoneInstalled,         // {0}: the engine, "MySQL"
     DbServer,
     DbStart,
     DbStop,
@@ -296,8 +296,8 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     DbUsedByNobody,
     DbShowFinal,
     DbEditFull,
-    DbUnknownOption,         // {0}: "11.4", {1}: the name
-    DbUnknownOptionMaybe,    // {0}: "11.4", {1}: the name, {2}: the known name it's closest to
+    DbUnknownOption,         // {0}: the server, "MariaDB 11.4", {1}: the name
+    DbUnknownOptionMaybe,    // {0}: "MariaDB 11.4", {1}: the name, {2}: the known name it's closest to
     DbCustomProblems,        // {0}: the lines left out
     DbCustomIniUsed,
     DbProblems,              // {0}: what the service skipped
@@ -319,23 +319,25 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     DbPasswordShort,
     DbPasswordLong,
     DbPasswordChars,
-    DbApplies,               // {0}: "11.4", {1}: who: "3 projects and shared sites"
-    DbAppliesSleeping,       // {0}: "11.4"
-    DbAppliesNobody,         // {0}: "11.4"
-    DbAskSave,               // {0}: "11.4"
-    DbReadFailed,            // {0}: "11.4", {1}: the service's reason
-    DbRestarting,            // {0}: "11.4"
-    DbServerFailed,          // {0}: "11.4", {1}: the service's reason
+    DbApplies,               // {0}: "MariaDB 11.4", {1}: who: "3 projects and shared sites"
+    DbAppliesSleeping,       // {0}: "MariaDB 11.4"
+    DbAppliesNobody,         // {0}: "MariaDB 11.4"
+    DbAskSave,               // {0}: "MariaDB 11.4"
+    DbReadFailed,            // {0}: "MariaDB 11.4", {1}: the service's reason
+    DbRestarting,            // {0}: "MariaDB 11.4"
+    DbServerFailed,          // {0}: "MariaDB 11.4", {1}: the service's reason
     DbOpenIniFailed,         // {0}: the reason
     DbIniOpened,
     DbFinalOpened,
+    DbMysqlLtsNote,          // under MySQL's tab: 8.4 LTS only (D28)
+    DbEngines,               // the engines' tabs, for screen readers
     // phpMyAdmin (an optional tool).
     SettingsTools,
     PmaOpen,
     PmaOpenProject,
     PmaNotInstalled,
     PmaOpening,
-    PmaStarting,             // {0}: the MariaDB series, "11.8"
+    PmaStarting,             // {0}: the server, "MariaDB 11.8", "MySQL 8.4"
     PmaOpenFailed,          // {0}: the service's reason
     PmaAddress,              // {0}: "https://phpmyadmin.localhost"
     PmaNameTaken,
@@ -467,6 +469,7 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     FirstRunWhatMariadb,
     FirstRunWhatNode,
     FirstRunWhatComposer,
+    FirstRunWhatMysql,
     FirstRunWhatPython,
     FirstRunWhatPma,
     FirstRunWhatApache,

@@ -2,6 +2,7 @@
 // answer read, changes until Save, what Save sends, "did you mean".
 
 #include "model/database_page.h"
+#include "model/main_access.h"
 
 #include <doctest/doctest.h>
 
@@ -144,4 +145,84 @@ TEST_CASE("Settings > Database's footer, names and root password rule") {
         CHECK(f.key == db_option_base(f.label));
     }
     CHECK(settings_db_ini_fields().size() == 8);
+}
+
+TEST_CASE("Settings > Database: one tab per engine, each with its own versions and requests (D28)") {
+    REQUIRE(db_engines().size() == 2);
+    CHECK(db_engines()[0].family == "mariadb");
+    CHECK(db_engines()[1].family == "mysql");
+    CHECK(db_engine_title("mysql") == "MySQL");
+    CHECK(db_server_title("mysql", "8.4") == "MySQL 8.4");
+
+    const Installed installed = {{"mariadb", {"11.4.5", "11.8.2"}}, {"mysql", {"8.4.11", "8.4.9"}}};
+    const auto mysql = installed_db_series(installed, "mysql");
+    REQUIRE(mysql.size() == 1);
+    CHECK(mysql[0] == std::pair<std::string, std::string>{"8.4", "8.4.11"});
+    CHECK(installed_db_series(installed).size() == 2);  // MariaDB's, as before
+    const json runtimes = {{"installed", json::array({{{"name", "mysql"}, {"version", "8.4.11"}}})}};
+    CHECK(settings_db_versions(false, {}, runtimes, "mysql").front().first == "8.4");
+    CHECK(settings_db_versions(false, {}, runtimes).empty());
+
+    // The tab shown: the one before when it has an install, else the first that has one.
+    CHECK(db_family_to_show("mysql", true, installed, json()) == "mysql");
+    CHECK(db_family_to_show("", true, installed, json()) == "mariadb");
+    CHECK(db_family_to_show("mariadb", true, {{"mysql", {"8.4.11"}}}, json()) == "mysql");
+    CHECK(db_family_to_show("mysql", true, {}, json()) == "mysql");  // its tab says none is installed
+    CHECK(db_family_to_show("", true, {}, json()) == "mariadb");
+
+    // Requests name the family when it isn't MariaDB (old services read a series alone as MariaDB's).
+    CHECK(db_params("mariadb", "11.4") == json{{"series", "11.4"}});
+    CHECK(db_params("mysql", "8.4") == json{{"family", "mysql"}, {"series", "8.4"}});
+    DbChanges c;
+    c.keep_running = true;
+    CHECK(database_set_params("8.4", c, "mysql") == json{{"family", "mysql"}, {"series", "8.4"}, {"keep_running", true}});
+
+    // The answer and the snapshot: each family's own server.
+    auto r = reply();
+    r["family"] = "mysql";
+    r["series"] = "8.4";
+    const auto s = db_series_from_reply(r);
+    REQUIRE(s);
+    CHECK(s->family == "mysql");
+    CHECK(db_series_from_reply(reply())->family == "mariadb");
+    const json list = json::parse(R"({"servers": [{"series": "8.4", "state": "sleeping", "port": 3306},
+                                                   {"family": "mysql", "series": "8.4", "state": "running", "port": 3307}]})");
+    CHECK(db_server_from_list(list, "8.4", "mysql").port == 3307);
+    CHECK(db_server_from_list(list, "8.4").port == 3306);
+
+    // The words name the engine.
+    DbServer sleeping;
+    sleeping.exists = true;
+    sleeping.state = "sleeping";
+    CHECK(db_restart_text(*s, sleeping, Lang::En) ==
+          "Applies when saved. MySQL 8.4 isn't running now: it uses them the next time it starts.");
+    CHECK(unknown_db_option_text("MySQL 8.4", "max_conections", "max_connections", Lang::En) ==
+          "custom.ini: MySQL 8.4 has no option named max_conections. Did you mean max_connections?");
+    CHECK(fill(Lang::En, Str::DbNoneInstalled, {"MySQL"}) == "No MySQL is installed yet. Download one in Runtimes first.");
+    for (const Lang lang : {Lang::En, Lang::Ar, Lang::Ku}) {
+        CAPTURE(static_cast<int>(lang));
+        CHECK(db_engine_note("mysql", lang).find("MySQL 8.4 LTS") != std::string::npos);
+        CHECK(db_engine_note("mariadb", lang).empty());
+        CHECK(fill(lang, Str::DbAskSave, {"MySQL 8.4"}).find("MySQL 8.4") != std::string::npos);
+        CHECK(fill(lang, Str::DbNoneInstalled, {"MySQL"}).find("MySQL") != std::string::npos);
+        CHECK_FALSE(text(lang, Str::DbEngines).empty());
+        CHECK(std::string(text(lang, Str::DbTitle)).find("MariaDB") == std::string::npos);
+    }
+}
+
+TEST_CASE("Settings > Database's engine tabs as a screen reader gets them") {
+    std::vector<AccessNode> tabs;
+    for (std::size_t i = 0; i < db_engines().size(); ++i) {
+        tabs.push_back(tab_node("db/engine/" + std::string(db_engines()[i].family), db_engines()[i].title,
+                                db_engines()[i].family == "mysql", static_cast<int>(i) + 1,
+                                static_cast<int>(db_engines().size())));
+    }
+    REQUIRE(tabs.size() == 2);
+    CHECK(tabs[1].role == AccessRole::TabItem);
+    CHECK(tabs[1].name == "MySQL");
+    CHECK(tabs[1].selected == std::optional<bool>(true));
+    CHECK(tabs[0].selected == std::optional<bool>(false));
+    CHECK(tabs[1].position == 2);
+    CHECK(tabs[1].set_size == 2);
+    CHECK(tabs[0].focusable);
 }

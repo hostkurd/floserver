@@ -557,7 +557,7 @@ void MainWindow::add_panel_access(AccessTree& t) const {
     if (shown(g.pma)) {
         const DatabaseServerState server =
             database_server(snap_.databases, !row->database.empty() ? row->database : row->wants.database);
-        const std::string label = pma_busy_ ? phpmyadmin_busy_text(server.series, server.state, lang_)
+        const std::string label = pma_busy_ ? phpmyadmin_busy_text(database_server_title(server), server.state, lang_)
                                             : std::string(text(lang_, Str::PmaOpenProject));
         AccessNode pma = button_node(access_id({Part::PanelPhpMyAdmin, -1, p}), label,
                                      phpmyadmin_installed(snap_.installed) && !pma_busy_ && connected);

@@ -839,12 +839,14 @@ TEST_CASE("Settings > Runtimes: phpMyAdmin in the Tools card, with how it's serv
     CHECK(phpmyadmin_line(json(), Lang::En).empty());
 
     // The pressed button while its server is started first, then while phpMyAdmin opens.
-    CHECK(phpmyadmin_busy_text("11.8", "sleeping", Lang::En) == "Starting MariaDB 11.8…");
-    CHECK(phpmyadmin_busy_text("11.8", "starting", Lang::En) == "Starting MariaDB 11.8…");
-    CHECK(phpmyadmin_busy_text("11.8", "", Lang::En) == "Starting MariaDB 11.8…");
-    CHECK(phpmyadmin_busy_text("11.8", "running", Lang::En) == "Opening phpMyAdmin…");
+    CHECK(phpmyadmin_busy_text("MariaDB 11.8", "sleeping", Lang::En) == "Starting MariaDB 11.8…");
+    CHECK(phpmyadmin_busy_text("MariaDB 11.8", "starting", Lang::En) == "Starting MariaDB 11.8…");
+    CHECK(phpmyadmin_busy_text("MariaDB 11.8", "", Lang::En) == "Starting MariaDB 11.8…");
+    CHECK(phpmyadmin_busy_text("MySQL 8.4", "sleeping", Lang::En) == "Starting MySQL 8.4…");
+    CHECK(phpmyadmin_busy_text("MariaDB 11.8", "running", Lang::En) == "Opening phpMyAdmin…");
     CHECK(phpmyadmin_busy_text("", "", Lang::En) == "Opening phpMyAdmin…");
-    CHECK(phpmyadmin_busy_text("11.8", "sleeping", Lang::Ar).find("11.8") != std::string::npos);
+    CHECK(phpmyadmin_busy_text("MariaDB 11.8", "sleeping", Lang::Ar).find("MariaDB 11.8") != std::string::npos);
+    CHECK(phpmyadmin_busy_text("MySQL 8.4", "sleeping", Lang::Ku).find("MySQL 8.4") != std::string::npos);
     const json servers = {{"servers", json::array({{{"series", "11.8"}, {"version", "11.8.9"}, {"port", 3306},
                                                      {"state", "sleeping"}}})}};
     CHECK(database_server(servers, "mariadb-11.8").series == "11.8");
@@ -1514,4 +1516,49 @@ TEST_CASE("scroll bars: a click on the track pages toward it; a drag keeps the g
     CHECK(drag.offset_at(m, 340) == 840);
     CHECK(drag.offset_at(m, -2000) == 0);    // the mouse far off the bar: the end, not beyond
     CHECK(drag.offset_at(m, 5000) == 1200);
+}
+
+TEST_CASE("MySQL beside MariaDB in the window's model (D28): the picker, the chip, the server, Runtimes") {
+    const Installed installed = {{"php", {"8.4.27"}}, {"mariadb", {"11.8.5", "11.4.9"}}, {"mysql", {"8.4.11"}}};
+    ProjectRow row;
+    row.wants.known = true;
+    row.wants.php = "8.4";
+    row.wants.database = "mysql-8.4";
+    const auto fields = version_fields(row, installed, Lang::En);
+    const auto db = std::find_if(fields.begin(), fields.end(), [](const VersionField& f) { return f.key == "database"; });
+    REQUIRE(db != fields.end());
+    // None, MariaDB's series, then MySQL's.
+    REQUIRE(db->choices.size() == 4);
+    CHECK(db->choices[0].label == "None");
+    CHECK(db->choices[1].label == "MariaDB 11.8");
+    CHECK(db->choices[2].label == "MariaDB 11.4");
+    CHECK(db->choices[3].label == "MySQL 8.4");
+    CHECK(db->choices[3].value == std::optional<std::string>("mysql-8.4"));
+    CHECK(db->current == 3);
+    // Asked for but not installed: still listed, and said so.
+    const Installed no_mysql = {{"php", {"8.4.27"}}, {"mariadb", {"11.4.9"}}};
+    const auto missing = version_fields(row, no_mysql, Lang::En);
+    const auto mdb = std::find_if(missing.begin(), missing.end(), [](const VersionField& f) { return f.key == "database"; });
+    REQUIRE(mdb != missing.end());
+    CHECK(mdb->choices[mdb->current].value == std::optional<std::string>("mysql-8.4"));
+    CHECK(mdb->choices[mdb->current].label.find("MySQL 8.4") != std::string::npos);
+
+    CHECK(database_chip("mysql-8.4") == "MySQL 8.4");
+    CHECK(runtime_label("mysql") == "MySQL");
+
+    // Each family's own server: a MySQL 8.4 is never taken for a MariaDB one.
+    const json servers = {{"servers", json::array({{{"family", "mariadb"}, {"series", "11.4"}, {"version", "11.4.9"},
+                                                    {"port", 3306}, {"state", "running"}},
+                                                   {{"family", "mysql"}, {"series", "8.4"}, {"version", "8.4.11"},
+                                                    {"port", 3307}, {"state", "sleeping"}},
+                                                   {{"series", "11.8"}, {"version", "11.8.5"}, {"port", 3308}}})}};
+    CHECK(database_port(servers, "mysql-8.4") == 3307);
+    CHECK(database_port(servers, "mariadb-11.4") == 3306);
+    CHECK(database_port(servers, "mariadb-11.8") == 3308);  // no family: MariaDB's
+    CHECK(database_port(servers, "mariadb-8.4") == 0);
+    const DatabaseServerState my = database_server(servers, "mysql-8.4");
+    CHECK(my.state == "sleeping");
+    CHECK(my.family == "mysql");
+    CHECK(database_server_title(my) == "MySQL 8.4");
+    CHECK(database_server_title({}).empty());
 }

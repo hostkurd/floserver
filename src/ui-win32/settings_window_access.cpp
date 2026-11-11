@@ -106,7 +106,7 @@ std::string SettingsWindow::access_id(const Hit& hit) const {
         "ports/open-cert",
         "db/version", "db/runtimes", "db/start", "db/stop", "db/restart", "db/port", "db/keep", "db/final-ini",
         "db/edit-ini", "db/field", "db/reset", "db/root-show", "db/root-copy", "db/new-password", "db/set-password",
-        "db/discard", "db/save", "db/phpmyadmin",
+        "db/discard", "db/save", "db/phpmyadmin", "db/engine",
         "mail/install", "mail/inbox-link", "mail/copy-inbox", "mail/open-inbox", "mail/copy-smtp", "mail/switch",
         "mail/max", "mail/test", "mail/delete", "mail/discard", "mail/save",
         "apache/version", "apache/runtimes", "apache/find", "apache/module", "apache/more", "apache/final-conf",
@@ -119,6 +119,7 @@ std::string SettingsWindow::access_id(const Hit& hit) const {
     static_assert(kIds[static_cast<std::size_t>(Part::PhpVersion)] == "php/version" &&
                       kIds[static_cast<std::size_t>(Part::PortsChoice)] == "ports/choice" &&
                       kIds[static_cast<std::size_t>(Part::DbVersion)] == "db/version" &&
+                      kIds[static_cast<std::size_t>(Part::DbEngine)] == "db/engine" &&
                       kIds[static_cast<std::size_t>(Part::MailInstall)] == "mail/install" &&
                       kIds[static_cast<std::size_t>(Part::ApacheVersion)] == "apache/version" &&
                       kIds[static_cast<std::size_t>(Part::FoldersProjectsChange)] == "folders/projects/change" &&
@@ -154,6 +155,9 @@ std::string SettingsWindow::access_id(const Hit& hit) const {
         case Part::DbReset:
             return row < settings_db_ini_fields().size() ? part + "/" + settings_db_ini_fields()[row].key
                                                          : std::string();
+        case Part::DbEngine:
+            // By the engine: "db/engine/mysql".
+            return row < db_engines().size() ? part + "/" + std::string(db_engines()[row].family) : std::string();
         default:
             break;
     }
@@ -282,16 +286,27 @@ AccessNode SettingsWindow::access_node(const Hit& hit) const {
             return button(true);
 
         // Settings > Database.
+        case Part::DbEngine: {
+            // A tab per engine (D28); its help names the group.
+            if (row >= db_engines().size()) {
+                break;
+            }
+            AccessNode n = tab_node(access_id(hit), db_engines()[row].title, db_engines()[row].family == db_family_,
+                                    static_cast<int>(row) + 1, static_cast<int>(db_engines().size()));
+            n.help = access_text(text(lang_, Str::DbEngines));
+            n.enabled = !db_saving_;
+            return n;
+        }
         case Part::DbVersion: {
-            std::string label = "MariaDB " + db_series_;
+            std::string label = db_title();
             for (const auto& v : db_versions()) {
                 if (v.first == db_series_) {
-                    label = "MariaDB " + v.second;
+                    label = db_server_title(db_family_, v.second);
                 }
             }
             return combo_node(access_id(hit),
-                              access_join(lang_, {"MariaDB", std::string(text(lang_, Str::PhpVersion))}), label,
-                              !db_saving_);
+                              access_join(lang_, {db_engine_title(db_family_), std::string(text(lang_, Str::PhpVersion))}),
+                              label, !db_saving_);
         }
         case Part::DbStart:
             return button(db_actions(db_server_).start && connected_);

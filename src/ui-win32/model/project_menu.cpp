@@ -9,7 +9,8 @@ namespace floserver::ui {
 
 namespace {
 
-bool is_mariadb(const std::string& database) { return database.starts_with("mariadb"); }
+// A database FloServer makes for the project: MariaDB's, or MySQL's (D28).
+bool is_mariadb(const std::string& database) { return database.starts_with("mariadb") || database.starts_with("mysql"); }
 
 }  // namespace
 

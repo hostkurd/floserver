@@ -9,6 +9,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -279,4 +280,23 @@ TEST_CASE("first run: done is kept in window.json with the other keys") {
     CHECK(parse_window_prefs(window_prefs_json(prefs)) == prefs);
     prefs.first_run_done = false;
     CHECK_FALSE(json::parse(window_prefs_json(prefs)).contains("first_run_done"));
+}
+
+TEST_CASE("first run: MySQL 8.4 is offered after Python, not ticked (D28)") {
+    json reply = kReply;
+    reply["available"].push_back({{"name", "mysql"}, {"version", "8.4.11"}, {"variant", ""}, {"size", 268000000}});
+    reply["available"].push_back({{"name", "mysql"}, {"version", "8.4.9"}, {"variant", ""}, {"size", 260000000}});
+    const std::vector<FirstRunOffer> offers = first_run_offers(reply);
+    const auto python = std::find_if(offers.begin(), offers.end(), [](const FirstRunOffer& o) { return o.name == "python"; });
+    const auto mysql = std::find_if(offers.begin(), offers.end(), [](const FirstRunOffer& o) { return o.name == "mysql"; });
+    REQUIRE(mysql != offers.end());
+    REQUIRE(python != offers.end());
+    CHECK(mysql == python + 1);
+    CHECK(mysql->version == "8.4.11");
+    CHECK(mysql->label == "MySQL 8.4");
+    CHECK_FALSE(mysql->ticked);
+    CHECK(mysql->what == Str::FirstRunWhatMysql);
+    for (const Lang lang : {Lang::En, Lang::Ar, Lang::Ku}) {
+        CHECK(text(lang, Str::FirstRunWhatMysql).find("MySQL") != std::string_view::npos);
+    }
 }

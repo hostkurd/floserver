@@ -156,13 +156,16 @@ struct VersionField {
 // The port the project's database server listens on, from databases.list
 // (the server whose series matches `database`, "mariadb-11.4"), or 0.
 [[nodiscard]] std::uint16_t database_port(const nlohmann::json& databases, std::string_view database);
-// That server's series ("11.4") and state ("sleeping", "running"...); both
-// empty when databases.list has none.
+// That server's series ("11.4"), state ("sleeping", "running"...) and family
+// ("mariadb", "mysql"); all empty when databases.list has none.
 struct DatabaseServerState {
     std::string series;
     std::string state;
+    std::string family;
 };
 [[nodiscard]] DatabaseServerState database_server(const nlohmann::json& databases, std::string_view database);
+// "MySQL 8.4"; empty when there's no server.
+[[nodiscard]] std::string database_server_title(const DatabaseServerState& server);
 
 struct LogLine {
     std::string time;    // "19:41:02"

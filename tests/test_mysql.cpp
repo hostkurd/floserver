@@ -3,6 +3,7 @@
 // folder's clean-up and the signed list's catalog. The real server is
 // tested in test_database_service.cpp (FLOSERVER_TEST_MYSQL).
 
+#include "floserver/core/backup.h"
 #include "floserver/core/data_folder.h"
 #include "floserver/core/database_engine.h"
 #include "floserver/core/database_service.h"
@@ -235,4 +236,12 @@ TEST_CASE("Remove FloServer: MySQL's data folders go with MariaDB's") {
     const auto items = uninstall_items(data, false, true, std::chrono::steady_clock::now() + std::chrono::seconds(5));
     REQUIRE(items.size() == 1);
     CHECK(items[0].path.filename() == "mysql-8.4");
+}
+
+TEST_CASE("a backup names MySQL's database however floserver.json writes it") {
+    const test_util::TempDir tmp;
+    test_util::write_file(tmp.path() / "floserver.json", R"({"php": "8.4", "mysql": "8.4"})");
+    CHECK(backup_versions(tmp.path())["database"] == "mysql-8.4");
+    test_util::write_file(tmp.path() / "floserver.json", R"({"database": "mysql-8.4"})");
+    CHECK(backup_versions(tmp.path())["database"] == "mysql-8.4");
 }

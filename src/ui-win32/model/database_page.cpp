@@ -86,10 +86,29 @@ DbServer db_server_from_json(const json& server) {
     return out;
 }
 
-DbServer db_server_from_list(const json& databases, std::string_view series) {
+const std::vector<DbEngine>& db_engines() {
+    static const std::vector<DbEngine> engines = {{"mariadb", "MariaDB"}, {"mysql", "MySQL"}};
+    return engines;
+}
+
+std::string db_engine_title(std::string_view family) {
+    for (const DbEngine& e : db_engines()) {
+        if (e.family == family) {
+            return std::string(e.title);
+        }
+    }
+    return std::string(family);
+}
+
+std::string db_server_title(std::string_view family, std::string_view series) {
+    return db_engine_title(family) + " " + std::string(series);
+}
+
+DbServer db_server_from_list(const json& databases, std::string_view series, std::string_view family) {
     if (databases.is_object() && databases.contains("servers") && databases["servers"].is_array()) {
         for (const json& s : databases["servers"]) {
-            if (text_of(s, "series") == series) {
+            const std::string own = s.is_object() && s.contains("family") ? text_of(s, "family") : "mariadb";
+            if (own == family && text_of(s, "series") == series) {
                 return db_server_from_json(s);
             }
         }
@@ -99,6 +118,7 @@ DbServer db_server_from_list(const json& databases, std::string_view series) {
 
 std::optional<DbSeries> db_series_from_reply(const json& reply) {
     DbSeries out;
+    out.family = reply.is_object() && reply.contains("family") ? text_of(reply, "family") : "mariadb";
     out.series = text_of(reply, "series");
     if (out.series.empty()) {
         return std::nullopt;
@@ -123,9 +143,9 @@ std::optional<DbSeries> db_series_from_reply(const json& reply) {
     return out;
 }
 
-std::vector<std::pair<std::string, std::string>> installed_db_series(const Installed& installed) {
+std::vector<std::pair<std::string, std::string>> installed_db_series(const Installed& installed, std::string_view family) {
     std::vector<std::pair<std::string, std::string>> out;
-    const auto it = installed.find("mariadb");
+    const auto it = installed.find(std::string(family));
     if (it == installed.end()) {
         return out;
     }
@@ -133,7 +153,7 @@ std::vector<std::pair<std::string, std::string>> installed_db_series(const Insta
     std::sort(versions.begin(), versions.end(),
               [](const std::string& a, const std::string& b) { return is_newer_version(a, b); });
     for (const std::string& v : versions) {
-        const std::string series = version_series("mariadb", v);
+        const std::string series = version_series(family, v);
         if (series.find('.') == std::string::npos) {
             continue;
         }
@@ -144,11 +164,9 @@ std::vector<std::pair<std::string, std::string>> installed_db_series(const Insta
     return out;
 }
 
-std::vector<std::pair<std::string, std::string>> settings_db_versions(bool has_installed, const Installed& installed,
-                                                                     const json& runtimes_reply) {
-    if (has_installed) {
-        return installed_db_series(installed);
-    }
+namespace {
+
+Installed installed_of_reply(const json& runtimes_reply) {
     Installed from_reply;
     if (runtimes_reply.is_object() && runtimes_reply.contains("installed") && runtimes_reply["installed"].is_array()) {
         for (const json& r : runtimes_reply["installed"]) {
@@ -159,7 +177,45 @@ std::vector<std::pair<std::string, std::string>> settings_db_versions(bool has_i
             }
         }
     }
-    return installed_db_series(from_reply);
+    return from_reply;
+}
+
+}  // namespace
+
+std::vector<std::pair<std::string, std::string>> settings_db_versions(bool has_installed, const Installed& installed,
+                                                                     const json& runtimes_reply, std::string_view family) {
+    if (has_installed) {
+        return installed_db_series(installed, family);
+    }
+    return installed_db_series(installed_of_reply(runtimes_reply), family);
+}
+
+std::string db_family_to_show(const std::string& shown, bool has_installed, const Installed& installed,
+                              const json& runtimes_reply) {
+    const auto has = [&](std::string_view family) {
+        return !settings_db_versions(has_installed, installed, runtimes_reply, family).empty();
+    };
+    for (const DbEngine& e : db_engines()) {
+        if (e.family == shown && has(e.family)) {
+            return shown;
+        }
+    }
+    for (const DbEngine& e : db_engines()) {
+        if (has(e.family)) {
+            return std::string(e.family);
+        }
+    }
+    // None installed: the one shown before (its tab says so), else MariaDB.
+    for (const DbEngine& e : db_engines()) {
+        if (e.family == shown) {
+            return shown;
+        }
+    }
+    return std::string(db_engines().front().family);
+}
+
+std::string db_engine_note(std::string_view family, Lang lang) {
+    return family == "mysql" ? std::string(text(lang, Str::DbMysqlLtsNote)) : std::string();
 }
 
 const std::vector<DbIniField>& settings_db_ini_fields() {
@@ -201,10 +257,10 @@ std::optional<std::string> unknown_db_option(const std::vector<std::string>& kno
     return unknown_ini_name(known, base);
 }
 
-std::string unknown_db_option_text(std::string_view series, std::string_view key, const std::string& suggestion,
+std::string unknown_db_option_text(std::string_view server, std::string_view key, const std::string& suggestion,
                                    Lang lang) {
-    return suggestion.empty() ? fill(lang, Str::DbUnknownOption, {series, key})
-                              : fill(lang, Str::DbUnknownOptionMaybe, {series, key, suggestion});
+    return suggestion.empty() ? fill(lang, Str::DbUnknownOption, {server, key})
+                              : fill(lang, Str::DbUnknownOptionMaybe, {server, key, suggestion});
 }
 
 // --- changes until Save --------------------------------------------------------
@@ -284,8 +340,16 @@ void db_toggle_keep_running(const DbSeries& series, DbChanges& changes) {
     }
 }
 
-json database_set_params(const std::string& series, const DbChanges& changes) {
+json db_params(std::string_view family, const std::string& series) {
     json params = {{"series", series}};
+    if (family != "mariadb") {
+        params["family"] = std::string(family);
+    }
+    return params;
+}
+
+json database_set_params(const std::string& series, const DbChanges& changes, std::string_view family) {
+    json params = db_params(family, series);
     if (!changes.ini.empty()) {
         json ini = json::object();
         for (const auto& [key, value] : changes.ini) {
@@ -323,11 +387,12 @@ std::string db_names_text(const std::vector<std::string>& names, Lang lang) {
 }
 
 std::string db_restart_text(const DbSeries& series, const DbServer& server, Lang lang) {
+    const std::string title = db_server_title(series.family, series.series);
     if (series.used_by.empty() && !server.exists) {
-        return fill(lang, Str::DbAppliesNobody, {series.series});
+        return fill(lang, Str::DbAppliesNobody, {title});
     }
     if (server.state != "running" && server.state != "starting") {
-        return fill(lang, Str::DbAppliesSleeping, {series.series});
+        return fill(lang, Str::DbAppliesSleeping, {title});
     }
     std::size_t projects = 0;
     bool shared = false;
@@ -349,11 +414,10 @@ std::string db_restart_text(const DbSeries& series, const DbServer& server, Lang
                           : fill_pattern(text(lang, Str::PhpAndShared), false, {who});
     }
     if (who.empty()) {
-        return fill(lang, Str::DbAppliesSleeping, {series.series});
+        return fill(lang, Str::DbAppliesSleeping, {title});
     }
-    // `who` is already in the reader's direction: only the version is isolated.
-    return fill_pattern(text(lang, Str::DbApplies), false,
-                        {is_rtl(lang) ? isolate_ltr(series.series) : series.series, who});
+    // `who` is already in the reader's direction: only the server's name is isolated.
+    return fill_pattern(text(lang, Str::DbApplies), false, {is_rtl(lang) ? isolate_ltr(title) : title, who});
 }
 
 std::string db_state_text(const DbSeries& series, const DbServer& server, Lang lang) {

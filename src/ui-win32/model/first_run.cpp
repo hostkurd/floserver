@@ -46,6 +46,8 @@ constexpr std::array kOffers{
     OfferSpec{"composer", "", Str::FirstRunWhatComposer, true, false},
     OfferSpec{"mailpit", "", Str::FirstRunWhatMailpit, true, false},
     OfferSpec{"python", "3.13", Str::FirstRunWhatPython, false, false},
+    // MySQL 8.4 LTS (D28): offered, not ticked; MariaDB is the usual database.
+    OfferSpec{"mysql", "8.4", Str::FirstRunWhatMysql, false, false},
     OfferSpec{"phpmyadmin", "5.2", Str::FirstRunWhatPma, false, false},
     OfferSpec{"apache", "2.4", Str::FirstRunWhatApache, false, false},
     OfferSpec{"nginx", "", Str::FirstRunWhatNginx, true, true},

@@ -1,4 +1,5 @@
-// Settings > Database (MariaDB): one series' server (its state with Start,
+// Settings > Database: a tab per engine (MariaDB, MySQL since D28), then one
+// series' server of it (its state with Start,
 // Stop and Restart, its port, Keep running), the my.ini values people change
 // most as fields with custom.ini and the final my.ini opened in Notepad, and
 // root's password (shown or copied only when asked, and changed). Built as
@@ -66,7 +67,39 @@ void wipe(std::string& s) {
 // --- loading, saving, leaving ----------------------------------------------------------
 
 std::vector<std::pair<std::string, std::string>> SettingsWindow::db_versions() const {
-    return settings_db_versions(has_installed_, installed_, reply_);
+    return settings_db_versions(has_installed_, installed_, reply_, db_family_);
+}
+
+std::string SettingsWindow::db_title() const { return db_server_title(db_family_, db_series_); }
+
+void SettingsWindow::show_db_engine(const std::string& family) {
+    db_family_ = family;
+    const auto versions = db_versions();
+    if (!versions.empty()) {
+        load_db(versions.front().first);
+        return;
+    }
+    // None installed: the tab says so, with the way to Runtimes.
+    db_series_.clear();
+    db_.reset();
+    db_changes_ = {};
+    db_loading_ = false;
+    db_error_key_.clear();
+    db_error_.clear();
+    db_server_ = {};
+    wipe(root_shown_);
+    password_error_.clear();
+    relayout();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void SettingsWindow::select_db_engine(const std::string& family) {
+    if (family == db_family_ || db_saving_) {
+        return;
+    }
+    if (settle_db_changes(AfterSave::Engine, family)) {
+        show_db_engine(family);
+    }
 }
 
 bool SettingsWindow::settle_db_changes(AfterSave then, const std::string& series) {
@@ -77,7 +110,7 @@ bool SettingsWindow::settle_db_changes(AfterSave then, const std::string& series
         return false;
     }
     asking_ = true;
-    const SaveChoice choice = ask_to_save(hwnd_, lang_, fill(lang_, Str::DbAskSave, {db_series_}));
+    const SaveChoice choice = ask_to_save(hwnd_, lang_, fill(lang_, Str::DbAskSave, {db_title()}));
     asking_ = false;
     modal_closed();
     if (quit_after_ask_) {
@@ -111,9 +144,9 @@ void SettingsWindow::load_db(const std::string& series) {
     db_changes_ = {};
     wipe(root_shown_);
     password_error_.clear();
-    db_server_ = db_server_from_list(databases_, series);
+    db_server_ = db_server_from_list(databases_, series, db_family_);
     db_loading_ = true;
-    worker_.database_call("database.get", {{"series", series}});
+    worker_.database_call("database.get", db_params(db_family_, series));
     if (db_edits_.size() > settings_db_ini_fields().size() + 1) {
         db_edits_.back()->set_text({});  // a password typed for another version isn't kept
     }
@@ -135,15 +168,15 @@ bool SettingsWindow::on_db_answers(const Snapshot& snap) {
         if (answer.method == "phpmyadmin.login") {
             pma_busy_ = false;
         }
-        // A late answer for a version the user has left: dropped, errors too.
-        if (answer.series != db_series_) {
+        // A late answer for a version (or an engine's tab) the user has left: dropped, errors too.
+        if (answer.series != db_series_ || (answer.family.empty() ? std::string("mariadb") : answer.family) != db_family_) {
             continue;
         }
         if (answer.method == "database.get" || save) {
             if (!answer.error.empty() || !answer.reply) {
                 if (!save) {
                     db_loading_ = false;
-                    show_message(fill(lang_, Str::DbReadFailed, {db_series_, answer.error}), true);
+                    show_message(fill(lang_, Str::DbReadFailed, {db_title(), answer.error}), true);
                     continue;
                 }
                 after_save_ = AfterSave::Stay;  // refused: stay here with the reason shown
@@ -157,7 +190,7 @@ bool SettingsWindow::on_db_answers(const Snapshot& snap) {
                 continue;
             }
             auto series = db_series_from_reply(*answer.reply);
-            if (!series || series->series != db_series_) {
+            if (!series || series->series != db_series_ || series->family != db_family_) {
                 continue;
             }
             db_server_ = series->server;
@@ -168,7 +201,7 @@ bool SettingsWindow::on_db_answers(const Snapshot& snap) {
                 db_changes_ = {};
                 db_error_key_.clear();
                 db_error_.clear();
-                show_message(restarting ? fill(lang_, Str::DbRestarting, {db_series_}) : std::string(text(lang_, Str::PhpSaved)),
+                show_message(restarting ? fill(lang_, Str::DbRestarting, {db_title()}) : std::string(text(lang_, Str::PhpSaved)),
                              false);
             }
             fill_db_edits();
@@ -181,11 +214,13 @@ bool SettingsWindow::on_db_answers(const Snapshot& snap) {
                     open_section(after_save_section_);
                 } else if (then == AfterSave::Version && !target.empty()) {
                     load_db(target);
+                } else if (then == AfterSave::Engine && !target.empty()) {
+                    show_db_engine(target);
                 }
             }
         } else if (answer.method == "database.server") {
             if (!answer.error.empty() || !answer.reply) {
-                show_message(fill(lang_, Str::DbServerFailed, {db_series_, answer.error}), true);
+                show_message(fill(lang_, Str::DbServerFailed, {db_title(), answer.error}), true);
             } else if (answer.reply->is_object() && answer.reply->contains("server")) {
                 db_server_ = db_server_from_json((*answer.reply)["server"]);
             }
@@ -270,7 +305,7 @@ bool SettingsWindow::save_db() {
     db_saving_ = true;
     set_db_read_only(true);
     clear_toast();
-    worker_.database_call("database.set", database_set_params(db_series_, db_changes_));
+    worker_.database_call("database.set", database_set_params(db_series_, db_changes_, db_family_));
     relayout();
     InvalidateRect(hwnd_, nullptr, FALSE);
     return true;
@@ -301,7 +336,10 @@ void SettingsWindow::set_root_password() {
         password_error_.clear();
         root_busy_ = true;
         clear_toast();
-        worker_.database_call("database.root_set", {{"series", db_series_}, {"password", password}});
+        json params = db_params(db_family_, db_series_);
+        params["password"] = password;
+        worker_.database_call("database.root_set", params);
+        wipe(params["password"].get_ref<std::string&>());
         wipe(password);
         db_edits_.back()->set_text({});
     }
@@ -409,7 +447,8 @@ void SettingsWindow::layout_db(HDC dc, Geometry& g, int x0, int x1, int y) const
     if (!versions.empty()) {
         picker_w = px(170);
         for (const auto& v : versions) {
-            picker_w = std::max(picker_w, Canvas::measure(dc, w("MariaDB " + v.second), fonts_.button.get(), false) + px(34));
+            picker_w = std::max(picker_w, Canvas::measure(dc, w(db_server_title(db_family_, v.second)), fonts_.button.get(),
+                                                          false) + px(34));
         }
         label_w = measure(text(lang_, Str::PhpVersion), fonts_.caption.get());
     }
@@ -426,17 +465,42 @@ void SettingsWindow::layout_db(HDC dc, Geometry& g, int x0, int x1, int y) const
     }
     y = std::max(g.hint.bottom, dg.version.bottom) + px(kGap);
 
+    // One tab per engine (D28): MariaDB, MySQL.
+    {
+        int tx = x0;
+        const int th = px(kControlH) + px(2);
+        for (const DbEngine& e : db_engines()) {
+            const int tw = Canvas::measure(dc, w(e.title), fonts_.body_bold.get(), false) + px(28);
+            dg.engines.push_back({tx, y, std::min(x1, tx + tw), y + th});
+            tx += tw + px(4);
+        }
+        dg.engines_line = {x0, y + th, x1, y + th + std::max(1, px(1))};
+        y = static_cast<int>(dg.engines_line.bottom) + px(kGap);
+    }
+    // MySQL's: 8.4 LTS only (under the cards, or under the none-installed note).
+    const std::string engine_note = db_engine_note(db_family_, lang_);
+    const auto place_engine_note = [&](int at) {
+        if (engine_note.empty()) {
+            return at;
+        }
+        const int nh = text_height(dc, w(engine_note), fonts_.caption.get(), x1 - x0, rtl_);
+        dg.engine_note = {x0, at, x1, at + nh};
+        return at + nh + px(kGap);
+    };
+
     if ((!has_installed_ && !has_reply_) || (!db_ && db_loading_)) {
         dg.note = {x0, y, x1, y + px(24)};
         g.content_h = dg.note.bottom + scroll_ + px(8);
         return;
     }
     if (versions.empty()) {
-        const int nh = text_height(dc, w(text(lang_, Str::DbNoneInstalled)), fonts_.button.get(), x1 - x0, rtl_);
+        const std::string none = fill(lang_, Str::DbNoneInstalled, {db_engine_title(db_family_)});
+        const int nh = text_height(dc, w(none), fonts_.button.get(), x1 - x0, rtl_);
         dg.note = {x0, y, x1, y + nh};
         y += nh + px(kGap);
         dg.runtimes = {x0, y, x0 + button_w(Str::PhpGoToRuntimes), y + px(kControlH)};
-        g.content_h = dg.runtimes.bottom + scroll_ + px(8);
+        y = place_engine_note(static_cast<int>(dg.runtimes.bottom) + px(kGap));
+        g.content_h = y + scroll_ + px(8);
         return;
     }
     if (!db_) {
@@ -581,7 +645,7 @@ void SettingsWindow::layout_db(HDC dc, Geometry& g, int x0, int x1, int y) const
     }
     for (const std::string& key : db_->custom_keys) {
         if (const auto suggestion = unknown_db_option(db_->known_options, key)) {
-            const std::string words = unknown_db_option_text(db_series_, key, *suggestion, lang_);
+            const std::string words = unknown_db_option_text(db_title(), key, *suggestion, lang_);
             const int nh = std::max(error_h, text_height(dc, w(words), fonts_.caption.get(), avail, rtl_));
             dg.warnings.emplace_back(RECT{cx0, yy + px(4), cx1, yy + px(4) + nh}, words);
             yy += px(4) + nh;
@@ -600,7 +664,7 @@ void SettingsWindow::layout_db(HDC dc, Geometry& g, int x0, int x1, int y) const
     dg.root_card = {x0, y, x1, y};
     // Open phpMyAdmin (as root, on this series) beside the title.
     const int pma_w = std::max({button_w(Str::PmaOpen), button_w(Str::PmaOpening),
-                                measure(fill(lang_, Str::PmaStarting, {db_series_}), fonts_.button.get()) + px(24)});
+                                measure(fill(lang_, Str::PmaStarting, {db_title()}), fonts_.button.get()) + px(24)});
     dg.pma = {std::max(cx0, cx1 - pma_w), top, cx1, top + px(kControlH)};
     dg.root_title = {cx0, top, std::max(cx0, static_cast<int>(dg.pma.left) - px(kGap)), top + px(kControlH)};
     yy = top + px(kControlH) + px(4);
@@ -645,6 +709,7 @@ void SettingsWindow::layout_db(HDC dc, Geometry& g, int x0, int x1, int y) const
     yy += dh;
     dg.root_card.bottom = yy + px(14);
     y = static_cast<int>(dg.root_card.bottom) + px(kGap);
+    y = place_engine_note(y);
 
     // The footer: at the window's bottom when there's room, else after the cards.
     const int save_w = std::max(button_w(Str::PhpSave), button_w(Str::PhpSaving));
@@ -672,6 +737,8 @@ const RECT* SettingsWindow::db_rect_of(const Hit& hit) const {
         return hit.row >= 0 && std::cmp_less(hit.row, list.size()) ? &list[static_cast<std::size_t>(hit.row)] : nullptr;
     };
     switch (hit.part) {
+        case Part::DbEngine:
+            return in(g.engines);
         case Part::DbVersion:
             return &g.version;
         case Part::DbRuntimes:
@@ -721,6 +788,9 @@ void SettingsWindow::db_focus_order(std::vector<Hit>& order) const {
             order.push_back({part, -1, row});
         }
     };
+    for (std::size_t i = 0; i < g.engines.size(); ++i) {
+        add(Part::DbEngine, g.engines[i], static_cast<int>(i));
+    }
     add(Part::DbVersion, g.version);
     add(Part::DbRuntimes, g.runtimes);
     if (!db_) {
@@ -753,10 +823,17 @@ void SettingsWindow::on_db_click(const Hit& hit) {
     const auto server = [this](const char* action, const char* state) {
         clear_toast();
         db_server_.state = state;  // until the next snapshot says how it went
-        worker_.database_call("database.server", {{"series", db_series_}, {"action", action}});
+        json params = db_params(db_family_, db_series_);
+        params["action"] = action;
+        worker_.database_call("database.server", params);
         relayout();
     };
     switch (hit.part) {
+        case Part::DbEngine:
+            if (hit.row >= 0 && std::cmp_less(hit.row, db_engines().size())) {
+                select_db_engine(std::string(db_engines()[static_cast<std::size_t>(hit.row)].family));
+            }
+            break;
         case Part::DbVersion:
             db_version_menu();
             break;
@@ -796,7 +873,7 @@ void SettingsWindow::on_db_click(const Hit& hit) {
             if (connected_ && !db_series_.empty()) {
                 clear_toast();
                 worker_.database_call(hit.part == Part::DbFinalIni ? "database.final_ini" : "database.custom_ini",
-                                      {{"series", db_series_}});
+                                      db_params(db_family_, db_series_));
                 relayout();
             }
             break;
@@ -817,13 +894,13 @@ void SettingsWindow::on_db_click(const Hit& hit) {
                 relayout();
             } else if (db_ && connected_ && !root_busy_) {
                 root_busy_ = true;
-                worker_.database_call("database.root", {{"series", db_series_}}, "show");
+                worker_.database_call("database.root", db_params(db_family_, db_series_), "show");
             }
             break;
         case Part::DbRootCopy:
             if (db_ && connected_ && !root_busy_) {
                 root_busy_ = true;
-                worker_.database_call("database.root", {{"series", db_series_}}, "copy");
+                worker_.database_call("database.root", db_params(db_family_, db_series_), "copy");
             }
             break;
         case Part::DbPhpMyAdmin:
@@ -831,8 +908,9 @@ void SettingsWindow::on_db_click(const Hit& hit) {
             if (db_ && connected_ && !pma_busy_ && phpmyadmin_installed(installed_)) {
                 pma_busy_ = true;
                 clear_toast();
-                worker_.database_call("phpmyadmin.login", {{"series", db_series_}, {"lang", std::string(lang_code(lang_))}},
-                                      "settings");
+                json params = db_params(db_family_, db_series_);
+                params["lang"] = std::string(lang_code(lang_));
+                worker_.database_call("phpmyadmin.login", params, "settings");
                 relayout();
             }
             break;
@@ -862,7 +940,7 @@ void SettingsWindow::db_version_menu() {
     std::vector<std::wstring> labels;
     labels.reserve(versions.size());
     for (std::size_t i = 0; i < versions.size(); ++i) {
-        labels.push_back(w("MariaDB " + versions[i].second));
+        labels.push_back(w(db_server_title(db_family_, versions[i].second)));
         AppendMenuW(menu.get(), MF_STRING | (versions[i].first == db_series_ ? UINT{MF_CHECKED} : 0U),
                     kFirstChoice + static_cast<UINT>(i), labels.back().c_str());
     }
@@ -899,6 +977,24 @@ void SettingsWindow::paint_db_shapes(Canvas& c) const {
             paint_ring(c, r);
         }
     };
+    // The engines' tabs: the shown one underlined.
+    for (std::size_t i = 0; i < dg.engines.size() && i < db_engines().size(); ++i) {
+        const Hit hit{Part::DbEngine, -1, static_cast<int>(i)};
+        const RECT& r = dg.engines[i];
+        if (hover_ == hit) {
+            c.round_rect(r, pxf(4), p.row_hover);
+        }
+        if (db_engines()[i].family == db_family_) {
+            const RECT under{r.left + px(4), r.bottom - px(3), r.right - px(4), r.bottom};
+            c.round_rect(under, pxf(1.5F), p.accent);
+        }
+        if (is_focused(hit)) {
+            paint_ring(c, r);
+        }
+    }
+    if (!is_empty(dg.engines_line)) {
+        c.round_rect(dg.engines_line, 0.0F, p.card_border);
+    }
     if (!is_empty(dg.version)) {
         const Hit hit{Part::DbVersion, -1, -1};
         field_box(dg.version, false, hover_ == hit, false, false, hit);
@@ -1007,12 +1103,20 @@ void SettingsWindow::paint_db_text(Canvas& c) const {
     c.clip_text(column);
     c.text(g.title, w(text(lang_, Str::DbTitle)), fonts_.title.get(), p.text, Align::Start, false);
     c.paragraph(g.hint, w(text(lang_, Str::DbHint)), fonts_.caption.get(), p.text_subtle);
+    for (std::size_t i = 0; i < dg.engines.size() && i < db_engines().size(); ++i) {
+        const bool shown = db_engines()[i].family == db_family_;
+        c.text(dg.engines[i], w(db_engines()[i].title), shown ? fonts_.body_bold.get() : fonts_.button.get(),
+               shown ? p.text : p.text_subtle, Align::Center, true);
+    }
+    if (!is_empty(dg.engine_note)) {
+        c.paragraph(dg.engine_note, w(db_engine_note(db_family_, lang_)), fonts_.caption.get(), p.text_subtle);
+    }
     if (!is_empty(dg.version)) {
         c.text(dg.version_label, w(text(lang_, Str::PhpVersion)), fonts_.caption.get(), p.text_subtle, Align::End, false);
-        std::string label = "MariaDB " + db_series_;
+        std::string label = db_title();
         for (const auto& v : db_versions()) {
             if (v.first == db_series_) {
-                label = "MariaDB " + v.second;
+                label = db_server_title(db_family_, v.second);
             }
         }
         RECT box = dg.version;
@@ -1024,7 +1128,8 @@ void SettingsWindow::paint_db_text(Canvas& c) const {
         if (is_empty(dg.runtimes)) {
             c.text(dg.note, w(text(lang_, Str::SettingsLoading)), fonts_.button.get(), p.text_subtle, Align::Start, false);
         } else {
-            c.paragraph(dg.note, w(text(lang_, Str::DbNoneInstalled)), fonts_.button.get(), p.text);
+            c.paragraph(dg.note, w(fill(lang_, Str::DbNoneInstalled, {db_engine_title(db_family_)})), fonts_.button.get(),
+                        p.text);
         }
     }
     if (!is_empty(dg.runtimes)) {
@@ -1116,7 +1221,7 @@ void SettingsWindow::paint_db_text(Canvas& c) const {
     {
         // While it waits: "Starting MariaDB 11.8…" until the server runs.
         const bool enabled = connected_ && !pma_busy_ && phpmyadmin_installed(installed_);
-        const std::string busy = phpmyadmin_busy_text(db_series_, db_server_.state, lang_);
+        const std::string busy = phpmyadmin_busy_text(db_title(), db_server_.state, lang_);
         c.text(dg.pma, w(pma_busy_ ? std::string_view(busy) : text(lang_, Str::PmaOpen)), fonts_.button.get(),
                enabled ? p.text : p.button_disabled_text, Align::Center, false);
     }
