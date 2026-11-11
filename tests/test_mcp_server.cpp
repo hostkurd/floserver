@@ -15,6 +15,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <map>
@@ -325,15 +326,15 @@ TEST_CASE("mcp: the stateless 2026-07-28 revision") {
     CHECK(status["result"]["isError"] == false);
 
     // A version it doesn't have: UnsupportedProtocolVersionError, with the ones it has.
-    json old = request(3, "tools/list", {{"_meta", meta("1900-01-01")}});
+    const json old = request(3, "tools/list", {{"_meta", meta("1900-01-01")}});
     const json refused = ask(server, old);
     CHECK(refused["error"]["code"] == -32022);
     CHECK(refused["error"]["data"]["requested"] == "1900-01-01");
     CHECK(refused["error"]["data"]["supported"][0] == "2026-07-28");
     // Not a string, or no client capabilities: malformed.
-    json bad_version = request(4, "tools/list", {{"_meta", {{"io.modelcontextprotocol/protocolVersion", 2026}}}});
+    const json bad_version = request(4, "tools/list", {{"_meta", {{"io.modelcontextprotocol/protocolVersion", 2026}}}});
     CHECK(ask(server, bad_version)["error"]["code"] == mcp::kInvalidParams);
-    json no_caps = request(5, "tools/list", {{"_meta", {{"io.modelcontextprotocol/protocolVersion", "2026-07-28"}}}});
+    const json no_caps = request(5, "tools/list", {{"_meta", {{"io.modelcontextprotocol/protocolVersion", "2026-07-28"}}}});
     CHECK(ask(server, no_caps)["error"]["code"] == mcp::kInvalidParams);
     // ping went away in this revision.
     CHECK(ask(server, modern(6, "ping"))["error"]["code"] == mcp::kMethodNotFound);
@@ -376,7 +377,7 @@ TEST_CASE("mcp: what isn't a request") {
     CHECK_FALSE(server.handle_line(R"({"jsonrpc":"2.0","id":9,"result":{}})"));
     // Too long for one message.
     const std::string huge(mcp::kMaxLine + 1, ' ');
-    std::string long_line = R"({"jsonrpc":"2.0","id":1,"method":"ping","x":")" + huge + "\"}";
+    const std::string long_line = R"({"jsonrpc":"2.0","id":1,"method":"ping","x":")" + huge + "\"}";
     CHECK(line(long_line)["error"]["code"] == mcp::kParseError);
     // Not UTF-8: a parse error, not a crash.
     CHECK(line("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"\xC3\x28\"}")["error"]["code"] == mcp::kParseError);
@@ -653,8 +654,14 @@ TEST_CASE("the real flo mcp against the real service, over stdio") {
     REQUIRE(fs::is_regular_file(flo));
     std::string error;
     REQUIRE_FALSE(ipc::connect(instance, error).has_value());
+#ifdef _WIN32
+    // On Windows a service flo starts stays in the test's job for flo (the
+    // job allows no breakaway) and would end with it: started here instead.
+    REQUIRE(spawn_detached(fs::path(FLOSERVER_TEST_BIN_DIR) / "floserverd.exe", {}, error));
+#endif
 
-    // The 2025-11-25 handshake; the service isn't running, so flo mcp starts it.
+    // The 2025-11-25 handshake; the service isn't running (elsewhere than
+    // Windows), so flo mcp starts it.
     const json init = {{"jsonrpc", "2.0"},
                        {"id", 1},
                        {"method", "initialize"},

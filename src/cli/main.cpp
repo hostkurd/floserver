@@ -1974,12 +1974,12 @@ public:
         if (ec || size > std::uintmax_t{256} * 1024 || !fs::is_regular_file(file, ec)) {
             return std::nullopt;
         }
-        std::ifstream in(file, std::ios::binary);
-        std::ostringstream text;
-        text << in.rdbuf();
-        if (!in && !in.eof()) {
+        const std::ifstream in(file, std::ios::binary);
+        if (!in) {
             return std::nullopt;
         }
+        std::ostringstream text;
+        text << in.rdbuf();
         return text.str();
     }
 

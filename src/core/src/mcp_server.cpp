@@ -45,8 +45,8 @@ bool flag(const json& j, const char* key) {
     return j.is_object() && j.contains(key) && j.at(key).is_boolean() && j.at(key).get<bool>();
 }
 
-json at_or(const json& j, const char* key, json fallback) {
-    return j.is_object() && j.contains(key) ? j.at(key) : std::move(fallback);
+json at_or(const json& j, const char* key, const json& fallback) {
+    return j.is_object() && j.contains(key) ? j.at(key) : fallback;
 }
 
 json server_info() {
@@ -889,12 +889,16 @@ json Server::call_tool(const std::string& name, const json& args, std::string_vi
         json messages = json::array();
         for (const json& m : at_or(*r, "messages", json::array())) {
             const std::string mail_id = text_of(m, "id");
+            std::string link;
+            if (!mail_id.empty() && !inbox.empty()) {
+                link.append(inbox).append("/view/").append(mail_id);
+            }
             messages.push_back({{"subject", text_of(m, "subject")},
                                 {"from", text_of(m, "from")},
                                 {"to", text_of(m, "to")},
                                 {"time", text_of(m, "time")},
                                 {"read", flag(m, "read")},
-                                {"link", mail_id.empty() || inbox.empty() ? std::string() : inbox + "/view/" + mail_id}});
+                                {"link", link}});
             if (std::cmp_greater_equal(messages.size(), limit)) {
                 break;
             }
