@@ -7,8 +7,15 @@
 
 #include <nlohmann/json.hpp>
 
+#ifdef _WIN32
+#include <windows.h>
+#else
+extern char** environ;  // NOLINT(readability-redundant-declaration): POSIX's, not in a header
+#endif
+
 #include <algorithm>
 #include <array>
+#include <cwchar>
 #include <system_error>
 
 namespace floserver::core {
@@ -180,12 +187,15 @@ std::optional<fs::path> dotnet_program(const fs::path& dotnet_dir) {
 }
 
 std::optional<GarnetLaunch> garnet_launch(const fs::path& entry, const fs::path& dotnet_dir, std::string& error) {
+    // Either kind runs on the .NET install: the apphost finds it through DOTNET_ROOT.
+    const auto dotnet = dotnet_dir.empty() ? std::nullopt : dotnet_program(dotnet_dir);
+    if (!dotnet) {
+        error = "the .NET " + std::string(kGarnetDotnetSeries) + " runtime Garnet needs isn't installed" +
+                (dotnet_dir.empty() ? std::string() : " (no dotnet program in " + path_to_utf8(dotnet_dir) + ")") +
+                ": install Garnet again in Settings → Runtimes (or: flo install garnet)";
+        return std::nullopt;
+    }
     if (entry.extension() == ".dll") {
-        const auto dotnet = dotnet_program(dotnet_dir);
-        if (!dotnet) {
-            error = "the .NET runtime's dotnet program is missing from " + path_to_utf8(dotnet_dir);
-            return std::nullopt;
-        }
         return GarnetLaunch{*dotnet, {path_to_utf8(entry)}};
     }
     return GarnetLaunch{entry, {}};
@@ -216,27 +226,32 @@ std::optional<std::string> garnet_socket_problem(const GarnetPaths& paths) {
     return std::nullopt;
 }
 
-std::vector<std::string> garnet_args(const GarnetPaths& paths, int memory_mb) {
-    return {"--config-import-path",
-            path_to_utf8(paths.config),
-            "--bind",
-            "127.0.0.1",
-            "--port",
-            "0",
-            "--unixsocket",
-            mailpit_socket_text(paths.socket),
-            "--unixsocketperm",
-            "600",
-            "--checkpointdir",
-            path_to_utf8(paths.checkpoints),
-            "--recover",
-            "--lua",
-            "--memory",
-            std::to_string(std::clamp(memory_mb, kMinRedisMemoryMb, kMaxRedisMemoryMb)) + "m",
-            "--enable-debug-command",
-            "no",
-            "--enable-module-command",
-            "no"};
+std::vector<std::string> garnet_args(const GarnetPaths& paths, int memory_mb, bool windows) {
+    std::vector<std::string> args = {"--config-import-path", path_to_utf8(paths.config),
+                                     "--bind", "127.0.0.1",
+                                     "--port", "0",
+                                     "--unixsocket", mailpit_socket_text(paths.socket)};
+    if (!windows) {
+        // Garnet's validator allows a socket permission only on Linux, macOS
+        // and FreeBSD; on Windows the owner-only folder's ACL protects it.
+        args.insert(args.end(), {"--unixsocketperm", "600"});
+    }
+    const std::vector<std::string> rest = {
+        "--checkpointdir", path_to_utf8(paths.checkpoints),
+        // The default device loads native_device from runtimes/<rid>/native
+        // under the working folder, which isn't Garnet's: SAVE failed with it.
+        "--device-type", "RandomAccess",
+        "--recover",
+        "--checkpoint-freq", std::to_string(kGarnetCheckpointSeconds),
+        "--lua",
+        "--lua-script-timeout", "5000",
+        "--lua-memory-management-mode", "Tracked",
+        "--lua-script-memory-limit", "64m",
+        "--memory", std::to_string(std::clamp(memory_mb, kMinRedisMemoryMb, kMaxRedisMemoryMb)) + "m",
+        "--enable-debug-command", "no",
+        "--enable-module-command", "no"};
+    args.insert(args.end(), rest.begin(), rest.end());
+    return args;
 }
 
 std::string garnet_config_text(std::string_view password) {
@@ -252,14 +267,54 @@ std::vector<std::pair<std::string, std::string>> garnet_env(const fs::path& dotn
             {"DOTNET_CLI_TELEMETRY_OPTOUT", "1"}};
 }
 
-const std::vector<std::string>& garnet_env_names_removed() {
-    static const std::vector<std::string> names = {
-        "DOTNET_STARTUP_HOOKS",  "DOTNET_ADDITIONAL_DEPS", "DOTNET_SHARED_STORE",   "DOTNET_ROLL_FORWARD",
-        "DOTNET_ROLL_FORWARD_TO_PRERELEASE", "DOTNET_ROOT(x86)", "DOTNET_ROOT_X86", "DOTNET_ROOT_ARM64",
-        "DOTNET_MULTILEVEL_LOOKUP", "DOTNET_HOST_PATH", "COREHOST_TRACE", "COREHOST_TRACEFILE",
-        "COREHOST_TRACE_VERBOSITY", "COMPlus_gcServer", "DOTNET_gcHeapHardLimit", "DOTNET_GCHeapHardLimit",
-        "COMPlus_GCHeapHardLimit", "DOTNET_EnableDiagnostics_Debugger"};
-    return names;
+std::vector<std::string> garnet_env_names_removed(const std::vector<std::string>& environment) {
+    static constexpr std::array<std::string_view, 5> kPrefixes = {"DOTNET_", "COMPLUS_", "CORECLR_", "COR_", "COREHOST_"};
+    const auto upper_of = [](std::string_view s) {
+        std::string out(s);
+        std::transform(out.begin(), out.end(), out.begin(), upper);
+        return out;
+    };
+    std::vector<std::string> kept;
+    for (const auto& [name, value] : garnet_env({})) {
+        kept.push_back(upper_of(name));
+    }
+    std::vector<std::string> out;
+    for (const std::string& name : environment) {
+        const std::string u = upper_of(name);
+        const bool dotnet = std::any_of(kPrefixes.begin(), kPrefixes.end(),
+                                        [&u](std::string_view prefix) { return u.starts_with(prefix); });
+        if (dotnet && std::find(kept.begin(), kept.end(), u) == kept.end() &&
+            std::find(out.begin(), out.end(), name) == out.end()) {
+            out.push_back(name);
+        }
+    }
+    return out;
+}
+
+std::vector<std::string> environment_names() {
+    std::vector<std::string> out;
+#ifdef _WIN32
+    wchar_t* block = GetEnvironmentStringsW();
+    if (block == nullptr) {
+        return out;
+    }
+    for (const wchar_t* p = block; *p != L'\0'; p += std::wcslen(p) + 1) {
+        const std::wstring_view entry(p);
+        const std::size_t eq = entry.find(L'=', 1);  // "=C:=..." entries start with '='
+        if (eq != std::wstring_view::npos && entry.front() != L'=') {
+            out.push_back(path_to_utf8(fs::path(std::wstring(entry.substr(0, eq)))));
+        }
+    }
+    FreeEnvironmentStringsW(block);
+#else
+    for (char** e = environ; e != nullptr && *e != nullptr; ++e) {
+        const std::string_view entry(*e);
+        if (const std::size_t eq = entry.find('='); eq != std::string_view::npos && eq > 0) {
+            out.emplace_back(entry.substr(0, eq));
+        }
+    }
+#endif
+    return out;
 }
 
 FirstBytes classify_first_bytes(std::string_view data) {
@@ -269,43 +324,16 @@ FirstBytes classify_first_bytes(std::string_view data) {
     if (data.front() == '*') {
         return FirstBytes::Redis;  // a browser's request can't start with '*'
     }
-    const std::size_t end = data.find('\n');
-    if (end == std::string_view::npos) {
-        return data.size() >= kMaxSniffBytes ? FirstBytes::Http : FirstBytes::NeedMore;
-    }
-    std::string_view first = data.substr(0, end);
-    if (first.ends_with('\r')) {
-        first.remove_suffix(1);
-    }
-    static constexpr std::array<std::string_view, 10> kMethods = {"GET ",    "POST ",  "PUT ",     "HEAD ",  "OPTIONS ",
-                                                                  "DELETE ", "PATCH ", "CONNECT ", "TRACE ", "PRI "};
-    for (const std::string_view method : kMethods) {
-        if (starts_with_nocase(first, method)) {
-            return FirstBytes::Http;
+    // Otherwise only "PING" or "QUIT" alone on the first line.
+    static constexpr std::array<std::string_view, 4> kAllowed = {"PING\r\n", "QUIT\r\n", "PING\n", "QUIT\n"};
+    for (const std::string_view line : kAllowed) {
+        const std::size_t n = std::min(line.size(), data.size());
+        if (!starts_with_nocase(line, data.substr(0, n))) {
+            continue;
         }
+        return data.size() >= line.size() ? FirstBytes::Redis : FirstBytes::NeedMore;
     }
-    for (std::size_t i = 0; i + 6 <= first.size(); ++i) {
-        if (starts_with_nocase(first.substr(i), " HTTP/")) {
-            return FirstBytes::Http;
-        }
-    }
-    // Header lines in what came, the first one too: a request line hidden
-    // behind something else still has its headers.
-    for (std::size_t start = 0; start < data.size();) {
-        std::size_t stop = data.find('\n', start);
-        if (stop == std::string_view::npos) {
-            stop = data.size();
-        }
-        const std::string_view line = data.substr(start, stop - start);
-        for (const std::string_view header : {std::string_view("Host:"), std::string_view("Origin:"),
-                                              std::string_view("User-Agent:")}) {
-            if (starts_with_nocase(line, header)) {
-                return FirstBytes::Http;
-            }
-        }
-        start = stop + 1;
-    }
-    return FirstBytes::Redis;
+    return FirstBytes::Close;
 }
 
 std::string resp_command(const std::vector<std::string_view>& args) {

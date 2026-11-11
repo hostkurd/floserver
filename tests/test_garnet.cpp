@@ -72,7 +72,7 @@ TEST_CASE("Garnet's arguments: the socket, 127.0.0.1 port 0, checkpoints and --r
     const GarnetPaths p = garnet_paths("/data");
     CHECK(p.dir == fs::path("/data/garnet"));
     CHECK(p.log == fs::path("/data/web/logs/garnet.log"));
-    const auto args = garnet_args(p, 256);
+    const auto args = garnet_args(p, 256, false);
     const auto value = [&](const std::string& key) {
         const auto it = std::find(args.begin(), args.end(), key);
         return it != args.end() && it + 1 != args.end() ? *(it + 1) : std::string("(none)");
@@ -92,7 +92,19 @@ TEST_CASE("Garnet's arguments: the socket, 127.0.0.1 port 0, checkpoints and --r
         CHECK(a.find("assword") == std::string::npos);
         CHECK(a != "--auth");
     }
-    CHECK(garnet_args(p, 1)[std::size_t(std::find(args.begin(), args.end(), "--memory") - args.begin()) + 1] == "16m");
+    CHECK(value("--device-type") == "RandomAccess");  // the default device's native library isn't found
+    CHECK(value("--checkpoint-freq") == "300");
+    CHECK(value("--lua-script-timeout") == "5000");
+    CHECK(value("--lua-memory-management-mode") == "Tracked");
+    CHECK(value("--lua-script-memory-limit") == "64m");
+    const auto low = garnet_args(p, 1, false);
+    CHECK(low[std::size_t(std::find(low.begin(), low.end(), "--memory") - low.begin()) + 1] == "16m");
+    // Windows: no socket permission (Garnet refuses one there), the rest the same.
+    const auto win = garnet_args(p, 256, true);
+    CHECK(std::find(win.begin(), win.end(), "--unixsocketperm") == win.end());
+    CHECK(std::find(win.begin(), win.end(), "--unixsocket") != win.end());
+    CHECK(win.size() + 2 == garnet_args(p, 256, false).size());
+    CHECK(std::find(win.begin(), win.end(), "RandomAccess") != win.end());
 
     const auto conf = nlohmann::json::parse(garnet_config_text("abc123"));
     CHECK(conf["AuthenticationMode"] == "Password");
@@ -112,10 +124,16 @@ TEST_CASE("Garnet's environment: its .NET install, and nothing that changes what
     CHECK(get("DOTNET_ROOT") == path_to_utf8(fs::path("/rt/dotnet/10.0.3")));
     CHECK(get("DOTNET_ROOT_X64") == get("DOTNET_ROOT"));
     CHECK(get("DOTNET_gcServer") == "0");
-    const auto& removed = garnet_env_names_removed();
-    for (const char* name : {"DOTNET_STARTUP_HOOKS", "DOTNET_ADDITIONAL_DEPS", "DOTNET_ROLL_FORWARD", "COREHOST_TRACE"}) {
-        CHECK(std::find(removed.begin(), removed.end(), name) != removed.end());
-    }
+    const std::vector<std::string> environment = {"PATH", "DOTNET_STARTUP_HOOKS", "dotnet_additional_deps",
+                                                  "DOTNET_ROOT", "DOTNET_gcServer", "COMPlus_EnableDiagnostics",
+                                                  "CORECLR_PROFILER", "COR_ENABLE_PROFILING", "COREHOST_TRACE",
+                                                  "DOTNET_ROOT(x86)", "HOME", "CORNERSTONE"};
+    const auto removed = garnet_env_names_removed(environment);
+    const std::vector<std::string> want = {"DOTNET_STARTUP_HOOKS", "dotnet_additional_deps", "COMPlus_EnableDiagnostics",
+                                           "CORECLR_PROFILER", "COR_ENABLE_PROFILING", "COREHOST_TRACE",
+                                           "DOTNET_ROOT(x86)"};
+    CHECK(removed == want);  // DOTNET_ROOT and DOTNET_gcServer are FloServer's own; PATH, HOME and CORNERSTONE aren't .NET's
+    CHECK_FALSE(environment_names().empty());
 }
 
 TEST_CASE("Garnet's program in its install, the launch through dotnet, and the newest installs") {
@@ -146,11 +164,23 @@ TEST_CASE("Garnet's program in its install, the launch through dotnet, and the n
     CHECK(launch->args == std::vector<std::string>{path_to_utf8(garnet->dir / "GarnetServer.dll")});
     CHECK_FALSE(garnet_launch(garnet->dir / "GarnetServer.dll", tmp.path() / "nothing", error));
     CHECK(error.find("dotnet") != std::string::npos);
-    // The apphost alone runs as it is.
-    const auto apphost = garnet_launch(tmp.path() / "GarnetServer.exe", {}, error);
+    // The release's layout (2.2.4): net10.0/GarnetServer.exe, a framework-dependent
+    // single-file apphost and no DLL. It runs as it is, and needs .NET too.
+#ifdef _WIN32
+    const char* kApphost = "GarnetServer.exe";
+#else
+    const char* kApphost = "GarnetServer";
+#endif
+    fake_install(tmp.path(), "garnet", "2.2.5", "", {std::string("net10.0/") + kApphost, "net10.0/lua54.dll"});
+    const fs::path r225 = runtimes_dir(tmp.path()) / "garnet" / "2.2.5";
+    REQUIRE(garnet_entry(r225) == r225 / "net10.0" / kApphost);
+    const auto apphost = garnet_launch(*garnet_entry(r225), dotnet->dir, error);
     REQUIRE(apphost);
-    CHECK(apphost->program == tmp.path() / "GarnetServer.exe");
+    CHECK(apphost->program == r225 / "net10.0" / kApphost);
     CHECK(apphost->args.empty());
+    error.clear();
+    CHECK_FALSE(garnet_launch(*garnet_entry(r225), {}, error));
+    CHECK(error.find(".NET 10") != std::string::npos);
 
     CHECK(hidden_runtime("dotnet"));
     CHECK(hidden_runtime("php-redis"));
@@ -158,29 +188,32 @@ TEST_CASE("Garnet's program in its install, the launch through dotnet, and the n
     CHECK_FALSE(hidden_runtime("php"));
 }
 
-TEST_CASE("the relay's first look: RESP and inline commands pass, anything like HTTP is closed") {
+TEST_CASE("the relay's first look: RESP arrays and a bare PING or QUIT pass, everything else is closed") {
     CHECK(classify_first_bytes("") == FirstBytes::NeedMore);
     CHECK(classify_first_bytes("*1\r\n$4\r\nPING\r\n") == FirstBytes::Redis);
     CHECK(classify_first_bytes("*") == FirstBytes::Redis);  // what every client library sends
-    CHECK(classify_first_bytes("PING\r\n") == FirstBytes::Redis);
-    CHECK(classify_first_bytes("AUTH secret\n") == FirstBytes::Redis);
-    CHECK(classify_first_bytes("PI") == FirstBytes::NeedMore);
-    CHECK(classify_first_bytes("GE") == FirstBytes::NeedMore);
-
-    CHECK(classify_first_bytes("GET / HTTP/1.1\r\nHost: 127.0.0.1:6379\r\n\r\n") == FirstBytes::Http);
-    CHECK(classify_first_bytes("POST /x HTTP/1.1\r\n") == FirstBytes::Http);
-    CHECK(classify_first_bytes("post /x HTTP/1.1\r\n") == FirstBytes::Http);
-    for (const char* m : {"PUT", "HEAD", "OPTIONS", "DELETE", "PATCH", "CONNECT", "TRACE", "PRI"}) {
-        CHECK(classify_first_bytes(std::string(m) + " * HTTP/1.1\r\n") == FirstBytes::Http);
+    for (const char* ok : {"PING\r\n", "ping\r\n", "QUIT\r\n", "Quit\n", "PING\n", "PING\r\n*1\r\n$4\r\nPING\r\n"}) {
+        CAPTURE(ok);
+        CHECK(classify_first_bytes(ok) == FirstBytes::Redis);
     }
-    CHECK(classify_first_bytes("GET key\r\n") == FirstBytes::Http);  // an inline GET is refused too
-    CHECK(classify_first_bytes("FLUSHALL HTTP/1.1\r\n") == FirstBytes::Http);
-    CHECK(classify_first_bytes("SET a b\r\nHost: evil.example\r\n") == FirstBytes::Http);
-    CHECK(classify_first_bytes("Host: x\r\n") == FirstBytes::Http);
-    CHECK(classify_first_bytes("SET a b\r\nuser-agent: Mozilla\r\n") == FirstBytes::Http);
-    CHECK(classify_first_bytes("SET a b\r\norigin: https://evil.example\r\n") == FirstBytes::Http);
-    CHECK(classify_first_bytes(std::string(kMaxSniffBytes - 1, 'a')) == FirstBytes::NeedMore);
-    CHECK(classify_first_bytes(std::string(kMaxSniffBytes, 'a')) == FirstBytes::Http);
+    for (const char* more : {"P", "PI", "pin", "PING", "PING\r", "Q", "QUI", "QUIT\r"}) {
+        CAPTURE(more);
+        CHECK(classify_first_bytes(more) == FirstBytes::NeedMore);
+    }
+    CHECK(classify_first_bytes("GET / HTTP/1.1\r\nHost: 127.0.0.1:6379\r\n\r\n") == FirstBytes::Close);
+    CHECK(classify_first_bytes("POST /x HTTP/1.1\r\n") == FirstBytes::Close);
+    CHECK(classify_first_bytes("G") == FirstBytes::Close);
+    for (const char* m : {"PUT", "HEAD", "OPTIONS", "DELETE", "PATCH", "CONNECT", "TRACE", "PRI"}) {
+        CHECK(classify_first_bytes(std::string(m) + " * HTTP/1.1\r\n") == FirstBytes::Close);
+    }
+    // Inline commands other than PING and QUIT, PING with words after it, a leading blank line, TLS.
+    for (const char* bad : {"GET key\r\n", "SET a b\r\n", "AUTH secret\n", "FLUSHALL\r\n", "PING hello\r\n",
+                            "PINGX\r\n", "\r\nPING\r\n", "\n*1\r\n", " PING\r\n", "Host: x\r\n"}) {
+        CAPTURE(bad);
+        CHECK(classify_first_bytes(bad) == FirstBytes::Close);
+    }
+    const std::string tls = {'\x16', '\x03', '\x01', '\x02', '\x00', '\x01'};  // a TLS ClientHello's first bytes
+    CHECK(classify_first_bytes(tls) == FirstBytes::Close);
 }
 
 TEST_CASE("RESP: commands written, replies read whole or not at all") {

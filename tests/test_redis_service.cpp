@@ -245,6 +245,35 @@ void run_service_test(bool real) {
     REQUIRE(r.size() == 2);
     CHECK(r[1] == "$(nil)");
 
+    // A failed SAVE is kept in the status until one works; a slow one shows "saving".
+    if (!real) {
+        test_util::write_file(paths.checkpoints / "fail-save", "");
+        r = replies(talk(*port, resp_command({"AUTH", *password}) + resp_command({"SET", "x", "1"})));
+        REQUIRE(r.size() == 2);
+        CHECK(eventually([&] { return service.status()["state"] == "asleep"; }));
+        CHECK(service.status().value("save_error", std::string()).find("checkpoint failed") != std::string::npos);
+        fs::remove(paths.checkpoints / "fail-save");
+        test_util::write_file(paths.checkpoints / "slow-save", "");
+        r = replies(talk(*port, resp_command({"AUTH", *password}) + resp_command({"SET", "x", "2"})));
+        REQUIRE(r.size() == 2);
+        CHECK(service.status().contains("save_error"));  // still: no SAVE has worked since
+        CHECK(eventually([&] { return service.status()["state"] == "saving"; }));
+        CHECK_FALSE(garnet_cmdlines(data).empty());  // saving: still there
+        CHECK(eventually([&] { return service.status()["state"] == "asleep"; }));
+        CHECK(garnet_cmdlines(data).empty());
+        CHECK_FALSE(service.status().contains("save_error"));
+        fs::remove(paths.checkpoints / "slow-save");
+    }
+    // A Lua script can't hold Garnet: stopped after 5 s.
+    {
+        const auto started = std::chrono::steady_clock::now();
+        r = replies(talk(*port, resp_command({"AUTH", *password}) + resp_command({"EVAL", "while true do end", "0"}),
+                         40s));
+        REQUIRE(r.size() == 2);
+        CHECK(r[1].starts_with("-"));
+        CHECK(std::chrono::steady_clock::now() - started < 30s);
+    }
+
     // Held for a removal: stopped, and connections are told it isn't available.
     {
         const RedisService::RemovalHold hold = service.hold_for_removal();

@@ -191,7 +191,7 @@ void RedisService::reload() {
             if (process) {
                 ++killing_;
             }
-            state_ = State::Asleep;
+            state_ = process ? State::Saving : State::Asleep;
             error_.clear();
             listener_.reset();
         }
@@ -206,7 +206,8 @@ void RedisService::reload() {
     } else {
         install_error = "Garnet's GarnetServer program is missing from " + path_to_utf8(garnet->dir);
     }
-    if (install_error.empty() && entry.extension() == ".dll" && dotnet == nullptr) {
+    // Either layout runs on .NET: GarnetServer.dll through dotnet, the apphost through DOTNET_ROOT.
+    if (install_error.empty() && dotnet == nullptr) {
         install_error = "the .NET " + std::string(kGarnetDotnetSeries) +
                         " runtime Garnet needs isn't installed: install Garnet again in Settings → Runtimes "
                         "(or: flo install garnet)";
@@ -232,7 +233,7 @@ void RedisService::reload() {
         if (restart) {
             retired = std::move(process_);
             ++killing_;
-            state_ = State::Asleep;
+            state_ = State::Saving;  // asleep once it's saved and gone
         }
         if (replaced && state_ == State::Failed) {
             state_ = State::Asleep;
@@ -412,7 +413,7 @@ bool RedisService::ensure_running(std::string& error) {
             if (!dotnet_dir.empty()) {
                 o.env = garnet_env(dotnet_dir);
             }
-            o.remove_env = garnet_env_names_removed();
+            o.remove_env = garnet_env_names_removed(environment_names());
             o.output_log = paths_.log;
 #ifdef _WIN32
             // A real (empty) standard input: a child without a console and
@@ -488,7 +489,7 @@ void RedisService::stop_process() {
         changed_.wait(lock, [this] { return state_ != State::Starting && killing_ == 0; });
         process = std::move(process_);
         if (state_ == State::Running) {
-            state_ = State::Asleep;
+            state_ = process ? State::Saving : State::Asleep;
         }
         if (process) {
             ++killing_;
@@ -509,11 +510,7 @@ void RedisService::kill_and_note(std::unique_ptr<ChildProcess> process, bool sav
             if (!password.empty()) {
                 try {
                     const auto saved = authed_command(paths_.socket, password, {"SAVE"}, kSaveLimit);
-                    if (!saved || saved->type != '+') {
-                        const std::lock_guard lock(mutex_);
-                        error_ = clean_error_text("Garnet's data couldn't be saved before it stopped" +
-                                                  (saved ? ": " + saved->text : std::string()));
-                    }
+                    note_save(saved);
                 } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): it still stops
                 }
             }
@@ -521,8 +518,20 @@ void RedisService::kill_and_note(std::unique_ptr<ChildProcess> process, bool sav
         process->kill();
         const std::lock_guard lock(mutex_);
         --killing_;
+        if (killing_ == 0 && state_ == State::Saving) {
+            state_ = State::Asleep;  // saved and gone
+        }
     }
     changed_.notify_all();
+}
+
+void RedisService::note_save(const std::optional<RespReply>& saved) {
+    const std::lock_guard lock(mutex_);
+    if (saved && saved->type == '+') {
+        save_error_.clear();  // kept until a SAVE works again
+    } else {
+        save_error_ = clean_error_text(saved ? saved->text : std::string("Garnet didn't answer SAVE"));
+    }
 }
 
 RedisService::RemovalHold RedisService::hold_for_removal() {
@@ -607,7 +616,7 @@ void RedisService::serve(std::uintptr_t client) {
             kind = classify_first_bytes(first);
         }
         if (kind != FirstBytes::Redis) {
-            if (kind == FirstBytes::Http) {
+            if (kind == FirstBytes::Close) {
                 ++refused_;
             }
             close_socket(client);  // no answer: a page learns nothing
@@ -655,7 +664,7 @@ void RedisService::tick(Clock::time_point now) {
             now - last >= config_.idle_after) {
             idle = std::move(process_);
             ++killing_;
-            state_ = State::Asleep;
+            state_ = State::Saving;  // the status says so until it's saved and gone
         }
         wake = installed_ && install_error_.empty() && settings_.keep_running && held_ == 0 && !stopped_ &&
                (state_ == State::Asleep || (state_ == State::Failed && now >= retry_after_));
@@ -752,6 +761,9 @@ json RedisService::status() const {
             case State::Running:
                 state = "running";
                 break;
+            case State::Saving:
+                state = "saving";
+                break;
             case State::Failed:
                 state = "failed";
                 break;
@@ -765,6 +777,9 @@ json RedisService::status() const {
     s["host"] = "127.0.0.1";
     s["port"] = listener_ ? listener_->port() : settings_.port.value_or(kFirstRedisPort);
     s["keys"] = keys_;
+    if (!save_error_.empty()) {
+        s["save_error"] = save_error_;  // the last SAVE failed: the data may not come back after a stop
+    }
     s["refused"] = refused_.load();
     s["settings"] = {{"keep_running", settings_.keep_running}, {"memory_mb", settings_.memory_mb}};
     return s;
@@ -848,7 +863,7 @@ bool RedisService::flush(ServiceRefusal& refusal) {
                                        (reply ? ": " + clean_error_text(reply->text) : std::string())};
         return false;
     }
-    (void)command({"SAVE"}, kSaveLimit);  // so an older checkpoint doesn't bring them back
+    note_save(command({"SAVE"}, kSaveLimit));  // so an older checkpoint doesn't bring them back
     const std::lock_guard lock(mutex_);
     keys_ = 0;
     save_status_locked();

@@ -1675,9 +1675,9 @@ constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
     Entry{Str::PanelRedisPhpredis, "Copy .env lines holds the REDIS_ lines (REDIS_CLIENT=phpredis).",
           "نسخ أسطر " FLO_LRI ".env" FLO_PDI " يضم أسطر " FLO_LRI "REDIS_" FLO_PDI " (" FLO_LRI "REDIS_CLIENT=phpredis" FLO_PDI ").",
           "کۆپیکردنی دێڕەکانی " FLO_LRI ".env" FLO_PDI " دێڕەکانی " FLO_LRI "REDIS_" FLO_PDI " لەخۆ دەگرێت (" FLO_LRI "REDIS_CLIENT=phpredis" FLO_PDI ")."},
-    Entry{Str::PanelRedisPredis, "Copy .env lines holds the REDIS_ lines (REDIS_CLIENT=predis: this PHP has no phpredis build).",
-          "نسخ أسطر " FLO_LRI ".env" FLO_PDI " يضم أسطر " FLO_LRI "REDIS_" FLO_PDI " (" FLO_LRI "REDIS_CLIENT=predis" FLO_PDI ": لا يوجد " FLO_LRI "phpredis" FLO_PDI " لهذا الإصدار من " FLO_LRI "PHP" FLO_PDI ").",
-          "کۆپیکردنی دێڕەکانی " FLO_LRI ".env" FLO_PDI " دێڕەکانی " FLO_LRI "REDIS_" FLO_PDI " لەخۆ دەگرێت (" FLO_LRI "REDIS_CLIENT=predis" FLO_PDI ": ئەم " FLO_LRI "PHP" FLO_PDI "یە " FLO_LRI "phpredis" FLO_PDI "ی نییە)."},
+    Entry{Str::PanelRedisPredis, "Copy .env lines holds the REDIS_ lines (REDIS_CLIENT=predis: this PHP has no phpredis build; run composer require predis/predis in the project).",
+          "نسخ أسطر " FLO_LRI ".env" FLO_PDI " يضم أسطر " FLO_LRI "REDIS_" FLO_PDI " (" FLO_LRI "REDIS_CLIENT=predis" FLO_PDI ": لا يوجد " FLO_LRI "phpredis" FLO_PDI " لهذا الإصدار من " FLO_LRI "PHP" FLO_PDI "؛ شغّل " FLO_LRI "composer require predis/predis" FLO_PDI " في المشروع).",
+          "کۆپیکردنی دێڕەکانی " FLO_LRI ".env" FLO_PDI " دێڕەکانی " FLO_LRI "REDIS_" FLO_PDI " لەخۆ دەگرێت (" FLO_LRI "REDIS_CLIENT=predis" FLO_PDI ": ئەم " FLO_LRI "PHP" FLO_PDI "یە " FLO_LRI "phpredis" FLO_PDI "ی نییە؛ " FLO_LRI "composer require predis/predis" FLO_PDI " لە پڕۆژەکەدا جێبەجێ بکە)."},
     Entry{Str::PanelRedisNotInstalled, "Install Garnet in Settings → Redis first.",
           "ثبّت " FLO_LRI "Garnet" FLO_PDI " أولًا من الإعدادات ← " FLO_LRI "Redis" FLO_PDI ".",
           "سەرەتا " FLO_LRI "Garnet" FLO_PDI " لە ڕێکخستنەکان ← " FLO_LRI "Redis" FLO_PDI " دابمەزرێنە."},
@@ -1690,6 +1690,11 @@ constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
     Entry{Str::RedisCopied, "Copied.",
           "نُسخ.",
           "کۆپی کرا."},
+    Entry{Str::RedisSaving, "Saving…", "يحفظ…", "پاشەکەوت دەکات…"},
+    Entry{Str::RedisSaveFailed, "Garnet's last save failed, so its data may not come back after it stops: {0}",
+          "فشل آخر حفظ لـ " FLO_LRI "Garnet" FLO_PDI "، لذا قد لا تعود بياناته بعد توقفه: {0}",
+          "دوایین پاشەکەوتکردنی " FLO_LRI "Garnet" FLO_PDI " سەرکەوتوو نەبوو، بۆیە لەوانەیە داتاکانی دوای وەستان نەگەڕێنەوە: {0}"},
+    Entry{Str::RedisFlushConfirm, "Flush all", "مسح الكل", "سڕینەوەی هەموو"},
 }};
 
 #undef FLO_LRI

@@ -29,15 +29,19 @@
 // file, never in an argument), and the relay closes a connection whose first
 // bytes look like HTTP before anything reaches Garnet.
 //
-// Garnet always has a TCP listener besides the socket: it's on 127.0.0.1 port
-// 0, so the system picks a free port as it binds (nothing can take it first)
-// and nothing uses it; the password guards it too.
+// Garnet always has a TCP listener besides the socket: 2.2.4 can't run
+// without a TCP endpoint (Options.cs builds one from --bind/--port whatever
+// else is given). It's on 127.0.0.1 port 0, so the system picks a random
+// free port as Garnet binds (nothing can take it first) and FloServer never
+// uses or tells it. It IS reachable by any local program that finds it: the
+// password guards it, but the relay's HTTP check doesn't (a page would have
+// to guess the port, and its lines then meet NOAUTH).
 //
 // <data>/garnet (never cleaned up by Settings → Folders, never backed up;
 // Remove FloServer deletes it with the databases):
 //   garnet.conf    {"AuthenticationMode": "Password", "Password": ...}, owner-only
 //   garnet.sock    Garnet's socket (0600)
-//   checkpoints/   what SAVE writes and --recover reads
+//   checkpoints/   what SAVE (and Garnet's own checkpoint every 5 minutes) writes and --recover reads
 //   status.json    the last key count, shown while Garnet sleeps
 // The log is <data>/web/logs/garnet.log (Clear old logs empties it).
 
@@ -59,8 +63,9 @@ namespace floserver::core {
 inline constexpr std::string_view kGarnetRuntime = "garnet";
 inline constexpr std::string_view kDotnetRuntime = "dotnet";
 inline constexpr std::string_view kPhpRedisRuntime = "php-redis";
-// The .NET series Garnet's build needs (its runtimeconfig.json rolls forward
-// within a major version only).
+// The .NET series FloServer installs for Garnet: the one its build targets
+// (net10.0). Its runtimeconfig asks for LatestMajor roll-forward, so a newer
+// major would run it too, but FloServer only installs and picks 10.x.
 inline constexpr std::string_view kGarnetDotnetSeries = "10";
 inline constexpr Port kFirstRedisPort = 6379;
 inline constexpr std::string_view kRedisSecretName = "garnet/password";
@@ -98,11 +103,12 @@ struct GarnetPaths {
 
 [[nodiscard]] GarnetPaths garnet_paths(const std::filesystem::path& data);
 
-// How Garnet is started: `program` with `args` before Garnet's own. A
-// framework-dependent build is run as "<dotnet>/dotnet GarnetServer.dll",
-// so the .NET install FloServer chose runs it and no other one is looked
-// for; a build with only the apphost (GarnetServer.exe) runs as it is, with
-// DOTNET_ROOT set.
+// How Garnet is started: `program` with `args` before Garnet's own. A build
+// with GarnetServer.dll is run as "<dotnet>/dotnet GarnetServer.dll", so the
+// .NET install FloServer chose runs it. The release's Windows and Linux
+// builds (2.2.4: net10.0/GarnetServer.exe, a framework-dependent single-file
+// apphost, no DLL) run as they are, with DOTNET_ROOT at that install. Both
+// need the .NET runtime.
 struct GarnetLaunch {
     std::filesystem::path program;
     std::vector<std::string> args;
@@ -114,7 +120,8 @@ struct GarnetLaunch {
 [[nodiscard]] std::optional<std::filesystem::path> garnet_entry(const std::filesystem::path& install_dir);
 // The dotnet host in a .NET runtime install (dotnet.exe; dotnet elsewhere).
 [[nodiscard]] std::optional<std::filesystem::path> dotnet_program(const std::filesystem::path& dotnet_dir);
-// The launch for this Garnet entry and .NET install, or nothing (with `error`).
+// The launch for this Garnet entry and .NET install, or nothing (with
+// `error`): either kind needs the .NET install's dotnet program.
 [[nodiscard]] std::optional<GarnetLaunch> garnet_launch(const std::filesystem::path& entry,
                                                         const std::filesystem::path& dotnet_dir, std::string& error);
 
@@ -127,33 +134,47 @@ struct GarnetLaunch {
 [[nodiscard]] std::optional<std::string> garnet_socket_problem(const GarnetPaths& paths);
 
 // Garnet's arguments (after the launch's own): its config file (the
-// password), 127.0.0.1 port 0, the socket (0600), checkpoints and --recover,
-// Lua, the memory size, no DEBUG or MODULE commands. Nothing secret.
-[[nodiscard]] std::vector<std::string> garnet_args(const GarnetPaths& paths, int memory_mb);
+// password), 127.0.0.1 port 0, the socket (0600 except on Windows, where
+// Garnet refuses a socket permission and the folder's ACL protects it),
+// checkpoints (the RandomAccess device: the default one needs a native
+// library Garnet looks for next to the working folder) and --recover, a
+// checkpoint every 5 minutes, Lua with a 5 s and 64 MB limit per script, the
+// memory size, no DEBUG or MODULE commands. Nothing secret. `windows` is for tests.
+#ifdef _WIN32
+inline constexpr bool kGarnetOnWindows = true;
+#else
+inline constexpr bool kGarnetOnWindows = false;
+#endif
+inline constexpr int kGarnetCheckpointSeconds = 300;
+[[nodiscard]] std::vector<std::string> garnet_args(const GarnetPaths& paths, int memory_mb,
+                                                   bool windows = kGarnetOnWindows);
 // garnet.conf's text: Garnet's own JSON config with the password.
 [[nodiscard]] std::string garnet_config_text(std::string_view password);
 // The environment Garnet gets: DOTNET_ROOT and DOTNET_ROOT_X64 at the .NET
 // install, workstation GC (a dev box's memory, not a server's), no telemetry.
 [[nodiscard]] std::vector<std::pair<std::string, std::string>> garnet_env(const std::filesystem::path& dotnet_dir);
 // .NET variables taken out of Garnet's environment, so nothing set there
-// (a startup hook, other dependencies, another runtime) changes what runs.
-[[nodiscard]] const std::vector<std::string>& garnet_env_names_removed();
+// (a startup hook, other dependencies, another runtime, a profiler) changes
+// what runs: every DOTNET_*, COMPlus_*, CORECLR_*, COR_* and COREHOST_*
+// name in `environment` (case-insensitive) but those garnet_env() sets.
+[[nodiscard]] std::vector<std::string> garnet_env_names_removed(const std::vector<std::string>& environment);
+// The names of this process's environment variables.
+[[nodiscard]] std::vector<std::string> environment_names();
 
 // --- the relay's first look -------------------------------------------------------
 
 enum class FirstBytes : std::uint8_t {
-    NeedMore,  // read on (up to kMaxSniffBytes)
+    NeedMore,  // read on
     Redis,     // forward
-    Http,      // close: a web page's request (or nothing a Redis client sends)
+    Close,     // close: a web page's request, TLS, anything a Redis client doesn't send first
 };
-inline constexpr std::size_t kMaxSniffBytes = 8192;
 
-// What a connection's first bytes are. A RESP array ('*', what every Redis
-// client sends) is Redis. Otherwise it's an inline command, judged on its
-// whole first line: one that starts with an HTTP method and a space (GET,
-// POST, PUT, HEAD, OPTIONS, DELETE, PATCH, CONNECT, TRACE, PRI; any case) or
-// holds " HTTP/", or any line in what came that starts with "Host:",
-// "Origin:" or "User-Agent:", is HTTP. kMaxSniffBytes without a line end is HTTP too.
+// What a connection's first bytes are. Forwarded only when the first byte is
+// '*' (a RESP array: what every Redis client library sends) or the first
+// line is an inline PING or QUIT alone (any case; "\r\n" or "\n" ends it), as
+// a health check or a hand-typed probe sends. Everything else is closed: an
+// HTTP request line, a leading blank line, a TLS ClientHello, any other
+// inline command. Bytes that may still become "PING\r\n" or "QUIT\r\n" need more.
 [[nodiscard]] FirstBytes classify_first_bytes(std::string_view data);
 
 // --- RESP, for the service's own commands -----------------------------------------

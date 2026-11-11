@@ -32,7 +32,8 @@
 //   mail.env         {"name"} -> {"env": [[key, value]...], "env_file"}   the project's mail
 //                    lines alone (databases.login's "env" has them too), for flo env
 //   redis.status     {"projects"?: bool} -> {"installed", "version"?, "dotnet_version"?, "state": "not_installed"|
-//                    "asleep"|"starting"|"running"|"failed", "error"?, "host": "127.0.0.1", "port",
+//                    "asleep"|"starting"|"running"|"saving"|"failed", "error"?, "save_error"? (the last
+//                    SAVE failed; kept until one works), "host": "127.0.0.1", "port",
 //                    "keys" (DBSIZE when last asked), "refused" (connections closed as HTTP since
 //                    the service started), "settings": {"keep_running", "memory_mb"},
 //                    "projects"? (asked for: names with "redis": true), "phpredis": ["8.4", ...]} (D30)

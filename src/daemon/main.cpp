@@ -377,9 +377,14 @@ struct Service {
         }
         try {
             if (name == core::kGarnetRuntime) {
+                // Garnet, and the .NET runtime that came with it: only the newest stays.
                 const core::RedisService::RemovalHold hold = redis->hold_for_removal();
-                for (const core::InstalledRuntime& r : core::list_installed(core::runtimes_dir(*data))) {
-                    if (r.name == name && r.version != version) {
+                const auto installed = core::list_installed(core::runtimes_dir(*data));
+                const core::InstalledRuntime* dotnet = core::newest_dotnet(installed);
+                for (const core::InstalledRuntime& r : installed) {
+                    const bool old_garnet = r.name == name && r.version != version;
+                    const bool old_dotnet = r.name == core::kDotnetRuntime && dotnet != nullptr && r.dir != dotnet->dir;
+                    if (old_garnet || old_dotnet) {
                         core::ServiceRefusal ignored;  // left for the user to remove
                         (void)runtimes->remove(r.name, core::path_to_utf8(r.dir.filename()), ignored);
                     }
@@ -389,10 +394,29 @@ struct Service {
                 name == "php") {
                 redis->reload();
                 if (web) {
-                    (void)web->reload();
+                    (void)web->reload();  // the pools load the newest phpredis now
                 }
+                remove_older_php_redis();
             }
         } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the older install stays; nothing breaks
+        }
+    }
+
+    // phpredis: only the newest of each PHP series stays (D30). One a pool
+    // still has loaded (Windows) stays until the next install.
+    void remove_older_php_redis() const {
+        namespace core = floserver::core;
+        const auto installed = core::list_installed(core::runtimes_dir(*data));
+        for (const core::InstalledRuntime& r : installed) {
+            if (r.name != core::kPhpRedisRuntime) {
+                continue;
+            }
+            const auto series = core::php_redis_series_of_variant(r.variant);
+            const core::InstalledRuntime* newest = series ? core::php_redis_for(installed, *series + ".0") : nullptr;
+            if (newest != nullptr && newest->dir != r.dir) {
+                core::ServiceRefusal ignored;
+                (void)runtimes->remove(r.name, core::path_to_utf8(r.dir.filename()), ignored);
+            }
         }
     }
 

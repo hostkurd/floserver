@@ -31,7 +31,7 @@ MailState state_of(std::string_view s) {
     if (s == "starting") {
         return MailState::Starting;
     }
-    if (s == "running") {
+    if (s == "running" || s == "saving") {
         return MailState::Running;
     }
     if (s == "failed") {
@@ -80,6 +80,8 @@ std::optional<RedisStatus> redis_status_from_reply(const json& reply) {
     s.version = mail_plain_subject(text_of(reply, "version"), 40);
     s.state = s.installed ? state_of(text_of(reply, "state")) : MailState::NotInstalled;
     s.error = mail_plain_subject(text_of(reply, "error"), kMailErrorMaxChars);
+    s.save_error = mail_plain_subject(text_of(reply, "save_error"), kMailErrorMaxChars);
+    s.saving = s.installed && text_of(reply, "state") == "saving";
     if (reply.contains("port") && reply["port"].is_number_integer()) {
         const auto port = reply["port"].get<std::int64_t>();
         if (port > 0 && port < 65536) {
@@ -103,6 +105,17 @@ std::optional<RedisStatus> redis_status_from_reply(const json& reply) {
         }
     }
     return s;
+}
+
+std::string redis_state_text(const RedisStatus& status, Lang lang) {
+    return status.saving ? std::string(text(lang, Str::RedisSaving)) : mail_state_text(status.state, lang);
+}
+
+std::string redis_save_failed_text(const RedisStatus& status, Lang lang) {
+    if (!status.installed || status.save_error.empty()) {
+        return {};
+    }
+    return fill(lang, Str::RedisSaveFailed, {status.save_error});
 }
 
 std::string redis_address_text(const RedisStatus& status) { return "127.0.0.1 : " + std::to_string(status.port); }

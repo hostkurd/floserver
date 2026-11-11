@@ -163,7 +163,7 @@ void SettingsWindow::flush_redis() {
         return;
     }
     asking_ = true;
-    const bool yes = ask_delete_mails(hwnd_, lang_, redis_flush_question(*redis_, lang_));
+    const bool yes = ask_flush_redis(hwnd_, lang_, redis_flush_question(*redis_, lang_));
     asking_ = false;
     modal_closed();
     if (hwnd_ == nullptr || !yes) {
@@ -282,7 +282,7 @@ void SettingsWindow::layout_redis(HDC dc, Geometry& g, int x0, int x1, int y) co
     std::string version_text;
     int right_w = 0;
     if (known) {
-        pill_text = mail_state_text(redis_->state, lang_);
+        pill_text = redis_state_text(*redis_, lang_);
         if (redis_->installed && !redis_->version.empty()) {
             version_text = fill(lang_, Str::RedisVersion, {redis_->version});
         }
@@ -340,6 +340,11 @@ void SettingsWindow::layout_redis(HDC dc, Geometry& g, int x0, int x1, int y) co
         const std::string words = fill(lang_, Str::RedisFailed, {rtl_ ? isolate_ltr(redis_->error) : redis_->error});
         const int h = height(words, fonts_.caption.get(), x1 - x0 - px(24)) + px(14);
         rg.failed = {x0, y, x1, y + h};
+        y += h + px(kGap);
+    }
+    if (const std::string words = redis_save_failed_text(*redis_, lang_); !words.empty()) {
+        const int h = height(words, fonts_.caption.get(), x1 - x0 - px(24)) + px(14);
+        rg.save_failed = {x0, y, x1, y + h};
         y += h + px(kGap);
     }
 
@@ -541,6 +546,9 @@ void SettingsWindow::paint_redis_shapes(Canvas& c) const {
     if (!is_empty(rg.failed)) {
         c.round_rect(rg.failed, pxf(4), p.banner_error.fill);
     }
+    if (!is_empty(rg.save_failed)) {
+        c.round_rect(rg.save_failed, pxf(4), p.banner_error.fill);
+    }
     if (!is_empty(rg.install)) {
         const Hit hit{Part::RedisInstall, -1, -1};
         if (connected_) {
@@ -639,7 +647,7 @@ void SettingsWindow::paint_redis_text(Canvas& c) const {
                                 : kind == MailPill::Waiting ? p.asleep
                                 : kind == MailPill::Bad     ? p.problem
                                                             : p.off;
-        c.text(rg.pill, w(mail_state_text(redis_->state, lang_)), fonts_.small_bold.get(), sc.text, Align::Center, false);
+        c.text(rg.pill, w(redis_state_text(*redis_, lang_)), fonts_.small_bold.get(), sc.text, Align::Center, false);
     }
     if (!is_empty(rg.version)) {
         c.text(rg.version, w(fill(lang_, Str::RedisVersion, {redis_->version})), fonts_.caption.get(), p.text_subtle,
@@ -665,6 +673,12 @@ void SettingsWindow::paint_redis_text(Canvas& c) const {
         InflateRect(&inner, -px(12), -px(7));
         c.paragraph(inner, w(fill(lang_, Str::RedisFailed, {rtl_ ? isolate_ltr(redis_->error) : redis_->error})),
                     fonts_.caption.get(), p.banner_error.text);
+    }
+    if (!is_empty(rg.save_failed)) {
+        RECT inner = rg.save_failed;
+        InflateRect(&inner, -px(12), -px(7));
+        const std::string words = redis_save_failed_text(*redis_, lang_);
+        c.paragraph(inner, w(words), fonts_.caption.get(), p.banner_error.text);
     }
 
     c.text(rg.addr_title, w(text(lang_, Str::RedisAddress)), fonts_.body_bold.get(), p.text, Align::Start, false);

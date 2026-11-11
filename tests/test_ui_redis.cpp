@@ -208,3 +208,36 @@ TEST_CASE("Garnet is a Tools row; its .NET runtime and phpredis aren't shown; th
     CHECK(it->what == Str::FirstRunWhatGarnet);
     CHECK(it->label.find("Garnet") != std::string::npos);
 }
+
+TEST_CASE("Settings > Redis: \"saving\" before it sleeps, and a failed save kept on show, in three languages") {
+    json reply = status_reply();
+    reply["state"] = "saving";
+    reply["save_error"] = "checkpoint failed";
+    const RedisStatus s = *redis_status_from_reply(reply);
+    CHECK(s.saving);
+    CHECK(s.state == MailState::Running);  // the pill keeps Running's colour
+    CHECK(redis_state_text(s, Lang::En) == "Saving\xE2\x80\xA6");
+    CHECK(redis_save_failed_text(s, Lang::En).find("checkpoint failed") != std::string::npos);
+    for (const Lang lang : {Lang::Ar, Lang::Ku}) {
+        CHECK(redis_state_text(s, lang) != redis_state_text(s, Lang::En));
+        CHECK(redis_save_failed_text(s, lang).find("checkpoint failed") != std::string::npos);
+        CHECK(text(lang, Str::RedisFlushConfirm) != text(Lang::En, Str::RedisFlushConfirm));
+    }
+    const RedisStatus fine = *redis_status_from_reply(status_reply());
+    CHECK_FALSE(fine.saving);
+    CHECK(redis_state_text(fine, Lang::En) == mail_state_text(MailState::Asleep, Lang::En));
+    CHECK(redis_save_failed_text(fine, Lang::En).empty());
+    CHECK(text(Lang::En, Str::RedisFlushConfirm) == "Flush all");
+}
+
+TEST_CASE("the predis note tells how to add predis, in three languages") {
+    ProjectRow row;
+    row.name = "shop";
+    row.php = "8.1.30";
+    row.wants.redis = true;
+    Installed installed;
+    installed["garnet"] = {"2.2.4"};
+    for (const Lang lang : {Lang::En, Lang::Ar, Lang::Ku}) {
+        CHECK(redis_panel_note(row, installed, lang).find("composer require predis/predis") != std::string::npos);
+    }
+}

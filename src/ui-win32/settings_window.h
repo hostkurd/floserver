@@ -490,6 +490,7 @@ private:
         RECT pill{};
         RECT version{};       // "Garnet 2.2.4"
         RECT failed{};
+        RECT save_failed{};   // the last SAVE failed
         RECT install_note{};
         RECT install{};
         RECT progress_text{};

@@ -13,6 +13,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -142,8 +143,17 @@ void serve(int fd) {
                 g_store.clear();
                 reply = "+OK\r\n";
             } else if (name == "SAVE") {
-                save();
-                reply = "+OK\r\n";
+                // Test switches next to the checkpoints: a slow SAVE, a failing one.
+                std::error_code ec;
+                if (fs::exists(g_dump.parent_path() / "slow-save", ec)) {
+                    std::this_thread::sleep_for(std::chrono::seconds(3));
+                }
+                if (fs::exists(g_dump.parent_path() / "fail-save", ec)) {
+                    reply = "-ERR checkpoint failed\r\n";
+                } else {
+                    save();
+                    reply = "+OK\r\n";
+                }
             } else if (name == "QUIT") {
                 (void)send(fd, "+OK\r\n", 5, MSG_NOSIGNAL);
                 close(fd);

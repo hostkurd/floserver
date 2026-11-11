@@ -29,12 +29,14 @@ struct RedisStatus {
     std::uint64_t keys = 0;
     std::string version;
     std::string error;
+    std::string save_error;  // the last SAVE failed (kept until one works)
     std::vector<std::string> projects;  // with Redis on; known only from Settings' own ask
     std::vector<std::string> phpredis;  // the PHP series phpredis is installed for
     RedisOptions settings;
     int port = 6379;
     MailState state = MailState::NotInstalled;
     bool installed = false;
+    bool saving = false;  // saving before it's stopped: shown as such, Running's colour
     bool projects_known = false;
     // The last redis.status failed: these numbers are from before and aren't shown.
     bool stale = false;
@@ -45,6 +47,11 @@ struct RedisStatus {
 [[nodiscard]] std::optional<RedisStatus> redis_status_from_reply(const nlohmann::json& reply);
 
 // --- Settings > Redis ---------------------------------------------------------------
+
+// The pill's words: "Saving…" while it saves before stopping, else the state's.
+[[nodiscard]] std::string redis_state_text(const RedisStatus& status, Lang lang);
+// The banner when the last SAVE failed, or empty.
+[[nodiscard]] std::string redis_save_failed_text(const RedisStatus& status, Lang lang);
 
 // "127.0.0.1 : 6379", and what Copy puts on the clipboard: "127.0.0.1:6379".
 [[nodiscard]] std::string redis_address_text(const RedisStatus& status);

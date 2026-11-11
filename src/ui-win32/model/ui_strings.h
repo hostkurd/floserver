@@ -835,6 +835,9 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     ChipRedis,
     FirstRunWhatGarnet,
     RedisCopied,
+    RedisSaving,
+    RedisSaveFailed,
+    RedisFlushConfirm,
     Count_,
 };
 

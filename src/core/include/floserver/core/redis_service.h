@@ -13,8 +13,11 @@
 // The first connection starts Garnet and waits until its socket answers
 // (AUTH, then PING). When no relayed connection has been open for the idle
 // time it's stopped: SAVE first (a checkpoint), so the data comes back
-// with --recover on the next start. "keep_running" keeps it up. Every other
-// stop (FloServer quits, a new memory limit, an update or a removal) saves too.
+// with --recover on the next start ("saving" until it's gone). "keep_running"
+// keeps it up, and Garnet checkpoints by itself every 5 minutes meanwhile.
+// Every other stop (FloServer quits, a new memory limit, an update or a
+// removal) saves too. A failed SAVE stays in the status ("save_error") until
+// one works.
 
 #include "floserver/core/child_process.h"
 #include "floserver/core/garnet.h"
@@ -100,7 +103,8 @@ public:
     };
     [[nodiscard]] RemovalHold hold_for_removal();
 
-    enum class State : std::uint8_t { Asleep, Starting, Running, Failed };
+    // Saving: taken out of service and saving before it's stopped (asleep after).
+    enum class State : std::uint8_t { Asleep, Starting, Running, Saving, Failed };
 
 private:
     void supervise();
@@ -111,6 +115,8 @@ private:
     // process_ (killing_ counted), then lets starts go on.
     void kill_and_note(std::unique_ptr<ChildProcess> process, bool save = true);
     void release_hold();
+    // Keeps (or clears, once a SAVE works) why the last SAVE failed.
+    void note_save(const std::optional<RespReply>& saved);
     void run_detached(std::function<void()> work);
     void tick(std::chrono::steady_clock::time_point now);
     void refresh_keys() noexcept;
@@ -135,6 +141,7 @@ private:
     std::string dotnet_version_;                  // mutex_
     std::string install_error_;                   // mutex_: installed but can't run
     std::string error_;                           // mutex_
+    std::string save_error_;                      // mutex_: the last SAVE failed, and why
     std::string password_;                        // mutex_
     SecretStore secrets_;
     std::mutex reload_mutex_;
