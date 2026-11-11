@@ -50,6 +50,7 @@ add_library(floserver_core STATIC
     src/manifest.cpp
     src/mariadb.cpp
     src/mariadb_settings.cpp
+    src/mcp_server.cpp
     src/database_service.cpp
     src/data_folder.cpp
     src/nginx_config.cpp

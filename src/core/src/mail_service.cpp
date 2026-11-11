@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <set>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 
@@ -1203,6 +1204,66 @@ bool MailService::clear(ServiceRefusal& refusal) {
     latest_ = nullptr;
     save_counts_locked();
     return true;
+}
+
+std::optional<json> MailService::recent(int limit, ServiceRefusal& refusal) {
+    limit = std::clamp(limit, 1, kMailRecentLimit);
+    {
+        const std::lock_guard lock(mutex_);
+        if (!installed_) {
+            refusal = {"not_installed",
+                       "Mailpit isn't installed: download it in Settings → Runtimes (or: flo install mailpit)"};
+            return std::nullopt;
+        }
+        if ((!process_ || !process_->running()) && total_ == 0) {
+            return json{{"messages", json::array()}, {"total", 0}};  // nothing caught: no need to wake it
+        }
+    }
+    // Counts as a connection meanwhile, as clear() does.
+    ++active_;
+    touch();
+    const AtExit done([this] {
+        touch();
+        --active_;
+    });
+    std::string error;
+    if (!ensure_running(error)) {
+        refusal = {"mail_failed", error};
+        return std::nullopt;
+    }
+    const auto reply = api("GET", "/api/v1/messages?limit=" + std::to_string(limit));
+    const json doc = reply && reply->first == 200 ? json::parse(reply->second, nullptr, false) : json();
+    if (!doc.is_object() || !doc.contains("messages") || !doc.at("messages").is_array()) {
+        refusal = {"mail_failed", "Mailpit didn't list the emails" +
+                                      (reply ? " (it answered " + std::to_string(reply->first) + ")" : std::string())};
+        return std::nullopt;
+    }
+    json messages = json::array();
+    for (const json& m : doc.at("messages")) {
+        if (!m.is_object() || std::cmp_greater_equal(messages.size(), limit)) {
+            continue;
+        }
+        // Mailpit's ids are letters, digits and '-' (for a link to the inbox); anything else is left out.
+        std::string id = string_field(m, "ID");
+        if (id.size() > 64 || !std::all_of(id.begin(), id.end(), [](char c) {
+                return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' ||
+                       c == '_';
+            })) {
+            id.clear();
+        }
+        json from;
+        if (m.contains("From") && m.at("From").is_object()) {
+            from = json::array({m.at("From")});
+        }
+        messages.push_back({{"id", id},
+                            {"subject", clean_mail_text(string_field(m, "Subject"))},
+                            {"from", recipients(from)},
+                            {"to", recipients(m.contains("To") ? m.at("To") : json())},
+                            {"time", clean_mail_text(string_field(m, "Created"), 40)},
+                            {"read", m.contains("Read") && m.at("Read").is_boolean() && m.at("Read").get<bool>()},
+                            {"size", std::max<std::int64_t>(0, number(m, "Size"))}});
+    }
+    return json{{"messages", std::move(messages)}, {"total", std::max<std::int64_t>(0, number(doc, "total"))}};
 }
 
 }  // namespace floserver::core

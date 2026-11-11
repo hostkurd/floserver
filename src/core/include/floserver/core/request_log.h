@@ -48,4 +48,15 @@ inline constexpr std::string_view kRequestLogFormat =
 [[nodiscard]] std::vector<RequestLogEntry> read_request_log(const std::filesystem::path& file,
                                                             std::size_t max_entries);
 
+// A plain text log (PHP's error log, <web>/logs/<pool>.php-errors.log), for
+// `flo mcp`'s read_log (D32): its last `max_lines` (at most
+// kRequestLogMaxEntries) lines that aren't empty, oldest first. Each is cut
+// to kTextLogLineLimit bytes; a tab becomes a space and other control
+// characters are taken out. A partial first line (the read started
+// mid-line) is dropped; the last line counts without its newline.
+inline constexpr std::size_t kTextLogLineLimit = 1000;
+[[nodiscard]] std::vector<std::string> parse_text_log(std::string_view text, std::size_t max_lines, bool starts_mid_line);
+// The same from the end of `file` (its last 64 KiB). A missing file has no lines.
+[[nodiscard]] std::vector<std::string> read_text_log(const std::filesystem::path& file, std::size_t max_lines);
+
 }  // namespace floserver::core

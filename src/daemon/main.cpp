@@ -519,6 +519,46 @@ struct Service {
         return protocol::make_result(r.id, updates->status());
     }
 
+    // projects.log {name, kind: "php", lines}: the last lines of the PHP
+    // error log of the pool the project runs in (D32, flo mcp's read_log).
+    // The file is named by the web service's own pool key, never by the
+    // request; other projects on the same PHP version and settings share it
+    // ("shared_with"). Refused when the project runs no PHP right now.
+    [[nodiscard]] std::string php_log_reply(std::int64_t id, const std::string& name, std::size_t lines) const {
+        namespace core = floserver::core;
+        const json status = web ? web->status() : json::object();
+        const json pools = status.value("pools", json::array());
+        for (const json& pool : pools) {
+            const json sites = pool.is_object() ? pool.value("sites", json::array()) : json::array();
+            if (!sites.is_array() ||
+                std::none_of(sites.begin(), sites.end(), [&](const json& s) { return s.is_string() && s.get<std::string>() == name; })) {
+                continue;
+            }
+            const std::string key = pool.value("key", std::string());
+            if (key.empty() || key.find_first_of("/\\:") != std::string::npos || key.find("..") != std::string::npos) {
+                break;
+            }
+            const std::string file = key + ".php-errors.log";
+            json out_lines = json::array();
+            for (std::string& line :
+                 core::read_text_log(core::web_dir(data.value_or(std::filesystem::path())) / "logs" / core::path_from_utf8(file), lines)) {
+                out_lines.push_back(std::move(line));
+            }
+            json others = json::array();
+            for (const json& s : sites) {
+                if (s.is_string() && s.get<std::string>() != name) {
+                    others.push_back(s);
+                }
+            }
+            return protocol::make_result(id, {{"lines", std::move(out_lines)},
+                                              {"file", file},
+                                              {"php", pool.value("version", std::string())},
+                                              {"shared_with", std::move(others)}});
+        }
+        return protocol::make_error(id, "no_php",
+                                    name + " doesn't run PHP right now (it's off, can't start, or doesn't use PHP)");
+    }
+
     // The reply to one projects.* request.
     [[nodiscard]] std::string project_request(const protocol::Request& r) const {
         namespace core = floserver::core;
@@ -570,6 +610,13 @@ struct Service {
             std::size_t lines = 50;
             if (r.params.contains("lines") && r.params["lines"].is_number_unsigned()) {
                 lines = std::min<std::size_t>(r.params["lines"].get<std::size_t>(), core::kRequestLogMaxEntries);
+            }
+            const std::string kind = string_param(r.params, "kind");
+            if (kind == "php") {
+                return php_log_reply(r.id, name, lines);
+            }
+            if (!kind.empty() && kind != "web") {
+                return protocol::make_error(r.id, "bad_params", R"("kind" is "web" or "php")");
             }
             json entries = json::array();
             for (const core::RequestLogEntry& e :
@@ -1068,6 +1115,28 @@ struct Service {
         return core::mail_env_values(core::mail_env_kind(dir, python), *port);
     }
 
+    // The inbox's address: where nginx serves it (`served`), else where it
+    // will be with the web ports and HTTPS as they are now.
+    [[nodiscard]] std::string inbox_address(bool& served) const {
+        namespace core = floserver::core;
+        const json status = web ? web->status() : json::object();
+        const json inbox = status.contains("mail") ? status.at("mail") : json();
+        std::string address = inbox.is_object() ? inbox.value("address", std::string()) : std::string();
+        served = !address.empty();
+        if (address.empty()) {
+            const json nginx = status.value("nginx", json::object());
+            core::WebPorts ports{80, 443, false};
+            if (nginx.contains("http_port") && nginx.at("http_port").is_number_unsigned()) {
+                ports.http = nginx.at("http_port").get<core::Port>();
+            }
+            if (nginx.contains("https_port") && nginx.at("https_port").is_number_unsigned()) {
+                ports.https = nginx.at("https_port").get<core::Port>();
+            }
+            address = core::site_address(std::string(core::kMailHostName), ports, nginx.value("tls", false));
+        }
+        return address;
+    }
+
     // Mailpit (D27), protocol.h:
     //   mail.status -> MailService::status() with "inbox_url" and "inbox_served" from the web service;
     //   mail.set {php?, notices?, keep_running?, max?} -> {"ok": true};
@@ -1083,24 +1152,28 @@ struct Service {
         core::ServiceRefusal refusal;
         if (r.method == "mail.status") {
             json out = mail->status();
-            const json status = web ? web->status() : json::object();
-            const json served = status.contains("mail") ? status.at("mail") : json();
-            std::string address = served.is_object() ? served.value("address", std::string()) : std::string();
-            out["inbox_served"] = !address.empty();
-            if (address.empty()) {
-                // Where it will be: the web ports and HTTPS as they are now.
-                const json nginx = status.value("nginx", json::object());
-                core::WebPorts ports{80, 443, false};
-                if (nginx.contains("http_port") && nginx.at("http_port").is_number_unsigned()) {
-                    ports.http = nginx.at("http_port").get<core::Port>();
-                }
-                if (nginx.contains("https_port") && nginx.at("https_port").is_number_unsigned()) {
-                    ports.https = nginx.at("https_port").get<core::Port>();
-                }
-                address = core::site_address(std::string(core::kMailHostName), ports, nginx.value("tls", false));
-            }
-            out["inbox_url"] = address;
+            bool served = false;
+            out["inbox_url"] = inbox_address(served);
+            out["inbox_served"] = served;
             return protocol::make_result(r.id, out);
+        }
+        if (r.method == "mail.recent") {
+            // flo mcp's recent_mail (D32): read-only, newest first.
+            int limit = 10;
+            if (r.params.contains("limit")) {
+                if (!r.params["limit"].is_number_integer()) {
+                    return protocol::make_error(r.id, "bad_params", "limit is a whole number from 1 to 20");
+                }
+                limit = static_cast<int>(std::clamp<std::int64_t>(r.params["limit"].get<std::int64_t>(), 1,
+                                                                  core::kMailRecentLimit));
+            }
+            auto out = mail->recent(limit, refusal);
+            if (!out) {
+                return protocol::make_error(r.id, refusal.code, refusal.message);
+            }
+            bool served = false;
+            (*out)["inbox_url"] = inbox_address(served);
+            return protocol::make_result(r.id, *out);
         }
         if (r.method == "mail.set") {
             if (!mail->set(r.params.is_object() ? r.params : json::object(), refusal)) {
@@ -1659,7 +1732,7 @@ struct Service {
                 reply = phpmyadmin_request(*request);
             } else if (request->method == "mail.status" || request->method == "mail.set" ||
                        request->method == "mail.test" || request->method == "mail.clear" ||
-                       request->method == "mail.env") {
+                       request->method == "mail.env" || request->method == "mail.recent") {
                 reply = mail_request(*request);
             } else if (request->method == "templates.list" || request->method == "projects.create" ||
                        request->method == "create.get" || request->method == "create.cancel") {

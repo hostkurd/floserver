@@ -7,6 +7,7 @@
 #include "floserver/core/ipc.h"
 #include "floserver/core/mailpit.h"
 #include "floserver/core/mariadb.h"
+#include "floserver/core/mcp_server.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/project_config.h"
 #include "floserver/core/process.h"
@@ -27,6 +28,8 @@
 #ifdef _WIN32
 #include <windows.h>
 
+#include <fcntl.h>
+#include <io.h>
 #include <shellapi.h>
 #endif
 
@@ -89,6 +92,8 @@ void print_help(std::ostream& out) {
         << "  check [folder]             Check the floserver.json for a project\n"
         << "  studio [project|folder]    Open a FloCMS project in FloCMS Studio\n"
         << "  shims [install|remove]     php, node, npm, composer, python... in your terminal, at each project's version\n"
+        << "  mcp                        For AI coding tools: a read-only MCP server on stdin/stdout\n"
+        << "                             (Claude Code: claude mcp add floserver -- flo mcp)\n"
         << "  version                    Show the version\n"
         << "  help                       Show this help\n";
 }
@@ -1932,6 +1937,114 @@ int studio(const std::vector<std::string>& args, const std::vector<fs::path>& pa
     return 0;
 }
 
+// What `flo mcp` asks of FloServer (D32): the service through its channel,
+// started when it isn't running (as flo start does), and a project's
+// floserver.json from the folder the service named. Messages go to stderr
+// only: stdout carries the MCP messages and nothing else.
+class McpBackend final : public floserver::core::mcp::Backend {
+public:
+    std::optional<floserver::core::protocol::Reply> call(const std::string& method, const nlohmann::json& params,
+                                                         std::string& error) override {
+        if (!floserver::core::mcp::read_only_method(method)) {
+            error = method + " isn't a read-only request";
+            return std::nullopt;
+        }
+        // Once more on a fresh connection when it broke (the service restarted, say).
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            if (!client_) {
+                client_ = connect_or_start(std::chrono::seconds(60));
+                if (!client_) {
+                    error = "see FloServer's window, or run: flo service start";
+                    return std::nullopt;
+                }
+            }
+            if (auto reply = client_->call(method, params)) {
+                return reply;
+            }
+            client_.reset();
+        }
+        error = "it stopped answering";
+        return std::nullopt;
+    }
+
+    std::optional<std::string> project_file(const fs::path& folder) override {
+        const fs::path file = folder / "floserver.json";
+        std::error_code ec;
+        const auto size = fs::file_size(file, ec);
+        if (ec || size > std::uintmax_t{256} * 1024 || !fs::is_regular_file(file, ec)) {
+            return std::nullopt;
+        }
+        std::ifstream in(file, std::ios::binary);
+        std::ostringstream text;
+        text << in.rdbuf();
+        if (!in && !in.eof()) {
+            return std::nullopt;
+        }
+        return text.str();
+    }
+
+private:
+    std::optional<floserver::core::ServiceClient> client_;
+};
+
+// One line of input without its newline; nothing at the end of input. A
+// line longer than the limit is cut there and `too_long` is set (the rest of
+// it is read and dropped).
+std::optional<std::string> read_mcp_line(std::streambuf& in, bool& too_long) {
+    using traits = std::char_traits<char>;
+    std::string line;
+    too_long = false;
+    bool any = false;
+    for (;;) {
+        const traits::int_type c = in.sbumpc();
+        if (traits::eq_int_type(c, traits::eof())) {
+            return any ? std::optional<std::string>(std::move(line)) : std::nullopt;
+        }
+        any = true;
+        if (traits::to_char_type(c) == '\n') {
+            return line;
+        }
+        if (line.size() < floserver::core::mcp::kMaxLine) {
+            line.push_back(traits::to_char_type(c));
+        } else {
+            too_long = true;
+        }
+    }
+}
+
+int mcp(const std::vector<std::string>& args) {
+    if (args.size() > 1) {
+        std::cerr << "Usage: flo mcp   (an AI coding tool starts it: claude mcp add floserver -- flo mcp)\n";
+        return 2;
+    }
+#ifdef _WIN32
+    // The bytes as they are: no CRLF for LF, no Ctrl+Z as the end.
+    (void)_setmode(_fileno(stdin), _O_BINARY);
+    (void)_setmode(_fileno(stdout), _O_BINARY);
+#else
+    (void)std::signal(SIGPIPE, SIG_IGN);  // the tool went away: writing fails, the loop ends
+#endif
+    McpBackend backend;
+    floserver::core::mcp::Server server(backend);
+    std::streambuf* in = std::cin.rdbuf();
+    bool too_long = false;
+    while (auto line = read_mcp_line(*in, too_long)) {
+        std::optional<std::string> reply;
+        if (too_long) {
+            reply = R"({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Parse error: the message is too long"}})";
+        } else {
+            reply = server.handle_line(*line);
+        }
+        if (reply) {
+            std::cout << *reply << '\n' << std::flush;
+            if (!std::cout) {
+                return 0;  // nobody reads any more
+            }
+        }
+    }
+    return 0;
+}
+
 int run_command(const std::vector<std::string>& args, const std::vector<fs::path>& paths) {
     if (args.empty() || args[0] == "help" || args[0] == "--help" || args[0] == "-h") {
         print_help(std::cout);
@@ -2016,6 +2129,9 @@ int run_command(const std::vector<std::string>& args, const std::vector<fs::path
     }
     if (args[0] == "check") {
         return check(paths.size() > 1 ? paths[1] : fs::current_path());
+    }
+    if (args[0] == "mcp") {
+        return mcp(args);
     }
     std::cerr << "Unknown command: " << args[0] << "\n\n";
     print_help(std::cerr);

@@ -124,25 +124,82 @@ std::vector<RequestLogEntry> parse_request_log(std::string_view text, std::size_
     return {std::make_move_iterator(kept.begin()), std::make_move_iterator(kept.end())};
 }
 
-std::vector<RequestLogEntry> read_request_log(const fs::path& file, std::size_t max_entries) {
+namespace {
+
+// The end of `file`: its last kTailBytes, and one byte before them (when
+// that's a newline, the tail starts on a whole line). `mid_line`: the read
+// didn't start at the file's start. Nothing when there's no file or it's empty.
+std::optional<std::string> read_tail(const fs::path& file, bool& mid_line) {
     std::ifstream in(file, std::ios::binary);
     if (!in) {
-        return {};
+        return std::nullopt;
     }
     in.seekg(0, std::ios::end);
     const std::streamoff size = in.tellg();
     if (size <= 0) {
-        return {};
+        return std::nullopt;
     }
-    // One byte before the tail too: when it's a newline, the tail starts on a whole line.
     const auto start = static_cast<std::streamoff>(std::max<std::streamoff>(0, size - static_cast<std::streamoff>(kTailBytes) - 1));
     in.seekg(start);
     std::string text(static_cast<std::size_t>(size - start), '\0');
     in.read(text.data(), static_cast<std::streamsize>(text.size()));
     text.resize(static_cast<std::size_t>(std::max<std::streamsize>(0, in.gcount())));
+    mid_line = start > 0;
+    return text;
+}
+
+}  // namespace
+
+std::vector<RequestLogEntry> read_request_log(const fs::path& file, std::size_t max_entries) {
+    bool mid_line = false;
+    const auto text = read_tail(file, mid_line);
     // From the file's start, every line is whole; otherwise the first,
     // partial or just the newline before the tail, is dropped.
-    return parse_request_log(text, max_entries, start > 0);
+    return text ? parse_request_log(*text, max_entries, mid_line) : std::vector<RequestLogEntry>{};
+}
+
+std::vector<std::string> parse_text_log(std::string_view text, std::size_t max_lines, bool starts_mid_line) {
+    max_lines = std::min(max_lines, kRequestLogMaxEntries);
+    if (starts_mid_line) {
+        const std::size_t nl = text.find('\n');
+        text = nl == std::string_view::npos ? std::string_view() : text.substr(nl + 1);
+    }
+    std::deque<std::string> kept;
+    while (!text.empty() && max_lines > 0) {
+        const std::size_t nl = text.find('\n');
+        std::string_view line = text.substr(0, nl);
+        text = nl == std::string_view::npos ? std::string_view() : text.substr(nl + 1);
+        if (line.size() > kTextLogLineLimit) {
+            line = line.substr(0, kTextLogLineLimit);
+        }
+        std::string shown;
+        shown.reserve(line.size());
+        for (const char c : line) {
+            const auto u = static_cast<unsigned char>(c);
+            if (c == '\t') {
+                shown += ' ';
+            } else if (u >= 0x20 && u != 0x7F) {
+                shown += c;  // control characters (a terminal's escapes) never pass
+            }
+        }
+        while (!shown.empty() && shown.back() == ' ') {
+            shown.pop_back();
+        }
+        if (shown.empty()) {
+            continue;
+        }
+        kept.push_back(std::move(shown));
+        if (kept.size() > max_lines) {
+            kept.pop_front();
+        }
+    }
+    return {std::make_move_iterator(kept.begin()), std::make_move_iterator(kept.end())};
+}
+
+std::vector<std::string> read_text_log(const fs::path& file, std::size_t max_lines) {
+    bool mid_line = false;
+    const auto text = read_tail(file, mid_line);
+    return text ? parse_text_log(*text, max_lines, mid_line) : std::vector<std::string>{};
 }
 
 }  // namespace floserver::core
