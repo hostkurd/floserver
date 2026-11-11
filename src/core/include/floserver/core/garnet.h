@@ -152,7 +152,7 @@ inline constexpr std::size_t kMaxSniffBytes = 8192;
 // client sends) is Redis. Otherwise it's an inline command, judged on its
 // whole first line: one that starts with an HTTP method and a space (GET,
 // POST, PUT, HEAD, OPTIONS, DELETE, PATCH, CONNECT, TRACE, PRI; any case) or
-// holds " HTTP/", or any later line in what came that starts with "Host:",
+// holds " HTTP/", or any line in what came that starts with "Host:",
 // "Origin:" or "User-Agent:", is HTTP. kMaxSniffBytes without a line end is HTTP too.
 [[nodiscard]] FirstBytes classify_first_bytes(std::string_view data);
 

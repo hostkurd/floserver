@@ -289,9 +289,9 @@ FirstBytes classify_first_bytes(std::string_view data) {
             return FirstBytes::Http;
         }
     }
-    // Later lines that came in the same bytes: a request line hidden behind
-    // something else still has its headers.
-    for (std::size_t start = end + 1; start < data.size();) {
+    // Header lines in what came, the first one too: a request line hidden
+    // behind something else still has its headers.
+    for (std::size_t start = 0; start < data.size();) {
         std::size_t stop = data.find('\n', start);
         if (stop == std::string_view::npos) {
             stop = data.size();
