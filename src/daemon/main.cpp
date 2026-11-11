@@ -1184,8 +1184,8 @@ struct Service {
     }
 
     // Redis (D30), protocol.h:
-    //   redis.status -> RedisService::status() with "projects" (those with Redis on)
-    //     and "phpredis" (the PHP series it's installed for);
+    //   redis.status {projects?} -> RedisService::status() with "phpredis" (the PHP
+    //     series it's installed for) and, when asked, "projects" (those with Redis on);
     //   redis.set {keep_running?, memory_mb?} -> {"ok": true};
     //   redis.flush -> {"ok": true}; redis.password -> {"password"} (Settings' Copy).
     [[nodiscard]] std::string redis_request(const protocol::Request& r) const {
@@ -1197,16 +1197,20 @@ struct Service {
         core::ServiceRefusal refusal;
         if (r.method == "redis.status") {
             json out = redis->status();
-            json names = json::array();
-            if (const auto config = projects->config(refusal)) {
-                for (const core::Project& p : config->projects) {
-                    const auto parsed = core::read_project_config_file(p);
-                    if (parsed.config && parsed.config->redis) {
-                        names.push_back(p.name);
+            // Only when asked: it reads every project's floserver.json (Settings
+            // asks once; the window's 2 s poll doesn't).
+            if (bool_param(r.params, "projects").value_or(false)) {
+                json names = json::array();
+                if (const auto config = projects->config(refusal)) {
+                    for (const core::Project& p : config->projects) {
+                        const auto parsed = core::read_project_config_file(p);
+                        if (parsed.config && parsed.config->redis) {
+                            names.push_back(p.name);
+                        }
                     }
                 }
+                out["projects"] = std::move(names);
             }
-            out["projects"] = std::move(names);
             json series = json::array();
             for (const core::InstalledRuntime& i : core::list_installed(core::runtimes_dir(*data))) {
                 if (i.name == core::kPhpRedisRuntime) {

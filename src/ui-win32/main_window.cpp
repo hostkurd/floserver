@@ -303,6 +303,7 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
                 const bool hand = hit.part == Part::Switch || hit.part == Part::Address || hit.part == Part::Download ||
                                   hit.part == Part::FrChange ||
                                   hit.part == Part::PanelAddress || hit.part == Part::PanelKeep ||
+                                  hit.part == Part::PanelRedis ||
                                   hit.part == Part::SharedSwitch || hit.part == Part::SharedEnd ||
                                   hit.part == Part::MailLink ||
                                   (hit.part == Part::Banner && status_line().clickable);
@@ -1540,6 +1541,7 @@ void MainWindow::on_click(const Hit& clicked) {
         case Part::PanelCopyEnv:
         case Part::PanelPhpMyAdmin:
         case Part::PanelKeep:
+        case Part::PanelRedis:
         case Part::PanelRemove:
             on_panel_click(hit);
             break;

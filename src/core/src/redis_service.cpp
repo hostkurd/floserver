@@ -79,20 +79,21 @@ std::optional<RespReply> read_reply(std::uintptr_t socket, std::string& buffer, 
 // AUTH then `args` on a fresh connection to `socket_path`.
 std::optional<RespReply> authed_command(const fs::path& socket_path, const std::string& password,
                                         const std::vector<std::string_view>& args, std::chrono::milliseconds limit) {
-    const auto socket = connect_local(socket_path);
-    if (!socket) {
+    const auto connected = connect_local(socket_path);
+    if (!connected) {
         return std::nullopt;
     }
-    const AtExit closed([&socket] { close_socket(*socket); });
+    const std::uintptr_t socket = *connected;
+    const AtExit closed([socket] { close_socket(socket); });
     std::string buffer;
-    if (!send_all(*socket, resp_command({"AUTH", password}) + resp_command(args))) {
+    if (!send_all(socket, resp_command({"AUTH", password}) + resp_command(args))) {
         return std::nullopt;
     }
-    const auto auth = read_reply(*socket, buffer, kCommandLimit);
+    auto auth = read_reply(socket, buffer, kCommandLimit);
     if (!auth || auth->type != '+') {
-        return auth ? auth : std::nullopt;
+        return auth;
     }
-    return read_reply(*socket, buffer, limit);
+    return read_reply(socket, buffer, limit);
 }
 
 }  // namespace
@@ -613,17 +614,22 @@ void RedisService::serve(std::uintptr_t client) {
             return;
         }
         std::string error;
-        std::optional<std::uintptr_t> upstream;
+        // A plain value and a flag, not std::optional: GCC -O3 warns (maybe-uninitialized) about the optional.
+        std::uintptr_t upstream = 0;
+        bool connected = false;
         if (ensure_running(error)) {
-            upstream = connect_local(paths_.socket);
+            if (const auto s = connect_local(paths_.socket)) {
+                upstream = *s;
+                connected = true;
+            }
         }
-        if (upstream && !send_all(*upstream, first)) {
-            close_socket(*upstream);
-            upstream.reset();
+        if (connected && !send_all(upstream, first)) {
+            close_socket(upstream);
+            connected = false;
         }
-        relayed = upstream.has_value();
-        if (upstream) {
-            relay_sockets(client, *upstream, [this] { touch(); });
+        relayed = connected;
+        if (connected) {
+            relay_sockets(client, upstream, [this] { touch(); });
         } else {
             // A Redis client reads this as an error; no paths or log text in it.
             answer_and_close(client, "-ERR Redis (Garnet) isn't available just now; FloServer's window says why\r\n");

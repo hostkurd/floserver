@@ -77,6 +77,7 @@ add_executable(floserver_ui WIN32
     settings_database.cpp
     settings_apache.cpp
     settings_mail.cpp
+    settings_redis.cpp
     settings_general.cpp
     window_prefs.cpp
     code_editors.cpp

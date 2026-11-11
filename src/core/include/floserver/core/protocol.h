@@ -31,11 +31,11 @@
 //   mail.clear       {} -> {"ok": true}        every email deleted (wakes Mailpit)
 //   mail.env         {"name"} -> {"env": [[key, value]...], "env_file"}   the project's mail
 //                    lines alone (databases.login's "env" has them too), for flo env
-//   redis.status     {} -> {"installed", "version"?, "dotnet_version"?, "state": "not_installed"|
+//   redis.status     {"projects"?: bool} -> {"installed", "version"?, "dotnet_version"?, "state": "not_installed"|
 //                    "asleep"|"starting"|"running"|"failed", "error"?, "host": "127.0.0.1", "port",
 //                    "keys" (DBSIZE when last asked), "refused" (connections closed as HTTP since
 //                    the service started), "settings": {"keep_running", "memory_mb"},
-//                    "projects": [names with "redis": true], "phpredis": ["8.4", ...]} (D30)
+//                    "projects"? (asked for: names with "redis": true), "phpredis": ["8.4", ...]} (D30)
 //   redis.set        {"keep_running"?, "memory_mb"?: 16..65536} -> {"ok": true}
 //   redis.flush      {} -> {"ok": true}   every key deleted, then saved (wakes Garnet)
 //   redis.password   {} -> {"password"}   for Settings → Redis's Copy (never shown)

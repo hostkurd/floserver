@@ -147,12 +147,15 @@ TEST_CASE("the real service starts, answers, refuses a second copy and stops") {
     REQUIRE(redis_on->ok);
     CHECK(redis_on->result["wants"]["redis"] == true);
     CHECK(test_util::read_file(shop / "floserver.json").find("\"redis\": true") != std::string::npos);
-    const auto redis_status = client->call("redis.status");
+    const auto redis_status = client->call("redis.status", {{"projects", true}});
     REQUIRE(redis_status.has_value());
     REQUIRE(redis_status->ok);
     CHECK(redis_status->result["state"] == "not_installed");
     CHECK(redis_status->result["projects"] == nlohmann::json::array({"my-shop"}));
     CHECK(redis_status->result["settings"]["memory_mb"] == 256);
+    const auto redis_poll = client->call("redis.status");  // the window's poll: no floserver.json read
+    REQUIRE(redis_poll.has_value());
+    CHECK_FALSE(redis_poll->result.contains("projects"));
     const auto redis_password = client->call("redis.password");
     REQUIRE(redis_password.has_value());
     CHECK(redis_password->error_code == "not_installed");

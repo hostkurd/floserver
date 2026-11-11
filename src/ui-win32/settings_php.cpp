@@ -26,6 +26,7 @@ constexpr int kEditBase = 1000;    // edits_[i] has id kEditBase + i
 constexpr int kDbEditBase = 3000;  // db_edits_[i] has id kDbEditBase + i (settings_database.cpp)
 constexpr int kApacheEditBase = 4000;  // apache_edits_[0] (settings_apache.cpp)
 constexpr int kMailEditBase = 5000;    // mail_edits_[0], the emails kept (settings_mail.cpp)
+constexpr int kRedisEditBase = 5100;   // redis_edits_[0], the memory limit (settings_redis.cpp)
 constexpr UINT kFirstChoice = 100;
 constexpr int kGap = 12;
 constexpr int kCardPad = 16;
@@ -106,7 +107,8 @@ void SettingsWindow::try_close() {
     if (hwnd_ == nullptr || asking_ || (section_ == Section::Php && !settle_php_changes(AfterSave::Close)) ||
         (section_ == Section::Database && !settle_db_changes(AfterSave::Close)) ||
         (section_ == Section::Apache && !settle_apache_changes(AfterSave::Close)) ||
-        (section_ == Section::Mail && !settle_mail_changes(AfterSave::Close))) {
+        (section_ == Section::Mail && !settle_mail_changes(AfterSave::Close)) ||
+        (section_ == Section::Redis && !settle_redis_changes(AfterSave::Close))) {
         return;
     }
     DestroyWindow(hwnd_);
@@ -173,6 +175,15 @@ void SettingsWindow::open_section(Section section, const std::string& series) {
         }
         mail_edits_.clear();
     }
+    if (section_ == Section::Redis) {
+        if (!settle_redis_changes(AfterSave::Runtimes)) {
+            return;
+        }
+        if (GetFocus() != hwnd_) {
+            SetFocus(hwnd_);
+        }
+        redis_edits_.clear();
+    }
     if (section_ == Section::Ports) {
         if (GetFocus() != hwnd_) {
             SetFocus(hwnd_);
@@ -218,6 +229,10 @@ void SettingsWindow::open_section(Section section, const std::string& series) {
     if (section == Section::Mail) {
         make_mail_edits();
         load_mail();  // each time the section opens: one mail.status, nothing else
+    }
+    if (section == Section::Redis) {
+        make_redis_edits();
+        load_redis();  // each time the section opens: one redis.status, nothing else
     }
     if (section == Section::Folders) {
         load_folders();  // each time the section opens: one folders.get, nothing else
@@ -430,6 +445,9 @@ SettingsWindow::Hit SettingsWindow::hit_of_edit(int id) const {
     if (id == kMailEditBase) {
         return mail_edits_.empty() ? Hit{} : Hit{Part::MailMax, -1, -1};
     }
+    if (id == kRedisEditBase) {
+        return redis_edits_.empty() ? Hit{} : Hit{Part::RedisMemory, -1, -1};
+    }
     if (id == kApacheEditBase) {
         return apache_edits_.empty() ? Hit{} : Hit{Part::ApacheFind, -1, -1};
     }
@@ -491,6 +509,9 @@ FieldEdit* SettingsWindow::edit_of(const Hit& hit) const {
     if (hit.part == Part::MailMax && !mail_edits_.empty()) {
         return mail_edits_.front().get();
     }
+    if (hit.part == Part::RedisMemory && !redis_edits_.empty()) {
+        return redis_edits_.front().get();
+    }
     if (hit.part == Part::PhpField && hit.row >= 0 && std::cmp_less(hit.row, field_edit_.size())) {
         const int index = field_edit_[static_cast<std::size_t>(hit.row)];
         return index >= 0 ? edits_[static_cast<std::size_t>(index)].get() : nullptr;
@@ -512,6 +533,11 @@ void SettingsWindow::on_edit_change(int id) {
     if (hit.part == Part::MailMax) {
         if (mail_ && !mail_saving_) {
             mail_set_max_text(*mail_, mail_changes_, edit->text());
+            relayout();
+        }
+    } else if (hit.part == Part::RedisMemory) {
+        if (redis_ && !redis_saving_) {
+            redis_set_memory_text(*redis_, redis_changes_, edit->text());
             relayout();
         }
     } else if (hit.part == Part::PortsHttpEdit || hit.part == Part::PortsHttpsEdit) {
