@@ -59,6 +59,7 @@ struct CdnPath {
     std::string runtime;
     std::string version;
     std::string file;
+    std::string variant;    // the entry's variant ("nts"; php-redis's "php8-4", from the file name)
     bool listable = false;  // the list can carry it
     std::string problem;    // why not, when it can't ("<path>: ...")
 };

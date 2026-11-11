@@ -1,6 +1,7 @@
 #include "build.h"
 
 #include "floserver/core/encoding.h"
+#include "floserver/core/garnet.h"
 #include "floserver/core/manifest.h"
 #include "floserver/core/version.h"
 
@@ -38,7 +39,7 @@ struct CatalogEntry {
 
 // The runtimes FloServer 1.0 knows (Windows x64). Add a row here before
 // publishing a new kind of runtime.
-constexpr std::array<CatalogEntry, 10> kCatalog = {{
+constexpr std::array<CatalogEntry, 13> kCatalog = {{
     {"php", R"(php-{v}(-\d+)?-Win32-vs1[67]-x64\.zip)", "PHP-3.01", "windows-x64", "nts", R"(php-{v}(-\d+)?-nts-Win32-vs1[67]-x64\.zip)",
      "https://downloads.php.net/~windows/releases/archives/{file}"},
     {"mariadb", "", "GPL-2.0", "windows-x64", "", R"(mariadb-{v}-winx64\.zip)",
@@ -61,6 +62,17 @@ constexpr std::array<CatalogEntry, 10> kCatalog = {{
     // Mailpit (an optional tool, D27): one Go program; its other builds aren't listed.
     {"mailpit", R"(mailpit-(windows-arm64\.zip|(linux|darwin)-[a-z0-9]+\.tar\.gz))", "MIT", "windows-x64", "",
      R"(mailpit-windows-amd64\.zip)", "https://github.com/axllent/mailpit/releases/download/v{v}/{file}"},
+    // Redis through Garnet (D30): the framework-dependent Windows x64 build;
+    // the .NET runtime it needs is its own (hidden) kind.
+    {"garnet", R"((linux|osx|win-arm64|win-x86)-[a-z0-9-]+\.(zip|tar\.xz|tar\.gz))", "MIT", "windows-x64", "",
+     R"(win-x64-based-readytorun\.zip)", "https://github.com/microsoft/garnet/releases/download/v{v}/{file}"},
+    {"dotnet", R"(dotnet-runtime-{v}-(win-(arm64|x86)|linux-[a-z0-9-]+|osx-[a-z0-9]+)\.(zip|tar\.gz))", "MIT",
+     "windows-x64", "", R"(dotnet-runtime-{v}-win-x64\.zip)",
+     "https://builds.dotnet.microsoft.com/dotnet/Runtime/{v}/{file}"},
+    // PECL's phpredis for one PHP series (NTS x64); the variant ("php8-4")
+    // comes from the file name, so each series is its own entry.
+    {"php-redis", R"(php_redis-{v}-\d+\.\d+-(ts|nts)-(vs1[67]|vc15)-(x86|x64)\.zip)", "PHP-3.01", "windows-x64", "",
+     R"(php_redis-{v}-8\.\d+-nts-vs1[67]-x64\.zip)", "https://downloads.php.net/~windows/pecl/releases/redis/{v}/{file}"},
 }};
 
 std::string join(std::initializer_list<std::string_view> parts) {
@@ -231,6 +243,17 @@ Classified classify(const std::string& path) {
         }
         return c;
     }
+    if (entry->name == kPhpRedisRuntime) {
+        const auto series = php_redis_series_of_file(version, file);
+        if (!series) {
+            c.message = join({path, ": PHP's Windows builds of that series use another Visual Studio (",
+                              "vs17 for 8.4 and later, vs16 for 8.0 to 8.3)"});
+            return c;
+        }
+        c.parts.variant = php_redis_variant(*series);
+    } else {
+        c.parts.variant = std::string(entry->variant);
+    }
     c.entry = &*entry;
     return c;
 }
@@ -393,7 +416,8 @@ BuildResult build_manifest(std::string_view report_json, const BuildOptions& opt
             fail(path + ": the report has no valid sha256");
             continue;
         }
-        if (!seen_runtimes.insert(join({name, "/", version, "/", entry->platform})).second) {
+        const std::string& variant = kind.parts.variant;
+        if (!seen_runtimes.insert(join({name, "/", version, "/", entry->platform, "/", variant})).second) {
             fail(path + ": a second file for the same runtime and version");
             continue;
         }
@@ -409,8 +433,8 @@ BuildResult build_manifest(std::string_view report_json, const BuildOptions& opt
         r["name"] = name;
         r["version"] = version;
         r["platform"] = entry->platform;
-        if (!entry->variant.empty()) {
-            r["variant"] = entry->variant;
+        if (!variant.empty()) {
+            r["variant"] = variant;
         }
         r["archive"] = archive_of(file);
         r["size"] = f["size"].get<std::uint64_t>();

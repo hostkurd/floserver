@@ -1,5 +1,7 @@
 #include "publish.h"
 
+#include "floserver/core/garnet.h"
+
 #include "build.h"
 #include "templates_json.h"
 #include "floserver/core/encoding.h"
@@ -202,8 +204,8 @@ LiveResult fetch_live_list(HttpTransport& http, std::string_view cdn,
     return result;
 }
 
-std::string runtime_title(std::string_view runtime, std::string_view version) {
-    static constexpr std::array<std::pair<std::string_view, std::string_view>, 11> kNames = {{
+std::string runtime_title(std::string_view runtime, std::string_view version, std::string_view variant) {
+    static constexpr std::array<std::pair<std::string_view, std::string_view>, 14> kNames = {{
         {"php", "PHP"},
         {"mariadb", "MariaDB"},
         {"node", "Node.js"},
@@ -214,6 +216,9 @@ std::string runtime_title(std::string_view runtime, std::string_view version) {
         {"python", "Python"},
         {"phpmyadmin", "phpMyAdmin"},
         {"mailpit", "Mailpit"},
+        {"garnet", "Garnet"},
+        {"dotnet", ".NET runtime"},
+        {"php-redis", "phpredis"},
         {kAppFolder, "FloServer"},
     }};
     std::string name(runtime);
@@ -222,7 +227,13 @@ std::string runtime_title(std::string_view runtime, std::string_view version) {
             name = title;
         }
     }
-    return name + " " + std::string(version);
+    std::string title = name + " " + std::string(version);
+    if (runtime == core::kPhpRedisRuntime) {
+        if (const auto series = core::php_redis_series_of_variant(variant)) {
+            title += " for PHP " + *series;
+        }
+    }
+    return title;
 }
 
 std::vector<PublishFile> files_from_live(const LiveList& live, std::string_view cdn,
@@ -238,7 +249,7 @@ std::vector<PublishFile> files_from_live(const LiveList& live, std::string_view 
         }
         PublishFile f;
         f.path = std::string(url.substr(prefix.size()));
-        f.title = runtime_title(r.name, r.version);
+        f.title = runtime_title(r.name, r.version, r.variant);
         f.published = true;
         f.size = r.size;
         f.sha256 = to_hex(r.sha256);
@@ -326,14 +337,14 @@ AddResult new_file(std::string_view text, std::string_view cdn,
                            "). The list names one installer: remove it first to replace it.";
             return result;
         }
-        if (f.title == runtime_title(p.runtime, p.version)) {
+        if (f.title == runtime_title(p.runtime, p.version, p.variant)) {
             result.error = f.title + " is already in the list (" + f.path + "). Remove it first to replace it.";
             return result;
         }
     }
     PublishFile f;
     f.path = std::string(text);
-    f.title = runtime_title(p.runtime, p.version);
+    f.title = runtime_title(p.runtime, p.version, p.variant);
     f.notes_url = std::move(notes);
     result.file = std::move(f);
     return result;
@@ -384,6 +395,19 @@ OfficialSource official_source(std::string_view path) {
         // its release workflow), so the GitHub download itself is compared.
         s.kind = Kind::Original;
         s.urls = {"https://github.com/axllent/mailpit/releases/download/v" + v + "/" + p.file};
+    } else if (p.runtime == "garnet") {
+        // Garnet's releases publish no checksum file: the GitHub download is compared (D30).
+        s.kind = Kind::Original;
+        s.urls = {"https://github.com/microsoft/garnet/releases/download/v" + v + "/" + p.file};
+    } else if (p.runtime == "dotnet") {
+        // Microsoft's own download, compared byte for byte (releases.json's
+        // hash is SHA-512, which this check doesn't compute).
+        s.kind = Kind::Original;
+        s.urls = {"https://builds.dotnet.microsoft.com/dotnet/Runtime/" + v + "/" + p.file};
+    } else if (p.runtime == "php-redis") {
+        // PECL's Windows builds publish no checksum list either.
+        s.kind = Kind::Original;
+        s.urls = {core::php_redis_upstream(v, p.file)};
     } else if (p.runtime == "apache" || p.runtime == kAppFolder) {
         // Apache Lounge publishes no checksum list; FloServer's installer is
         // HostKurd's own, compared with the CI artifact.

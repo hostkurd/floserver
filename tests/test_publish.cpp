@@ -614,3 +614,32 @@ TEST_CASE("publisher: FloServer's installer is added with its notes, compared by
     CHECK_FALSE(second.file.has_value());
     CHECK(second.error.find("remove it first") != std::string::npos);
 }
+
+TEST_CASE("publisher: Garnet, .NET and phpredis are compared with their original downloads (D30)") {
+    const OfficialSource g = official_source("garnet/2.2.4/win-x64-based-readytorun.zip");
+    CHECK(g.kind == OfficialSource::Kind::Original);
+    CHECK(g.urls == std::vector<std::string>{
+                        "https://github.com/microsoft/garnet/releases/download/v2.2.4/win-x64-based-readytorun.zip"});
+    const OfficialSource d = official_source("dotnet/10.0.3/dotnet-runtime-10.0.3-win-x64.zip");
+    CHECK(d.kind == OfficialSource::Kind::Original);
+    CHECK(d.urls == std::vector<std::string>{
+                        "https://builds.dotnet.microsoft.com/dotnet/Runtime/10.0.3/dotnet-runtime-10.0.3-win-x64.zip"});
+    const OfficialSource r = official_source("php-redis/6.3.0/php_redis-6.3.0-8.4-nts-vs17-x64.zip");
+    CHECK(r.kind == OfficialSource::Kind::Original);
+    CHECK(r.urls == std::vector<std::string>{
+                        "https://downloads.php.net/~windows/pecl/releases/redis/6.3.0/php_redis-6.3.0-8.4-nts-vs17-x64.zip"});
+
+    CHECK(runtime_title("garnet", "2.2.4") == "Garnet 2.2.4");
+    CHECK(runtime_title("dotnet", "10.0.3") == ".NET runtime 10.0.3");
+    CHECK(runtime_title("php-redis", "6.3.0", "php8-4") == "phpredis 6.3.0 for PHP 8.4");
+    // One file per PHP series: the second series isn't "already in the list".
+    std::vector<PublishFile> files;
+    auto first = new_file("php-redis/6.3.0/php_redis-6.3.0-8.4-nts-vs17-x64.zip", kTestCdn, files);
+    REQUIRE(first.file);
+    files.push_back(*first.file);
+    const auto second = new_file("php-redis/6.3.0/php_redis-6.3.0-8.3-nts-vs16-x64.zip", kTestCdn, files);
+    CHECK(second.file);
+    CHECK(second.error.empty());
+    const auto again = new_file("php-redis/6.3.0/php_redis-6.3.0-8.4-nts-vs17-x64.zip", kTestCdn, files);
+    CHECK_FALSE(again.file);
+}
