@@ -427,14 +427,24 @@ TEST_CASE("flo use bun and flo use deno, and the window's JavaScript key, replac
     out = set_project_config_value(R"({"deno": "2.9", "root": "public"})", ConfigKey::Javascript, "javascript",
                                    std::string("bun-1.3"), error);
     REQUIRE_MESSAGE(out, error);
-    CHECK(*out == "{\n  \"root\": \"public\",\n  \"bun\": \"1.3\"\n}\n");
+    // The new runtime takes the first one's place in the file.
+    CHECK(*out == "{\n  \"bun\": \"1.3\",\n  \"root\": \"public\"\n}\n");
     out = set_project_config_value(*out, ConfigKey::Javascript, "javascript", std::string("node-24"), error);
     REQUIRE(out);
+    CHECK(*out == "{\n  \"node\": \"24\",\n  \"root\": \"public\"\n}\n");
     CHECK(out->find("\"node\": \"24\"") != std::string::npos);
     CHECK(out->find("bun") == std::string::npos);
     out = set_project_config_value(*out, ConfigKey::Javascript, "javascript", std::nullopt, error);
     REQUIRE(out);
     CHECK(*out == "{\n  \"root\": \"public\"\n}\n");
+    // Nothing there before: added at the end; `flo use bun` over node keeps its place too.
+    out = set_project_config_value(R"({"php": "8.4", "node": "22", "web": "nginx"})", ConfigKey::Bun, "bun",
+                                   std::string("1.3"), error);
+    REQUIRE(out);
+    CHECK(*out == "{\n  \"php\": \"8.4\",\n  \"bun\": \"1.3\",\n  \"web\": \"nginx\"\n}\n");
+    out = set_project_config_value(R"({"php": "8.4"})", ConfigKey::Deno, "deno", std::string("2.9"), error);
+    REQUIRE(out);
+    CHECK(*out == "{\n  \"php\": \"8.4\",\n  \"deno\": \"2.9\"\n}\n");
     for (const char* bad : {"ruby-3.4", "bun", "bun-", "bun-latest", "php-8.4", "javascript-1"}) {
         CHECK_FALSE(set_project_config_value("{}", ConfigKey::Javascript, "javascript", std::string(bad), error));
         CHECK(error.find("bun-1.3") != std::string::npos);

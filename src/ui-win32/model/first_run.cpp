@@ -70,9 +70,6 @@ std::string shown_series(std::string_view name, std::string_view series, std::st
     if (name == "mailpit") {
         return std::string(version);  // "Mailpit 1.27.3": it has no series people name it by
     }
-    if (name == "bun" || name == "deno") {
-        return version_series(name, version);  // "Bun 1.3", "Deno 2.9": the newest of each
-    }
     return version_series(name, version);
 }
 

@@ -28,15 +28,17 @@
 // project's Node; for Bun, `bun run dev` when package.json has a "dev" script,
 // else `bun --hot` on the first of index.ts, index.js, server.ts, server.js,
 // src/index.ts, src/index.js; for Deno, `deno task dev` when deno.json or
-// deno.jsonc has a "dev" task, else `deno run --watch --allow-net
-// --allow-read --allow-env` on the first of main.ts, server.ts, main.js,
+// deno.jsonc has a "dev" task (or package.json a "dev" script), else `deno run --watch --allow-net
+// --allow-read=. --allow-env` on the first of main.ts, server.ts, main.js,
 // src/main.ts (only the permissions a web server needs, not -A). Bun and Deno
 // install no packages themselves: `bun install` and `deno install` are the
 // project's to run (the window says when node_modules is missing for Bun).
 // For Python, Django (manage.py runserver), FastAPI (uvicorn
 // with --reload, the app in main.py, app/main.py or app.py) or Flask (flask
 // run --debug, the app in app.py or wsgi.py). The port to listen on is in PORT
-// (HOST is 127.0.0.1); for dev servers known to ignore PORT (Vite, Next.js,
+// (HOST is 127.0.0.1; for Deno, which ignores both, DENO_SERVE_ADDRESS is
+// tcp:127.0.0.1:<port>; Bun has no such setting and, like Node by default,
+// listens on every address unless the app says otherwise); for dev servers known to ignore PORT (Vite, Next.js,
 // Nuxt, Astro, Angular) it's also passed as --port.
 
 #include "floserver/core/child_process.h"

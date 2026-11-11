@@ -88,6 +88,21 @@ TEST_CASE("dev servers that ignore PORT are given --port") {
     CHECK(port_arguments("node server.js", 7).empty());
     CHECK(port_arguments("nodemon index.js", 7).empty());
     CHECK(port_arguments("vite build && node dist/server.js", 7).empty());  // the last command counts
+    // Bun and Deno runners, options and package names (D31).
+    const Args vite = {"--port", "7", "--strictPort", "--host", "127.0.0.1"};
+    CHECK(port_arguments("bunx --bun vite", 7) == vite);
+    CHECK(port_arguments("bun --bun run vite", 7) == vite);
+    CHECK(port_arguments("bun x vite", 7) == vite);
+    CHECK(port_arguments("bun run vite --mode dev", 7) == vite);
+    CHECK(port_arguments("deno run -A npm:vite", 7) == vite);
+    CHECK(port_arguments("deno run --allow-net=0.0.0.0 --allow-read npm:vite@5.4.1 --open", 7) == vite);
+    CHECK(port_arguments("deno task vite", 7) == vite);
+    CHECK(port_arguments("npx -y vite@latest", 7) == vite);
+    CHECK(port_arguments("deno run -A jsr:@std/path", 7).empty());  // some other package
+    CHECK(port_arguments("deno run -A npm:@sveltejs/kit/bin/vite", 7) == vite);
+    CHECK(port_arguments("bun --hot index.ts", 7).empty());
+    CHECK(port_arguments("deno run --watch main.ts", 7).empty());
+    CHECK(port_arguments("bunx --bun", 7).empty());
 }
 
 TEST_CASE("an app starts from floserver.json's command or package.json's scripts") {
@@ -390,7 +405,37 @@ TEST_CASE("a Deno app starts from its dev task, else deno run --watch with only 
         CHECK(l->shown == "deno task dev");
         CHECK(env_of(*l, "PORT") == "9601");
         CHECK(env_of(*l, "DENO_NO_UPDATE_CHECK") == "1");
+        // Deno.serve ignores PORT: Deno's own address setting moves the first server it starts.
+        CHECK(env_of(*l, "DENO_SERVE_ADDRESS") == "tcp:127.0.0.1:9601");
+        CHECK(env_of(*l, "HOST") == "127.0.0.1");
         CHECK(env_of(*l, "PATH").starts_with(path_to_utf8(deno_program(app.runtime_dir)->parent_path())));
+        // ... and only Deno's: Bun and Node have no such setting.
+        AppSpec bun = app;
+        bun.kind = AppKind::Bun;
+        bun.runtime_dir = fake_single(tmp.path() / "bun", "bun");
+        test_util::write_file(bun.dir / "index.ts", "");
+        test_util::write_file(bun.dir / "package.json", "{}");
+        const auto b = app_launch(bun, 9601, error);
+        REQUIRE_MESSAGE(b, error);
+        CHECK(std::none_of(b->options.env.begin(), b->options.env.end(),
+                           [](const auto& kv) { return kv.first == "DENO_SERVE_ADDRESS"; }));
+    }
+    SUBCASE("a task with a dependency list and no command isn't one; package.json's dev script is used too") {
+        test_util::write_file(app.dir / "deno.json", R"({"tasks": {"dev": {"dependencies": ["build"]}}})");
+        test_util::write_file(app.dir / "main.ts", "");
+        auto l = app_launch(app, 9606, error);
+        REQUIRE_MESSAGE(l, error);
+        CHECK(l->shown.starts_with("deno run --watch"));
+        // `deno task` runs package.json's scripts as well.
+        test_util::write_file(app.dir / "package.json", R"({"scripts": {"dev": "vite"}})");
+        l = app_launch(app, 9606, error);
+        REQUIRE_MESSAGE(l, error);
+        CHECK(l->options.args == Args{"task", "dev", "--port", "9606", "--strictPort", "--host", "127.0.0.1"});
+        // A damaged package.json is not Deno's problem.
+        test_util::write_file(app.dir / "package.json", "{oops");
+        l = app_launch(app, 9606, error);
+        REQUIRE_MESSAGE(l, error);
+        CHECK(l->shown.starts_with("deno run --watch"));
     }
     SUBCASE("deno.jsonc, with comments and a trailing comma; a task may be an object") {
         test_util::write_file(app.dir / "deno.jsonc", R"({
@@ -410,8 +455,8 @@ TEST_CASE("a Deno app starts from its dev task, else deno run --watch with only 
             test_util::write_file(app.dir / entry, "");
             const auto l = app_launch(app, 9603, error);
             REQUIRE_MESSAGE(l, error);
-            CHECK(l->options.args == Args{"run", "--watch", "--allow-net", "--allow-read", "--allow-env", entry});
-            CHECK(l->shown == std::string("deno run --watch --allow-net --allow-read --allow-env ") + entry);
+            CHECK(l->options.args == Args{"run", "--watch", "--allow-net", "--allow-read=.", "--allow-env", entry});
+            CHECK(l->shown == std::string("deno run --watch --allow-net --allow-read=. --allow-env ") + entry);
             CHECK(std::find(l->options.args.begin(), l->options.args.end(), "-A") == l->options.args.end());
             CHECK(std::find(l->options.args.begin(), l->options.args.end(), "--allow-all") == l->options.args.end());
         }
@@ -961,10 +1006,13 @@ TEST_CASE("a Deno app runs deno run --watch on a real Deno, with no -A (D31)") {
     app.dir = tmp.path() / "fresh";
     app.runtime_dir = *install;
     app.port = free_port(19460);
+    // A plain Deno.serve(handler): no reading of PORT or HOST, as most apps are written; it
+    // must still answer on FloServer's port, on 127.0.0.1. A local import checks that --allow-read=.
+    // is enough for the app's own modules.
+    test_util::write_file(app.dir / "lib" / "message.ts", R"(export const message: string = "deno " + Deno.version.deno;)");
     test_util::write_file(app.dir / "main.ts", R"(
-        const message: string = "deno " + Deno.version.deno;
-        Deno.serve({port: Number(Deno.env.get("PORT")), hostname: Deno.env.get("HOST")}, (req) =>
-            new Response(message + " " + new URL(req.url).pathname + " " + req.headers.get("host")));
+        import { message } from "./lib/message.ts";
+        Deno.serve((req) => new Response(message + " " + new URL(req.url).pathname + " " + req.headers.get("host")));
     )");
     std::string error;
     auto runner = AppRunner::open(app, {tmp.path() / "work", nullptr, nullptr}, error);
@@ -975,7 +1023,7 @@ TEST_CASE("a Deno app runs deno run --watch on a real Deno, with no -A (D31)") {
     CHECK_MESSAGE(body.starts_with("200 deno 2."), body);
     CHECK_MESSAGE(body.ends_with(" /cart web.localhost"), body);
     CHECK(runner->describe()["command"] ==
-          "deno run --watch --allow-net --allow-read --allow-env main.ts");
+          "deno run --watch --allow-net --allow-read=. --allow-env main.ts");
     runner->tick(AppRunner::Clock::now() + 3600s, 1s);
     CHECK(eventually([&] { return runner->state() == AppState::Sleeping; }));
     CHECK(get(app.port, "/again", 90s).ends_with(" /again web.localhost"));

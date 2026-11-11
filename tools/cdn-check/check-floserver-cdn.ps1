@@ -91,10 +91,12 @@ function Find-OfficialHash([string]$sumsUrl, [string]$name) {
             if ($line -match "\b([0-9a-fA-F]{64})\b") { return $Matches[1].ToLower() }
         }
     }
-    # A file that names $name and holds one hash only: PowerShell's Get-FileHash print,
-    # as Deno's .sha256sum files are ("Hash : CBA8...", "Path : ...\deno-x86_64-pc-windows-msvc.zip")
-    $hashes = @([regex]::Matches($text, "\b[0-9a-fA-F]{64}\b") | ForEach-Object { $_.Value.ToLower() } | Sort-Object -Unique)
-    if ($hashes.Count -eq 1 -and $text -match "(^|[^\w.-])$escaped([^\w.-]|$)") { return $hashes[0] }
+    # Deno's .sha256sum files are PowerShell's Get-FileHash print ("Hash : CBA8...",
+    # "Path : ...\deno-x86_64-pc-windows-msvc.zip"): a Hash line, the file named, one distinct hash in all
+    if ($sumsUrl -like "*.sha256sum" -and $text -match "(?m)^\s*Hash\s*:" -and $text -match "(^|[^\w.-])$escaped([^\w.-]|$)") {
+        $hashes = @([regex]::Matches($text, "\b[0-9a-fA-F]{64}\b") | ForEach-Object { $_.Value.ToLower() } | Sort-Object -Unique)
+        if ($hashes.Count -eq 1) { return $hashes[0] }
+    }
     # composer.phar.sha256sum and similar hold just the hash, on one line
     $lines = @($text -split "`r?`n" | Where-Object { $_.Trim() -ne "" })
     if ($lines.Count -eq 1 -and $lines[0].Trim() -match "^([0-9a-fA-F]{64})(\s|$)") { return $Matches[1].ToLower() }

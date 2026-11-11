@@ -118,7 +118,9 @@ std::string lower(std::string s) {
 }
 
 // A 64-hex-digit word on the line.
-std::optional<std::string> hash_on_line(std::string_view line) {
+// Every 64-hex word on the line, in lower case.
+std::vector<std::string> hashes_on_line(std::string_view line) {
+    std::vector<std::string> found;
     std::size_t i = 0;
     while (i < line.size()) {
         if (!is_word_char(line[i])) {
@@ -131,11 +133,26 @@ std::optional<std::string> hash_on_line(std::string_view line) {
         }
         const std::string_view word = line.substr(i, j - i);
         if (word.size() == 64 && std::all_of(word.begin(), word.end(), is_hex)) {
-            return lower(std::string(word));
+            found.push_back(lower(std::string(word)));
         }
         i = j;
     }
-    return std::nullopt;
+    return found;
+}
+
+std::optional<std::string> hash_on_line(std::string_view line) {
+    auto found = hashes_on_line(line);
+    return found.empty() ? std::nullopt : std::optional<std::string>(std::move(found.front()));
+}
+
+// A line of PowerShell's Get-FileHash print: "Hash      : CBA8...".
+bool is_hash_label(std::string_view line) {
+    const std::size_t at = line.find_first_not_of(" \t");
+    if (at == std::string_view::npos || !line.substr(at).starts_with("Hash")) {
+        return false;
+    }
+    const std::size_t colon = line.find_first_not_of(" \t", at + 4);
+    return colon != std::string_view::npos && line[colon] == ':';
 }
 
 bool names_file(std::string_view line, std::string_view name) {
@@ -399,6 +416,7 @@ OfficialSource official_source(std::string_view path) {
     } else if (p.runtime == "deno") {
         // Each download has its own checksum file next to it.
         s.kind = Kind::Sums;
+        s.powershell_print = true;  // the file is a Get-FileHash print, not "<hash>  <file>"
         s.urls = {"https://github.com/denoland/deno/releases/download/v" + v + "/" + p.file + ".sha256sum"};
     } else if (p.runtime == "apache" || p.runtime == kAppFolder) {
         // Apache Lounge publishes no checksum list; FloServer's installer is
@@ -408,7 +426,7 @@ OfficialSource official_source(std::string_view path) {
     return s;
 }
 
-std::optional<std::string> find_official_hash(std::string_view sums, std::string_view name) {
+std::optional<std::string> find_official_hash(std::string_view sums, std::string_view name, bool powershell_print) {
     std::vector<std::string_view> lines;
     for (std::size_t start = 0; start <= sums.size();) {
         std::size_t end = sums.find('\n', start);
@@ -422,7 +440,10 @@ std::optional<std::string> find_official_hash(std::string_view sums, std::string
         lines.push_back(line);
         start = end + 1;
     }
-    if (!name.empty()) {
+    // A Deno list with a "Hash :" line is that print and nothing else: its
+    // lines aren't "<hash>  <file>" pairs.
+    const bool print = powershell_print && std::any_of(lines.begin(), lines.end(), is_hash_label);
+    if (!name.empty() && !print) {
         for (const std::string_view line : lines) {
             if (names_file(line, name)) {
                 if (auto h = hash_on_line(line)) {
@@ -431,22 +452,22 @@ std::optional<std::string> find_official_hash(std::string_view sums, std::string
             }
         }
     }
-    // A checksum file that names the file and holds one hash: PowerShell's
-    // Get-FileHash print, as Deno's .sha256sum files are ("Hash : CBA8...",
-    // "Path : ...\deno-x86_64-pc-windows-msvc.zip").
-    if (!name.empty()) {
-        std::optional<std::string> only;
-        bool several = false;
+    // PowerShell's Get-FileHash print, as Deno's .sha256sum files are
+    // ("Hash : CBA8...", "Path : ...\deno-x86_64-pc-windows-msvc.zip"): a
+    // "Hash" line, the file named, and one hash in the whole text.
+    if (print && !name.empty()) {
+        std::vector<std::string> distinct;
         bool named = false;
         for (const std::string_view line : lines) {
             named = named || names_file(line, name);
-            if (const auto h = hash_on_line(line)) {
-                several = several || (only && *only != *h);
-                only = only ? only : h;
+            for (std::string& h : hashes_on_line(line)) {
+                if (std::find(distinct.begin(), distinct.end(), h) == distinct.end()) {
+                    distinct.push_back(std::move(h));
+                }
             }
         }
-        if (named && only && !several) {
-            return only;
+        if (named && distinct.size() == 1) {
+            return distinct.front();
         }
     }
     // composer.phar.sha256sum and similar hold just the hash, on one line.
@@ -550,7 +571,7 @@ void check_file(CheckContext& ctx, PublishFile& file) {
                 cached = ctx.sums_cache.emplace(sums_url, std::move(text)).first;
             }
             if (const std::optional<std::string>& sums = cached->second; sums.has_value()) {
-                official = find_official_hash(sums.value(), source.name);
+                official = find_official_hash(sums.value(), source.name, source.powershell_print);
                 if (official) {
                     from = host_of(sums_url);
                     break;

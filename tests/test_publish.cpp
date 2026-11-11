@@ -532,15 +532,28 @@ TEST_CASE("publisher: Deno is checked against its own .sha256sum, as PowerShell 
           "https://github.com/denoland/deno/releases/download/v2.9.8/deno-x86_64-pc-windows-msvc.zip");
 }
 
-TEST_CASE("publisher: a checksum file naming the file with one hash is read (PowerShell's Get-FileHash)") {
+TEST_CASE("publisher: Deno's Get-FileHash print is read only for Deno, with a Hash line and one hash") {
     const std::string h = std::string(63, 'a') + "b";
     std::string upper = h;
     upper[0] = 'A';
     const std::string text = "Algorithm : SHA256\r\nHash      : " + upper + "\r\nPath      : C:\\x\\file.zip\r\n";
-    CHECK(find_official_hash(text, "file.zip") == std::string("a") + h.substr(1));
-    CHECK_FALSE(find_official_hash(text, "other.zip"));  // it names another file
+    CHECK(find_official_hash(text, "file.zip", true) == h);
+    CHECK_FALSE(find_official_hash(text, "other.zip", true));  // it names another file
+    CHECK_FALSE(find_official_hash(text, "file.zip"));         // the fallback is for Deno's lists alone
+    CHECK(official_source("deno/2.9.8/deno-x86_64-pc-windows-msvc.zip").powershell_print);
+    CHECK_FALSE(official_source("bun/1.3.14/bun-windows-x64.zip").powershell_print);
+    CHECK_FALSE(official_source("node/24.22.1/node-v24.22.1-win-x64.zip").powershell_print);
+    // No Hash line: not that format.
+    CHECK_FALSE(find_official_hash("Path : C:\\x\\file.zip\n" + h + "\n", "file.zip", true));
+    // Names the file but holds two different hashes (another one on the Path
+    // line, or after the first on the Hash line): refused, not guessed.
+    const std::string other(64, 'c');
+    CHECK_FALSE(find_official_hash("Hash : " + h + "\nPath : C:\\x\\file.zip " + other + "\n", "file.zip", true));
+    CHECK_FALSE(find_official_hash("Hash : " + h + " " + other + "\nPath : C:\\x\\file.zip\n", "file.zip", true));
+    // The same hash twice is still one hash.
+    CHECK(find_official_hash("Hash : " + h + "\nPath : C:\\x\\file.zip\nHash : " + h + "\n", "file.zip", true) == h);
     // Two different hashes and no line naming the file: not guessed.
-    CHECK_FALSE(find_official_hash(h + "  a.zip\n" + std::string(64, 'c') + "  b.zip\n", "file.zip"));
+    CHECK_FALSE(find_official_hash(h + "  a.zip\n" + other + "  b.zip\n", "file.zip", true));
 }
 
 TEST_CASE("publisher: official checksums are read from the usual list formats") {

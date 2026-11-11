@@ -12,6 +12,8 @@
 #include <array>
 #include <cctype>
 #include <fstream>
+#include <map>
+#include <mutex>
 #include <span>
 #include <system_error>
 #include <thread>
@@ -88,8 +90,9 @@ std::vector<std::string> words(std::string_view text) {
 
 fs::path venv_dir(const AppSpec& app) { return app.dir / ".venv"; }
 
-// What the environment of the app's processes adds: the port, loopback
-// only, no browser opened by the dev server, plain text in the log, and the
+// What the environment of the app's processes adds: the port and HOST (the
+// address most servers read; Bun has no such setting and Node's and Bun's
+// own defaults listen on every address, as on any machine), no browser opened by the dev server, plain text in the log, and the
 // project's runtime first on PATH (for Python its .venv, then the install).
 void set_environment(ChildOptions& o, const AppSpec& app, Port port) {
     std::vector<std::string> first;
@@ -126,6 +129,10 @@ void set_environment(ChildOptions& o, const AppSpec& app, Port port) {
         o.env.emplace_back("BUN_CONFIG_NO_CLEAR_TERMINAL_ON_RELOAD", "true");  // no screen-clearing codes in the log
     } else if (app.kind == AppKind::Deno) {
         o.env.emplace_back("DENO_NO_UPDATE_CHECK", "1");  // never a message about a newer Deno
+        // Deno.serve and `deno serve` listen on 0.0.0.0:8000 and ignore PORT
+        // and HOST; Deno's own setting moves the first server it starts (also
+        // under `deno task`, and node:http and npm:vite).
+        o.env.emplace_back("DENO_SERVE_ADDRESS", "tcp:127.0.0.1:" + std::to_string(port));
     }
     if (app.kind == AppKind::Python) {
         o.env.emplace_back("VIRTUAL_ENV", path_to_utf8(venv_dir(app)));
@@ -221,24 +228,48 @@ std::optional<AppLaunch> python_launch(const AppSpec& app, Port port, std::strin
 
 }  // namespace
 
-// package.json lists packages and node_modules isn't there yet.
+// package.json lists packages and node_modules isn't there yet. The window
+// asks every couple of seconds, so what package.json lists is remembered
+// until the file's time or size changes.
 bool needs_package_install(const fs::path& dir) {
     std::error_code ec;
-    if (fs::exists(dir / "node_modules", ec) || !is_file(dir / "package.json")) {
+    const fs::path package = dir / "package.json";
+    if (fs::exists(dir / "node_modules", ec) || !is_file(package)) {
         return false;
     }
-    const auto text = read_small_file(dir / "package.json", kMaxPackageJson);
+    struct Seen {
+        fs::file_time_type time;
+        std::uintmax_t size = 0;
+        bool lists_packages = false;
+    };
+    static std::mutex mutex;
+    static std::map<fs::path, Seen> seen;
+    const auto time = fs::last_write_time(package, ec);
+    const auto size = ec ? 0 : fs::file_size(package, ec);
+    const bool known = !ec;
+    if (known) {
+        const std::lock_guard<std::mutex> lock(mutex);
+        if (const auto it = seen.find(package); it != seen.end() && it->second.time == time && it->second.size == size) {
+            return it->second.lists_packages;
+        }
+    }
+    const auto text = read_small_file(package, kMaxPackageJson);
     if (!text) {
         return false;
     }
     // A damaged file is reported by app_launch(); nothing to install here.
     const json doc = json::parse(*text, nullptr, false);
+    bool lists = false;
     for (const char* key : {"dependencies", "devDependencies"}) {
         if (doc.is_object() && doc.contains(key) && doc[key].is_object() && !doc[key].empty()) {
-            return true;
+            lists = true;
         }
     }
-    return false;
+    if (known) {
+        const std::lock_guard<std::mutex> lock(mutex);
+        seen[package] = {time, size, lists};
+    }
+    return lists;
 }
 
 namespace {
@@ -313,14 +344,33 @@ std::vector<std::string> port_arguments(const std::string& script, Port port) {
         })) {
         return {};
     }
-    // The command's name, after any VAR=value and cross-env.
+    // The command's name, after any VAR=value, cross-env, option and runner
+    // (`bunx --bun vite`, `deno run -A npm:vite@5`, `bun run vite`).
     std::string name;
-    for (const std::string& s : w) {
-        if (s.find('=') != std::string::npos || s == "cross-env" || s == "env" || s == "npx" || s == "pnpm" ||
-            s == "pnpx" || s == "yarn" || s == "bunx" || s == "exec" || s == "dlx") {
+    bool after_runtime = false;
+    for (std::size_t i = 0; i < w.size(); ++i) {
+        const std::string& s = w[i];
+        if (s.find('=') != std::string::npos || s.starts_with('-') || s == "cross-env" || s == "env" ||
+            s == "npx" || s == "pnpm" || s == "pnpx" || s == "yarn" || s == "bunx" || s == "exec" || s == "dlx") {
             continue;
         }
-        name = s.substr(s.find_last_of('/') + 1);
+        if (s == "bun" || s == "deno") {
+            after_runtime = true;
+            continue;
+        }
+        if (after_runtime && (s == "run" || s == "x" || s == "task")) {
+            continue;
+        }
+        name = s;
+        for (const char* scheme : {"npm:", "jsr:"}) {
+            if (name.starts_with(scheme)) {
+                name.erase(0, std::string_view(scheme).size());
+            }
+        }
+        if (const auto at = name.find('@', 1); at != std::string::npos) {
+            name.erase(at);  // vite@5
+        }
+        name = name.substr(name.find_last_of('/') + 1);
         break;
     }
     const std::string p = std::to_string(port);
@@ -644,12 +694,24 @@ std::optional<AppLaunch> deno_launch(AppLaunch launch, const AppSpec& app, Port 
             return launch;
         }
     }
+    // `deno task` runs package.json's scripts too.
+    if (const fs::path package = app.dir / "package.json"; is_file(package)) {
+        const auto text = read_small_file(package, kMaxPackageJson);
+        const json doc = text ? json::parse(*text, nullptr, false) : json();
+        if (const auto dev = doc.is_object() && doc.contains("scripts") ? script_text(doc.at("scripts"), "dev")
+                                                                        : std::nullopt) {
+            launch.options.args = {"task", "dev"};
+            launch.shown = "deno task dev";
+            add_port_arguments(launch, *dev, port, false);
+            return launch;
+        }
+    }
     if (const auto entry = first_entry(app.dir, kDenoEntries)) {
-        launch.options.args = {"run", "--watch", "--allow-net", "--allow-read", "--allow-env", *entry};
-        launch.shown = "deno run --watch --allow-net --allow-read --allow-env " + *entry;
+        launch.options.args = {"run", "--watch", "--allow-net", "--allow-read=.", "--allow-env", *entry};
+        launch.shown = "deno run --watch --allow-net --allow-read=. --allow-env " + *entry;
         return launch;
     }
-    error = "FloServer can't tell how to start this Deno project (no \"dev\" task in deno.json or deno.jsonc, and "
+    error = "FloServer can't tell how to start this Deno project (no \"dev\" task in deno.json or deno.jsonc or \"dev\" script in package.json, and "
             "none of " + list_names(kDenoEntries) + "); add one, or a \"command\" in floserver.json";
     return std::nullopt;
 }

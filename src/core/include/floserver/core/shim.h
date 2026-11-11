@@ -19,6 +19,8 @@
 //   python    the project's .venv when it has one, else its Python install
 //   pip       the same python with -m pip
 
+#include "floserver/core/cpu_features.h"
+
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -39,9 +41,11 @@ struct ShimTarget {
 
 // What `tool` ("php", "npm"...) runs in `cwd`. Nothing (with `error`, in plain
 // English, saying what to install or fix) when it can't. May write the php.ini
-// for a PHP install under data/cli/php.
+// for a PHP install under data/cli/php. `avx2`: whether this CPU has it, which
+// picks Bun's regular or baseline build when both are installed (D31).
 [[nodiscard]] std::optional<ShimTarget> resolve_shim(const std::string& tool, const std::filesystem::path& cwd,
-                                                     const std::filesystem::path& data_dir, std::string& error);
+                                                     const std::filesystem::path& data_dir, std::string& error,
+                                                     bool avx2 = cpu_has_avx2());
 
 [[nodiscard]] std::filesystem::path shims_dir(const std::filesystem::path& data);
 

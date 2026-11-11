@@ -374,6 +374,14 @@ TEST_CASE("bun, bunx and deno run the project's Bun and Deno (D31)") {
     const fs::path baseline = add_single(slow, "bun", "1.3.14", "baseline");
     CHECK(baseline.filename() == "1.3.14-baseline");
     CHECK(resolve_shim("bun", elsewhere, slow, error)->program == *bun_program(baseline));
+    // Both builds installed: the one that runs on this CPU, whatever the order of versions.
+    const fs::path both_builds = tmp.path() / "both-data";
+    const fs::path regular_dir = add_single(both_builds, "bun", "1.3.14");
+    const fs::path baseline_dir = add_single(both_builds, "bun", "1.3.14", "baseline");
+    CHECK(resolve_shim("bun", elsewhere, both_builds, error, true)->program == *bun_program(regular_dir));
+    CHECK(resolve_shim("bun", elsewhere, both_builds, error, false)->program == *bun_program(baseline_dir));
+    // Only the other build there: still used (it runs, if slowly, or says why not).
+    CHECK(resolve_shim("bun", elsewhere, slow, error, true)->program == *bun_program(baseline));
 
     // What to install when it isn't there.
     const fs::path none = tmp.path() / "none-data";

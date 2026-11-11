@@ -471,8 +471,23 @@ bool RuntimeService::remove(const std::string& name, const std::string& version,
             --service.removing_;
         }
     } const done(*this);
+    // Bun's baseline build lives in "<version>-baseline" (D31): "1.3.14"
+    // finds it too, this CPU's build first.
+    std::string folder = version;
+    if (name == "bun" && !version.ends_with("-baseline")) {
+        const std::string baseline = version + "-baseline";
+        const std::array<std::string, 2> order = config_.has_avx2() ? std::array<std::string, 2>{version, baseline}
+                                                                    : std::array<std::string, 2>{baseline, version};
+        std::error_code ec;
+        for (const std::string& candidate : order) {
+            if (fs::is_directory(runtimes_root() / "bun" / path_from_utf8(candidate), ec)) {
+                folder = candidate;
+                break;
+            }
+        }
+    }
     std::string error;
-    if (!remove_runtime(runtimes_root(), name, version, error)) {
+    if (!remove_runtime(runtimes_root(), name, folder, error)) {
         refusal = {"not_removed", error};
         return false;
     }

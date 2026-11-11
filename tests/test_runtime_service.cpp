@@ -550,5 +550,43 @@ TEST_CASE("Bun installs the build that fits the CPU: AVX2 the regular zip, other
         CHECK(read_file(dir / "bun.exe") == (avx2 ? "MZ bun" : "MZ bun baseline"));
         CHECK(w.transport->requests("https://cdn.example.org/bun/1.3.14/bun-windows-x64.zip") == (avx2 ? 1 : 0));
         CHECK(w.transport->requests("https://cdn.example.org/bun/1.3.14/bun-windows-x64-baseline.zip") == (avx2 ? 0 : 1));
+
+        // `remove bun 1.3.14` finds the baseline build's folder, this CPU's build first.
+        ServiceRefusal gone;
+        CHECK_MESSAGE(s.remove("bun", "1.3.14", gone), gone.message);
+        CHECK_FALSE(fs::exists(dir));
+        CHECK_FALSE(s.remove("bun", "1.3.14", gone));
+    }
+
+    // Both builds there: the one for this CPU goes first.
+    World w;
+    for (const char* folder : {"1.3.14", "1.3.14-baseline"}) {
+        const fs::path dir = w.tmp.path() / "runtimes" / "bun" / folder;
+        fs::create_directories(dir);
+        write_file(dir / "bun.exe", "MZ");
+        write_file(dir / ".floserver-runtime.json",
+                   nlohmann::json{{"schema", 1}, {"name", "bun"}, {"version", "1.3.14"},
+                                  {"platform", "windows-x64"},
+                                  {"variant", std::string(folder).ends_with("baseline") ? "baseline" : ""},
+                                  {"license", "MIT"}, {"sha256", std::string(64, 'a')}}
+                       .dump());
+    }
+    for (const bool avx2 : {true, false}) {
+        RuntimeServiceConfig config = w.config();
+        config.has_avx2 = [avx2] { return avx2; };
+        RuntimeService s(config, w.transport);
+        ServiceRefusal refusal;
+        REQUIRE_MESSAGE(s.remove("bun", "1.3.14", refusal), refusal.message);
+        CHECK(fs::exists(w.tmp.path() / "runtimes" / "bun" / "1.3.14") == !avx2);
+        CHECK(fs::exists(w.tmp.path() / "runtimes" / "bun" / "1.3.14-baseline") == avx2);
+        // Put the removed one back for the other round.
+        const fs::path back = w.tmp.path() / "runtimes" / "bun" / (avx2 ? "1.3.14" : "1.3.14-baseline");
+        fs::create_directories(back);
+        write_file(back / "bun.exe", "MZ");
+        write_file(back / ".floserver-runtime.json",
+                   nlohmann::json{{"schema", 1}, {"name", "bun"}, {"version", "1.3.14"},
+                                  {"platform", "windows-x64"}, {"variant", avx2 ? "" : "baseline"},
+                                  {"license", "MIT"}, {"sha256", std::string(64, 'a')}}
+                       .dump());
     }
 }

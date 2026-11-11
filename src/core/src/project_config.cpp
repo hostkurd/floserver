@@ -102,7 +102,8 @@ void read_version(const json& doc, const char* key, std::optional<std::string>& 
 }
 
 // One JavaScript runtime per project (D31): naming two is an error, shown
-// against the second one in the file's order (node, bun, deno).
+// against the second one in the order node, bun, deno (not the file's:
+// the parsed config doesn't keep it).
 void read_one_js_runtime(const ProjectConfig& config, ConfigResult& result) {
     std::vector<std::string> named;
     if (config.node) {
@@ -567,12 +568,29 @@ std::optional<std::string> set_project_config_value(std::string_view text, Confi
     // "javascript" with no value takes them all out.
     const bool javascript = key == ConfigKey::Javascript || key == ConfigKey::Node || key == ConfigKey::Bun ||
                             key == ConfigKey::Deno;
-    if (javascript && (stored || key == ConfigKey::Javascript)) {
+    if (javascript && stored) {
+        // The new one takes the place of the first one there was.
+        nlohmann::ordered_json rebuilt = nlohmann::ordered_json::object();
+        bool placed = false;
+        for (const auto& [member, member_value] : doc.items()) {
+            if (member == "node" || member == "bun" || member == "deno") {
+                if (!placed) {
+                    rebuilt[name] = *stored;
+                    placed = true;
+                }
+                continue;
+            }
+            rebuilt[member] = member_value;
+        }
+        if (!placed) {
+            rebuilt[name] = *stored;
+        }
+        doc = std::move(rebuilt);
+    } else if (javascript && key == ConfigKey::Javascript) {
         for (const char* other : {"node", "bun", "deno"}) {
             doc.erase(other);
         }
-    }
-    if (stored) {
+    } else if (stored) {
         doc[name] = *stored;
     } else {
         doc.erase(name);
