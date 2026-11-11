@@ -556,9 +556,18 @@ constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
     // D28: MySQL beside MariaDB. Arabic and Kurdish need a native read.
     Entry{Str::DbMysqlLtsNote,
           "FloServer offers MySQL 8.4 LTS only, not MySQL's 9.x Innovation releases. Add another engine's versions in Runtimes.",
-          "يوفّر " FLO_LRI "FloServer" FLO_PDI " الإصدار " FLO_LRI "MySQL 8.4 LTS" FLO_PDI " فقط، وليس إصدارات " FLO_LRI "9.x" FLO_PDI " التجريبية (" FLO_LRI "Innovation" FLO_PDI "). أضف إصدارات محرّك آخر من بيئات التشغيل.",
-          FLO_LRI "FloServer" FLO_PDI " تەنها " FLO_LRI "MySQL 8.4 LTS" FLO_PDI " پێشکەش دەکات، نەک وەشانەکانی " FLO_LRI "9.x" FLO_PDI "ی (" FLO_LRI "Innovation" FLO_PDI "). وەشانی بزوێنەرێکی تر لە ژینگەکانی کارپێکردن زیاد بکە."},
+          "يوفّر " FLO_LRI "FloServer" FLO_PDI " الإصدار " FLO_LRI "MySQL 8.4 LTS" FLO_PDI " فقط، وليس إصدارات " FLO_LRI "Innovation" FLO_PDI " (" FLO_LRI "9.x" FLO_PDI ") قصيرة الدعم. أضف إصدارات محرّك آخر من بيئات التشغيل.",
+          FLO_LRI "FloServer" FLO_PDI " تەنها " FLO_LRI "MySQL 8.4 LTS" FLO_PDI " پێشکەش دەکات، نەک وەشانەکانی " FLO_LRI "Innovation" FLO_PDI " (" FLO_LRI "9.x" FLO_PDI ") کە پشتگیرییان کورتە. وەشانی بزوێنەرێکی تر لە ژینگەکانی کارپێکردن زیاد بکە."},
     Entry{Str::DbEngines, "Database engine", "محرّك قاعدة البيانات", "بزوێنەری بنکەی زانیاری"},
+    Entry{Str::DbPathNotAscii,
+          "MySQL can't start here: the path of its folder has letters outside English, and Windows keeps no short "
+          "(8.3) name for it. Use MariaDB on this computer, or a Windows user whose folder name has English letters only.",
+          "لا يمكن تشغيل " FLO_LRI "MySQL" FLO_PDI " هنا: مسار مجلده يحتوي على أحرف غير إنجليزية، ولا يحتفظ " FLO_LRI "Windows" FLO_PDI
+          " باسم قصير (" FLO_LRI "8.3" FLO_PDI ") له. استخدم " FLO_LRI "MariaDB" FLO_PDI " على هذا الكمبيوتر، أو مستخدم " FLO_LRI
+          "Windows" FLO_PDI " اسم مجلده بأحرف إنجليزية فقط.",
+          FLO_LRI "MySQL" FLO_PDI " لێرە دەست پێ ناکات: ڕێڕەوی بوخچەکەی پیتی جگە لە ئینگلیزی تێدایە، و " FLO_LRI "Windows" FLO_PDI
+          " هیچ ناوێکی کورتی (" FLO_LRI "8.3" FLO_PDI ") بۆی نییە. " FLO_LRI "MariaDB" FLO_PDI " لەم کۆمپیوتەرە بەکاربهێنە، یان بەکارهێنەرێکی "
+          FLO_LRI "Windows" FLO_PDI " کە ناوی بوخچەکەی تەنها پیتی ئینگلیزی تێدایە."},
     // phpMyAdmin (an optional tool).
     Entry{Str::SettingsTools, "Tools", "الأدوات", "ئامرازەکان"},
     Entry{Str::PmaOpen, "Open phpMyAdmin", "فتح " FLO_LRI "phpMyAdmin" FLO_PDI,

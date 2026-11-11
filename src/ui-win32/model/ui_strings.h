@@ -331,6 +331,7 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     DbFinalOpened,
     DbMysqlLtsNote,          // under MySQL's tab: 8.4 LTS only (D28)
     DbEngines,               // the engines' tabs, for screen readers
+    DbPathNotAscii,          // MySQL on Windows: no ASCII (8.3) form of its folder's path
     // phpMyAdmin (an optional tool).
     SettingsTools,
     PmaOpen,

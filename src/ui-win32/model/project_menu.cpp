@@ -95,6 +95,23 @@ std::string row_database_name(const ProjectRow& row) {
 
 namespace {
 
+std::string row_family(const ProjectRow& row) {
+    const std::string& database = !row.database.empty() ? row.database : row.wants.database;
+    return database.substr(0, database.find('-'));
+}
+
+}  // namespace
+
+std::string row_server_database(const ProjectRow& row) {
+    return core::server_database_name(row_database_name(row), row_family(row));
+}
+
+std::string row_database_user(const ProjectRow& row) {
+    return core::project_database_user(row_server_database(row), row_family(row));
+}
+
+namespace {
+
 // What's wrong with `name` as the project's new name, or nothing. The
 // service's own rules (project_registry.h); it checks them again.
 std::optional<std::string> rename_problem(const ProjectRow& row, std::string_view name,

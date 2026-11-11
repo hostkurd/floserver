@@ -103,6 +103,26 @@ std::optional<Port> saved_port(const fs::path& folder) {
     }
 }
 
+// The ports other database servers keep in their folders (<data>/data/
+// <family>-<series>/port): a new server never takes one, so the .env files
+// of a server that isn't running now stay right (D28: one rule for every family).
+std::set<Port> ports_kept_by_others(const fs::path& data_dir, const fs::path& own) {
+    std::set<Port> out;
+    std::error_code ec;
+    for (fs::directory_iterator it(data_dir / "data", ec), end; !ec && it != end; it.increment(ec)) {
+        const std::string name = path_to_utf8(it->path().filename());
+        const auto dash = name.find('-');
+        if (dash == std::string::npos || !mysql_protocol_family(std::string_view(name).substr(0, dash)) ||
+            it->path().filename() == own.filename()) {
+            continue;
+        }
+        if (const auto port = saved_port(it->path())) {
+            out.insert(*port);
+        }
+    }
+    return out;
+}
+
 // Runs `f` when the scope ends.
 template <class F>
 class AtExit {
@@ -456,6 +476,9 @@ public:
         }
         if (!error_.empty()) {
             j["error"] = error_;
+            if (!path_problem_.empty()) {
+                j["error_code"] = std::string(kPathNotAsciiCode);
+            }
         }
         if (port_fallback_ && chosen_port_) {
             j["port_wanted"] = *chosen_port_;  // taken by another program
@@ -464,6 +487,10 @@ public:
     }
 
     [[nodiscard]] std::string root_name() const { return key() + "/root"; }
+
+    // MySQL on Windows: a path it can't be given (ascii_mysql_files()). Set
+    // once, before the server is shared.
+    void set_path_problem(std::string problem) { path_problem_ = std::move(problem); }
 
 private:
     void shut_down(ChildProcess& process) const {
@@ -485,24 +512,58 @@ private:
         remove_secret_file(files_.init_file);
         for (fs::directory_iterator it(files_.folder, ec), end; !ec && it != end; it.increment(ec)) {
             const std::string name = path_to_utf8(it->path().filename());
-            if (name.ends_with(".sql") && (name.starts_with("query-") || name.starts_with("probe"))) {
+            if ((name.ends_with(".sql") && (name.starts_with("query-") || name.starts_with("probe"))) ||
+                (name.ends_with(".cnf") && name.starts_with("client-"))) {
                 remove_secret_file(it->path());
             }
         }
     }
 
-    // One of the server's programs as a client of it: TCP to the
-    // internal port, as root, the password in MYSQL_PWD only.
-    bool run_tool(const fs::path& program, const std::vector<std::string>& extra, const std::string& password,
-                  const fs::path& input, std::chrono::seconds limit, std::string& error) const {
-        ChildOptions o;
+    // How one of the server's programs connects to it: an owner-only option
+    // file in `dir` (deleted after the run, `cnf`) holds the password, read
+    // with --defaults-file, so no other option file (and, for MySQL, no
+    // ~/.mylogin.cnf: MYSQL_TEST_LOGIN_FILE names none) is read and the
+    // password is in no argument and no environment variable. TCP to the
+    // internal port; MySQL's tools check the server's certificate against
+    // the CA its set-up made in the owner-only data folder (`ca`: its path as
+    // the program is given it), so a program that took the internal port
+    // first never sees root's password.
+    bool client_options(ChildOptions& o, const fs::path& program, const std::string& user, const std::string& password,
+                        const fs::path& dir, const std::string& ca, fs::path& cnf, std::string& error) const {
+        cnf = dir / ("client-" + random_suffix() + ".cnf");
+        if (!write_private_file_atomically(cnf, client_password_option_file(password), error)) {
+            return false;
+        }
         o.program = program;
-        o.args = {"--no-defaults", "--protocol=TCP", "--host=127.0.0.1", "--port=" + std::to_string(internal_.load()),
-                  "--user=root"};
+        o.args = {"--defaults-file=" + path_to_utf8(cnf.filename()), "--protocol=TCP", "--host=127.0.0.1",
+                  "--port=" + std::to_string(internal_.load()), "--user=" + user};
+        if (files_.family == kMySqlFamily) {
+            std::error_code ec;
+            const bool have_ca = fs::is_regular_file(files_.data_dir / "ca.pem", ec);
+            o.args.push_back(have_ca ? "--ssl-mode=VERIFY_CA" : "--ssl-mode=REQUIRED");
+            if (have_ca) {
+                o.args.push_back("--ssl-ca=" + ca);
+            }
+        }
+        o.working_dir = dir;
+        o.env = {{"MYSQL_TEST_LOGIN_FILE", path_to_utf8(dir / "no-login-file")}};
+        o.remove_env = {"MYSQL_HOST", "MYSQL_TCP_PORT", "MYSQL_UNIX_PORT", "MYSQL_PWD", "LIBMYSQL_ENABLE_CLEARTEXT_PLUGIN"};
+        return true;
+    }
+
+    // One of the server's programs as a client of it, as root, run in the
+    // server's folder. `output`: what it printed, when it succeeded.
+    bool run_tool(const fs::path& program, const std::vector<std::string>& extra, const std::string& password,
+                  const fs::path& input, std::chrono::seconds limit, std::string& error,
+                  std::string* output = nullptr) const {
+        ChildOptions o;
+        fs::path cnf;
+        // The CA relative to the folder it runs in: a plain name.
+        const std::string ca = path_to_utf8(files_.data_dir.filename() / "ca.pem");
+        if (!client_options(o, program, "root", password, files_.folder, ca, cnf, error)) {
+            return false;
+        }
         o.args.insert(o.args.end(), extra.begin(), extra.end());
-        o.working_dir = files_.folder;
-        o.env = {{"MYSQL_PWD", password}};
-        o.remove_env = {"MYSQL_HOST", "MYSQL_TCP_PORT", "MYSQL_UNIX_PORT"};
         o.stdin_file = input;
         o.output_log = files_.folder / ("client-" + random_suffix() + ".log");  // one per run: runs may overlap
         auto child = ChildProcess::start(o, error);
@@ -513,8 +574,12 @@ private:
             if (!ok) {
                 error = path_to_utf8(program.filename()) + ": " +
                         (code ? tail(o.output_log, 600) : std::string("didn't finish in time"));
+            } else if (output != nullptr) {
+                *output = read_small_file(o.output_log, std::size_t{64} * 1024).value_or("");
             }
         }
+        child.reset();
+        remove_secret_file(cnf);
         std::error_code ec;
         fs::remove(o.output_log, ec);
         return ok;
@@ -522,9 +587,9 @@ private:
 
 public:
     // One of the server's programs with a project's own login (backups, D22):
-    // TCP to the internal port, the password in MYSQL_PWD only, run in
-    // `work` (so file names on its command line are plain relative ones),
-    // standard input from `input` when it's given. Ended when `cancel` is set.
+    // as client_options() says, run in `work` (so file names on its command
+    // line are plain relative ones), standard input from `input` when it's
+    // given. Ended when `cancel` is set.
     bool run_as(const fs::path& program, const DatabaseLogin& login, const std::vector<std::string>& extra,
                 const fs::path& work, const fs::path& input, const std::atomic<bool>& cancel, std::string& error) {
         std::error_code ec;
@@ -533,13 +598,13 @@ public:
             return false;
         }
         ChildOptions o;
-        o.program = program;
-        o.args = {"--no-defaults", "--protocol=TCP", "--host=127.0.0.1", "--port=" + std::to_string(internal_.load()),
-                  "--user=" + login.user};
+        fs::path cnf;
+        if (!client_options(o, program, login.user, login.password, work, path_to_utf8(files_.data_dir / "ca.pem"), cnf,
+                            error)) {
+            return false;
+        }
+        const AtExit gone([&cnf] { remove_secret_file(cnf); });
         o.args.insert(o.args.end(), extra.begin(), extra.end());
-        o.working_dir = work;
-        o.env = {{"MYSQL_PWD", login.password}};
-        o.remove_env = {"MYSQL_HOST", "MYSQL_TCP_PORT", "MYSQL_UNIX_PORT"};
         o.stdin_file = input;
         o.output_log = work / ("client-" + random_suffix() + ".log");
         auto child = ChildProcess::start(o, error);
@@ -575,6 +640,10 @@ private:
     // password was refused.
     std::unique_ptr<ChildProcess> start_server(bool reset_root, bool& wrong_root, std::string& error) {
         wrong_root = false;
+        if (!path_problem_.empty()) {
+            error = path_problem_;
+            return nullptr;
+        }
         std::error_code ec;
         fs::create_directories(files_.folder, ec);
 #ifndef _WIN32
@@ -704,10 +773,64 @@ private:
             shut_down(*process);
             return nullptr;
         }
+        // MySQL's init file goes on past a failing statement and the server
+        // still starts: the first start is only trusted when it logged no
+        // error and no account is left without a password.
+        if (first && files_.family == kMySqlFamily) {
+            if (const std::string why = first_start_problem(*root, log_from); !why.empty()) {
+                error = "setting up " + title() + " didn't finish: " + why;
+                shut_down(*process);
+                return nullptr;
+            }
+        }
         if (first) {
             (void)write_file_atomically(marker, "1\n", error);
         }
         return process;
+    }
+
+    // Why MySQL's first start can't be trusted, or nothing.
+    [[nodiscard]] std::string first_start_problem(const std::string& root, std::uintmax_t log_from) const {
+        if (const std::string errors = error_lines(log_from); !errors.empty()) {
+            return "its init file or start logged errors: " + errors;
+        }
+        const fs::path query = files_.folder / ("query-" + random_suffix() + ".sql");
+        std::string error;
+        if (!write_private_file_atomically(query, empty_password_count_sql(), error)) {
+            return error;
+        }
+        std::string out;
+        const bool ran = run_tool(files_.client, {"--batch", "--skip-column-names"}, root, query, 30s, error, &out);
+        remove_secret_file(query);
+        if (!ran) {
+            return "its accounts can't be checked: " + error;
+        }
+        while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) {
+            out.pop_back();
+        }
+        const auto line = out.rfind('\n');
+        if (out.substr(line == std::string::npos ? 0 : line + 1) != "0") {
+            return "an account still has no password";
+        }
+        return {};
+    }
+
+    // The [ERROR] lines this start wrote to the error log (not the last
+    // "Aborting"), at most 1500 characters; empty when there are none.
+    [[nodiscard]] std::string error_lines(std::uintmax_t log_from) const {
+        const auto log = read_small_file(files_.error_log, std::size_t{4} * 1024 * 1024).value_or("");
+        const std::string fresh = log.size() > log_from ? log.substr(static_cast<std::size_t>(log_from)) : std::string();
+        std::string errors;
+        std::size_t pos = 0;
+        while (pos < fresh.size()) {
+            const auto end = fresh.find('\n', pos);
+            const std::string line = fresh.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+            pos = end == std::string::npos ? fresh.size() : end + 1;
+            if (line.find("[ERROR]") != std::string::npos && line.find("Aborting") == std::string::npos) {
+                errors.append(errors.empty() ? "" : "\n").append(line);
+            }
+        }
+        return errors.size() > 1500 ? errors.substr(0, 1500) + "..." : errors;
     }
 
     // What this start wrote to the error log: its [ERROR] lines, or the
@@ -737,7 +860,10 @@ private:
     bool set_up(std::string& error) {
         std::error_code ec;
         fs::remove(files_.installed_marker, ec);
-        if (fs::exists(files_.data_dir, ec)) {
+        // An empty one (made for MySQL's short path on Windows) is used as it is.
+        if (fs::is_directory(files_.data_dir, ec) && fs::is_empty(files_.data_dir, ec) && files_.family == kMySqlFamily) {
+            ec.clear();
+        } else if (fs::exists(files_.data_dir, ec)) {
             fs::path aside = files_.data_dir;
             aside += ".failed-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
             fs::rename(files_.data_dir, aside, ec);
@@ -838,6 +964,7 @@ private:
     bool keep_running_ = false;
     std::optional<Port> chosen_port_;
     bool port_fallback_ = false;
+    std::string path_problem_;
 
     std::atomic<int> active_{0};
     std::mutex activity_mutex_;
@@ -1157,6 +1284,8 @@ void DatabaseService::reload_locked() {
             if (chosen) {
                 avoid.insert(*chosen);
             }
+            const std::set<Port> kept = ports_kept_by_others(config_.data_dir, files.folder);
+            avoid.insert(kept.begin(), kept.end());
             port = pick_port_from(kFirstDatabasePort, avoid, config_.probe);
             if (!port) {
                 continue;
@@ -1174,11 +1303,28 @@ void DatabaseService::reload_locked() {
         fs::create_directories(files.folder, ec);
         (void)write_file_atomically(files.folder / "port", std::to_string(*port) + "\n", error);
         taken.insert(*port);
+        std::string path_problem;
+#ifdef _WIN32
+        // Oracle's mysqld.exe reads paths in the ANSI code page: ASCII (8.3) forms.
+        if (want.family == kMySqlFamily) {
+            fs::create_directories(files.data_dir, ec);  // a short form needs it to exist
+            fs::path bad;
+            if (!ascii_mysql_files(files, windows_short_path, bad)) {
+                path_problem = "MySQL can't use " + path_to_utf8(bad) +
+                               ": the path has letters outside English, and Windows keeps no short (8.3) name for "
+                               "it. Use MariaDB on this computer, or a Windows user whose folder name has English "
+                               "letters only.";
+            }
+        }
+#endif
         auto server = std::make_shared<Server>(config_.data_dir, std::move(files), want.runtime->version, *port, *internal,
                                                std::move(listener), secrets_, internal_ports_, config_.probe,
                                                config_.start_limit);
         server->set_projects(want.projects, want.keep_running);
         server->set_chosen_port(chosen, fallback);
+        if (!path_problem.empty()) {
+            server->set_path_problem(std::move(path_problem));
+        }
         servers_[key] = std::move(server);
     }
 }
@@ -1281,9 +1427,12 @@ std::optional<DatabaseLogin> DatabaseService::project_login(const std::string& p
         return std::nullopt;
     }
     DatabaseLogin login;
-    login.database = project_database_name(*p);  // kept through a rename (D22)
-    login.user = login.database;
-    if (reserved_database_name(login.database)) {
+    // FloServer's name for it, kept through a rename (D22); on MySQL a long
+    // one is cut to fit its limits, the same way every time.
+    const std::string own_name = project_database_name(*p);
+    login.database = server_database_name(own_name, family);
+    login.user = project_database_user(login.database, family);  // MySQL's: at most 32 characters
+    if (reserved_database_name(own_name)) {
         // MariaDB's own name follows a rename; shared sites' is kept by one,
         // so only a project under another name gets a database of its own.
         refusal = {"reserved_name", "\"" + login.database + "\" is one of " + database_family_title(family) +
@@ -1330,7 +1479,7 @@ std::optional<DatabaseLogin> DatabaseService::project_login(const std::string& p
         return std::nullopt;
     }
     login.port = server->port();
-    const std::string secret = server->key() + "/" + login.database;
+    const std::string secret = server->key() + "/" + own_name;
     auto password = secrets_.read(secret);
     if (!password) {
         password = generate_password();
@@ -1502,7 +1651,8 @@ std::optional<std::uint64_t> DatabaseService::project_database_bytes(const std::
     // Its own folder in the series' data: one file per table (and the
     // folder's own .opt), so the sum is close to what the dump holds.
     const MariaDbFiles files = mariadb_files(r->dir, r->version, config_.data_dir, spec->family);
-    const fs::path folder = files.data_dir / path_from_utf8(project_database_name(*p));  // kept through a rename
+    const fs::path folder =
+        files.data_dir / path_from_utf8(server_database_name(project_database_name(*p), spec->family));  // kept through a rename
     std::error_code ec;
     if (!fs::is_directory(folder, ec)) {
         return std::nullopt;
@@ -1556,7 +1706,6 @@ bool DatabaseService::drop_project_database(const std::string& project, ServiceR
     }
     // The names are the service's own, as project_login() makes them.
     const std::string database = project_database_name(*p);
-    const std::string& user = database;
     if (reserved_database_name(database)) {
         refusal = {"reserved_name", "\"" + database + "\" is one of MariaDB's, MySQL's or shared sites' names, so FloServer never "
                                     "made it for " + project + " and won't delete it; remove the project without its database"};
@@ -1627,7 +1776,9 @@ bool DatabaseService::drop_project_database(const std::string& project, ServiceR
         }
         const std::lock_guard lock(server->login_mutex());
         const bool made = secrets_.read(secret_of(key)).has_value();  // FloServer made one there
-        if (!server->run_sql(drop_project_database_sql(database, user, family), error)) {
+        const std::string on_server = server_database_name(database, family);
+        if (!server->run_sql(
+                drop_project_database_sql(on_server, project_database_user(on_server, family), family), error)) {
             return failed(title, {"database_failed",
                                   std::string("the database ").append(database).append(" couldn't be deleted: ").append(error)});
         }

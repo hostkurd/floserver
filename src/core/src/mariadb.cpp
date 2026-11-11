@@ -1,8 +1,14 @@
 #include "floserver/core/mariadb.h"
 
 #include "floserver/core/mariadb_settings.h"
+#include "floserver/core/encoding.h"
 #include "floserver/core/paths.h"
+#include "floserver/core/sha256.h"
 #include "floserver/core/version.h"
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -65,7 +71,64 @@ std::string env_key(std::string_view line) {
     return key;
 }
 
+bool is_ascii(const std::string& s) {
+    return std::all_of(s.begin(), s.end(), [](char c) { return static_cast<unsigned char>(c) < 0x80; });
+}
+
 }  // namespace
+
+fs::path windows_short_path(const fs::path& path) {
+#ifdef _WIN32
+    const std::wstring in = path.wstring();
+    const DWORD n = GetShortPathNameW(in.c_str(), nullptr, 0);
+    if (n == 0) {
+        return {};
+    }
+    std::wstring out(n, L'\0');
+    const DWORD got = GetShortPathNameW(in.c_str(), out.data(), n);
+    if (got == 0 || got >= n) {
+        return {};
+    }
+    out.resize(got);
+    return fs::path(out);
+#else
+    (void)path;
+    return {};
+#endif
+}
+
+std::optional<fs::path> ascii_path(const fs::path& path, const ShortPathFunction& shorten) {
+    if (is_ascii(path_to_utf8(path))) {
+        return path;
+    }
+    fs::path short_form = shorten ? shorten(path) : fs::path();
+    if (short_form.empty() || !is_ascii(path_to_utf8(short_form))) {
+        return std::nullopt;
+    }
+    return short_form;
+}
+
+bool ascii_mysql_files(MariaDbFiles& files, const ShortPathFunction& shorten, fs::path& bad) {
+    for (fs::path* p : {&files.base_dir, &files.server, &files.install_db, &files.admin, &files.client, &files.dump,
+                        &files.folder, &files.data_dir}) {
+        auto safe = ascii_path(*p, shorten);
+        if (!safe) {
+            bad = *p;
+            return false;
+        }
+        *p = std::move(*safe);
+    }
+    // The files in them follow (their own names are FloServer's, ASCII).
+    files.config = files.folder / files.config.filename();
+    files.installed_marker = files.folder / files.installed_marker.filename();
+    files.error_log = files.data_dir / files.error_log.filename();
+    files.pid_file = files.data_dir / files.pid_file.filename();
+    files.init_file = files.data_dir / files.init_file.filename();
+    if (!files.socket.empty()) {
+        files.socket = files.data_dir / files.socket.filename();
+    }
+    return true;
+}
 
 std::string mariadb_series(std::string_view version) {
     const auto v = Version::parse(version);
@@ -159,6 +222,14 @@ std::string mariadb_config(const MariaDbFiles& files, Port port, bool as_root, b
       // be read in the ANSI code page (a folder name in Arabic breaks).
       << "basedir=" << option_path(files.base_dir) << nl
 #endif
+      ;
+#ifdef _WIN32
+    if (mysql) {
+        // mysqld.exe would take it from its own path, read in the ANSI code page.
+        c << "basedir=" << option_path(files.base_dir) << nl;
+    }
+#endif
+    c
       // A full path (a relative one is taken from basedir); the files
       // below are relative to it. MariaDB 10.6+ on Windows runs with UTF-8
       // as its code page, so a non-ASCII folder is read correctly.
@@ -181,6 +252,12 @@ std::string mariadb_config(const MariaDbFiles& files, Port port, bool as_root, b
     }
     // Never without passwords, and reached only through FloServer's port.
     c << "skip-grant-tables=0" << nl << "skip-networking=0" << nl;
+    if (mysql) {
+        // No file of this computer's is read or written by SQL (LOAD DATA
+        // INFILE, SELECT ... INTO OUTFILE, LOAD_FILE()). MariaDB has no such
+        // value: it takes NULL as a folder's name and doesn't start.
+        c << "secure-file-priv=NULL" << nl;
+    }
     if (mysql) {
         // No X Protocol (its own listener on every address, port 33060, one
         // for all servers), and no binary log (it grows until the disk is
@@ -249,7 +326,11 @@ std::string sql_string(std::string_view text) {
 
 std::string root_password_sql(const std::string& password, std::string_view family) {
     const std::string value = sql_string(password);
+    // root's password first: in MySQL's init file a failing statement skips the rest.
     std::string sql;
+    for (const char* host : {"localhost", "127.0.0.1", "::1"}) {
+        sql += "ALTER USER IF EXISTS 'root'@'" + std::string(host) + "' IDENTIFIED BY " + value + ";\n";
+    }
     if (family == kMySqlFamily) {
         // MySQL's set-up makes root@localhost only; FloServer logs in over
         // TCP from 127.0.0.1, which skip-name-resolve doesn't match to it.
@@ -258,11 +339,6 @@ std::string root_password_sql(const std::string& password, std::string_view fami
             sql.append("CREATE USER IF NOT EXISTS ").append(account).append(" IDENTIFIED BY ").append(value).append(";\n");
             sql.append("GRANT ALL PRIVILEGES ON *.* TO ").append(account).append(" WITH GRANT OPTION;\n");
         }
-    }
-    for (const char* host : {"localhost", "127.0.0.1", "::1"}) {
-        sql += "ALTER USER IF EXISTS 'root'@'" + std::string(host) + "' IDENTIFIED BY " + value + ";\n";
-    }
-    if (family == kMySqlFamily) {
         // No anonymous logins (MySQL's set-up makes none; one made by hand
         // would match before a named one). Account statements need no FLUSH.
         return sql + "DROP USER IF EXISTS ''@'localhost', ''@'127.0.0.1', ''@'%';\n";
@@ -273,6 +349,21 @@ std::string root_password_sql(const std::string& password, std::string_view fami
     sql += "DELETE FROM mysql.global_priv WHERE (User = 'root' AND Host NOT IN ('localhost', '127.0.0.1', '::1')) OR User = '';\n";
     sql += "DELETE FROM mysql.db WHERE User = '';\n";
     return sql + "FLUSH PRIVILEGES;\n";
+}
+
+std::string empty_password_count_sql() {
+    return "SELECT COUNT(*) FROM mysql.user WHERE authentication_string = '' OR authentication_string IS NULL;\n";
+}
+
+std::string client_password_option_file(const std::string& password) {
+    std::string value;
+    for (const char c : password) {
+        if (c == '\\' || c == '"') {
+            value += '\\';
+        }
+        value += c;
+    }
+    return "[client]\npassword=\"" + value + "\"\n";
 }
 
 std::string grant_pattern(std::string_view database) {
@@ -342,6 +433,32 @@ std::string project_database_name(std::string_view project) {
     std::string out(project);
     std::replace(out.begin(), out.end(), '-', '_');
     return out;
+}
+
+std::string project_database_user(std::string_view database, std::string_view family) {
+    if (family != kMySqlFamily || database.size() <= kMySqlMaxUserName) {
+        return std::string(database);
+    }
+    const Sha256Digest digest = sha256(database);
+    const std::string hex = to_hex(std::span<const std::uint8_t>(digest.data(), 4));
+    return std::string(database.substr(0, kMySqlMaxUserName - 1 - hex.size())) + "_" + hex;
+}
+
+std::string server_database_name(std::string_view database, std::string_view family) {
+    const auto escaped = [](std::string_view s) {
+        return s.size() + static_cast<std::size_t>(std::count(s.begin(), s.end(), '_'));
+    };
+    if (family != kMySqlFamily || escaped(database) <= kMySqlMaxIdentifier) {
+        return std::string(database);
+    }
+    const Sha256Digest digest = sha256(database);
+    const std::string hex = to_hex(std::span<const std::uint8_t>(digest.data(), 4));
+    // The start, '_' (escaped: 2) and the hex digits, all within the limit.
+    std::size_t keep = 0;
+    while (keep < database.size() && escaped(database.substr(0, keep + 1)) + 2 + hex.size() <= kMySqlMaxIdentifier) {
+        ++keep;
+    }
+    return std::string(database.substr(0, keep)) + "_" + hex;
 }
 
 std::string project_database_name(const Project& project) {

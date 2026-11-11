@@ -9,10 +9,17 @@
 #include "floserver/core/database_service.h"
 #include "floserver/core/mariadb.h"
 #include "floserver/core/mariadb_settings.h"
+#include "floserver/core/paths.h"
 #include "floserver/core/phpmyadmin.h"
+#include "floserver/core/project_registry.h"
+#include "floserver/core/runtime_store.h"
+#include "floserver/core/secret_store.h"
 #include "test_util.h"
 
 #include <doctest/doctest.h>
+
+#include <algorithm>
+#include <cctype>
 
 using namespace floserver::core;
 namespace fs = std::filesystem;
@@ -244,4 +251,107 @@ TEST_CASE("a backup names MySQL's database however floserver.json writes it") {
     CHECK(backup_versions(tmp.path())["database"] == "mysql-8.4");
     test_util::write_file(tmp.path() / "floserver.json", R"({"database": "mysql-8.4"})");
     CHECK(backup_versions(tmp.path())["database"] == "mysql-8.4");
+}
+
+TEST_CASE("MySQL user names: 32 characters at most, the same short name every time") {
+    const std::string long_name(63, 'a');
+    const std::string user = project_database_user(long_name, kMySqlFamily);
+    CHECK(user.size() == kMySqlMaxUserName);
+    CHECK(user.starts_with(std::string(23, 'a') + "_"));
+    CHECK(user == project_database_user(long_name, kMySqlFamily));  // deterministic
+    CHECK(user != project_database_user(std::string(62, 'a') + "b", kMySqlFamily));
+    CHECK(std::all_of(user.begin() + 24, user.end(), [](char c) { return std::isxdigit(static_cast<unsigned char>(c)); }));
+    // 32 or fewer, and MariaDB's (80): the database's name.
+    CHECK(project_database_user(std::string(32, 'b'), kMySqlFamily) == std::string(32, 'b'));
+    CHECK(project_database_user(long_name, kMariaDbFamily) == long_name);
+    CHECK(project_database_user("my_shop", kMySqlFamily) == "my_shop");
+}
+
+TEST_CASE("MySQL on Windows: paths as ASCII, their 8.3 forms, or a clear refusal") {
+    const ShortPathFunction shorten = [](const fs::path& p) -> fs::path {
+        const std::string s = path_to_utf8(p);
+        if (s.find("\xD9\x86") != std::string::npos) {  // an Arabic letter: this "drive" keeps 8.3 names
+            return fs::path("C:/Users/KARWAN~1") / p.filename();
+        }
+        return {};
+    };
+    CHECK(ascii_path(fs::path("C:/Users/karwan/data"), shorten) == std::optional<fs::path>(fs::path("C:/Users/karwan/data")));
+    CHECK(ascii_path(path_from_utf8("C:/Users/\xD9\x86/data"), shorten) ==
+          std::optional<fs::path>(fs::path("C:/Users/KARWAN~1/data")));
+    CHECK_FALSE(ascii_path(path_from_utf8("C:/Users/\xC3\xA9/data"), shorten));  // no short name
+    CHECK_FALSE(ascii_path(path_from_utf8("C:/Users/\xC3\xA9/data"), ShortPathFunction()));
+
+    MariaDbFiles f = mariadb_files(path_from_utf8("C:/Users/\xD9\x86/rt/mysql"), "8.4.11",
+                                   path_from_utf8("C:/Users/\xD9\x86/data"), kMySqlFamily);
+    fs::path bad;
+    REQUIRE(ascii_mysql_files(f, shorten, bad));
+    for (const fs::path* p : {&f.base_dir, &f.server, &f.client, &f.admin, &f.dump, &f.folder, &f.data_dir, &f.config,
+                              &f.error_log, &f.init_file}) {
+        const std::string s = path_to_utf8(*p);
+        CAPTURE(s);
+        CHECK(std::all_of(s.begin(), s.end(), [](char c) { return static_cast<unsigned char>(c) < 0x80; }));
+    }
+    CHECK(f.config.parent_path() == f.folder);
+    CHECK(f.error_log.parent_path() == f.data_dir);
+    MariaDbFiles g = mariadb_files(path_from_utf8("C:/Users/\xC3\xA9/rt/mysql"), "8.4.11", "C:/d", kMySqlFamily);
+    CHECK_FALSE(ascii_mysql_files(g, shorten, bad));
+    CHECK(path_to_utf8(bad).find("\xC3\xA9") != std::string::npos);
+    CHECK(windows_short_path("/no/such/path").empty());
+}
+
+TEST_CASE("MySQL's root SQL sets root's password first; FloServer's tools read it from an option file") {
+    const std::string sql = root_password_sql("pw", kMySqlFamily);
+    CHECK(sql.find("ALTER USER IF EXISTS 'root'@'localhost'") < sql.find("CREATE USER"));
+    CHECK(root_password_sql("pw").find("ALTER USER IF EXISTS 'root'@'localhost'") == 0);
+    CHECK(empty_password_count_sql().find("authentication_string = ''") != std::string::npos);
+    CHECK(client_password_option_file(R"(a"b\c#d')") == "[client]\npassword=\"a\\\"b\\\\c#d'\"\n");
+    // MySQL's own listeners and logs.
+    CHECK(mariadb_option_problem("log_raw"));
+    CHECK(mariadb_option_problem("log-raw"));
+    const test_util::TempDir tmp;
+    const MariaDbFiles f = mariadb_files(tmp.path() / "inst", "8.4.11", tmp.path() / "data", kMySqlFamily);
+    CHECK(mariadb_config(f, 33101, false, false).find("secure-file-priv=NULL") != std::string::npos);
+    const MariaDbFiles m = mariadb_files(tmp.path() / "inst", "11.4.13", tmp.path() / "data");
+    CHECK(mariadb_config(m, 33100, false, false).find("secure-file-priv") == std::string::npos);  // MariaDB won't start with NULL
+}
+
+TEST_CASE("a new database server never takes a port another one keeps in its folder (one rule for every family)") {
+    const test_util::TempDir tmp;
+    const fs::path data = tmp.path() / "data";
+    // An installed MySQL (it never starts here: nothing connects) and a MariaDB folder from before, keeping 3307.
+    const fs::path dir = runtimes_dir(data) / "mysql" / "8.4.11";
+    fs::create_directories(dir);
+    test_util::write_file(dir / ".floserver-runtime.json",
+                          nlohmann::json{{"schema", 1}, {"name", "mysql"}, {"version", "8.4.11"},
+                                         {"platform", std::string(current_platform())}, {"variant", ""},
+                                         {"license", "x"}, {"sha256", std::string(64, 'a')}}
+                              .dump());
+    test_util::write_file(data / "data" / "mariadb-10.11" / "port", "3307\n");
+    AppConfig app;
+    std::string error;
+    REQUIRE(save_app_config(app_config_file(data), app, error));
+    DatabaseServiceConfig cfg;
+    cfg.data_dir = data;
+    cfg.probe = [](Port p) { return p != 3306 && can_listen_on_loopback(p); };
+    DatabaseService db(cfg, SecretStore(data));
+    db.start();
+    const auto servers = db.status()["servers"];
+    REQUIRE(servers.size() == 1);
+    CHECK(servers[0]["family"] == "mysql");
+    CHECK(servers[0]["port"] != 3307);
+    CHECK(test_util::read_file(data / "data" / "mysql-8.4" / "port") == std::to_string(servers[0]["port"].get<int>()) + "\n");
+    db.stop();
+}
+
+TEST_CASE("MySQL database names: a GRANT's escaped name fits its 64 characters") {
+    const std::string name = project_database_name("a-very-long-project-name-that-mysql-cannot-take-as-a-user-names");
+    const std::string on_mysql = server_database_name(name, kMySqlFamily);
+    CHECK(on_mysql != name);
+    CHECK(on_mysql == server_database_name(name, kMySqlFamily));
+    CHECK(grant_pattern(on_mysql).size() - 2 <= kMySqlMaxIdentifier);  // without its backticks
+    CHECK(server_database_name(name, kMariaDbFamily) == name);
+    CHECK(server_database_name("my_shop", kMySqlFamily) == "my_shop");
+    const std::string plain(64, 'a');  // no '_': nothing to escape
+    CHECK(server_database_name(plain, kMySqlFamily) == plain);
+    CHECK(project_database_user(on_mysql, kMySqlFamily).size() <= kMySqlMaxUserName);
 }

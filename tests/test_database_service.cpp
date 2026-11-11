@@ -27,6 +27,7 @@
 #include <unistd.h>
 
 #include <set>
+#include <sstream>
 #include <thread>
 
 using namespace floserver::core;
@@ -940,6 +941,12 @@ TEST_CASE("MySQL 8.4 beside MariaDB: set up, a project's own login (caching_sha2
     const fs::path copy_dir = tmp.path() / "shop-copy";
     test_util::write_file(copy_dir / "floserver.json", R"({"database": "mysql-8.4"})");
     REQUIRE(add_project(app, copy_dir, "", error));
+    // A 63-character name: MySQL's user names have 32 at most.
+    const std::string long_name = "a-very-long-project-name-that-mysql-cannot-take-as-a-user-names";
+    REQUIRE(long_name.size() == 63);
+    const fs::path long_dir = tmp.path() / long_name;
+    test_util::write_file(long_dir / "floserver.json", R"({"database": "mysql-8.4"})");
+    REQUIRE(add_project(app, long_dir, "", error));
     const fs::path sys_dir = tmp.path() / "sys";  // MySQL's own database's name
     test_util::write_file(sys_dir / "floserver.json", R"({"database": "mysql-8.4"})");
     REQUIRE(add_project(app, sys_dir, "", error));
@@ -980,7 +987,7 @@ TEST_CASE("MySQL 8.4 beside MariaDB: set up, a project's own login (caching_sha2
     REQUIRE(mysql_server.is_object());
     CHECK(mysql_server["series"] == "8.4");
     CHECK(mysql_server["state"] == "sleeping");
-    CHECK(mysql_server["projects"] == nlohmann::json{"my-shop", "shop-copy", "sys"});
+    CHECK(mysql_server["projects"] == nlohmann::json{"my-shop", "shop-copy", long_name, "sys"});
     CHECK(ports.size() == servers.size());
     const Port port = mysql_server["port"].get<Port>();
     CHECK(port >= 3307);
@@ -1020,6 +1027,54 @@ TEST_CASE("MySQL 8.4 beside MariaDB: set up, a project's own login (caching_sha2
     } else {
         MESSAGE("PHP with pdo_mysql isn't installed here; its login skipped");
     }
+
+    // No listener but the internal port (no X Protocol, no admin port), and SQL reaches no file.
+    {
+        const auto pid = db.series_status("8.4", "mysql")["server"]["pid"].get<std::uint32_t>();
+        const Port internal = db.series_status("8.4", "mysql")["server"]["internal_port"].get<Port>();
+        std::set<std::string> inodes;
+        for (const auto& fd : fs::directory_iterator(fs::path("/proc") / std::to_string(pid) / "fd", ec)) {
+            const std::string target = fs::read_symlink(fd.path(), ec).string();
+            if (target.starts_with("socket:[")) {
+                inodes.insert(target.substr(8, target.size() - 9));
+            }
+        }
+        std::vector<int> listening;
+        for (const char* table : {"/proc/net/tcp", "/proc/net/tcp6"}) {
+            std::istringstream lines(test_util::read_file(table));
+            std::string line;
+            std::getline(lines, line);  // the header
+            while (std::getline(lines, line)) {
+                std::istringstream cols(line);
+                std::string sl, local, remote, state, queues, timer, retr, uid, timeout, inode;
+                cols >> sl >> local >> remote >> state >> queues >> timer >> retr >> uid >> timeout >> inode;
+                if (state == "0A" && inodes.contains(inode)) {
+                    listening.push_back(std::stoi(local.substr(local.find(':') + 1), nullptr, 16));
+                }
+            }
+        }
+        CHECK(listening == std::vector<int>{internal});
+        CHECK(query(port, "root", *secrets.read("mysql-8.4/root"), "SELECT @@secure_file_priv", client) == "NULL");
+    }
+
+    // A 63-character project name: MySQL counts a GRANT's escapes toward its 64, so the database's
+    // name is cut to fit (with a hash), and its user to 32.
+    const auto long_login = db.project_login(long_name, refusal);
+    REQUIRE_MESSAGE(long_login, refusal.message);
+    CHECK(long_login->user.size() == 32);
+    CHECK(long_login->user == project_database_user(long_login->database, "mysql"));
+    CHECK(long_login->database == server_database_name(project_database_name(long_name), "mysql"));
+    CHECK(long_login->database.size() + static_cast<std::size_t>(std::count(long_login->database.begin(),
+                                                                          long_login->database.end(), '_')) <= 64);
+    CHECK(long_login->database.starts_with("a_very_long"));
+    CHECK(query(port, long_login->user, long_login->password, "USE " + long_login->database + "; SELECT 1", client) == "1");
+    {
+        bool dropped = false;
+        const auto hold = db.hold_project(long_name);
+        REQUIRE_MESSAGE(db.drop_project_database(long_name, refusal, dropped), refusal.message);
+        CHECK(dropped);
+    }
+    CHECK(query(port, long_login->user, long_login->password, "SELECT 1", client).starts_with("ERROR"));
 
     // The project's own user: its database only, MySQL's default login method.
     CHECK(query(port, "my_shop", login->password, "USE my_shop; CREATE TABLE t (a INT, b TEXT); "
@@ -1072,14 +1127,23 @@ TEST_CASE("MySQL 8.4 beside MariaDB: set up, a project's own login (caching_sha2
           "1\tit's\n2\ttwo");
     CHECK(query(port, "shop_copy", copy->password, "USE shop_copy; CALL p()", client) == "42");
     CHECK(db.project_database_bytes("my-shop").value_or(0) > 0);
+    if (with_mariadb) {
+        // Loaded into the project's own family's server: MariaDB never saw it.
+        const auto maria_root = db.root_login("10.11", refusal);
+        REQUIRE_MESSAGE(maria_root, refusal.message);
+        CHECK(query(maria_root->port, "root", maria_root->password, "SHOW DATABASES LIKE 'shop%'").empty());
+    }
 
     // Settings > Database: root's login, a new root password, the final my.ini.
     const auto root_login = db.root_login("8.4", refusal, "mysql");
     REQUIRE_MESSAGE(root_login, refusal.message);
     CHECK(root_login->password == *root);
-    REQUIRE_MESSAGE(db.set_root_password("8.4", "New-pass-84", refusal, "mysql"), refusal.message);
+    // Quotes, a backslash and a '#': FloServer's tools read it from their option file.
+    const std::string new_root = R"(New"pa\ss#84')";
+    REQUIRE_MESSAGE(db.set_root_password("8.4", new_root, refusal, "mysql"), refusal.message);
+    CHECK(secrets.read("mysql-8.4/root") == std::optional<std::string>(new_root));
+    REQUIRE_MESSAGE(db.set_root_password("8.4", "New-pass-84", refusal, "mysql"), refusal.message);  // the tools logged in with it
     CHECK(query(port, "root", "New-pass-84", "SELECT 1", client) == "1");
-    CHECK(secrets.read("mysql-8.4/root") == std::optional<std::string>("New-pass-84"));
     const auto final_ini = db.final_ini("8.4", refusal, "mysql");
     REQUIRE_MESSAGE(final_ini, refusal.message);
     CHECK(*final_ini == data / "mysql" / "8.4" / "final-my.ini");

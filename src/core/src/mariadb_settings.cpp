@@ -51,10 +51,11 @@ constexpr std::array<std::string_view, 13> kManagedMore = {
 // MySQL's (D28): its X Protocol and admin interface listen on ports of their
 // own, and these move its files. Unknown to MariaDB, so refusing them there
 // changes nothing.
-constexpr std::array<std::string_view, 9> kManagedMySql = {
+constexpr std::array<std::string_view, 10> kManagedMySql = {
     "admin_address",          "admin_port",          "create_admin_listener_thread",
     "innodb_directories",     "innodb_temp_tablespaces_dir", "innodb_redo_log_archive_dirs",
     "innodb_temp_data_file_path", "tmpdir",          "keyring_file_data",
+    "log_raw",  // would write passwords into the general log
 };
 // Real options that happen to start a managed name: not taken for a
 // shortened one ("general_log" is not general_log_file).

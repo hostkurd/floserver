@@ -83,6 +83,7 @@ DbServer db_server_from_json(const json& server) {
     out.port_wanted = int_of(server, "port_wanted");
     out.connections = int_of(server, "connections");
     out.error = text_of(server, "error");
+    out.error_code = text_of(server, "error_code");
     return out;
 }
 
@@ -439,6 +440,8 @@ std::string db_state_text(const DbSeries& series, const DbServer& server, Lang l
         line = std::string(text(lang, Str::SettingsStarting));
     } else if (server.state == "stopping") {
         line = std::string(text(lang, Str::DbStopping));
+    } else if (server.state == "failed" && server.error_code == "path_not_ascii") {
+        line = std::string(text(lang, Str::DbPathNotAscii));
     } else if (server.state == "failed") {
         line = fill(lang, Str::DbFailed, {server.error});
     } else {

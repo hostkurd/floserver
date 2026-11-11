@@ -24,6 +24,7 @@
 #include "floserver/core/project_registry.h"
 
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <optional>
 #include <string>
@@ -63,6 +64,27 @@ struct MariaDbFiles {
                                          const std::filesystem::path& data,
                                          std::string_view family = kMariaDbFamily);
 
+// MySQL on Windows (D28): Oracle's mysqld.exe and its tools read option-file
+// and command-line paths in the ANSI code page (MariaDB 10.6+ reads UTF-8),
+// so a folder with non-English letters breaks them. Such a path is given
+// as its short (8.3) form, which is ASCII; when Windows keeps none (8.3
+// names turned off), MySQL can't run there and says so.
+//   `shorten`: GetShortPathNameW (windows_short_path()), or a test's.
+using ShortPathFunction = std::function<std::filesystem::path(const std::filesystem::path&)>;
+// GetShortPathNameW's answer for an existing path; empty when there's none
+// (and always outside Windows).
+[[nodiscard]] std::filesystem::path windows_short_path(const std::filesystem::path& path);
+// `path` when it's ASCII, else its short form when that is; else nothing.
+[[nodiscard]] std::optional<std::filesystem::path> ascii_path(const std::filesystem::path& path,
+                                                              const ShortPathFunction& shorten);
+// The paths MySQL's programs are given (its programs, the install, its
+// folder and data folder, and the files in them), each as ascii_path()
+// says. False, with `bad` the first path that has no ASCII form.
+[[nodiscard]] bool ascii_mysql_files(MariaDbFiles& files, const ShortPathFunction& shorten,
+                                     std::filesystem::path& bad);
+// What a MySQL server says when ascii_mysql_files() can't: its error_code.
+inline constexpr std::string_view kPathNotAsciiCode = "path_not_ascii";
+
 // The config: 127.0.0.1 only on `port` (the internal port the service
 // relays to), utf8mb4, a small buffer pool (a development server). Paths
 // are relative (mariadbd runs in the series' folder), except basedir
@@ -75,6 +97,9 @@ struct MariaDbFiles {
 // their own, so they win over anything before them. MySQL's also turn its
 // X Protocol listener off (it would listen on every address, on 33060) and
 // the binary log (a development server's disk would fill with it).
+// MySQL's get secure-file-priv=NULL: no LOAD DATA INFILE or SELECT ... INTO
+// OUTFILE reaches this computer's files (MariaDB has no such value). On Windows MySQL's basedir is
+// written too (as ascii_path() gives it).
 struct MariaDbExtras;  // mariadb_settings.h
 [[nodiscard]] std::string mariadb_config(const MariaDbFiles& files, Port port, bool as_root, bool with_init_file,
                                          const MariaDbExtras* extras = nullptr);
@@ -102,7 +127,18 @@ struct MariaDbExtras;  // mariadb_settings.h
 // set-up makes only root@localhost, and with skip-name-resolve a TCP login
 // from 127.0.0.1 doesn't match it: root@127.0.0.1 and root@::1 are made
 // too, with every right (as MariaDB's install-db makes them).
+// The ALTER USER lines come first: a failing statement in MySQL's init file
+// skips the ones after it, and root must never keep the empty password the
+// set-up gave it.
 [[nodiscard]] std::string root_password_sql(const std::string& password, std::string_view family = kMariaDbFamily);
+// MySQL: how many accounts have no password (0 after the first start), as
+// one number. FloServer checks it before it trusts the first start.
+[[nodiscard]] std::string empty_password_count_sql();
+
+// An option file for the servers' programs that holds only `password`
+// in [client] (FloServer's tools get it this way: not in their arguments
+// or environment). The value is quoted, '\' and '"' escaped.
+[[nodiscard]] std::string client_password_option_file(const std::string& password);
 
 // A project's database and its own user (@localhost and @127.0.0.1), all
 // rights on that database only. Safe to run again: it sets the password
@@ -136,6 +172,25 @@ inline constexpr std::string_view kSharedDatabasePrefix = "www_";
 // The same for a registered project: the name it kept through a rename
 // (D22), else the one its name gives.
 [[nodiscard]] std::string project_database_name(const Project& project);
+
+// A project's own user on a `family` server: its database's name, which
+// MariaDB takes up to 80 characters. MySQL takes user names up to 32 (ERROR
+// 1470), and a project's name may have 63: a longer one becomes its first 23
+// characters, '_' and 8 hex digits of the SHA-256 of the whole name. It's
+// made from the database's name, which is kept with the project through a
+// rename (project_database_name()), so it never changes. Database names may
+// have 64 characters on both.
+inline constexpr std::size_t kMySqlMaxUserName = 32;
+[[nodiscard]] std::string project_database_user(std::string_view database, std::string_view family);
+// The name a project's database has on a `family` server. MySQL counts the
+// '\' that escape a GRANT's '_' toward its 64-character limit (ERROR 1059),
+// so there a name whose GRANT pattern (grant_pattern()) would be longer is
+// cut the same way (its start, '_', 8 hex digits of its SHA-256) to fit:
+// the same name every time. Elsewhere, and for shorter names, `database`.
+// The secure store keeps its password under `database`, the name FloServer
+// knows it by.
+inline constexpr std::size_t kMySqlMaxIdentifier = 64;
+[[nodiscard]] std::string server_database_name(std::string_view database, std::string_view family);
 
 // Names a project's database and user can't have: MariaDB's and MySQL's own
 // accounts and databases ("root" would take over the root account; mysql,

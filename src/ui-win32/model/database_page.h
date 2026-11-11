@@ -27,6 +27,7 @@ struct DbServer {
     int port_wanted = 0;     // the port chosen in Settings, when another program has it
     int connections = 0;
     std::string error;
+    std::string error_code;  // "path_not_ascii": MySQL can't be given its folder's path (Windows)
 };
 
 // The engines' tabs, in order: their family ("mariadb", "mysql") and name.

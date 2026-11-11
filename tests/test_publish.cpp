@@ -388,14 +388,20 @@ TEST_CASE("publisher: MySQL 8.4 is compared with Oracle's download and listed fo
     // Oracle publishes MD5 sums and signatures, no SHA-256: the original is compared.
     const OfficialSource source = official_source(path);
     CHECK(source.kind == OfficialSource::Kind::Original);
-    CHECK(source.urls == std::vector<std::string>{"https://cdn.mysql.com/Downloads/MySQL-8.4/mysql-8.4.11-winx64.zip"});
-    cdn.http.serve(source.urls.front(), {200, body});
-
+    // Downloads/ keeps only the current release: the archive's address comes next.
+    CHECK(source.urls == std::vector<std::string>{"https://cdn.mysql.com/Downloads/MySQL-8.4/mysql-8.4.11-winx64.zip",
+                                                  "https://cdn.mysql.com/archives/mysql-8.4/mysql-8.4.11-winx64.zip"});
     const AddResult added = new_file(kTestCdn + "/" + path, kTestCdn, cdn.files);
     REQUIRE_MESSAGE(added.file, added.error);
     CHECK(added.file->title == "MySQL 8.4.11");
-    PublishFile f = *added.file;
     CheckContext ctx{cdn.http, kTestCdn};
+    // An older release: only the archive has it.
+    cdn.http.serve(source.urls.back(), {200, body});
+    PublishFile archived = *added.file;
+    check_file(ctx, archived);
+    CHECK(archived.state == CheckState::Ok);
+    cdn.http.serve(source.urls.front(), {200, body});
+    PublishFile f = *added.file;
     check_file(ctx, f);
     CHECK(f.state == CheckState::Ok);
 
