@@ -1089,6 +1089,27 @@ constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
           FLO_LRI "FloServer" FLO_PDI " لەم کۆمپیوتەرە لادەبات. خۆت هەڵدەبژێریت چی تر بسڕدرێتەوە."},
     Entry{Str::GeneralRemoveButton, "Remove FloServer…", "إزالة " FLO_LRI "FloServer" FLO_PDI "…",
           "لابردنی " FLO_LRI "FloServer" FLO_PDI "…"},
+    Entry{Str::GeneralAiTitle, "AI coding tools", "أدوات البرمجة بالذكاء الاصطناعي",
+          "ئامرازەکانی کۆدنووسین بە زیرەکیی دەستکرد"},
+    Entry{Str::GeneralAiNote,
+          "Claude Code, Cursor, VS Code and others can see your projects, versions, addresses, logs and caught "
+          "emails through MCP. Read-only: they can't change anything or see passwords.",
+          FLO_LRI "Claude Code" FLO_PDI " و" FLO_LRI "Cursor" FLO_PDI " و" FLO_LRI "VS Code" FLO_PDI
+          " وغيرها ترى مشاريعك وإصداراتها وعناوينها وسجلاتها والرسائل الملتقطة عبر " FLO_LRI "MCP" FLO_PDI
+          ". للقراءة فقط: لا تستطيع تغيير أي شيء ولا رؤية كلمات المرور.",
+          FLO_LRI "Claude Code" FLO_PDI "، " FLO_LRI "Cursor" FLO_PDI "، " FLO_LRI "VS Code" FLO_PDI
+          " و ئەوانی تر دەتوانن پڕۆژەکان، وەشانەکان، ناونیشانەکان، تۆمارەکان و ئیمەیلە گیراوەکانت ببینن لە ڕێگەی "
+          FLO_LRI "MCP" FLO_PDI ". تەنها خوێندنەوە: ناتوانن هیچ بگۆڕن یان وشەی نهێنی ببینن."},
+    Entry{Str::GeneralAiCommand, "Command", "الأمر", "فەرمان"},
+    Entry{Str::GeneralAiClaude, "Claude Code", FLO_LRI "Claude Code" FLO_PDI, FLO_LRI "Claude Code" FLO_PDI},
+    Entry{Str::GeneralAiOthers, "Cursor, VS Code", FLO_LRI "Cursor" FLO_PDI "، " FLO_LRI "VS Code" FLO_PDI,
+          FLO_LRI "Cursor" FLO_PDI "، " FLO_LRI "VS Code" FLO_PDI},
+    Entry{Str::GeneralAiFullPath, "flo isn't on your Path, so these lines name it in full.",
+          FLO_LRI "flo" FLO_PDI " ليس في " FLO_LRI "Path" FLO_PDI "، لذا تذكره هذه الأسطر بمساره الكامل.",
+          FLO_LRI "flo" FLO_PDI " لە " FLO_LRI "Path" FLO_PDI " دا نییە، بۆیە ئەم دێڕانە بە ڕێڕەوی تەواوی ناوی دەبەن."},
+    Entry{Str::GeneralAiFooter, "The AI tool starts flo mcp itself; nothing runs here until it does.",
+          "تُشغّل أداة الذكاء الاصطناعي " FLO_LRI "flo mcp" FLO_PDI " بنفسها؛ لا يعمل شيء هنا حتى تفعل ذلك.",
+          "ئامرازەکەی زیرەکیی دەستکرد خۆی " FLO_LRI "flo mcp" FLO_PDI " دەست پێ دەکات؛ تا ئەو کاتە هیچ لێرە کار ناکات."},
     Entry{Str::UninstallTitle, "Remove FloServer from this computer?",
           "إزالة " FLO_LRI "FloServer" FLO_PDI " من هذا الحاسوب؟",
           FLO_LRI "FloServer" FLO_PDI " لەم کۆمپیوتەرە لاببرێت؟"},

@@ -518,4 +518,23 @@ std::string licences_text(Lang lang, std::string_view version, const json* runti
     return out;
 }
 
+McpLines mcp_lines(const std::filesystem::path& flo_exe, bool on_path) {
+    McpLines out;
+    std::string program = "flo";
+    if (!on_path && !flo_exe.empty()) {
+        const std::u8string u = flo_exe.u8string();
+        program.assign(u.begin(), u.end());
+        out.full_path = true;
+    }
+    // For a shell: quoted when it has a space (C:\Program Files\...).
+    const std::string shell = program.find(' ') == std::string::npos ? program : "\"" + program + "\"";
+    out.command = shell + " mcp";
+    out.claude = "claude mcp add floserver -- " + shell + " mcp";
+    // JSON's own escapes for the path's backslashes and quotes.
+    out.json = R"({ "mcpServers": { "floserver": { "command": )" +
+               nlohmann::json(program).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) +
+               R"(, "args": ["mcp"] } } })";
+    return out;
+}
+
 }  // namespace floserver::ui

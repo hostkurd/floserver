@@ -104,29 +104,6 @@ MenuCommand track(HWND owner, HMENU menu, POINT at, bool rtl, const std::vector<
     return MenuCommand::None;
 }
 
-// Plain text on the clipboard (an address: nothing secret).
-bool put_text_on_clipboard(HWND owner, const std::string& value) {
-    const std::wstring wide = w(value);
-    if (OpenClipboard(owner) == FALSE) {
-        return false;
-    }
-    bool done = false;
-    EmptyClipboard();
-    const std::size_t bytes = (wide.size() + 1) * sizeof(wchar_t);
-    if (HGLOBAL text = GlobalAlloc(GMEM_MOVEABLE, bytes); text != nullptr) {
-        if (void* to = GlobalLock(text); to != nullptr) {
-            std::memcpy(to, wide.c_str(), bytes);
-            GlobalUnlock(text);
-            done = SetClipboardData(CF_UNICODETEXT, text) != nullptr;
-        }
-        if (!done) {
-            GlobalFree(text);
-        }
-    }
-    CloseClipboard();
-    return done;
-}
-
 }  // namespace
 
 void MainWindow::on_context_menu(LPARAM lparam) {

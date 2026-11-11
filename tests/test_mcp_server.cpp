@@ -722,6 +722,24 @@ TEST_CASE("the real flo mcp against the real service, over stdio") {
     CHECK(second[5]["result"]["isError"] == true);
     CHECK(second[6]["error"]["code"] == -32600);
 
+    // The service's own side: PHP's log only for a project running PHP, the
+    // kind checked, and Mailpit's list only when it's installed.
+    const auto php_log = client->call("projects.log", {{"name", "shop"}, {"kind", "php"}});
+    REQUIRE(php_log.has_value());
+    CHECK(php_log->error_code == "no_php");
+    const auto bad_kind = client->call("projects.log", {{"name", "shop"}, {"kind", "../x"}});
+    REQUIRE(bad_kind.has_value());
+    CHECK(bad_kind->error_code == "bad_params");
+    const auto unknown = client->call("projects.log", {{"name", "nobody"}, {"kind", "php"}});
+    REQUIRE(unknown.has_value());
+    CHECK_FALSE(unknown->ok);
+    const auto recent = client->call("mail.recent", {{"limit", 5}});
+    REQUIRE(recent.has_value());
+    CHECK(recent->error_code == "not_installed");
+    const auto bad_limit = client->call("mail.recent", {{"limit", "5"}});
+    REQUIRE(bad_limit.has_value());
+    CHECK(bad_limit->error_code == "bad_params");
+
     client.reset();
     CHECK(stop_service(instance, error));
 }

@@ -143,6 +143,20 @@ inline constexpr std::string_view kUninstallFlag = "--uninstall";
 // A StartupApproved\Run value: Task Manager turned it off (its first byte odd: 0x03, 0x01).
 [[nodiscard]] bool startup_disabled(const std::vector<unsigned char>& value);
 
+// --- AI coding tools (D32) -------------------------------------------------------
+
+// What the AI coding tools card shows, and its Copy buttons copy: the
+// command, Claude Code's line and the JSON for Cursor and VS Code. With
+// `on_path` (the flo a new terminal finds is this FloServer's) they say
+// "flo"; otherwise `flo_exe`'s full path, quoted where it has a space.
+struct McpLines {
+    std::string command;  // flo mcp
+    std::string claude;   // claude mcp add floserver -- flo mcp
+    std::string json;     // { "mcpServers": { "floserver": { "command": "flo", "args": ["mcp"] } } }
+    bool full_path = false;
+};
+[[nodiscard]] McpLines mcp_lines(const std::filesystem::path& flo_exe, bool on_path);
+
 // --- licences ------------------------------------------------------------------
 
 struct LicenceLine {

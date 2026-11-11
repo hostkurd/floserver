@@ -574,6 +574,14 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     GeneralRemoveTitle,
     GeneralRemoveNote,
     GeneralRemoveButton,
+    // Settings > General: AI coding tools (D32, flo mcp).
+    GeneralAiTitle,
+    GeneralAiNote,
+    GeneralAiCommand,      // the label before "flo mcp"
+    GeneralAiClaude,       // the label before Claude Code's command
+    GeneralAiOthers,       // the label before the JSON block: "Cursor, VS Code"
+    GeneralAiFullPath,     // flo isn't on the Path, so the lines name it in full
+    GeneralAiFooter,
     UninstallTitle,
     UninstallText,
     UninstallAlsoDelete,

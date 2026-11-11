@@ -73,6 +73,10 @@ private:
     RECT placed_{};         // where place() last put it (parent's client coordinates)
 };
 
+// Puts plain text (an address, a command: nothing secret) on the clipboard.
+// False when the clipboard couldn't be had.
+bool put_text_on_clipboard(HWND owner, const std::string& value);
+
 // Puts a secret (a password, .env lines with one) on the clipboard, kept
 // out of Windows' clipboard history and cloud clipboard; `value` is wiped
 // from memory. False when the clipboard couldn't be had.
