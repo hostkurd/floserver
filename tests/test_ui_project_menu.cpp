@@ -309,7 +309,7 @@ TEST_CASE("rename question: the help follows what's typed (D22)") {
     ProjectRow root = with_db;
     root.name = "root";
     CHECK(rename_question(root, "admin-site", rows, footer, Lang::En).database_note ==
-          "FloServer never makes a database called root (it's one of MariaDB's names), so its database takes the new "
+          "FloServer never makes a database called root (it's one of MariaDB's and MySQL's names), so its database takes the new "
           "name: admin_site.");
     CHECK(rename_question(root, "Bad!", rows, footer, Lang::En).database_note.ends_with("new name: …."));
     // A shared sites' name (from before shared sites) is kept like any other.

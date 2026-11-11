@@ -119,7 +119,7 @@ TEST_CASE("a my.ini name MariaDB doesn't know: it wouldn't start, and the closes
     CHECK_FALSE(unknown_db_option(s.known_options, "skip-name-resolve"));  // skip- goes with the name
     CHECK(unknown_db_option(s.known_options, "zzzz") == std::optional<std::string>(""));
     CHECK_FALSE(unknown_db_option({}, "zzzz"));  // MariaDB couldn't tell: no warnings
-    CHECK(unknown_db_option_text("11.4", "max_conections", "max_connections", Lang::En) ==
+    CHECK(unknown_db_option_text("MariaDB 11.4", "max_conections", "max_connections", Lang::En) ==
           "custom.ini: MariaDB 11.4 has no option named max_conections. Did you mean max_connections?");
 }
 

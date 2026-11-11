@@ -46,7 +46,7 @@ TEST_CASE("remove FloServer: the question's words, the sizes once they're counte
     CHECK(counting.also_delete == "Also delete");
     CHECK(counting.runtimes == "Downloaded runtimes and caches");
     CHECK(counting.runtimes_note ==
-          "PHP, MariaDB, Node.js, Python and the web servers · …. They can be downloaded again.");
+          "PHP, MariaDB, MySQL, Node.js, Python and the web servers · …. They can be downloaded again.");
     CHECK(counting.databases == "Databases");
     CHECK(counting.databases_note == "Every project's database · …. This can't be undone.");
     CHECK(counting.projects == "The projects folder");
