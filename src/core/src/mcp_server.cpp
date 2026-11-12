@@ -489,8 +489,17 @@ json redis_server(const json& r) {
                 {"port", field(r, "port")},
                 {"stored_items", field(r, "keys")},  // "keys" would read as a secret's name
                 {"keep_running", flag(object_at(r, "settings"), "keep_running")}};
-    if (!text_of(r, "error").empty()) {
-        out["error"] = start_failure(text_of(r, "error"));
+    // Its words are never shown: an install that's incomplete (a program or
+    // .NET missing, no free port) said as such, anything else as a start failure.
+    if (const std::string error = text_of(r, "error"); !error.empty()) {
+        if (error.find("no port is free") != std::string::npos) {
+            out["error"] = "no port is free for Redis; FloServer's window shows why";
+        } else if (error.find("is missing") != std::string::npos || error.find(".NET") != std::string::npos) {
+            out["error"] = "Redis (Garnet) isn't installed properly; install it again in Settings > Runtimes "
+                           "(or: flo install garnet)";
+        } else {
+            out["error"] = start_failure(error);
+        }
     }
     return out;
 }
@@ -1449,7 +1458,8 @@ json Server::call_tool(const std::string& name, const json& args, std::string_vi
                         {"version", series},
                         {"host", "127.0.0.1"},
                         {"database", server_database_name(db_name, family)},
-                        {"user", project_database_user(db_name, family)},
+                        // From the name on the server, as the service makes it (database_service.cpp).
+                        {"user", project_database_user(server_database_name(db_name, family), family)},
                         {"note", "The password isn't given to AI tools. The project's .env (flo env) has it."}};
             if (const auto servers = ask("databases.list", json::object())) {
                 for (const json& s : array_at(*servers, "servers")) {

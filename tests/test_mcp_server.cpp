@@ -772,6 +772,7 @@ TEST_CASE("mcp: floserver.json's settings only as FloServer takes them") {
     backend.files["/home/me/sites/shop"] = R"({
         "php": "8.4", "node": "22", "bun": "GITHUB_PAT=ghp_LEAKLEAKLEAK", "deno": "LEAKNODE",
         "python": "hunter2LEAKPY", "web": "caddy LEAK4", "root": "../../LEAK5", "redis": "yes LEAK6",
+        "mariadb": "LEAK17", "mysql": "--password LEAK18",
         "database": "mariadb-LEAK7",
         "рhp": "LEAK8", "API_TOKEN=LEAK9": 1, "a_very_long_name_that_goes_on_and_on_LEAK10_x": 2,
         "extensions": ["intl", "ghp_LEAK11abcdef", "x=LEAK12"],
@@ -783,7 +784,7 @@ TEST_CASE("mcp: floserver.json's settings only as FloServer takes them") {
     const json& c = r["structuredContent"]["floserver_json"];
     CHECK(c["php"] == "8.4");
     CHECK(c["node"] == "22");
-    for (const char* k : {"bun", "deno", "python", "web", "root", "redis", "database"}) {
+    for (const char* k : {"bun", "deno", "python", "web", "root", "redis", "database", "mariadb", "mysql"}) {
         INFO(k);
         CHECK(c[k] == "(set, not valid)");
     }
@@ -935,7 +936,7 @@ TEST_CASE("mcp: MySQL's names as its server has them, and Bun and Deno") {
     const json& db = r["structuredContent"]["database"];
     CHECK(db["engine"] == "mysql");
     CHECK(db["port"] == 3307);
-    CHECK(db["user"] == project_database_user(project_database_name(long_name), "mysql"));
+    CHECK(db["user"] == project_database_user(server_database_name(project_database_name(long_name), "mysql"), "mysql"));
     CHECK(db["user"].get<std::string>().size() <= kMySqlMaxUserName);
     CHECK(db["database"] == server_database_name(project_database_name(long_name), "mysql"));
     CHECK_FALSE(db.contains("password"));
@@ -947,6 +948,20 @@ TEST_CASE("mcp: MySQL's names as its server has them, and Bun and Deno") {
     const json status = call_tool(server, "service_status")["structuredContent"];
     CHECK(status["databases"][1]["engine"] == "mysql");
     CHECK(status["databases"][1]["port"] == 3307);
+
+    // Garnet's error never shows its words: an incomplete install as such, the rest as a start failure.
+    backend.results["redis.status"]["state"] = "failed";
+    backend.results["redis.status"]["error"] = "Garnet's GarnetServer program is missing from /data/runtimes/garnet/1.0.84";
+    CHECK(call_tool(server, "service_status")["structuredContent"]["redis"]["error"] ==
+          "Redis (Garnet) isn't installed properly; install it again in Settings > Runtimes (or: flo install garnet)");
+    backend.results["redis.status"]["error"] = "GarnetServer --auth Password --password LEAK19 ended (exit 1)";
+    for (const char* tool : {"service_status", "list_runtimes", "project_info"}) {
+        const json out = call_tool(server, tool, std::string_view(tool) == "project_info" ? json{{"name", "shop"}} : json::object());
+        INFO(out.dump(2));
+        CHECK(out.dump().find("LEAK19") == std::string::npos);
+    }
+    CHECK(call_tool(server, "service_status")["structuredContent"]["redis"]["error"] ==
+          "its server can't start (exit 1); FloServer's window shows why");
 }
 
 TEST_CASE("mcp: only read-only service methods, and secrets hidden at any depth") {
