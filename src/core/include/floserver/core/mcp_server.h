@@ -78,36 +78,45 @@ public:
     [[nodiscard]] virtual std::optional<protocol::Reply> call(const std::string& method, const nlohmann::json& params,
                                                               std::string& error) = 0;
     // The text of <folder>/floserver.json, the folder being one the service
-    // named; nothing when it's missing, unreadable or over 256 KiB.
-    [[nodiscard]] virtual std::optional<std::string> project_file(const std::filesystem::path& folder) = 0;
+    // named (read_project_json). Nothing when it's missing (`why` empty) or
+    // refused (`why` says why: a link, over 256 KiB...).
+    [[nodiscard]] virtual std::optional<std::string> project_file(const std::filesystem::path& folder,
+                                                                  std::string& why) = 0;
 };
 
 // The service's methods `flo mcp` may use: none of them changes anything or
 // returns a password. Every other one is refused before it's sent.
 [[nodiscard]] bool read_only_method(std::string_view method);
 
-// True for a key named like a secret, compared without case: containing
-// pass, pwd, secret, token, cookie, credential, dsn, apikey, privatekey,
-// passphrase, authorization, authentication or bearer, or with auth, auths,
-// key, keys, pw or sig as a part of its own (APP_KEY, BASIC_AUTH, default_pw).
+// True for a key named like a secret, percent-decoded and compared without
+// case: containing pass, pwd, secret, token, cookie, credential, dsn, apikey,
+// privatekey, passphrase, authorization, authentication, bearer, signature,
+// salt, hmac, jwt, session, sessid or otp; with auth, auths, key, keys, pw,
+// sig, code, sid, pat, sk, pin or mfa as a part of its own (APP_KEY,
+// BASIC_AUTH, default_pw, x-amz-signature); or ending in "key" (licensekey).
 [[nodiscard]] bool secret_key(std::string_view key);
 
-// True for a string that looks like it holds a secret: a URL with a
-// password (mysql://root:pw@host), or NAME=value with a secret_key() name
-// (DB_PASSWORD=..., password=..., API_TOKEN=...) at its start or after a
-// space, ';', '&', ',' or a quote.
+// `text` with the values of secrets replaced by "[hidden]": after a
+// secret_key() name in the shapes logs and configs use (name=v, "name":"v",
+// 'name' => 'v', [name] => v, name: v, --name v), mysql's -pPASSWORD, the
+// token after Bearer/Basic (and "Authorization: Bearer ..."), a URL's
+// password (mysql://root:pw@host), and known tokens anywhere (ghp_,
+// github_pat_, sk_live_, xoxb-, AKIA..., JWTs).
+[[nodiscard]] std::string blank_secrets(std::string_view text);
+// True when blank_secrets() would hide something.
 [[nodiscard]] bool secret_value(std::string_view value);
 
 // The second line of defence, after each tool picked what it shows: every
-// value under a secret_key() becomes "[hidden]", and every string that is a
-// secret_value(), at any depth.
+// value under a secret_key() becomes "[hidden]", and every string has its
+// secrets blanked (blank_secrets), at any depth.
 void redact_secrets(nlohmann::json& value);
 
-// <folder>/floserver.json's text for project_info: only a regular file
-// that's no link (symbolic or hard) and whose real path is in the folder's
-// real path, at most 256 KiB. Nothing otherwise: a floserver.json that
-// leads elsewhere (to ~/.docker/config.json, say) is never read.
-[[nodiscard]] std::optional<std::string> read_project_json(const std::filesystem::path& folder);
+// <folder>/floserver.json's text for project_info: only the folder's own
+// plain file (plain_file.h: no symbolic or hard link, checked on the open
+// file), at most 256 KiB. Nothing otherwise, with `why` (empty when there's
+// none): a floserver.json that leads elsewhere (to ~/.docker/config.json,
+// say) is never read.
+[[nodiscard]] std::optional<std::string> read_project_json(const std::filesystem::path& folder, std::string& why);
 
 // The tools as tools/list gives them, in a fixed order. `version` picks
 // what that revision has (2025-03-26 has no title or outputSchema).

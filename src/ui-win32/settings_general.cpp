@@ -905,9 +905,7 @@ void SettingsWindow::paint_general_text(Canvas& c) const {
     title(gg.ai_title, Str::GeneralAiTitle);
     c.paragraph(gg.ai_note, w(text(lang_, Str::GeneralAiNote)), fonts_.caption.get(), p.text_subtle);
     for (std::size_t i = 0; i < gg.ai_copy.size(); ++i) {
-        static constexpr std::array<Str, 4> kLabels = {Str::GeneralAiCommand, Str::GeneralAiClaude, Str::GeneralAiOthers,
-                                                       Str::GeneralAiVsCode};
-        c.text(gg.ai_labels.at(i), w(text(lang_, kLabels.at(i))), fonts_.caption.get(), p.text_subtle, Align::Start, false);
+        c.text(gg.ai_labels.at(i), w(text(lang_, mcp_label(mcp_lines_, i))), fonts_.caption.get(), p.text_subtle, Align::Start, false);
         // Commands read left to right in every language (embedded, as paths
         // are, in Arabic and Kurdish); the boxes' text sits inside their padding.
         RECT value = gg.ai_values.at(i);

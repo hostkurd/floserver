@@ -518,6 +518,20 @@ std::string licences_text(Lang lang, std::string_view version, const json* runti
     return out;
 }
 
+Str mcp_label(const McpLines& lines, std::size_t row) {
+    switch (row) {
+        case 0:
+            return lines.command.starts_with("& ") ? Str::GeneralAiPowerShell : Str::GeneralAiCommand;
+        case 1:
+            return Str::GeneralAiClaude;
+        case 2:
+            return Str::GeneralAiOthers;
+        default:
+            break;
+    }
+    return Str::GeneralAiVsCode;
+}
+
 McpLines mcp_lines(const std::filesystem::path& flo_exe, bool on_path) {
     McpLines out;
     std::string program = "flo";

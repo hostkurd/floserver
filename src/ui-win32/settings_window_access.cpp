@@ -445,10 +445,8 @@ AccessNode SettingsWindow::access_node(const Hit& hit) const {
             return button(can_check_updates());
         case Part::GeneralAiCopy: {
             // Three Copy buttons: each says what it copies.
-            static constexpr std::array<Str, 4> kWhat = {Str::GeneralAiCommand, Str::GeneralAiClaude,
-                                                         Str::GeneralAiOthers, Str::GeneralAiVsCode};
             AccessNode n = button_node(access_id(hit), access_join(lang_, {std::string(text(lang_, Str::DbCopy)),
-                                                                           std::string(text(lang_, kWhat.at(std::min<std::size_t>(row, 3))))}));
+                                                                           std::string(text(lang_, mcp_label(mcp_lines_, row)))}));
             n.focusable = true;
             return n;
         }

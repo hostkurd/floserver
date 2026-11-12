@@ -159,6 +159,9 @@ struct McpLines {
     bool full_path = false;
 };
 [[nodiscard]] McpLines mcp_lines(const std::filesystem::path& flo_exe, bool on_path);
+// Each line's label: Command (PowerShell when it's PowerShell's & form),
+// Claude Code, Cursor and Claude Desktop, VS Code.
+[[nodiscard]] Str mcp_label(const McpLines& lines, std::size_t row);
 
 // --- licences ------------------------------------------------------------------
 

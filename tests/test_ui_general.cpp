@@ -379,4 +379,10 @@ TEST_CASE("AI coding tools: the lines for flo mcp, short when flo is on the Path
     CHECK(mcp_lines(fs::path("D:/tools/flo.exe"), false).command == floserver::core::path_to_utf8(fs::path("D:/tools/flo.exe")) + " mcp");
     // Nothing known: plain flo.
     CHECK(mcp_lines(fs::path(), false).command == "flo mcp");
+    // The command's label says PowerShell when it's PowerShell's form.
+    CHECK(mcp_label(on, 0) == Str::GeneralAiCommand);
+    CHECK(mcp_label(off, 0) == Str::GeneralAiPowerShell);
+    CHECK(mcp_label(off, 1) == Str::GeneralAiClaude);
+    CHECK(mcp_label(off, 2) == Str::GeneralAiOthers);
+    CHECK(mcp_label(off, 3) == Str::GeneralAiVsCode);
 }

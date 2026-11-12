@@ -3,6 +3,7 @@
 #include "floserver/core/build_info.h"
 #include "floserver/core/mailpit.h"
 #include "floserver/core/paths.h"
+#include "floserver/core/plain_file.h"
 
 #include <algorithm>
 #include <cctype>
@@ -79,9 +80,6 @@ const json& object_at(const json& j, const char* key) {
     return f.is_object() ? f : empty_object();
 }
 
-// Text from the service that others may have written (a server's error):
-// one line, no control or bidi characters, short.
-std::string shown_text(const json& j, const char* key) { return clean_error_text(text_of(j, key), 300); }
 
 // Is `c` in a name made of letters, digits and `extra`?
 bool name_char(char c, std::string_view extra) {
@@ -301,30 +299,93 @@ std::string utc_ms(std::int64_t ms) {
            std::to_string(millis) + "Z";
 }
 
-// A request's path with the values of query parameters named like secrets
-// left out: /login?token=abc&page=2 -> /login?token=&page=2.
-std::string blank_secret_query(std::string_view uri) {
-    const std::size_t q = uri.find('?');
-    if (q == std::string_view::npos) {
-        return std::string(uri);
-    }
-    std::string out(uri.substr(0, q + 1));
-    std::string_view rest = uri.substr(q + 1);
+// One `name=value` list (a query, or a path's ;params) with the values of
+// names like secrets left out.
+std::string blank_params(std::string_view params, char separator) {
+    std::string out;
     bool first = true;
     while (true) {
-        const std::size_t amp = rest.find('&');
-        const std::string_view param = rest.substr(0, amp);
-        out += first ? "" : "&";
+        const std::size_t sep = params.find(separator);
+        const std::string_view param = params.substr(0, sep);
+        out += first ? "" : std::string(1, separator);
         first = false;
         const std::size_t eq = param.find('=');
-        out += eq != std::string_view::npos && secret_key(param.substr(0, eq)) ? std::string(param.substr(0, eq + 1))
-                                                                                : std::string(param);
-        if (amp == std::string_view::npos) {
+        const bool hide = eq != std::string_view::npos && eq + 1 < param.size() && secret_key(param.substr(0, eq));
+        out += hide ? std::string(param.substr(0, eq + 1)) + "[hidden]" : std::string(param);
+        if (sep == std::string_view::npos) {
             break;
         }
-        rest.remove_prefix(amp + 1);
+        params.remove_prefix(sep + 1);
     }
     return out;
+}
+
+// A request's path with the values of parameters named like secrets left
+// out, in the query and as ;params (;jsessionid=...):
+// /login;jsessionid=AB?token=abc&page=2 -> /login;jsessionid=[hidden]?token=[hidden]&page=2.
+std::string blank_secret_query(std::string_view uri) {
+    const std::size_t q = uri.find('?');
+    const std::string_view path = uri.substr(0, q);
+    std::string out;
+    // Each path segment's ;params.
+    std::size_t at = 0;
+    while (at <= path.size()) {
+        const std::size_t slash = path.find('/', at);
+        const std::string_view segment = path.substr(at, slash == std::string_view::npos ? std::string_view::npos : slash - at);
+        const std::size_t semi = segment.find(';');
+        if (semi == std::string_view::npos) {
+            out += segment;
+        } else {
+            out += std::string(segment.substr(0, semi + 1)) + blank_params(segment.substr(semi + 1), ';');
+        }
+        if (slash == std::string_view::npos) {
+            break;
+        }
+        out += '/';
+        at = slash + 1;
+    }
+    if (q != std::string_view::npos) {
+        out += "?" + blank_params(uri.substr(q + 1), '&');
+    }
+    return out;
+}
+
+// Text the service wrote that may quote floserver.json ("php \"x\" is not a
+// version..."): the quoted parts left out, secrets blanked, one short line.
+std::string shown_problem(const json& p) {
+    std::string text = text_of(p, "problem");
+    std::string out;
+    bool quoted = false;
+    for (const char c : text) {
+        if (c == '"') {
+            out += quoted ? "\"" : "\"…";  // "…"
+            quoted = !quoted;
+        } else if (!quoted) {
+            out += c;
+        }
+    }
+    return clean_error_text(blank_secrets(out.substr(0, out.find('\n'))), 300);
+}
+
+// Why a server can't start, without its words: they begin with the start
+// command (floserver.json's "command", which may hold a password) and end
+// with its log. Only the exit code is kept.
+std::string start_failure(const std::string& error) {
+    std::string out = "its server can't start";
+    const std::size_t exit = error.rfind("(exit ");
+    if (exit != std::string::npos) {
+        std::size_t end = exit + 6;
+        if (end < error.size() && error[end] == '-') {
+            ++end;
+        }
+        while (end < error.size() && error[end] >= '0' && error[end] <= '9') {
+            ++end;
+        }
+        if (end < error.size() && error[end] == ')' && end > exit + 6) {
+            out += " (exit " + error.substr(exit + 6, end - exit - 6) + ")";
+        }
+    }
+    return out + "; FloServer's window shows why";
 }
 
 // A project's state in words, as `flo projects` says it.
@@ -333,15 +394,13 @@ std::string status_words(const json& p) {
     std::string missing;
     for (const json& m : array_at(p, "missing")) {
         if (m.is_string()) {
-            missing += (missing.empty() ? "" : ", ") + m.get<std::string>();
+            missing += (missing.empty() ? "" : ", ") + clean_error_text(m.get<std::string>(), 40);
         }
     }
     if (state == "ready") {
         const std::string run = text_of(p, "run");
         if (run == "failed") {
-            std::string why = text_of(p, "error");
-            why = clean_error_text(why.substr(0, why.find('\n')), 300);
-            return "on, its server can't start" + (why.empty() ? std::string() : ": " + why);
+            return "on, " + start_failure(text_of(p, "error"));
         }
         return run == "running" ? "on, running" : run == "starting" ? "on, starting" : run.empty() ? "on" : "on, asleep";
     }
@@ -351,7 +410,7 @@ std::string status_words(const json& p) {
     if (state == "needs_download") {
         return "on, needs " + missing + " (install it in FloServer)";
     }
-    return "problem: " + shown_text(p, "problem");
+    return "problem: " + shown_problem(p);
 }
 
 json versions_of(const json& p) {
@@ -391,7 +450,197 @@ bool read_only_method(std::string_view method) {
     return std::find(kAllowed.begin(), kAllowed.end(), method) != kAllowed.end();
 }
 
-bool secret_key(std::string_view key) {
+namespace {
+
+// %74oken -> token, api%5Fkey -> api_key (what a server sees).
+std::string percent_decoded(std::string_view text) {
+    const auto hex = [](char c) -> int {
+        return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+    };
+    std::string out;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == '%' && i + 2 < text.size() && hex(text[i + 1]) >= 0 && hex(text[i + 2]) >= 0) {
+            out += static_cast<char>(hex(text[i + 1]) * 16 + hex(text[i + 2]));
+            i += 2;
+        } else {
+            out += text[i] == '+' ? ' ' : text[i];
+        }
+    }
+    return out;
+}
+
+bool run_char(char c) { return name_char(c, "_.-%"); }
+
+bool lower_equal(std::string_view a, std::string_view b) {
+    return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
+               return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y));
+           });
+}
+
+// A token that's a secret whatever it's called: GitHub, Stripe and Slack
+// tokens, AWS access keys, JWTs.
+bool known_token(std::string_view run) {
+    static constexpr std::array<std::string_view, 16> kPrefixes = {
+        "ghp_",    "gho_",    "ghu_",    "ghs_",  "ghr_",  "github_pat_", "sk_live_", "sk_test_",
+        "rk_live_", "rk_test_", "pk_live_", "xoxb-", "xoxp-", "xoxa-",       "xoxr-",    "xoxs-"};
+    for (const std::string_view prefix : kPrefixes) {
+        if (run.size() >= prefix.size() + 6 && run.substr(0, prefix.size()) == prefix) {
+            return true;
+        }
+    }
+    // AKIA and 16 capitals or digits.
+    if (run.size() >= 20 && (run.substr(0, 4) == "AKIA" || run.substr(0, 4) == "ASIA") &&
+        std::all_of(run.begin() + 4, run.begin() + 20, [](char c) { return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'); })) {
+        return true;
+    }
+    // eyJ...{4,}.{4,}.: a JWT's header and payload.
+    if (run.size() > 20 && run.substr(0, 3) == "eyJ") {
+        const std::size_t dot = run.find('.');
+        return dot != std::string_view::npos && dot >= 8 && run.find('.', dot + 1) != std::string_view::npos &&
+               run.find('.', dot + 1) >= dot + 5;
+    }
+    return false;
+}
+
+struct Span {
+    std::size_t begin;
+    std::size_t end;
+};
+
+// Where `text` holds a secret's value: after a name like a secret (name=v,
+// "name": "v", 'name' => 'v', [name] => v, name: v, --name v), -pPASSWORD,
+// the token after Bearer or Basic, a URL's password, and known tokens.
+std::vector<Span> secret_spans(std::string_view s) {
+    std::vector<Span> spans;
+    const std::size_t n = s.size();
+    const auto blank = [](char c) { return c == ' ' || c == '\t'; };
+    const auto value_end = [&](std::size_t v, char quote) {
+        std::size_t e = v;
+        if (quote != 0) {
+            while (e < n && s[e] != quote && s[e] != '\n') {
+                ++e;
+            }
+        } else {
+            while (e < n && std::string_view(" \t\r\n&;,})]\"'<>").find(s[e]) == std::string_view::npos) {
+                ++e;
+            }
+        }
+        return e;
+    };
+    // A scheme's credentials: scheme://user:password@host.
+    for (std::size_t at = s.find("://"); at != std::string_view::npos; at = s.find("://", at + 3)) {
+        const std::size_t user = at + 3;
+        const std::size_t sign = s.find('@', user);
+        if (sign == std::string_view::npos) {
+            continue;
+        }
+        const std::string_view info = s.substr(user, sign - user);
+        const std::size_t colon = info.find(':');
+        if (colon != std::string_view::npos && info.find_first_of(" \t/") == std::string_view::npos) {
+            spans.push_back({user + colon + 1, sign});
+        }
+    }
+    std::size_t i = 0;
+    while (i < n) {
+        if (!run_char(s[i])) {
+            ++i;
+            continue;
+        }
+        const std::size_t a = i;
+        while (i < n && run_char(s[i])) {
+            ++i;
+        }
+        const std::size_t e = i;
+        const std::string_view run = s.substr(a, e - a);
+        if (known_token(run)) {
+            spans.push_back({a, e});
+            continue;
+        }
+        // mysql's -pPASSWORD.
+        if (run.size() > 2 && run[0] == '-' && run[1] == 'p' && (a == 0 || blank(s[a - 1]))) {
+            spans.push_back({a + 2, e});
+            continue;
+        }
+        // Bearer <token>, Basic <base64>.
+        if (lower_equal(run, "bearer") || lower_equal(run, "basic") || lower_equal(run, "token")) {
+            std::size_t v = e;
+            while (v < n && blank(s[v])) {
+                ++v;
+            }
+            const std::size_t ve = value_end(v, 0);
+            const std::string_view token = s.substr(v, ve - v);
+            const bool basic = lower_equal(run, "basic");
+            const bool looks = token.size() >= (basic ? 12U : 8U) &&
+                               (!basic || token.find_first_of("0123456789=+/") != std::string_view::npos);
+            if (v > e && looks) {
+                spans.push_back({v, ve});
+                i = ve;
+                continue;
+            }
+        }
+        // What follows the name: its closing quote or bracket, then = => : or (for --flags) a space.
+        std::size_t k = e;
+        if (k < n && (s[k] == '"' || s[k] == '\'' || s[k] == ']')) {
+            ++k;
+        }
+        while (k < n && blank(s[k])) {
+            ++k;
+        }
+        bool separated = false;
+        if (k + 1 < n && s[k] == '=' && s[k + 1] == '>') {
+            k += 2;
+            separated = true;
+        } else if (k < n && s[k] == '=') {
+            ++k;
+            separated = true;
+        } else if (k < n && s[k] == ':' && !(k + 1 < n && s[k + 1] == '/')) {
+            ++k;
+            separated = true;
+        } else if (run.size() > 2 && run.substr(0, 2) == "--" && k > e && k < n && s[k] != '-') {
+            separated = true;
+        }
+        std::string_view name = run;
+        while (!name.empty() && (name.front() == '-' || name.front() == '.')) {
+            name.remove_prefix(1);
+        }
+        if (!separated || name.empty() || !secret_key(name)) {
+            continue;
+        }
+        std::size_t v = k;
+        while (v < n && blank(s[v])) {
+            ++v;
+        }
+        char quote = 0;
+        if (v < n && (s[v] == '"' || s[v] == '\'')) {
+            quote = s[v];
+            ++v;
+        }
+        if (s.substr(v).starts_with("[hidden]")) {
+            i = v + 8;  // already left out
+            continue;
+        }
+        std::size_t ve = value_end(v, quote);
+        // Authorization: Bearer <token>: the scheme and the token.
+        const std::string_view word = s.substr(v, ve - v);
+        if (quote == 0 && (lower_equal(word, "bearer") || lower_equal(word, "basic") || lower_equal(word, "digest"))) {
+            std::size_t t = ve;
+            while (t < n && blank(s[t])) {
+                ++t;
+            }
+            ve = value_end(t, 0);
+        }
+        if (ve > v) {
+            spans.push_back({v, ve});
+            i = ve;
+        }
+    }
+    return spans;
+}
+
+}  // namespace
+
+bool secret_key(std::string_view raw_key) {
+    const std::string key = percent_decoded(raw_key);
     // Its parts: split at anything not a letter or digit, and where a
     // capital follows a small letter (apiKey); and all of it run together.
     std::vector<std::string> parts;
@@ -418,51 +667,44 @@ bool secret_key(std::string_view key) {
         parts.push_back(std::move(part));
     }
     // Anywhere in it...
-    static constexpr std::array<std::string_view, 13> kWithin = {
-        "pass",    "pwd",        "secret",     "token",         "cookie",         "credential", "dsn",
-        "apikey",  "privatekey", "passphrase", "authorization", "authentication", "bearer"};
+    static constexpr std::array<std::string_view, 20> kWithin = {
+        "pass",          "pwd",            "secret", "token",     "cookie", "credential", "dsn",
+        "apikey",        "privatekey",     "passphrase", "authorization", "authentication", "bearer",
+        "signature",     "salt",           "hmac",   "jwt",       "session", "sessid",   "otp"};
     // ...or as a part of its own (not "author", "monkey").
-    static constexpr std::array<std::string_view, 6> kParts = {"auth", "auths", "key", "keys", "pw", "sig"};
-    return std::any_of(kWithin.begin(), kWithin.end(), [&](std::string_view w) { return joined.find(w) != std::string::npos; }) ||
+    static constexpr std::array<std::string_view, 12> kParts = {"auth", "auths", "key",  "keys", "pw", "sig",
+                                                                "code", "sid",   "pat", "sk",   "pin", "mfa"};
+    // ...or at its end: masterkey, licensekey, appkey.
+    const bool key_suffix = joined.size() > 3 && joined.ends_with("key") && joined != "monkey";
+    return key_suffix ||
+           std::any_of(kWithin.begin(), kWithin.end(), [&](std::string_view w) { return joined.find(w) != std::string::npos; }) ||
            std::any_of(parts.begin(), parts.end(), [](const std::string& p) {
                return std::find(kParts.begin(), kParts.end(), p) != kParts.end();
            });
 }
 
-bool secret_value(std::string_view value) {
-    std::string lower(value);
-    for (char& c : lower) {
-        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+std::string blank_secrets(std::string_view text) {
+    std::vector<Span> spans = secret_spans(text);
+    if (spans.empty()) {
+        return std::string(text);
     }
-    // A URL with a password in it: scheme://user:password@host.
-    for (std::size_t at = lower.find("://"); at != std::string::npos; at = lower.find("://", at + 3)) {
-        const std::size_t first = lower.find_first_of("/@:", at + 3);
-        if (first != std::string::npos && lower[first] == ':' && lower.find('@', first) != std::string::npos) {
-            return true;
+    std::sort(spans.begin(), spans.end(), [](const Span& x, const Span& y) { return x.begin < y.begin; });
+    std::string out;
+    std::size_t at = 0;
+    for (const Span& sp : spans) {
+        if (sp.end <= at) {
+            continue;  // inside one already blanked
         }
+        const std::size_t from = std::max(sp.begin, at);
+        out.append(text.substr(at, from - at));
+        out += "[hidden]";
+        at = sp.end;
     }
-    // NAME=value where the name is a secret's (DB_PASSWORD=..., password=...,
-    // API_TOKEN=...), at the start or after a space, ';', '&', ',' or a quote;
-    // an empty value hides nothing.
-    for (std::size_t at = 0; at < lower.size(); ++at) {
-        if (at > 0 && std::string_view(" \t;&,\"'?(").find(lower[at - 1]) == std::string_view::npos) {
-            continue;
-        }
-        std::size_t end = at;
-        while (end < lower.size() && name_char(lower[end], "_.-")) {
-            ++end;
-        }
-        if (end == at || end >= lower.size() || lower[end] != '=') {
-            continue;
-        }
-        const bool has_value = end + 1 < lower.size() && std::string_view(" \t;&,\"'").find(lower[end + 1]) == std::string_view::npos;
-        if (has_value && secret_key(std::string_view(value).substr(at, end - at))) {
-            return true;
-        }
-        at = end;
-    }
-    return false;
+    out.append(text.substr(at));
+    return out;
 }
+
+bool secret_value(std::string_view value) { return !secret_spans(value).empty(); }
 
 void redact_secrets(json& value) {
     // A stack, not recursion: a deep document can't use up this one.
@@ -483,125 +725,156 @@ void redact_secrets(json& value) {
                 todo.push_back(&item);
             }
         } else if (j->is_string() && secret_value(j->get_ref<const std::string&>())) {
-            *j = "[hidden: it looked like a password or key]";
+            *j = blank_secrets(j->get_ref<const std::string&>());
         }
     }
 }
 
 namespace {
 
-// A short floserver.json value shown as it is: a number, true/false, or a
-// string with nothing that looks like a secret; anything else is "(set)".
-json shown_scalar(const json& v) {
-    if (v.is_boolean() || v.is_number() || v.is_null()) {
-        return v;
+constexpr std::string_view kNotValid = "(set, not valid)";
+
+bool version_like(const std::string& v) {
+    return !v.empty() && v.size() <= 20 && std::all_of(v.begin(), v.end(), [](char c) { return name_char(c, ".-"); });
+}
+
+// A floserver.json setting's value as FloServer would take it, else "(set, not valid)".
+json valid_setting(const std::string& key, const json& v) {
+    if (key == "php" && v.is_boolean() && !v.get<bool>()) {
+        return v;  // no PHP
     }
-    if (v.is_string()) {
-        const auto& s = v.get_ref<const std::string&>();
-        return secret_value(s) ? json("[hidden]") : json(clean_error_text(s, 200));
+    if (key == "php" || key == "php_choice" || key == "node" || key == "python" || key == "bun" || key == "deno") {
+        return v.is_string() && version_like(v.get<std::string>()) ? v : json(kNotValid);
     }
-    return "(set)";
+    if (key == "web") {
+        return v.is_string() && (v.get<std::string>() == "nginx" || v.get<std::string>() == "apache") ? v : json(kNotValid);
+    }
+    if (key == "redis") {
+        return v.is_boolean() ? v : json(kNotValid);
+    }
+    if (key == "root") {
+        // As the service takes it: a folder inside the project, by a relative path.
+        if (!v.is_string()) {
+            return kNotValid;
+        }
+        const std::string& r = v.get_ref<const std::string&>();
+        const bool ok = !r.empty() && r.size() <= 200 && r.front() != '/' && r.front() != '\\' &&
+                        r.find("..") == std::string::npos &&
+                        std::all_of(r.begin(), r.end(), [](char c) { return name_char(c, " _.-/\\"); });
+        return ok ? v : json(kNotValid);
+    }
+    if (key == "database") {
+        // "mariadb-11.4"
+        if (!v.is_string()) {
+            return kNotValid;
+        }
+        const std::string& d = v.get_ref<const std::string&>();
+        const std::size_t dash = d.find('-');
+        const bool ok = dash != std::string::npos && dash > 0 && dash <= 20 &&
+                        std::all_of(d.begin(), d.begin() + static_cast<std::ptrdiff_t>(dash),
+                                    [](char c) { return c >= 'a' && c <= 'z'; }) &&
+                        version_like(d.substr(dash + 1));
+        return ok ? v : json(kNotValid);
+    }
+    return kNotValid;
+}
+
+// A name from floserver.json shown as a name, or nothing when it may itself
+// be a secret: one that looks like one, holds = : @, or is over 40 characters.
+std::optional<std::string> safe_name(const std::string& name, std::string_view extra) {
+    if (name.empty() || name.size() > 40 || name.find_first_of("=:@") != std::string::npos || secret_value(name) ||
+        known_token(name)) {
+        return std::nullopt;
+    }
+    return shown_name(name, extra);
 }
 
 // A list of names (PHP extensions, "-exif" to turn one off).
-json shown_names(const json& list, std::string_view extra) {
+json shown_names(const json& list, std::string_view extra, int& hidden) {
     json out = json::array();
     for (const json& n : list.is_array() ? list : empty_array()) {
-        if (n.is_string() && std::cmp_less(out.size(), 200)) {
-            out.push_back(shown_name(n.get_ref<const std::string&>(), extra));
+        if (!n.is_string() || !std::cmp_less(out.size(), 200)) {
+            continue;
+        }
+        if (auto name = safe_name(n.get<std::string>(), extra)) {
+            out.push_back(std::move(*name));
+        } else {
+            ++hidden;
+        }
+    }
+    return out;
+}
+
+// The names of an object's keys (php_ini, env).
+json key_names(const json& object, std::string_view extra, int& hidden) {
+    json out = json::array();
+    for (auto it = object.begin(); it != object.end(); ++it) {
+        if (auto name = safe_name(it.key(), extra)) {
+            out.push_back(std::move(*name));
+        } else {
+            ++hidden;
         }
     }
     return out;
 }
 
 // What a project's floserver.json (or the service's "wants", from it) says,
-// with only what an AI tool may see: the known settings' values; php.ini's
-// keys without their values; whether there's a start command, not what it
-// says; the names of any env values; the other keys by name only.
+// with only what an AI tool may see: FloServer's own settings when their
+// values are what FloServer takes (else "(set, not valid)"); php.ini's and
+// env's names without their values; whether there's a start command, not
+// what it says; the other keys by name. Names that may be secrets themselves
+// are counted in "hidden_names" instead.
 json safe_project_config(const json& config) {
-    static constexpr std::array<std::string_view, 9> kScalars = {"php",  "php_choice", "node", "python", "bun",
-                                                                 "deno", "web",        "root", "redis"};
+    static constexpr std::array<std::string_view, 10> kSettings = {"php",  "php_choice", "node", "python",  "bun",
+                                                                   "deno", "web",        "root", "redis", "database"};
     json out = json::object();
     json other = json::array();
+    int hidden = 0;
     for (auto it = config.begin(); it != config.end(); ++it) {
         const std::string& key = it.key();
         const json& v = it.value();
-        if (std::find(kScalars.begin(), kScalars.end(), key) != kScalars.end()) {
-            out[key] = shown_scalar(v);
-        } else if (key == "database") {
-            if (v.is_object()) {
-                json db = json::object();
-                for (auto d = v.begin(); d != v.end(); ++d) {
-                    if (!secret_key(d.key()) && (d.value().is_string() || d.value().is_number())) {
-                        db[shown_name(d.key(), "_-")] = shown_scalar(d.value());
-                    }
-                }
-                out[key] = std::move(db);
-            } else {
-                out[key] = shown_scalar(v);
-            }
+        if (std::find(kSettings.begin(), kSettings.end(), key) != kSettings.end()) {
+            out[key] = valid_setting(key, v);
         } else if (key == "extensions" || key == "extensions_off") {
-            out[key] = shown_names(v, "_-");
+            out[key] = shown_names(v, "_-", hidden);
         } else if (key == "php_ini") {
-            // Values can hold a password (mysqli.default_pw): the keys alone.
-            json keys = json::array();
-            for (auto k = object_at(config, "php_ini").begin(); k != object_at(config, "php_ini").end(); ++k) {
-                keys.push_back(shown_name(k.key(), "_.-"));
-            }
-            out["php_ini_names"] = std::move(keys);
+            // Values can hold a password (mysqli.default_pw): the names alone.
+            out["php_ini_names"] = key_names(object_at(config, "php_ini"), "_.-", hidden);
         } else if (key == "command") {
             out["command_set"] = v.is_string() && !v.get_ref<const std::string&>().empty();
         } else if (key == "env") {
-            json names = json::array();
-            for (auto e = object_at(config, "env").begin(); e != object_at(config, "env").end(); ++e) {
-                names.push_back(shown_name(e.key(), "_"));
-            }
-            out["env_names"] = std::move(names);
-        } else if (std::cmp_less(other.size(), 50)) {
-            other.push_back(shown_name(key, "_-."));
+            out["env_names"] = key_names(object_at(config, "env"), "_", hidden);
+        } else if (!std::cmp_less(other.size(), 50)) {
+            continue;
+        } else if (auto name = safe_name(key, "_-.")) {
+            other.push_back(std::move(*name));
+        } else {
+            ++hidden;
         }
     }
     if (!other.empty()) {
         out["other_settings"] = std::move(other);
+    }
+    if (hidden > 0) {
+        out["hidden_names"] = hidden;
     }
     return out;
 }
 
 }  // namespace
 
-std::optional<std::string> read_project_json(const std::filesystem::path& folder) {
-    namespace fs = std::filesystem;
-    constexpr std::uintmax_t kLimit = std::uintmax_t{256} * 1024;
-    const fs::path file = folder / "floserver.json";
-    const auto plain_file = [&file] {
-        std::error_code ec;
-        const bool regular = fs::is_regular_file(fs::symlink_status(file, ec)) && !ec;
-        return regular && fs::hard_link_count(file, ec) == 1 && !ec && fs::file_size(file, ec) <= kLimit && !ec;
-    };
-    if (!plain_file()) {
+std::optional<std::string> read_project_json(const std::filesystem::path& folder, std::string& why) {
+    constexpr std::uint64_t kLimit = std::uint64_t{256} * 1024;
+    // Checked on the open file: a link (symbolic or hard) or anything but a
+    // plain file is refused, so floserver.json can't lead elsewhere.
+    PlainFileRefusal refusal = PlainFileRefusal::None;
+    auto file = read_plain_file(folder / "floserver.json", kLimit, 0, refusal);
+    if (!file) {
+        why = refusal == PlainFileRefusal::Missing ? std::string() : plain_file_refusal_text(refusal, kLimit);
         return std::nullopt;
     }
-    std::error_code ec;
-    const fs::path real_folder = fs::canonical(folder, ec);
-    if (ec) {
-        return std::nullopt;
-    }
-    const fs::path real_file = fs::canonical(file, ec);
-    if (ec || real_file.parent_path() != real_folder) {
-        return std::nullopt;
-    }
-    std::ifstream in(real_file, std::ios::binary);
-    if (!in) {
-        return std::nullopt;
-    }
-    std::string text(static_cast<std::size_t>(kLimit) + 1, '\0');
-    in.read(text.data(), static_cast<std::streamsize>(text.size()));
-    text.resize(static_cast<std::size_t>(std::max<std::streamsize>(0, in.gcount())));
-    // Still the same plain file after the read (not swapped for a link meanwhile).
-    if (text.size() > kLimit || !plain_file()) {
-        return std::nullopt;
-    }
-    return text;
+    why.clear();
+    return std::move(file->text);
 }
 
 json tool_list(std::string_view version) {
@@ -879,12 +1152,14 @@ json Server::call_tool(const std::string& name, const json& args, std::string_vi
         if (!p) {
             return tool_error(problem);
         }
-        const json summary = project_summary(*p);
+        json summary = project_summary(*p);
         // floserver.json as the project has it (the folder is the service's, never the client's).
         json config = nullptr;
         std::string config_note;
+        bool refused = false;
         if (const std::string folder = text_of(*p, "path"); !folder.empty()) {
-            if (const auto file = backend_.project_file(path_from_utf8(folder))) {
+            std::string why;
+            if (const auto file = backend_.project_file(path_from_utf8(folder), why)) {
                 bool too_deep = false;
                 const json parsed = json::parse(
                     *file,
@@ -902,6 +1177,13 @@ json Server::call_tool(const std::string& name, const json& args, std::string_vi
                     config_note = "Only FloServer's own settings are shown; php.ini values, env values and the "
                                   "start command are left out, and other keys are named without their values.";
                 }
+            } else if (!why.empty()) {
+                // Refused (a link, too big...): nothing of it is shown, not even the service's words about it.
+                refused = true;
+                config_note = "floserver.json was refused: " + why;
+                if (text_of(*p, "state") == "problem") {
+                    summary["status"] = "problem: floserver.json can't be used";
+                }
             } else {
                 config_note = "there's no floserver.json in its folder (FloServer finds what it needs from its files)";
             }
@@ -911,11 +1193,17 @@ json Server::call_tool(const std::string& name, const json& args, std::string_vi
         if (!text_of(*p, "database").empty()) {
             runtimes["database"] = text_of(*p, "database");
         }
-        if (const json& wants = object_at(*p, "wants"); !wants.empty()) {
+        if (const json& wants = object_at(*p, "wants"); !wants.empty() && !refused) {
             runtimes["asked_for"] = safe_project_config(wants);  // as floserver.json says it, before versions are matched
         }
-        if (p->contains("missing") && !p->at("missing").empty()) {
-            runtimes["missing"] = p->at("missing");
+        if (!array_at(*p, "missing").empty() && !refused) {
+            json missing = json::array();
+            for (const json& m : array_at(*p, "missing")) {
+                if (m.is_string()) {
+                    missing.push_back(clean_error_text(m.get<std::string>(), 40));
+                }
+            }
+            runtimes["missing"] = std::move(missing);
         }
         // Its database: names and where, never the password.
         json database = nullptr;
@@ -1033,7 +1321,7 @@ json Server::call_tool(const std::string& name, const json& args, std::string_vi
                         {"https_port", field(nginx, "https_port")},
                         {"https", flag(nginx, "tls")}}}};
             if (!text_of(nginx, "error").empty()) {
-                w["nginx"]["error"] = shown_text(nginx, "error");
+                w["nginx"]["error"] = clean_error_text(blank_secrets(text_of(nginx, "error")), 300);
             }
             if (const json apache = field(*web, "apache"); apache.is_object()) {
                 w["apache"] = {{"version", text_of(apache, "version")}, {"running", flag(apache, "running")}};
@@ -1050,7 +1338,7 @@ json Server::call_tool(const std::string& name, const json& args, std::string_vi
                     item["idle_s"] = pool.at("idle_s");
                 }
                 if (!text_of(pool, "error").empty()) {
-                    item["error"] = shown_text(pool, "error");
+                    item["error"] = start_failure(text_of(pool, "error"));
                 }
                 out["php"].push_back(std::move(item));
             }
@@ -1059,7 +1347,7 @@ json Server::call_tool(const std::string& name, const json& args, std::string_vi
                 for (auto it = apps.begin(); it != apps.end(); ++it) {
                     json item = {{"name", it.key()}, {"state", text_of(it.value(), "state")}};
                     if (!text_of(it.value(), "error").empty()) {
-                        item["error"] = shown_text(it.value(), "error");
+                        item["error"] = start_failure(text_of(it.value(), "error"));
                     }
                     out["apps"].push_back(std::move(item));
                 }

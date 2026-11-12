@@ -1105,6 +1105,7 @@ constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
     Entry{Str::GeneralAiOthers, "Cursor, Claude Desktop", FLO_LRI "Cursor" FLO_PDI "، " FLO_LRI "Claude Desktop" FLO_PDI,
           FLO_LRI "Cursor" FLO_PDI "، " FLO_LRI "Claude Desktop" FLO_PDI},
     Entry{Str::GeneralAiVsCode, "VS Code", FLO_LRI "VS Code" FLO_PDI, FLO_LRI "VS Code" FLO_PDI},
+    Entry{Str::GeneralAiPowerShell, "PowerShell", FLO_LRI "PowerShell" FLO_PDI, FLO_LRI "PowerShell" FLO_PDI},
     Entry{Str::GeneralAiFullPath, "flo isn't on your Path, so these lines name it in full.",
           FLO_LRI "flo" FLO_PDI " ليس في " FLO_LRI "Path" FLO_PDI "، لذا تذكره هذه الأسطر بمساره الكامل.",
           FLO_LRI "flo" FLO_PDI " لە " FLO_LRI "Path" FLO_PDI " دا نییە، بۆیە ئەم دێڕانە بە ڕێڕەوی تەواوی ناوی دەبەن."},

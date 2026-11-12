@@ -6,6 +6,7 @@
 #include "floserver/core/paths.h"
 #include "floserver/core/mailpit.h"
 #include "floserver/core/phpmyadmin.h"
+#include "floserver/core/plain_file.h"
 #include "floserver/core/shared_sites.h"
 #include "floserver/core/version.h"
 
@@ -101,24 +102,23 @@ ConfigResult read_project_config_file(const Project& project) {
         return r;
     }
     const fs::path file = project.dir / kProjectConfigFileName;
-    if (!fs::exists(file, ec) && !ec) {
-        ConfigResult r;
-        r.config = ProjectConfig{};
-        return r;
-    }
-    // Only a plain file: a link to a pipe or a device would hang the read.
-    if (!fs::is_regular_file(file, ec)) {
-        ConfigResult r;
-        r.errors.push_back({"", "floserver.json isn't a plain file"});
-        return r;
-    }
-    const auto text = read_small_file(file, kMaxProjectConfigBytes);
+    // Only the project's own plain file: never a link (to a pipe or a device,
+    // which would hang the read, or to a file elsewhere, whose values would
+    // show in the problems), checked on the open file (plain_file.h).
+    PlainFileRefusal why = PlainFileRefusal::None;
+    const auto text = read_plain_file(file, kMaxProjectConfigBytes, 0, why);
     if (!text) {
         ConfigResult r;
-        r.errors.push_back({"", "floserver.json can't be read (or is larger than 64 KB)"});
+        if (why == PlainFileRefusal::Missing) {
+            r.config = ProjectConfig{};
+        } else if (why == PlainFileRefusal::Link) {
+            r.errors.push_back({"", "floserver.json is a link; FloServer reads only a plain file"});
+        } else {
+            r.errors.push_back({"", "floserver.json can't be used: " + plain_file_refusal_text(why, kMaxProjectConfigBytes)});
+        }
         return r;
     }
-    ConfigResult result = parse_project_config(*text);
+    ConfigResult result = parse_project_config(text->text);
     for (ConfigProblem& e : result.errors) {
         e.message = "floserver.json: " + (e.key.empty() ? std::string() : e.key + " ") + e.message;
         e.key.clear();

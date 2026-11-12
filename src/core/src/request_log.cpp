@@ -2,6 +2,7 @@
 
 #include "floserver/core/mailpit.h"
 #include "floserver/core/paths.h"
+#include "floserver/core/plain_file.h"
 
 #include <algorithm>
 #include <charconv>
@@ -131,27 +132,15 @@ namespace {
 // that's a newline, the tail starts on a whole line). `mid_line`: the read
 // didn't start at the file's start. Nothing when there's no file or it's empty.
 std::optional<std::string> read_tail(const fs::path& file, bool& mid_line) {
-    // The log itself: never through a link (a link to a file elsewhere would show that file).
-    std::error_code ec;
-    if (!fs::is_regular_file(fs::symlink_status(file, ec)) || ec || fs::hard_link_count(file, ec) != 1 || ec) {
+    // The log itself, checked on the open file: never through a link (a link
+    // to a file elsewhere would show that file).
+    PlainFileRefusal why = PlainFileRefusal::None;
+    auto tail = read_plain_file(file, 0, kTailBytes, why);
+    if (!tail || tail->text.empty()) {
         return std::nullopt;
     }
-    std::ifstream in(file, std::ios::binary);
-    if (!in) {
-        return std::nullopt;
-    }
-    in.seekg(0, std::ios::end);
-    const std::streamoff size = in.tellg();
-    if (size <= 0) {
-        return std::nullopt;
-    }
-    const auto start = static_cast<std::streamoff>(std::max<std::streamoff>(0, size - static_cast<std::streamoff>(kTailBytes) - 1));
-    in.seekg(start);
-    std::string text(static_cast<std::size_t>(size - start), '\0');
-    in.read(text.data(), static_cast<std::streamsize>(text.size()));
-    text.resize(static_cast<std::size_t>(std::max<std::streamsize>(0, in.gcount())));
-    mid_line = start > 0;
-    return text;
+    mid_line = !tail->from_start;
+    return std::move(tail->text);
 }
 
 }  // namespace

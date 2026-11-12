@@ -1966,8 +1966,8 @@ public:
         return std::nullopt;
     }
 
-    std::optional<std::string> project_file(const fs::path& folder) override {
-        return floserver::core::mcp::read_project_json(folder);
+    std::optional<std::string> project_file(const fs::path& folder, std::string& why) override {
+        return floserver::core::mcp::read_project_json(folder, why);
     }
 
 private:
