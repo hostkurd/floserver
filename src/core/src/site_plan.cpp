@@ -9,6 +9,7 @@
 #include "floserver/core/paths.h"
 #include "floserver/core/mailpit.h"
 #include "floserver/core/phpmyadmin.h"
+#include "floserver/core/plain_file.h"
 #include "floserver/core/shared_sites.h"
 #include "floserver/core/version.h"
 
@@ -21,8 +22,6 @@ namespace floserver::core {
 namespace fs = std::filesystem;
 
 namespace {
-
-constexpr std::size_t kMaxProjectConfigBytes = std::size_t{64} * 1024;
 
 // PHP installs this build can run as a pool: the usual NTS builds.
 bool is_pool_php(const InstalledRuntime& r) {
@@ -109,24 +108,22 @@ ConfigResult read_project_config_file(const Project& project) {
         return r;
     }
     const fs::path file = project.dir / kProjectConfigFileName;
-    if (!fs::exists(file, ec) && !ec) {
-        ConfigResult r;
-        r.config = ProjectConfig{};
-        return r;
-    }
-    // Only a plain file: a link to a pipe or a device would hang the read.
-    if (!fs::is_regular_file(file, ec)) {
-        ConfigResult r;
-        r.errors.push_back({"", "floserver.json isn't a plain file"});
-        return r;
-    }
-    const auto text = read_small_file(file, kMaxProjectConfigBytes);
+    // Only the project's own plain file: never a link (to a pipe or a device,
+    // which would hang the read, or to a file elsewhere, whose values would
+    // show in the problems), checked on the open file (plain_file.h).
+    PlainFileRefusal why = PlainFileRefusal::None;
+    const auto text = read_plain_file(file, kMaxProjectConfigBytes, 0, why);
     if (!text) {
         ConfigResult r;
-        r.errors.push_back({"", "floserver.json can't be read (or is larger than 64 KB)"});
+        if (why == PlainFileRefusal::Missing) {
+            r.config = ProjectConfig{};
+        } else {
+            // "floserver.json is a link; ...", "... has another name (a hard link); ...", "... is larger than 64 KB"
+            r.errors.push_back({"", "floserver.json " + plain_file_refusal_text(why, kMaxProjectConfigBytes)});
+        }
         return r;
     }
-    ConfigResult result = parse_project_config(*text);
+    ConfigResult result = parse_project_config(text->text);
     for (ConfigProblem& e : result.errors) {
         e.message = "floserver.json: " + (e.key.empty() ? std::string() : e.key + " ") + e.message;
         e.key.clear();

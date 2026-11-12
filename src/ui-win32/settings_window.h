@@ -277,6 +277,7 @@ private:
         GeneralUpdates,      // Updates' Check now (Q5)
         GeneralUpdateNotes,  // What's new, beside a ready update
         GeneralUpdateNow,
+        GeneralAiCopy,     // AI coding tools' Copy: row 0 the command, 1 Claude Code's, 2 mcpServers, 3 VS Code
         GeneralLicences,
         GeneralRemove,     // Remove FloServer…
     };
@@ -565,6 +566,14 @@ private:
         RECT update_line{};
         RECT update_notes{};
         RECT update_now{};
+        RECT ai_card{};  // AI coding tools (D32), above About
+        RECT ai_title{};
+        RECT ai_note{};
+        std::array<RECT, 4> ai_labels{};  // Command, Claude Code, Cursor and Claude Desktop, VS Code
+        std::array<RECT, 4> ai_values{};  // the two JSON ones are boxes
+        std::array<RECT, 4> ai_copy{};
+        RECT ai_path_note{};  // flo isn't on the Path; empty when it is
+        RECT ai_footer{};
         RECT about_card{};
         RECT about_title{};
         RECT version{};
@@ -886,6 +895,9 @@ private:
     [[nodiscard]] bool shown_start_tray() const;
     [[nodiscard]] bool run_elsewhere() const;
     void open_licences();
+    // AI coding tools: the lines for `flo mcp` (the Path is looked at once, here).
+    void load_mcp_lines();
+    [[nodiscard]] const std::string& mcp_line(std::size_t row) const;
     // Updates' words, from updates_ and the local clock.
     [[nodiscard]] std::string updates_summary_text() const;
     // Check now: not while a check or a download is on its way, or where there are no updates.
@@ -1061,6 +1073,8 @@ private:
     // as written since), and this FloServer.exe's path.
     std::optional<RunEntry> run_entry_;
     std::string own_exe_;
+    // AI coding tools (D32): its lines, worked out as General opens.
+    McpLines mcp_lines_;
     // And Updates (Q5): updates.status's answer, from the main window's poll.
     UpdateStatus updates_;
     // The code editors on this PC, looked for as General opens.

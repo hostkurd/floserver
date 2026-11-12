@@ -354,3 +354,35 @@ TEST_CASE("window.json: a damaged file is kept as .bad, never lost") {
     CHECK(kept.empty());
     CHECK(json::parse(test_util::read_file(file))["language"] == "ku");
 }
+
+TEST_CASE("AI coding tools: the lines for flo mcp, short when flo is on the Path") {
+    const McpLines on = mcp_lines(fs::path("C:/Program Files/FloServer/flo.exe"), true);
+    CHECK(on.command == "flo mcp");
+    CHECK(on.claude == "claude mcp add floserver -- flo mcp");
+    CHECK(on.json == R"({ "mcpServers": { "floserver": { "command": "flo", "args": ["mcp"] } } })");
+    CHECK(on.vscode == R"({ "servers": { "floserver": { "type": "stdio", "command": "flo", "args": ["mcp"] } } })");
+    CHECK_FALSE(on.full_path);
+    CHECK(json::parse(on.json)["mcpServers"]["floserver"]["args"] == json::array({"mcp"}));
+    CHECK(json::parse(on.vscode)["servers"]["floserver"]["type"] == "stdio");
+
+    // Not on the Path: the full path, quoted for a shell (PowerShell's & to run it), escaped for JSON.
+    const fs::path exe = fs::path(u8"C:\\Users\\me\\FloServer \u0628\\flo.exe");
+    const McpLines off = mcp_lines(exe, false);
+    CHECK(off.full_path);
+    const std::string full = floserver::core::path_to_utf8(exe);
+    CHECK(off.command == "& \"" + full + "\" mcp");
+    CHECK(off.claude == "claude mcp add floserver -- \"" + full + "\" mcp");
+    CHECK(json::parse(off.json)["mcpServers"]["floserver"]["command"] == full);
+    CHECK(json::parse(off.vscode)["servers"]["floserver"]["command"] == full);
+    CHECK(json::parse(off.json)["mcpServers"]["floserver"]["args"] == json::array({"mcp"}));
+    // Without a space, no quotes and no &.
+    CHECK(mcp_lines(fs::path("D:/tools/flo.exe"), false).command == floserver::core::path_to_utf8(fs::path("D:/tools/flo.exe")) + " mcp");
+    // Nothing known: plain flo.
+    CHECK(mcp_lines(fs::path(), false).command == "flo mcp");
+    // The command's label says PowerShell when it's PowerShell's form.
+    CHECK(mcp_label(on, 0) == Str::GeneralAiCommand);
+    CHECK(mcp_label(off, 0) == Str::GeneralAiPowerShell);
+    CHECK(mcp_label(off, 1) == Str::GeneralAiClaude);
+    CHECK(mcp_label(off, 2) == Str::GeneralAiOthers);
+    CHECK(mcp_label(off, 3) == Str::GeneralAiVsCode);
+}

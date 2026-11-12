@@ -356,6 +356,10 @@ ConfigResult parse_project_config(std::string_view json_text) {
     } catch (const json::parse_error& e) {
         result.errors.push_back({"", "is not valid JSON (near byte " + std::to_string(e.byte) + ")"});
         return result;
+    } catch (const json::exception&) {
+        // A number too large for a double (1e999), say: never an exception for projects.list.
+        result.errors.push_back({"", "is not JSON FloServer can read (a number out of range?)"});
+        return result;
     }
     if (!doc.is_object()) {
         result.errors.push_back({"", "must be a JSON object: { ... }"});

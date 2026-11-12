@@ -54,6 +54,7 @@ add_library(floserver_core STATIC
     src/database_engine.cpp
     src/mariadb.cpp
     src/mariadb_settings.cpp
+    src/mcp_server.cpp
     src/database_service.cpp
     src/data_folder.cpp
     src/nginx_config.cpp
@@ -65,6 +66,7 @@ add_library(floserver_core STATIC
     src/project_service.cpp
     src/site_plan.cpp
     src/shared_sites.cpp
+    src/plain_file.cpp
     src/protocol.cpp
     src/request_log.cpp
     src/trust_store.cpp

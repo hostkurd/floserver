@@ -41,6 +41,9 @@
 
 namespace floserver::core {
 
+// The most emails mail.recent lists (flo mcp's recent_mail, D32).
+inline constexpr int kMailRecentLimit = 20;
+
 struct MailServiceConfig {
     std::filesystem::path data_dir;
     std::chrono::seconds idle_after{600};
@@ -93,6 +96,13 @@ public:
     bool send_test(const std::string& to, ServiceRefusal& refusal);
     // mail.clear: every email deleted through Mailpit's API (it wakes Mailpit).
     bool clear(ServiceRefusal& refusal);
+    // mail.recent {limit}: the newest `limit` (1 to kMailRecentLimit) emails,
+    // newest first, through Mailpit's API: {"messages": [{"id", "subject",
+    // "from", "to", "time", "read", "size"}], "total"}. Read-only (listing
+    // marks nothing read). It wakes Mailpit, unless it sleeps with no email
+    // caught: then the answer is empty without starting it. Text is cleaned
+    // as for the window (clean_mail_text): anyone can send any subject.
+    [[nodiscard]] std::optional<nlohmann::json> recent(int limit, ServiceRefusal& refusal);
 
     // While the returned guard lives, Mailpit is stopped (this waits) and
     // doesn't start: its install can be removed or replaced.
