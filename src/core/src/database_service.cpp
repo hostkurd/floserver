@@ -1511,7 +1511,7 @@ std::optional<DatabaseLogin> DatabaseService::project_login(const std::string& p
     const std::string own_name = project_database_name(*p);
     login.database = server_database_name(own_name, family);
     login.user = project_database_user(login.database, family);  // MySQL's: at most 32 characters
-    if (login.database != own_name) {
+    if (login.database != own_name && app) {
         if (const auto other = project_with_server_database(*app, project, family, login.database)) {
             refusal = {"database_shared", "the database " + login.database + " on " + database_family_title(family) +
                                               " would also be " + *other + "'s; rename one of them"};
