@@ -181,7 +181,7 @@ RemoveQuestion remove_question(const ProjectRow& row, Lang lang, FolderOffer off
     q.cancel = std::string(text(lang, Str::WizardCancel));
     if (row_has_database(row)) {
         // The name the service gives it; the service works it out again itself.
-        q.drop = fill(lang, Str::RemoveDropDatabase, {row_database_name(row)});
+        q.drop = fill(lang, Str::RemoveDropDatabase, {row_server_database(row)});  // MySQL's may be cut
     }
     if (offer == FolderOffer::Offer && !row.path.empty()) {
         q.trash = std::string(text(lang, Str::RemoveTrashFolder));

@@ -1497,7 +1497,10 @@ struct Service {
             }
             json database = nullptr;
             if (plan->database) {
-                database = {{"name", plan->database_name},
+                // As its server names it (MySQL's may be cut to fit, D28).
+                const core::ConfigResult cfg = core::read_project_config_file(core::Project{plan->name, plan->dir, true, false, {}});
+                const std::string family = cfg.config && cfg.config->database ? cfg.config->database->family : std::string();
+                database = {{"name", core::server_database_name(plan->database_name, family)},
                             {"bytes", databases ? databases->project_database_bytes(plan->name).value_or(0) : 0}};
             }
             const auto file = default_file(plan->name);

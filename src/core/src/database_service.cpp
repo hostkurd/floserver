@@ -123,6 +123,44 @@ std::set<Port> ports_kept_by_others(const fs::path& data_dir, const fs::path& ow
     return out;
 }
 
+// Another registered project whose database has `on_server` as its name on
+// a `family` server (a cut name can't equal a real one, but two are checked
+// all the same), or nothing.
+std::optional<std::string> project_with_server_database(const AppConfig& app, const std::string& project,
+                                                        std::string_view family, const std::string& on_server) {
+    for (const Project& other : app.projects) {
+        if (other.name == project) {
+            continue;
+        }
+        const ConfigResult cfg = read_project_config_file(other);
+        if (cfg.config && cfg.config->database && cfg.config->database->family == family &&
+            server_database_name(project_database_name(other), family) == on_server) {
+            return other.name;
+        }
+    }
+    return std::nullopt;
+}
+
+#ifdef _WIN32
+// MySQL on Windows: `files` with ASCII paths (ascii_mysql_files()), or why
+// they can't have them. The data folder is made first (a short form needs it).
+std::string ascii_files_problem(MariaDbFiles& files) {
+    std::error_code ec;
+    fs::create_directories(files.data_dir, ec);
+    fs::path bad;
+    bool missing = false;
+    if (ascii_mysql_files(files, windows_short_path, bad, missing)) {
+        return {};
+    }
+    if (missing) {
+        return "MySQL can't start: " + path_to_utf8(bad) + " is missing (download MySQL again in Settings → Runtimes)";
+    }
+    return "MySQL can't use " + path_to_utf8(bad) +
+           ": the path has letters outside English, and Windows keeps no short (8.3) name for it. Use MariaDB on this "
+           "computer, or a Windows user whose folder name has English letters only.";
+}
+#endif
+
 // Runs `f` when the scope ends.
 template <class F>
 class AtExit {
@@ -491,6 +529,10 @@ public:
     // MySQL on Windows: a path it can't be given (ascii_mysql_files()). Set
     // once, before the server is shared.
     void set_path_problem(std::string problem) { path_problem_ = std::move(problem); }
+#ifdef _WIN32
+    // The install as FloServer keeps it (its own name, before any short form).
+    void set_install_dir(fs::path dir) { install_dir_ = std::move(dir); }
+#endif
 
 private:
     void shut_down(ChildProcess& process) const {
@@ -512,8 +554,11 @@ private:
         remove_secret_file(files_.init_file);
         for (fs::directory_iterator it(files_.folder, ec), end; !ec && it != end; it.increment(ec)) {
             const std::string name = path_to_utf8(it->path().filename());
+            // client-*.cnf and a half-written one (client-*.cnf.tmp-*). The
+            // ones a backup left in backups/job-* go with that folder when
+            // the backup service starts.
             if ((name.ends_with(".sql") && (name.starts_with("query-") || name.starts_with("probe"))) ||
-                (name.ends_with(".cnf") && name.starts_with("client-"))) {
+                (name.starts_with("client-") && name.find(".cnf") != std::string::npos)) {
                 remove_secret_file(it->path());
             }
         }
@@ -644,6 +689,21 @@ private:
             error = path_problem_;
             return nullptr;
         }
+#ifdef _WIN32
+        // Checked again at each start: a folder may have gone, or been made
+        // again with another short name, since the server was made.
+        if (files_.family == kMySqlFamily) {
+            MariaDbFiles fresh = mariadb_files(install_dir_, version_, data_dir_, files_.family);
+            if (std::string problem = ascii_files_problem(fresh); !problem.empty()) {
+                error = std::move(problem);
+                return nullptr;
+            }
+            if (fresh.server != files_.server || fresh.data_dir != files_.data_dir || fresh.folder != files_.folder) {
+                error = "MySQL's folders have other short (8.3) names than when FloServer started: restart FloServer";
+                return nullptr;
+            }
+        }
+#endif
         std::error_code ec;
         fs::create_directories(files_.folder, ec);
 #ifndef _WIN32
@@ -654,11 +714,13 @@ private:
             return nullptr;
         }
         const fs::path marker = files_.folder / "root-password-set";
+        bool new_install = false;  // set up in this start: its whole log is FloServer's doing
         if (!mariadb_initialized(files_)) {
             if (!set_up(error)) {
                 return nullptr;
             }
             fs::remove(marker, ec);
+            new_install = true;
         }
         auto root = reset_root ? std::nullopt : secrets_.read(root_name());
         if (!root) {
@@ -773,11 +835,14 @@ private:
             shut_down(*process);
             return nullptr;
         }
-        // MySQL's init file goes on past a failing statement and the server
-        // still starts: the first start is only trusted when it logged no
-        // error and no account is left without a password.
+        // In MySQL's init file a failing statement skips the ones after it,
+        // and the server still starts: a start with the init file is only
+        // trusted when root's three accounts have a password and there's no
+        // anonymous one, and a new install's start logged no error. (Root's
+        // password was reset: the user's own accounts are theirs, and the
+        // log may hold their errors from before.)
         if (first && files_.family == kMySqlFamily) {
-            if (const std::string why = first_start_problem(*root, log_from); !why.empty()) {
+            if (const std::string why = first_start_problem(*root, log_from, new_install); !why.empty()) {
                 error = "setting up " + title() + " didn't finish: " + why;
                 shut_down(*process);
                 return nullptr;
@@ -789,14 +854,17 @@ private:
         return process;
     }
 
-    // Why MySQL's first start can't be trusted, or nothing.
-    [[nodiscard]] std::string first_start_problem(const std::string& root, std::uintmax_t log_from) const {
-        if (const std::string errors = error_lines(log_from); !errors.empty()) {
-            return "its init file or start logged errors: " + errors;
+    // Why a MySQL start with the init file can't be trusted, or nothing.
+    [[nodiscard]] std::string first_start_problem(const std::string& root, std::uintmax_t log_from,
+                                                  bool new_install) const {
+        if (new_install) {
+            if (const std::string errors = error_lines(log_from); !errors.empty()) {
+                return "its first start logged errors: " + errors;
+            }
         }
         const fs::path query = files_.folder / ("query-" + random_suffix() + ".sql");
         std::string error;
-        if (!write_private_file_atomically(query, empty_password_count_sql(), error)) {
+        if (!write_private_file_atomically(query, root_accounts_check_sql(), error)) {
             return error;
         }
         std::string out;
@@ -810,7 +878,7 @@ private:
         }
         const auto line = out.rfind('\n');
         if (out.substr(line == std::string::npos ? 0 : line + 1) != "0") {
-            return "an account still has no password";
+            return "root's accounts didn't all get their password, or an anonymous account is left";
         }
         return {};
     }
@@ -818,8 +886,7 @@ private:
     // The [ERROR] lines this start wrote to the error log (not the last
     // "Aborting"), at most 1500 characters; empty when there are none.
     [[nodiscard]] std::string error_lines(std::uintmax_t log_from) const {
-        const auto log = read_small_file(files_.error_log, std::size_t{4} * 1024 * 1024).value_or("");
-        const std::string fresh = log.size() > log_from ? log.substr(static_cast<std::size_t>(log_from)) : std::string();
+        const std::string fresh = log_since(log_from);
         std::string errors;
         std::size_t pos = 0;
         while (pos < fresh.size()) {
@@ -835,9 +902,21 @@ private:
 
     // What this start wrote to the error log: its [ERROR] lines, or the
     // end of the log when there are none.
+    // What the error log got from `from` on (at most 4 MiB of it), read
+    // from there whatever the log's size.
+    [[nodiscard]] std::string log_since(std::uintmax_t from) const {
+        std::ifstream in(files_.error_log, std::ios::binary);
+        if (!in || !in.seekg(static_cast<std::streamoff>(from))) {
+            return {};
+        }
+        std::string out(std::size_t{4} * 1024 * 1024, '\0');
+        in.read(out.data(), static_cast<std::streamsize>(out.size()));
+        out.resize(static_cast<std::size_t>(in.gcount()));
+        return out;
+    }
+
     [[nodiscard]] std::string start_errors(std::uintmax_t log_from, const fs::path& output_log) const {
-        const auto log = read_small_file(files_.error_log, std::size_t{4} * 1024 * 1024).value_or("");
-        const std::string fresh = log.size() > log_from ? log.substr(static_cast<std::size_t>(log_from)) : std::string();
+        const std::string fresh = log_since(log_from);
         std::string errors;
         std::size_t pos = 0;
         while (pos < fresh.size()) {
@@ -965,6 +1044,9 @@ private:
     std::optional<Port> chosen_port_;
     bool port_fallback_ = false;
     std::string path_problem_;
+#ifdef _WIN32
+    fs::path install_dir_;
+#endif
 
     std::atomic<int> active_{0};
     std::mutex activity_mutex_;
@@ -1305,16 +1387,10 @@ void DatabaseService::reload_locked() {
         taken.insert(*port);
         std::string path_problem;
 #ifdef _WIN32
+        const fs::path install_dir = files.base_dir;
         // Oracle's mysqld.exe reads paths in the ANSI code page: ASCII (8.3) forms.
         if (want.family == kMySqlFamily) {
-            fs::create_directories(files.data_dir, ec);  // a short form needs it to exist
-            fs::path bad;
-            if (!ascii_mysql_files(files, windows_short_path, bad)) {
-                path_problem = "MySQL can't use " + path_to_utf8(bad) +
-                               ": the path has letters outside English, and Windows keeps no short (8.3) name for "
-                               "it. Use MariaDB on this computer, or a Windows user whose folder name has English "
-                               "letters only.";
-            }
+            path_problem = ascii_files_problem(files);
         }
 #endif
         auto server = std::make_shared<Server>(config_.data_dir, std::move(files), want.runtime->version, *port, *internal,
@@ -1322,6 +1398,9 @@ void DatabaseService::reload_locked() {
                                                config_.start_limit);
         server->set_projects(want.projects, want.keep_running);
         server->set_chosen_port(chosen, fallback);
+#ifdef _WIN32
+        server->set_install_dir(install_dir);
+#endif
         if (!path_problem.empty()) {
             server->set_path_problem(std::move(path_problem));
         }
@@ -1432,6 +1511,13 @@ std::optional<DatabaseLogin> DatabaseService::project_login(const std::string& p
     const std::string own_name = project_database_name(*p);
     login.database = server_database_name(own_name, family);
     login.user = project_database_user(login.database, family);  // MySQL's: at most 32 characters
+    if (login.database != own_name) {
+        if (const auto other = project_with_server_database(*app, project, family, login.database)) {
+            refusal = {"database_shared", "the database " + login.database + " on " + database_family_title(family) +
+                                              " would also be " + *other + "'s; rename one of them"};
+            return std::nullopt;
+        }
+    }
     if (reserved_database_name(own_name)) {
         // MariaDB's own name follows a rename; shared sites' is kept by one,
         // so only a project under another name gets a database of its own.
@@ -1777,6 +1863,11 @@ bool DatabaseService::drop_project_database(const std::string& project, ServiceR
         const std::lock_guard lock(server->login_mutex());
         const bool made = secrets_.read(secret_of(key)).has_value();  // FloServer made one there
         const std::string on_server = server_database_name(database, family);
+        if (const auto other = project_with_server_database(*app, project, family, on_server);
+            other && on_server != database) {
+            return failed(title, {"database_shared", "the database " + on_server + " is also " + *other +
+                                                         "'s; remove the project without its database"});
+        }
         if (!server->run_sql(
                 drop_project_database_sql(on_server, project_database_user(on_server, family), family), error)) {
             return failed(title, {"database_failed",

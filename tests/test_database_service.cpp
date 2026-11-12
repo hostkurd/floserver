@@ -1144,6 +1144,23 @@ TEST_CASE("MySQL 8.4 beside MariaDB: set up, a project's own login (caching_sha2
     CHECK(secrets.read("mysql-8.4/root") == std::optional<std::string>(new_root));
     REQUIRE_MESSAGE(db.set_root_password("8.4", "New-pass-84", refusal, "mysql"), refusal.message);  // the tools logged in with it
     CHECK(query(port, "root", "New-pass-84", "SELECT 1", client) == "1");
+
+    // root's saved password lost: the next start resets it through the init file. An
+    // account the user made without a password (as phpMyAdmin may) is theirs: it stays,
+    // and doesn't stop the start (only root's and anonymous accounts are checked).
+    REQUIRE(query(port, "root", "New-pass-84", "CREATE USER 'app'@'127.0.0.1'; SELECT 1", client) == "1");
+    REQUIRE(db.server_action("8.4", "stop", refusal, "mysql"));
+    REQUIRE(eventually([&] { return db.series_status("8.4", "mysql")["server"]["state"] == "sleeping"; }, 60s));
+    REQUIRE(secrets.remove("mysql-8.4/root"));
+    const auto after_reset = db.project_login("shop-copy", refusal);
+    REQUIRE_MESSAGE(after_reset, refusal.message);
+    const auto reset_root = secrets.read("mysql-8.4/root");
+    REQUIRE(reset_root);
+    CHECK(*reset_root != "New-pass-84");
+    CHECK(query(port, "root", *reset_root, "SELECT COUNT(*) FROM mysql.user WHERE user = 'app'", client) == "1");
+    CHECK(query(port, "app", "", "SELECT 1", client) == "1");
+    CHECK(fs::exists(folder / "root-password-set"));
+    REQUIRE_MESSAGE(db.set_root_password("8.4", "New-pass-84", refusal, "mysql"), refusal.message);
     const auto final_ini = db.final_ini("8.4", refusal, "mysql");
     REQUIRE_MESSAGE(final_ini, refusal.message);
     CHECK(*final_ini == data / "mysql" / "8.4" / "final-my.ini");

@@ -449,6 +449,27 @@ void print_served(const nlohmann::json& p) {
 }
 
 // What the web server says when something is wrong, and the HTTPS hint.
+// A project's database as its server names it: the name it kept through a
+// rename (D22), and MySQL's cut to fit its limits (D28). The service works it
+// out again itself.
+std::string server_database_of(floserver::core::ServiceClient& client, const std::string& name) {
+    std::string database = floserver::core::project_database_name(name);
+    std::string family;
+    if (const auto listed = client.call("projects.list"); listed && listed->ok && listed->result.contains("projects")) {
+        for (const auto& p : listed->result["projects"]) {
+            if (text_of(p, "name") != name) {
+                continue;
+            }
+            if (!text_of(p, "database_name").empty()) {
+                database = text_of(p, "database_name");
+            }
+            const std::string db = text_of(p, "database");  // "mysql-8.4"
+            family = db.substr(0, db.find('-'));
+        }
+    }
+    return floserver::core::server_database_name(database, family);
+}
+
 void print_web_notes(floserver::core::ServiceClient& client) {
     const auto web = client.call("web.status");
     if (!web || !web->ok) {
@@ -618,14 +639,7 @@ int remove_cmd(const std::vector<std::string>& args) {
     if (drop && !yes) {
         // The service names the database itself; this is what it will be
         // (a renamed project keeps its own, D22).
-        std::string database = floserver::core::project_database_name(name);
-        if (const auto listed = client->call("projects.list"); listed && listed->ok && listed->result.contains("projects")) {
-            for (const auto& p : listed->result["projects"]) {
-                if (text_of(p, "name") == name && !text_of(p, "database_name").empty()) {
-                    database = text_of(p, "database_name");
-                }
-            }
-        }
+        const std::string database = server_database_of(*client, name);
         std::cout << "Remove " << name << " from FloServer and delete its database " << database
                   << " and its user? This can't be undone. Its folder stays where it is. [y/N] " << std::flush;
         std::string answer;
@@ -829,14 +843,7 @@ int restore(const std::vector<std::string>& args, const std::vector<fs::path>& p
         }
         if (database && has_database) {
             // Its own (a renamed project keeps its database's name).
-            std::string db = floserver::core::project_database_name(name);
-            if (const auto listed = client->call("projects.list"); listed && listed->ok && listed->result.contains("projects")) {
-                for (const auto& p : listed->result["projects"]) {
-                    if (text_of(p, "name") == name && !text_of(p, "database_name").empty()) {
-                        db = text_of(p, "database_name");
-                    }
-                }
-            }
+            const std::string db = server_database_of(*client, name);
             std::cout << "  Its database " << db << " is replaced; today's is saved as a .sql next to the backup.\n";
         }
         std::cout << "  The project stops while it's restored, then starts again. [y/N] " << std::flush;

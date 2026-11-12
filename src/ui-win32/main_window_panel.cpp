@@ -1421,8 +1421,8 @@ void MainWindow::paint_panel(Canvas& c, HDC dc, bool text_pass) const {
         const std::string host = port != 0 ? "127.0.0.1:" + std::to_string(port) : std::string("127.0.0.1");
         c.text(g.db_title, w(fill(lang_, Str::DatabaseTitle, {name})), fonts_.button_bold.get(), p.text, Align::Start,
                false);
-        c.text(g.db_detail, w(fill(lang_, Str::DatabaseDetail, {host, row_database_user(*row)})), fonts_.caption.get(), p.text_subtle,
-               Align::Start, false);
+        c.text(g.db_detail, w(fill(lang_, Str::DatabaseDetail, {host, row_database_user(*row)})), fonts_.caption.get(),
+               p.text_subtle, Align::Start, false);
         c.text(g.copy_env, w(text(lang_, Str::CopyEnv)), fonts_.caption.get(), p.text, Align::Center, false);
     }
     if (g.pma.right > g.pma.left) {

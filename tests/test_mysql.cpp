@@ -261,8 +261,11 @@ TEST_CASE("MySQL user names: 32 characters at most, the same short name every ti
     CHECK(user == project_database_user(long_name, kMySqlFamily));  // deterministic
     CHECK(user != project_database_user(std::string(62, 'a') + "b", kMySqlFamily));
     CHECK(std::all_of(user.begin() + 24, user.end(), [](char c) { return std::isxdigit(static_cast<unsigned char>(c)); }));
-    // 32 or fewer, and MariaDB's (80): the database's name.
-    CHECK(project_database_user(std::string(32, 'b'), kMySqlFamily) == std::string(32, 'b'));
+    // 31 or fewer, and MariaDB's (80): the database's name. 32 is cut too, so a cut
+    // name (always 32) is never another project's real one.
+    CHECK(project_database_user(std::string(31, 'b'), kMySqlFamily) == std::string(31, 'b'));
+    CHECK(project_database_user(std::string(32, 'b'), kMySqlFamily).size() == 32);
+    CHECK(project_database_user(std::string(32, 'b'), kMySqlFamily) != std::string(32, 'b'));
     CHECK(project_database_user(long_name, kMariaDbFamily) == long_name);
     CHECK(project_database_user("my_shop", kMySqlFamily) == "my_shop");
 }
@@ -284,7 +287,8 @@ TEST_CASE("MySQL on Windows: paths as ASCII, their 8.3 forms, or a clear refusal
     MariaDbFiles f = mariadb_files(path_from_utf8("C:/Users/\xD9\x86/rt/mysql"), "8.4.11",
                                    path_from_utf8("C:/Users/\xD9\x86/data"), kMySqlFamily);
     fs::path bad;
-    REQUIRE(ascii_mysql_files(f, shorten, bad));
+    bool missing = false;
+    REQUIRE(ascii_mysql_files(f, shorten, bad, missing));
     for (const fs::path* p : {&f.base_dir, &f.server, &f.client, &f.admin, &f.dump, &f.folder, &f.data_dir, &f.config,
                               &f.error_log, &f.init_file}) {
         const std::string s = path_to_utf8(*p);
@@ -294,8 +298,17 @@ TEST_CASE("MySQL on Windows: paths as ASCII, their 8.3 forms, or a clear refusal
     CHECK(f.config.parent_path() == f.folder);
     CHECK(f.error_log.parent_path() == f.data_dir);
     MariaDbFiles g = mariadb_files(path_from_utf8("C:/Users/\xC3\xA9/rt/mysql"), "8.4.11", "C:/d", kMySqlFamily);
-    CHECK_FALSE(ascii_mysql_files(g, shorten, bad));
+    CHECK_FALSE(ascii_mysql_files(g, shorten, bad, missing));
     CHECK(path_to_utf8(bad).find("\xC3\xA9") != std::string::npos);
+    CHECK(missing);  // that install isn't on this disk
+    // One that is there but has no short name: its letters are the reason, not a missing file.
+    const test_util::TempDir tmp;
+    const fs::path here = tmp.path() / path_from_utf8("caf\xC3\xA9");
+    fs::create_directories(here / "bin");
+    MariaDbFiles h = mariadb_files(here, "8.4.11", tmp.path() / "data", kMySqlFamily);
+    CHECK_FALSE(ascii_mysql_files(h, shorten, bad, missing));
+    CHECK(bad == here);
+    CHECK_FALSE(missing);
     CHECK(windows_short_path("/no/such/path").empty());
 }
 
@@ -303,7 +316,6 @@ TEST_CASE("MySQL's root SQL sets root's password first; FloServer's tools read i
     const std::string sql = root_password_sql("pw", kMySqlFamily);
     CHECK(sql.find("ALTER USER IF EXISTS 'root'@'localhost'") < sql.find("CREATE USER"));
     CHECK(root_password_sql("pw").find("ALTER USER IF EXISTS 'root'@'localhost'") == 0);
-    CHECK(empty_password_count_sql().find("authentication_string = ''") != std::string::npos);
     CHECK(client_password_option_file(R"(a"b\c#d')") == "[client]\npassword=\"a\\\"b\\\\c#d'\"\n");
     // MySQL's own listeners and logs.
     CHECK(mariadb_option_problem("log_raw"));
@@ -351,7 +363,36 @@ TEST_CASE("MySQL database names: a GRANT's escaped name fits its 64 characters")
     CHECK(grant_pattern(on_mysql).size() - 2 <= kMySqlMaxIdentifier);  // without its backticks
     CHECK(server_database_name(name, kMariaDbFamily) == name);
     CHECK(server_database_name("my_shop", kMySqlFamily) == "my_shop");
-    const std::string plain(64, 'a');  // no '_': nothing to escape
+    const std::string plain(62, 'a');  // no '_': nothing to escape
     CHECK(server_database_name(plain, kMySqlFamily) == plain);
+    // 63 or more (escaped) is cut, to 63 or 64: never another project's real name (62 at most).
+    for (const std::string& longer : {std::string(63, 'a'), std::string(64, 'a'), std::string(31, 'a') + "_" + std::string(31, 'b'),
+                                    project_database_name("a-b-c-d-e-f-g-h-i-j-k-l-m-n-o-p-q-r-s-t-u-v-w-x-y-z-0-1-2-3-4")}) {
+        CAPTURE(longer);
+        const std::string cut = server_database_name(longer, kMySqlFamily);
+        const std::size_t escaped = cut.size() + static_cast<std::size_t>(std::count(cut.begin(), cut.end(), '_'));
+        CHECK(cut != longer);
+        CHECK(escaped >= 63);
+        CHECK(escaped <= 64);
+    }
     CHECK(project_database_user(on_mysql, kMySqlFamily).size() <= kMySqlMaxUserName);
+}
+
+TEST_CASE("MySQL's TLS settings are FloServer's: its tools check the server's own certificate") {
+    for (const char* name : {"ssl_ca", "ssl-cert", "ssl_key", "ssl_capath", "ssl_crl", "ssl_crlpath", "tls_version",
+                             "tls-ciphersuites", "ssl_cipher", "require_secure_transport", "loose-ssl-ca", "skip-ssl"}) {
+        CAPTURE(name);
+        const auto problem = mariadb_option_problem(name);
+        REQUIRE(problem);
+        CHECK(problem->find("certificate") != std::string::npos);
+    }
+    CHECK_FALSE(mariadb_option_problem("ssl_fips_mode_x"));  // not one of them
+    CHECK(filter_mariadb_custom_ini("[mysqld]\nssl_ca=/tmp/evil.pem\nmax_connections=50\n").problems.size() == 1);
+}
+
+TEST_CASE("MySQL's root check counts only what the init file is responsible for") {
+    const std::string sql = root_accounts_check_sql();
+    CHECK(sql.find("User = 'root'") != std::string::npos);
+    CHECK(sql.find("User = ''") != std::string::npos);
+    CHECK(sql.find("'localhost', '127.0.0.1', '::1'") != std::string::npos);
 }

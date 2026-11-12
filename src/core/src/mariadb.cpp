@@ -108,12 +108,15 @@ std::optional<fs::path> ascii_path(const fs::path& path, const ShortPathFunction
     return short_form;
 }
 
-bool ascii_mysql_files(MariaDbFiles& files, const ShortPathFunction& shorten, fs::path& bad) {
+bool ascii_mysql_files(MariaDbFiles& files, const ShortPathFunction& shorten, fs::path& bad, bool& missing) {
+    missing = false;
     for (fs::path* p : {&files.base_dir, &files.server, &files.install_db, &files.admin, &files.client, &files.dump,
                         &files.folder, &files.data_dir}) {
         auto safe = ascii_path(*p, shorten);
         if (!safe) {
             bad = *p;
+            std::error_code ec;
+            missing = !fs::exists(*p, ec);
             return false;
         }
         *p = std::move(*safe);
@@ -351,8 +354,10 @@ std::string root_password_sql(const std::string& password, std::string_view fami
     return sql + "FLUSH PRIVILEGES;\n";
 }
 
-std::string empty_password_count_sql() {
-    return "SELECT COUNT(*) FROM mysql.user WHERE authentication_string = '' OR authentication_string IS NULL;\n";
+std::string root_accounts_check_sql() {
+    return "SELECT (SELECT COUNT(*) FROM mysql.user WHERE User = '' OR (User = 'root' AND (authentication_string = '' "
+           "OR authentication_string IS NULL))) + (3 - (SELECT COUNT(*) FROM mysql.user WHERE User = 'root' AND Host IN "
+           "('localhost', '127.0.0.1', '::1') AND authentication_string <> ''));\n";
 }
 
 std::string client_password_option_file(const std::string& password) {
@@ -436,7 +441,7 @@ std::string project_database_name(std::string_view project) {
 }
 
 std::string project_database_user(std::string_view database, std::string_view family) {
-    if (family != kMySqlFamily || database.size() <= kMySqlMaxUserName) {
+    if (family != kMySqlFamily || database.size() < kMySqlMaxUserName) {
         return std::string(database);
     }
     const Sha256Digest digest = sha256(database);
@@ -448,7 +453,7 @@ std::string server_database_name(std::string_view database, std::string_view fam
     const auto escaped = [](std::string_view s) {
         return s.size() + static_cast<std::size_t>(std::count(s.begin(), s.end(), '_'));
     };
-    if (family != kMySqlFamily || escaped(database) <= kMySqlMaxIdentifier) {
+    if (family != kMySqlFamily || escaped(database) < kMySqlMaxIdentifier - 1) {
         return std::string(database);
     }
     const Sha256Digest digest = sha256(database);

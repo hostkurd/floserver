@@ -51,11 +51,15 @@ constexpr std::array<std::string_view, 13> kManagedMore = {
 // MySQL's (D28): its X Protocol and admin interface listen on ports of their
 // own, and these move its files. Unknown to MariaDB, so refusing them there
 // changes nothing.
-constexpr std::array<std::string_view, 10> kManagedMySql = {
+constexpr std::array<std::string_view, 20> kManagedMySql = {
     "admin_address",          "admin_port",          "create_admin_listener_thread",
     "innodb_directories",     "innodb_temp_tablespaces_dir", "innodb_redo_log_archive_dirs",
     "innodb_temp_data_file_path", "tmpdir",          "keyring_file_data",
     "log_raw",  // would write passwords into the general log
+    // TLS: FloServer's own tools check the server's certificate against the
+    // CA MySQL's set-up made; another certificate or TLS rule would stop them.
+    "ssl_ca", "ssl_cert", "ssl_key", "ssl_capath", "ssl_crl", "ssl_crlpath", "tls_version", "tls_ciphersuites",
+    "ssl_cipher", "require_secure_transport",
 };
 // Real options that happen to start a managed name: not taken for a
 // shortened one ("general_log" is not general_log_file).
@@ -88,6 +92,9 @@ std::string why_refused(std::string_view name, std::string_view managed) {
         managed.starts_with("admin_") || managed == "create_admin_listener_thread") {
         return n + " can't be set: FloServer keeps the database server on this computer only (127.0.0.1), reached "
                    "through its own port";
+    }
+    if (managed.starts_with("ssl_") || managed.starts_with("tls_") || managed == "require_secure_transport") {
+        return n + " can't be set: FloServer's own tools check the server's certificate (its own, made at set-up)";
     }
     if (managed == "skip_grant_tables" || managed == "init_file") {
         return n + " can't be set: it would let anyone in without a password";

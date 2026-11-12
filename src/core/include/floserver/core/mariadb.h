@@ -79,9 +79,10 @@ using ShortPathFunction = std::function<std::filesystem::path(const std::filesys
                                                               const ShortPathFunction& shorten);
 // The paths MySQL's programs are given (its programs, the install, its
 // folder and data folder, and the files in them), each as ascii_path()
-// says. False, with `bad` the first path that has no ASCII form.
+// says. False, with `bad` the first path that has no ASCII form, and
+// `missing` when that's because it isn't there (no short name is given then).
 [[nodiscard]] bool ascii_mysql_files(MariaDbFiles& files, const ShortPathFunction& shorten,
-                                     std::filesystem::path& bad);
+                                     std::filesystem::path& bad, bool& missing);
 // What a MySQL server says when ascii_mysql_files() can't: its error_code.
 inline constexpr std::string_view kPathNotAsciiCode = "path_not_ascii";
 
@@ -128,12 +129,14 @@ struct MariaDbExtras;  // mariadb_settings.h
 // from 127.0.0.1 doesn't match it: root@127.0.0.1 and root@::1 are made
 // too, with every right (as MariaDB's install-db makes them).
 // The ALTER USER lines come first: a failing statement in MySQL's init file
-// skips the ones after it, and root must never keep the empty password the
-// set-up gave it.
+// skips the ones after it (the server still starts), and root must never
+// keep the empty password the set-up gave it.
 [[nodiscard]] std::string root_password_sql(const std::string& password, std::string_view family = kMariaDbFamily);
-// MySQL: how many accounts have no password (0 after the first start), as
-// one number. FloServer checks it before it trusts the first start.
-[[nodiscard]] std::string empty_password_count_sql();
+// MySQL: one number, 0 when the init file did its work: root@localhost,
+// root@127.0.0.1 and root@::1 each have a password and there's no anonymous
+// account. Accounts the user made (passwordless ones too) aren't counted.
+// FloServer checks it before it trusts a start with the init file.
+[[nodiscard]] std::string root_accounts_check_sql();
 
 // An option file for the servers' programs that holds only `password`
 // in [client] (FloServer's tools get it this way: not in their arguments
@@ -175,8 +178,9 @@ inline constexpr std::string_view kSharedDatabasePrefix = "www_";
 
 // A project's own user on a `family` server: its database's name, which
 // MariaDB takes up to 80 characters. MySQL takes user names up to 32 (ERROR
-// 1470), and a project's name may have 63: a longer one becomes its first 23
-// characters, '_' and 8 hex digits of the SHA-256 of the whole name. It's
+// 1470), and a project's name may have 63: one of 32 or more becomes its
+// first 23 characters, '_' and 8 hex digits of the SHA-256 of the whole name
+// (always 32, so never another project's real name: 31 at most). It's
 // made from the database's name, which is kept with the project through a
 // rename (project_database_name()), so it never changes. Database names may
 // have 64 characters on both.
@@ -184,9 +188,10 @@ inline constexpr std::size_t kMySqlMaxUserName = 32;
 [[nodiscard]] std::string project_database_user(std::string_view database, std::string_view family);
 // The name a project's database has on a `family` server. MySQL counts the
 // '\' that escape a GRANT's '_' toward its 64-character limit (ERROR 1059),
-// so there a name whose GRANT pattern (grant_pattern()) would be longer is
-// cut the same way (its start, '_', 8 hex digits of its SHA-256) to fit:
-// the same name every time. Elsewhere, and for shorter names, `database`.
+// so there a name whose GRANT pattern (grant_pattern()) would have 63 or
+// more is cut the same way (its start, '_', 8 hex digits of its SHA-256) to
+// 63 or 64, never another project's real name (62 at most): the same name
+// every time. Elsewhere, and for shorter names, `database`.
 // The secure store keeps its password under `database`, the name FloServer
 // knows it by.
 inline constexpr std::size_t kMySqlMaxIdentifier = 64;
