@@ -82,11 +82,19 @@ TEST_CASE("MySQL's my.ini: no X Protocol, no binary log, 127.0.0.1 only, its own
     // Windows-only options in their loose- form, as for MariaDB.
     CHECK(c.find("loose-named-pipe=0") != std::string::npos);
     CHECK(c.find("loose-shared-memory=0") != std::string::npos);
-    CHECK(c.find("basedir") == std::string::npos);
 #endif
+    // MySQL's basedir is written everywhere (on Windows mysqld.exe would take it from
+    // its own path, read in the ANSI code page), as the path it's given.
+    const std::u8string base = f.base_dir.generic_u8string();
+    CHECK(c.find("basedir=\"" + std::string(base.begin(), base.end()) + "\"") != std::string::npos);
     // MariaDB's has neither of MySQL's lines.
     const MariaDbFiles m = mariadb_files(tmp.path() / "inst", "11.4.13", tmp.path() / "data");
     const std::string mc = mariadb_config(m, 33100, false, false);
+#ifdef _WIN32
+    CHECK(mc.find("basedir") == std::string::npos);  // mariadbd.exe finds its own folder (UTF-8)
+#else
+    CHECK(mc.find("basedir=") != std::string::npos);
+#endif
     CHECK(mc.find("mysqlx") == std::string::npos);
     CHECK(mc.find("skip-log-bin") == std::string::npos);
     CHECK(mc.find("collation_server=utf8mb4_unicode_ci") != std::string::npos);
