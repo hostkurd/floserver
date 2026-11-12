@@ -9,7 +9,12 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
+#include <cctype>
 #include <fstream>
+#include <map>
+#include <mutex>
+#include <span>
 #include <system_error>
 #include <thread>
 
@@ -85,9 +90,11 @@ std::vector<std::string> words(std::string_view text) {
 
 fs::path venv_dir(const AppSpec& app) { return app.dir / ".venv"; }
 
-// What the environment of the app's processes adds: the port, loopback
-// only, no browser opened by the dev server, plain text in the log, and the
-// project's runtime first on PATH (for Python its .venv, then the install).
+// What the environment of the app's processes adds: the port and HOST (the
+// address most servers read; Bun has no such setting, and Node's and Bun's own
+// defaults listen on every address), no browser opened by the dev server,
+// plain text in the log, and the project's runtime first on PATH (for Python
+// its .venv, then the install).
 void set_environment(ChildOptions& o, const AppSpec& app, Port port) {
     std::vector<std::string> first;
     if (app.kind == AppKind::Python) {
@@ -95,11 +102,11 @@ void set_environment(ChildOptions& o, const AppSpec& app, Port port) {
         if (const auto py = python_program(app.runtime_dir)) {
             first.push_back(path_to_utf8(py->parent_path()));
         }
-        if (const auto node = app.node_dir.empty() ? std::nullopt : node_program(app.node_dir)) {
-            first.push_back(path_to_utf8(node->parent_path()));
+        if (const auto js = app.node_dir.empty() ? std::nullopt : js_program(app.tools_name, app.node_dir)) {
+            first.push_back(path_to_utf8(js->parent_path()));
         }
-    } else if (const auto node = node_program(app.runtime_dir)) {
-        first.push_back(path_to_utf8(node->parent_path()));
+    } else if (const auto js = js_program(app_runtime_name(app.kind), app.runtime_dir)) {
+        first.push_back(path_to_utf8(js->parent_path()));
     }
     std::string path;
     for (const std::string& p : first) {
@@ -119,6 +126,15 @@ void set_environment(ChildOptions& o, const AppSpec& app, Port port) {
              {"NO_COLOR", "1"},
              {"FORCE_COLOR", "0"},
              {"PATH", path}};
+    if (app.kind == AppKind::Bun) {
+        o.env.emplace_back("BUN_CONFIG_NO_CLEAR_TERMINAL_ON_RELOAD", "true");  // no screen-clearing codes in the log
+    } else if (app.kind == AppKind::Deno) {
+        o.env.emplace_back("DENO_NO_UPDATE_CHECK", "1");  // never a message about a newer Deno
+        // Deno.serve and `deno serve` listen on 0.0.0.0:8000 and ignore PORT
+        // and HOST; Deno's own setting moves the first server it starts (also
+        // under `deno task`, and node:http and npm:vite).
+        o.env.emplace_back("DENO_SERVE_ADDRESS", "tcp:127.0.0.1:" + std::to_string(port));
+    }
     if (app.kind == AppKind::Python) {
         o.env.emplace_back("VIRTUAL_ENV", path_to_utf8(venv_dir(app)));
         o.env.emplace_back("PYTHONUNBUFFERED", "1");  // the log shows output as it comes
@@ -211,25 +227,53 @@ std::optional<AppLaunch> python_launch(const AppSpec& app, Port port, std::strin
     return std::nullopt;
 }
 
-// package.json lists packages and node_modules isn't there yet.
-bool needs_npm_install(const fs::path& dir) {
+}  // namespace
+
+// package.json lists packages and node_modules isn't there yet. The window
+// asks every couple of seconds, so what package.json lists is remembered
+// until the file's time or size changes.
+bool needs_package_install(const fs::path& dir) {
     std::error_code ec;
-    if (fs::exists(dir / "node_modules", ec) || !is_file(dir / "package.json")) {
+    const fs::path package = dir / "package.json";
+    if (fs::exists(dir / "node_modules", ec) || !is_file(package)) {
         return false;
     }
-    const auto text = read_small_file(dir / "package.json", kMaxPackageJson);
+    struct Seen {
+        fs::file_time_type time;
+        std::uintmax_t size = 0;
+        bool lists_packages = false;
+    };
+    static std::mutex mutex;
+    static std::map<fs::path, Seen> seen;
+    const auto time = fs::last_write_time(package, ec);
+    const auto size = ec ? 0 : fs::file_size(package, ec);
+    const bool known = !ec;
+    if (known) {
+        const std::lock_guard<std::mutex> lock(mutex);
+        if (const auto it = seen.find(package); it != seen.end() && it->second.time == time && it->second.size == size) {
+            return it->second.lists_packages;
+        }
+    }
+    const auto text = read_small_file(package, kMaxPackageJson);
     if (!text) {
         return false;
     }
     // A damaged file is reported by app_launch(); nothing to install here.
     const json doc = json::parse(*text, nullptr, false);
+    bool lists = false;
     for (const char* key : {"dependencies", "devDependencies"}) {
         if (doc.is_object() && doc.contains(key) && doc[key].is_object() && !doc[key].empty()) {
-            return true;
+            lists = true;
         }
     }
-    return false;
+    if (known) {
+        const std::lock_guard<std::mutex> lock(mutex);
+        seen[package] = {time, size, lists};
+    }
+    return lists;
 }
+
+namespace {
 
 std::string replace_all(std::string text, std::string_view from, const std::string& to) {
     for (std::size_t at = text.find(from); at != std::string::npos; at = text.find(from, at + to.size())) {
@@ -258,6 +302,34 @@ std::optional<fs::path> npm_script(const fs::path& node_dir) {
     return is_file(p) ? std::optional<fs::path>(std::move(p)) : std::nullopt;
 }
 
+std::optional<fs::path> bun_program(const fs::path& bun_dir) {
+#ifdef _WIN32
+    fs::path p = bun_dir / "bun.exe";
+#else
+    fs::path p = bun_dir / "bun";
+#endif
+    return is_file(p) ? std::optional<fs::path>(std::move(p)) : std::nullopt;
+}
+
+std::optional<fs::path> deno_program(const fs::path& deno_dir) {
+#ifdef _WIN32
+    fs::path p = deno_dir / "deno.exe";
+#else
+    fs::path p = deno_dir / "deno";
+#endif
+    return is_file(p) ? std::optional<fs::path>(std::move(p)) : std::nullopt;
+}
+
+std::optional<fs::path> js_program(std::string_view runtime, const fs::path& dir) {
+    if (runtime == "bun") {
+        return bun_program(dir);
+    }
+    if (runtime == "deno") {
+        return deno_program(dir);
+    }
+    return node_program(dir);
+}
+
 std::vector<std::string> port_arguments(const std::string& script, Port port) {
     // npm adds arguments at the end of the script, so they reach its last
     // command: "tsc && vite" → vite.
@@ -273,14 +345,32 @@ std::vector<std::string> port_arguments(const std::string& script, Port port) {
         })) {
         return {};
     }
-    // The command's name, after any VAR=value and cross-env.
+    // The command's name, after any VAR=value, cross-env, option and runner
+    // (`bunx --bun vite`, `deno run -A npm:vite@5`, `bun run vite`).
     std::string name;
+    bool after_runtime = false;
     for (const std::string& s : w) {
-        if (s.find('=') != std::string::npos || s == "cross-env" || s == "env" || s == "npx" || s == "pnpm" ||
-            s == "pnpx" || s == "yarn" || s == "bunx" || s == "exec" || s == "dlx") {
+        if (s.find('=') != std::string::npos || s.starts_with('-') || s == "cross-env" || s == "env" ||
+            s == "npx" || s == "pnpm" || s == "pnpx" || s == "yarn" || s == "bunx" || s == "exec" || s == "dlx") {
             continue;
         }
-        name = s.substr(s.find_last_of('/') + 1);
+        if (s == "bun" || s == "deno") {
+            after_runtime = true;
+            continue;
+        }
+        if (after_runtime && (s == "run" || s == "x" || s == "task")) {
+            continue;
+        }
+        name = s;
+        for (const char* scheme : {"npm:", "jsr:"}) {
+            if (name.starts_with(scheme)) {
+                name.erase(0, std::string_view(scheme).size());
+            }
+        }
+        if (const auto at = name.find('@', 1); at != std::string::npos) {
+            name.erase(at);  // vite@5
+        }
+        name = name.substr(name.find_last_of('/') + 1);
         break;
     }
     const std::string p = std::to_string(port);
@@ -319,8 +409,11 @@ std::optional<std::vector<AppSetupStep>> app_setup(const AppSpec& app, Port port
     if (app.kind == AppKind::Apache) {
         return steps;  // its config is written as it starts (app_launch)
     }
+    if (app.kind == AppKind::Bun || app.kind == AppKind::Deno) {
+        return steps;  // packages are the project's own to install (`bun install`, `deno install`)
+    }
     if (app.kind == AppKind::Node) {
-        if (!needs_npm_install(app.dir)) {
+        if (!needs_package_install(app.dir)) {
             return steps;
         }
         const auto node = node_program(app.runtime_dir);
@@ -430,6 +523,213 @@ std::optional<std::vector<AppSetupStep>> app_setup(const AppSpec& app, Port port
     return steps;
 }
 
+namespace {
+
+// The first of `names` that is a file in the project.
+std::optional<std::string> first_entry(const fs::path& dir, std::span<const char* const> names) {
+    for (const char* name : names) {
+        if (is_file(dir / path_from_utf8(name))) {
+            return std::string(name);
+        }
+    }
+    return std::nullopt;
+}
+
+std::string list_names(std::span<const char* const> names) {
+    std::string out;
+    for (const char* name : names) {
+        out += (out.empty() ? "" : ", ") + std::string(name);
+    }
+    return out;
+}
+
+// deno.jsonc may end a list or object with a comma, which JSON doesn't allow
+// and nlohmann::json can't skip: those commas (outside strings and comments)
+// are taken out.
+std::string without_trailing_commas(const std::string& text) {
+    std::string out;
+    out.reserve(text.size());
+    bool in_string = false;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        if (in_string) {
+            out += c;
+            if (c == '\\' && i + 1 < text.size()) {
+                out += text[++i];
+            } else if (c == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+        if (c == '"') {
+            in_string = true;
+        } else if (c == '/' && i + 1 < text.size() && (text[i + 1] == '/' || text[i + 1] == '*')) {
+            const bool line = text[i + 1] == '/';
+            const std::size_t end = line ? text.find('\n', i) : text.find("*/", i + 2);
+            const std::size_t stop = end == std::string::npos ? text.size() : (line ? end : end + 2);
+            out.append(text, i, stop - i);
+            i = stop - 1;
+            continue;
+        } else if (c == ',') {
+            // Is the next thing, past spaces and comments, a closing bracket?
+            std::size_t j = i + 1;
+            while (j < text.size()) {
+                if (std::isspace(static_cast<unsigned char>(text[j])) != 0) {
+                    ++j;
+                } else if (text.compare(j, 2, "//") == 0) {
+                    const std::size_t end = text.find('\n', j);
+                    j = end == std::string::npos ? text.size() : end;
+                } else if (text.compare(j, 2, "/*") == 0) {
+                    const std::size_t end = text.find("*/", j + 2);
+                    j = end == std::string::npos ? text.size() : end + 2;
+                } else {
+                    break;
+                }
+            }
+            if (j < text.size() && (text[j] == '}' || text[j] == ']')) {
+                continue;  // a trailing comma
+            }
+        }
+        out += c;
+    }
+    return out;
+}
+
+// "dev" scripts or tasks: a string, or (deno.json) an object with "command".
+std::optional<std::string> script_text(const json& scripts, const char* name) {
+    if (!scripts.is_object() || !scripts.contains(name)) {
+        return std::nullopt;
+    }
+    const json& one = scripts.at(name);
+    if (one.is_string()) {
+        return one.get<std::string>();
+    }
+    if (one.is_object() && one.contains("command") && one.at("command").is_string()) {
+        return one.at("command").get<std::string>();
+    }
+    return std::nullopt;
+}
+
+// `extra` after the script, as `npm run dev -- --port N` has it; Bun and
+// Deno take them straight after the script's name.
+// True when it added some (the script is a framework's dev server).
+bool add_port_arguments(AppLaunch& launch, const std::string& script, Port port, bool separator) {
+    const auto extra = port_arguments(script, port);
+    if (extra.empty()) {
+        return false;
+    }
+    if (separator) {
+        launch.options.args.emplace_back("--");
+        launch.shown += " --";
+    }
+    for (const std::string& a : extra) {
+        launch.options.args.push_back(a);
+        launch.shown += " " + a;
+    }
+    return true;
+}
+
+constexpr std::array<const char*, 6> kBunEntries = {"index.ts",     "index.js",     "server.ts",
+                                                    "server.js",    "src/index.ts", "src/index.js"};
+constexpr std::array<const char*, 4> kDenoEntries = {"main.ts", "server.ts", "main.js", "src/main.ts"};
+
+// Bun (D31): `bun run dev` when package.json has a "dev" script, else
+// `bun --hot` on the first entry file.
+std::optional<AppLaunch> bun_launch(AppLaunch launch, const AppSpec& app, Port port, std::string& error) {
+    const auto program = bun_program(app.runtime_dir);
+    if (!program) {
+        error = "bun is missing from " + path_to_utf8(app.runtime_dir);
+        return std::nullopt;
+    }
+    launch.options.program = *program;
+    const fs::path package = app.dir / "package.json";
+    if (is_file(package)) {
+        const auto text = read_small_file(package, kMaxPackageJson);
+        const json doc = text ? json::parse(*text, nullptr, false) : json();
+        if (!doc.is_object()) {
+            error = "package.json can't be read or isn't valid JSON";
+            return std::nullopt;
+        }
+        if (const auto dev = doc.contains("scripts") ? script_text(doc.at("scripts"), "dev") : std::nullopt) {
+            launch.options.args = {"run", "dev"};
+            launch.shown = "bun run dev";
+            add_port_arguments(launch, *dev, port, false);
+            return launch;
+        }
+    }
+    if (const auto entry = first_entry(app.dir, kBunEntries)) {
+        launch.options.args = {"--hot", *entry};
+        launch.shown = "bun --hot " + *entry;
+        return launch;
+    }
+    error = "FloServer can't tell how to start this Bun project (no \"dev\" script in package.json, and none of " +
+            list_names(kBunEntries) + "); add one, or a \"command\" in floserver.json";
+    return std::nullopt;
+}
+
+// `deno task dev`. A framework's dev server (Vite, Next...) is given its
+// port and host as arguments, and then has no DENO_SERVE_ADDRESS: that
+// setting would reach every server its child processes start as well, which
+// would find the port taken. A plain script keeps it.
+AppLaunch deno_task(AppLaunch launch, const std::optional<std::string>& script, Port port) {
+    launch.options.args = {"task", "dev"};
+    launch.shown = "deno task dev";
+    if (script && add_port_arguments(launch, *script, port, false)) {
+        std::erase_if(launch.options.env, [](const auto& kv) { return kv.first == "DENO_SERVE_ADDRESS"; });
+    }
+    return launch;
+}
+
+// Deno (D31): `deno task dev` when deno.json or deno.jsonc has a "dev" task,
+// else `deno run --watch` on the first entry file, with only the permissions
+// a web server needs.
+std::optional<AppLaunch> deno_launch(AppLaunch launch, const AppSpec& app, Port port, std::string& error) {
+    const auto program = deno_program(app.runtime_dir);
+    if (!program) {
+        error = "deno is missing from " + path_to_utf8(app.runtime_dir);
+        return std::nullopt;
+    }
+    launch.options.program = *program;
+    // Deno reads deno.json, and deno.jsonc only when there is no deno.json.
+    const char* const config_name = is_file(app.dir / "deno.json") ? "deno.json" : "deno.jsonc";
+    if (const fs::path config = app.dir / config_name; is_file(config)) {
+        const auto text = read_small_file(config, kMaxPackageJson);
+        // deno.jsonc has comments and may end lists with a comma.
+        const json doc = text ? json::parse(without_trailing_commas(*text), nullptr, false, true) : json();
+        if (!doc.is_object()) {
+            error = std::string(config_name) + " can't be read or isn't valid JSON";
+            return std::nullopt;
+        }
+        // A "dev" task of any shape is what Deno runs (one with only
+        // dependencies runs them and ends), not package.json's script.
+        if (doc.contains("tasks") && doc.at("tasks").is_object() && doc.at("tasks").contains("dev")) {
+            return deno_task(std::move(launch), script_text(doc.at("tasks"), "dev"), port);
+        }
+    }
+    // `deno task` runs package.json's scripts too.
+    if (const fs::path package = app.dir / "package.json"; is_file(package)) {
+        const auto text = read_small_file(package, kMaxPackageJson);
+        const json doc = text ? json::parse(*text, nullptr, false) : json();
+        if (const auto dev = doc.is_object() && doc.contains("scripts") ? script_text(doc.at("scripts"), "dev")
+                                                                        : std::nullopt) {
+            return deno_task(std::move(launch), dev, port);
+        }
+    }
+    if (const auto entry = first_entry(app.dir, kDenoEntries)) {
+        // Reads are limited to the project's folder: a file outside it is
+        // refused (a "command" in floserver.json takes its own flags).
+        launch.options.args = {"run", "--watch", "--allow-net", "--allow-read=.", "--allow-env", *entry};
+        launch.shown = "deno run --watch --allow-net --allow-read=. --allow-env " + *entry;
+        return launch;
+    }
+    error = "FloServer can't tell how to start this Deno project (no \"dev\" task in deno.json or deno.jsonc, or "
+            "\"dev\" script in package.json, and none of " + list_names(kDenoEntries) +
+            "); add one, or a \"command\" in floserver.json";
+    return std::nullopt;
+}
+
+}  // namespace
+
 std::optional<AppLaunch> app_launch(const AppSpec& app, Port port, std::string& error) {
     AppLaunch launch;
     set_environment(launch.options, app, port);
@@ -473,6 +773,12 @@ std::optional<AppLaunch> app_launch(const AppSpec& app, Port port, std::string& 
     if (app.kind == AppKind::Python) {
         return python_launch(app, port, error);
     }
+    if (app.kind == AppKind::Bun) {
+        return bun_launch(std::move(launch), app, port, error);
+    }
+    if (app.kind == AppKind::Deno) {
+        return deno_launch(std::move(launch), app, port, error);
+    }
     const fs::path package = app.dir / "package.json";
     const auto text = is_file(package) ? read_small_file(package, kMaxPackageJson) : std::nullopt;
     if (!text) {
@@ -508,14 +814,7 @@ std::optional<AppLaunch> app_launch(const AppSpec& app, Port port, std::string& 
     launch.options.program = *node;
     launch.options.args = {path_to_utf8(*npm), "run", script_name};
     launch.shown = "npm run " + script_name;
-    if (const auto extra = port_arguments(script, port); !extra.empty()) {
-        launch.options.args.emplace_back("--");
-        launch.shown += " --";
-        for (const std::string& a : extra) {
-            launch.options.args.push_back(a);
-            launch.shown += " " + a;
-        }
-    }
+    add_port_arguments(launch, script, port, true);
     return launch;
 }
 

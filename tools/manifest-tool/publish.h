@@ -81,8 +81,10 @@ struct PublishFile {
 [[nodiscard]] std::vector<PublishFile> files_from_live(const LiveList& live, std::string_view cdn,
                                                        std::vector<std::string>& notes);
 
-// "PHP 8.5.13" for php/8.5.13/..., "FloServer 1.2.0" for app/1.2.0/...
-[[nodiscard]] std::string runtime_title(std::string_view runtime, std::string_view version);
+// "PHP 8.5.13" for php/8.5.13/..., "FloServer 1.2.0" for app/1.2.0/...; a
+// variant other than PHP's "nts" is added ("Bun 1.3.14 baseline").
+[[nodiscard]] std::string runtime_title(std::string_view runtime, std::string_view version,
+                                        std::string_view variant = {});
 
 // A new file to add: trims spaces, a leading '/' and a CDN address the user
 // pasted with it. FloServer's installer may have its "What's new" address
@@ -101,13 +103,16 @@ struct OfficialSource {
     enum class Kind : std::uint8_t { Unknown, Sums, Original, ByHand } kind = Kind::Unknown;
     std::vector<std::string> urls;  // checksum lists to try in order, or the original file
     std::string name;               // the file's name in the checksum list
+    bool powershell_print = false;  // the list is a Get-FileHash print (Deno's)
 };
 [[nodiscard]] OfficialSource official_source(std::string_view path);
 
 // The checksum for `name` in a checksum list: the line naming the file as a
 // whole word, and the 64-hex value on it; or a list holding just one hash.
-[[nodiscard]] std::optional<std::string> find_official_hash(std::string_view sums,
-                                                            std::string_view name);
+// `powershell_print` (Deno's lists only) also accepts a Get-FileHash print: a
+// "Hash :" line, the file named, and exactly one distinct hash in the text.
+[[nodiscard]] std::optional<std::string> find_official_hash(std::string_view sums, std::string_view name,
+                                                            bool powershell_print = false);
 
 struct CheckContext {
     CheckContext(core::HttpTransport& transport, std::string_view cdn_base)

@@ -38,6 +38,12 @@ const char* runtime_title(const std::string& name) {
     if (name == "node") {
         return "Node.js";
     }
+    if (name == "bun") {
+        return "Bun";
+    }
+    if (name == "deno") {
+        return "Deno";
+    }
     if (name == "python") {
         return "Python";
     }
@@ -222,8 +228,9 @@ std::optional<std::int64_t> TemplateService::create(const CreateRequest& request
         return std::nullopt;
     }
     for (const auto& [key, value] : request.versions) {
-        if (key != "php" && key != "node" && key != "python" && key != "database" && key != "web") {
-            refusal = {"bad_params", "versions take php, node, python, database and web"};
+        if (key != "php" && key != "node" && key != "bun" && key != "deno" && key != "javascript" && key != "python" &&
+            key != "database" && key != "web") {
+            refusal = {"bad_params", "versions take php, javascript, python, database and web"};
             return std::nullopt;
         }
     }
