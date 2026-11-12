@@ -353,7 +353,7 @@ std::string blank_secret_query(std::string_view uri) {
 // Text the service wrote that may quote floserver.json ("php \"x\" is not a
 // version..."): the quoted parts left out, secrets blanked, one short line.
 std::string shown_problem(const json& p) {
-    std::string text = text_of(p, "problem");
+    const std::string text = text_of(p, "problem");
     std::string out;
     bool quoted = false;
     for (const char c : text) {
@@ -590,11 +590,8 @@ std::vector<Span> secret_spans(std::string_view s) {
         if (k + 1 < n && s[k] == '=' && s[k + 1] == '>') {
             k += 2;
             separated = true;
-        } else if (k < n && s[k] == '=') {
-            ++k;
-            separated = true;
-        } else if (k < n && s[k] == ':' && !(k + 1 < n && s[k + 1] == '/')) {
-            ++k;
+        } else if (k < n && (s[k] == '=' || (s[k] == ':' && (k + 1 >= n || s[k + 1] != '/')))) {
+            ++k;  // name=v, name: v (not a URL's ://)
             separated = true;
         } else if (run.size() > 2 && run.substr(0, 2) == "--" && k > e && k < n && s[k] != '-') {
             separated = true;
@@ -757,7 +754,7 @@ json valid_setting(const std::string& key, const json& v) {
         if (!v.is_string()) {
             return kNotValid;
         }
-        const std::string& r = v.get_ref<const std::string&>();
+        const auto& r = v.get_ref<const std::string&>();
         const bool ok = !r.empty() && r.size() <= 200 && r.front() != '/' && r.front() != '\\' &&
                         r.find("..") == std::string::npos &&
                         std::all_of(r.begin(), r.end(), [](char c) { return name_char(c, " _.-/\\"); });
@@ -768,7 +765,7 @@ json valid_setting(const std::string& key, const json& v) {
         if (!v.is_string()) {
             return kNotValid;
         }
-        const std::string& d = v.get_ref<const std::string&>();
+        const auto& d = v.get_ref<const std::string&>();
         const std::size_t dash = d.find('-');
         const bool ok = dash != std::string::npos && dash > 0 && dash <= 20 &&
                         std::all_of(d.begin(), d.begin() + static_cast<std::ptrdiff_t>(dash),
