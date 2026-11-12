@@ -4,6 +4,7 @@
 
 #include "floserver/core/child_process.h"
 #include "floserver/core/ipc.h"
+#include "floserver/core/mariadb.h"
 #include "floserver/core/mcp_server.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/process.h"
@@ -145,6 +146,9 @@ void fill_busy(FakeBackend& b) {
                                 {"smtp_port", 1025}, {"inbox_url", "http://mail.localhost:8080"},
                                 {"unread", 2}, {"total", 3}, {"settings", {{"php", true}}}};
     b.results["status"] = {{"version", "0.1.0"}, {"pid", 42}, {"uptime_s", 61}, {"memory_bytes", 1234567}};
+    b.results["redis.status"] = {{"installed", true}, {"version", "1.0.84"}, {"state", "asleep"}, {"host", "127.0.0.1"},
+                                 {"port", 6380}, {"keys", 3}, {"settings", {{"keep_running", false}, {"memory_mb", 256}}},
+                                 {"projects", json::array({"shop"})}, {"phpredis", json::array({"8.4"})}};
     b.results["web.status"] = {
         {"nginx", {{"running", true}, {"version", "1.28.0"}, {"tls", true}, {"http_port", 8080}, {"https_port", 8443}}},
         {"apache", nullptr},
@@ -500,7 +504,8 @@ TEST_CASE("mcp: each tool's answer, and only read-only requests reach the servic
     const json api_info = structured("project_info", {{"name", "api"}});
     CHECK(api_info["floserver_json"].is_null());
     CHECK(api_info["database"].is_null());
-    CHECK(api_info["redis"]["on"] == false);
+    CHECK(api_info["redis"]["on"] == false);  // the service's list of projects with Redis on has only shop
+    CHECK(info["redis"]["server"]["port"] == 6380);
 
     const json runtimes = structured("list_runtimes");
     CHECK(runtimes["installed"][0] == json{{"name", "php"}, {"version", "8.4.27"}, {"folder", "/data/runtimes/php/8.4.27"},
@@ -516,6 +521,9 @@ TEST_CASE("mcp: each tool's answer, and only read-only requests reach the servic
     CHECK(status["apps"][0] == json{{"name", "api"}, {"state", "sleeping"}});  // never its command
     CHECK(status["databases"][0]["port"] == 3306);
     CHECK(status["mail"]["unread"] == 2);
+    CHECK(status["redis"] == json{{"installed", true}, {"version", "1.0.84"}, {"state", "asleep"}, {"host", "127.0.0.1"},
+                                  {"port", 6380}, {"stored_items", 3}, {"keep_running", false}});
+    CHECK(runtimes["redis"]["state"] == "asleep");
 
     const json web = structured("read_log", {{"name", "shop"}, {"lines", 5}});
     CHECK(web["kind"] == "web");
@@ -908,12 +916,47 @@ TEST_CASE("mcp: floserver.json is read only as the project's own plain file") {
     }
 }
 
+TEST_CASE("mcp: MySQL's names as its server has them, and Bun and Deno") {
+    FakeBackend backend;
+    fill_busy(backend);
+    const std::string long_name = "a-very-long-project-name-that-mysql-cuts-short-for-its-users";
+    json& shop = backend.results["projects.list"]["projects"][0];
+    shop["database"] = "mysql-8.4";
+    shop["database_name"] = project_database_name(long_name);
+    shop.erase("php");
+    shop["bun"] = "1.3.2";
+    backend.results["databases.list"]["servers"].push_back(
+        {{"family", "mysql"}, {"series", "8.4"}, {"version", "8.4.7"}, {"port", 3307}, {"state", "running"},
+         {"connections", 1}, {"projects", json::array({"shop"})}});
+    backend.files["/home/me/sites/shop"] = R"({"bun": "1.3", "mysql": "8.4", "redis": true})";
+    mcp::Server server(backend);
+    const json r = call_tool(server, "project_info", {{"name", "shop"}});
+    INFO(r.dump(2));
+    const json& db = r["structuredContent"]["database"];
+    CHECK(db["engine"] == "mysql");
+    CHECK(db["port"] == 3307);
+    CHECK(db["user"] == project_database_user(project_database_name(long_name), "mysql"));
+    CHECK(db["user"].get<std::string>().size() <= kMySqlMaxUserName);
+    CHECK(db["database"] == server_database_name(project_database_name(long_name), "mysql"));
+    CHECK_FALSE(db.contains("password"));
+    CHECK(r["structuredContent"]["runtimes"]["bun"] == "1.3.2");
+    CHECK(r["structuredContent"]["floserver_json"]["bun"] == "1.3");
+    CHECK(r["structuredContent"]["floserver_json"]["mysql"] == "8.4");
+    const json listed = call_tool(server, "list_projects")["structuredContent"];
+    CHECK(listed["projects"][0]["versions"] == json{{"bun", "1.3.2"}});
+    const json status = call_tool(server, "service_status")["structuredContent"];
+    CHECK(status["databases"][1]["engine"] == "mysql");
+    CHECK(status["databases"][1]["port"] == 3307);
+}
+
 TEST_CASE("mcp: only read-only service methods, and secrets hidden at any depth") {
     for (const char* m : {"status", "projects.list", "projects.log", "runtimes.list", "web.status", "databases.list",
                           "mail.status", "mail.recent"}) {
         CHECK(mcp::read_only_method(m));
     }
-    for (const char* m : {"databases.login", "shared.login", "database.root", "phpmyadmin.login", "mail.env",
+    CHECK(mcp::read_only_method("redis.status"));
+    for (const char* m : {"redis.password", "redis.set", "redis.flush", "databases.login", "shared.login", "database.root",
+                          "phpmyadmin.login", "mail.env",
                           "projects.set", "projects.remove", "runtimes.install", "mail.clear", "quit", "web.reload",
                           "php.custom_ini", "backup.start"}) {
         CHECK_FALSE(mcp::read_only_method(m));

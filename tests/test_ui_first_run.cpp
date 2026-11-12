@@ -9,6 +9,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -279,4 +280,65 @@ TEST_CASE("first run: done is kept in window.json with the other keys") {
     CHECK(parse_window_prefs(window_prefs_json(prefs)) == prefs);
     prefs.first_run_done = false;
     CHECK_FALSE(json::parse(window_prefs_json(prefs)).contains("first_run_done"));
+}
+
+TEST_CASE("first run: MySQL 8.4 is offered after Python, not ticked (D28)") {
+    json reply = kReply;
+    reply["available"].push_back({{"name", "mysql"}, {"version", "8.4.11"}, {"variant", ""}, {"size", 268000000}});
+    reply["available"].push_back({{"name", "mysql"}, {"version", "8.4.9"}, {"variant", ""}, {"size", 260000000}});
+    const std::vector<FirstRunOffer> offers = first_run_offers(reply);
+    const auto python = std::find_if(offers.begin(), offers.end(), [](const FirstRunOffer& o) { return o.name == "python"; });
+    const auto mysql = std::find_if(offers.begin(), offers.end(), [](const FirstRunOffer& o) { return o.name == "mysql"; });
+    REQUIRE(mysql != offers.end());
+    REQUIRE(python != offers.end());
+    CHECK(mysql == python + 1);
+    CHECK(mysql->version == "8.4.11");
+    CHECK(mysql->label == "MySQL 8.4");
+    CHECK_FALSE(mysql->ticked);
+    CHECK(mysql->what == Str::FirstRunWhatMysql);
+    for (const Lang lang : {Lang::En, Lang::Ar, Lang::Ku}) {
+        CHECK(text(lang, Str::FirstRunWhatMysql).find("MySQL") != std::string_view::npos);
+    }
+}
+
+TEST_CASE("first run: Bun and Deno are offered after Python, not ticked (D31)") {
+    const json reply = json::parse(R"({
+        "installed": [],
+        "list": {"sequence": 12, "expires": "2027-01-28T00:00:00Z"},
+        "available": [
+            {"name": "python", "version": "3.13.9", "variant": "", "size": 25000000},
+            {"name": "bun", "version": "1.3.14", "variant": "", "size": 52000000},
+            {"name": "deno", "version": "2.9.8", "variant": "", "size": 42000000},
+            {"name": "apache", "version": "2.4.65", "variant": "", "size": 12000000},
+            {"name": "nginx", "version": "1.30.6", "variant": "", "size": 2000000}
+        ]})");
+    const std::vector<FirstRunOffer> offers = first_run_offers(reply);
+    REQUIRE(offers.size() == 5);
+    CHECK(offers[1].name == "bun");
+    CHECK(offers[1].version == "1.3.14");
+    CHECK(offers[1].label == "Bun 1.3");
+    CHECK(offers[1].what == Str::FirstRunWhatBun);
+    CHECK_FALSE(offers[1].ticked);
+    CHECK(offers[2].name == "deno");
+    CHECK(offers[2].label == "Deno 2.9");
+    CHECK(offers[2].what == Str::FirstRunWhatDeno);
+    CHECK_FALSE(offers[2].ticked);
+    CHECK(first_run_default_ticks(offers) == std::vector<bool>{false, false, false, false, true});
+    for (const Lang lang : {Lang::En, Lang::Ar, Lang::Ku}) {
+        CHECK_FALSE(text(lang, Str::FirstRunWhatBun).empty());
+        CHECK_FALSE(text(lang, Str::FirstRunWhatDeno).empty());
+    }
+
+    // A CPU without AVX2: the service lists Bun's baseline build only, and it is offered.
+    const json baseline = json::parse(R"({
+        "installed": [],
+        "list": {"sequence": 12, "expires": "2027-01-28T00:00:00Z"},
+        "available": [
+            {"name": "bun", "version": "1.3.14", "variant": "baseline", "size": 53000000},
+            {"name": "php", "version": "8.5.13", "variant": "ts", "size": 32000000}
+        ]})");
+    const auto without = first_run_offers(baseline);
+    REQUIRE(without.size() == 1);  // PHP's thread-safe build is still left out
+    CHECK(without[0].name == "bun");
+    CHECK(without[0].size == 53000000U);
 }

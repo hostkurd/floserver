@@ -104,6 +104,8 @@ std::string MainWindow::access_id(const Hit& hit) const {
             return panel + "phpmyadmin";
         case Part::PanelKeep:
             return panel + "keep";
+        case Part::PanelRedis:
+            return panel + "redis";
         case Part::PanelRemove:
             return panel + "remove";
         case Part::PanelPhpSettings:
@@ -519,8 +521,16 @@ void MainWindow::add_panel_access(AccessTree& t) const {
         picker.target = target(Part::PanelField, index);
         add(std::move(picker), g.fields[i].second);
     }
-    words("php-note", php_off_note(*row, lang_), g.php_note);
+    words("php-note", field_note(*row, lang_), g.php_note);
     words("saved-in", fill(lang_, Str::SavedIn, {core::kProjectConfigFileName}), g.saved_in);
+    if (shown(g.redis_switch)) {
+        AccessNode sw = switch_node(access_id({Part::PanelRedis, -1, p}), std::string(text(lang_, Str::PanelRedis)),
+                                    redis_value(*row), connected && !leaving(p), lang_);
+        sw.help = access_text(redis_panel_note(*row, snap_.installed, lang_));
+        sw.focusable = true;
+        sw.target = target(Part::PanelRedis, -1);
+        add(std::move(sw), g.redis_switch);
+    }
     if (shown(g.keep_switch)) {
         const bool keep = keep_value(*row);
         AccessNode sw = switch_node(access_id({Part::PanelKeep, -1, p}), std::string(text(lang_, Str::KeepRunning)),
@@ -543,11 +553,11 @@ void MainWindow::add_panel_access(AccessTree& t) const {
     // Database.
     if (shown(g.db_box)) {
         const std::string database = !row->database.empty() ? row->database : row->wants.database;
-        const std::string name = row_database_name(*row);  // kept through a rename (D22)
+        const std::string name = row_server_database(*row);  // kept through a rename (D22); MySQL's may be cut
         const std::uint16_t port = database_port(snap_.databases, database);
         const std::string host = port != 0 ? "127.0.0.1:" + std::to_string(port) : std::string("127.0.0.1");
         words("db-title", fill(lang_, Str::DatabaseTitle, {name}), g.db_title);
-        words("db-detail", fill(lang_, Str::DatabaseDetail, {host, name}), g.db_detail);
+        words("db-detail", fill(lang_, Str::DatabaseDetail, {host, row_database_user(*row)}), g.db_detail);
         AccessNode copy_env = button_node(access_id({Part::PanelCopyEnv, -1, p}), std::string(text(lang_, Str::CopyEnv)),
                                       connected);
         copy_env.focusable = true;
@@ -557,7 +567,7 @@ void MainWindow::add_panel_access(AccessTree& t) const {
     if (shown(g.pma)) {
         const DatabaseServerState server =
             database_server(snap_.databases, !row->database.empty() ? row->database : row->wants.database);
-        const std::string label = pma_busy_ ? phpmyadmin_busy_text(server.series, server.state, lang_)
+        const std::string label = pma_busy_ ? phpmyadmin_busy_text(database_server_title(server), server.state, lang_)
                                             : std::string(text(lang_, Str::PmaOpenProject));
         AccessNode pma = button_node(access_id({Part::PanelPhpMyAdmin, -1, p}), label,
                                      phpmyadmin_installed(snap_.installed) && !pma_busy_ && connected);
@@ -1190,6 +1200,9 @@ void MainWindow::run_access(const AccessNode& n, AccessAction action) {
             return;
         case Part::PanelKeep:
             toggle_keep_running_for(hit.project);
+            return;
+        case Part::PanelRedis:
+            toggle_redis_for(hit.project);
             return;
         case Part::SharedSwitch:
         case Part::SharedEnd:

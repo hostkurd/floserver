@@ -1,9 +1,9 @@
 #pragma once
 
-// Settings > Database (MariaDB): database.get's answer for one series, the
-// server's state as databases.list says it, the changes not saved yet and
-// what Save sends. Plain C++ so it's tested on every platform; the window
-// only draws it.
+// Settings > Database: one tab per engine (MariaDB, MySQL since D28; the
+// family), database.get's answer for one series of it, the server's state as
+// databases.list says it, the changes not saved yet and what Save sends.
+// Plain C++ so it's tested on every platform; the window only draws it.
 
 #include "model/ui_strings.h"
 #include "model/view_model.h"
@@ -27,10 +27,24 @@ struct DbServer {
     int port_wanted = 0;     // the port chosen in Settings, when another program has it
     int connections = 0;
     std::string error;
+    std::string error_code;  // "path_not_ascii": MySQL can't be given its folder's path (Windows)
 };
+
+// The engines' tabs, in order: their family ("mariadb", "mysql") and name.
+// PostgreSQL (D29) gets its tab when it's built.
+struct DbEngine {
+    std::string_view family;
+    std::string_view title;
+};
+[[nodiscard]] const std::vector<DbEngine>& db_engines();
+// "MySQL" for "mysql"; the family itself for anything else.
+[[nodiscard]] std::string db_engine_title(std::string_view family);
+// "MySQL 8.4": what the window calls one server.
+[[nodiscard]] std::string db_server_title(std::string_view family, std::string_view series);
 
 // database.get's (and database.set's) answer.
 struct DbSeries {
+    std::string family = "mariadb";  // also when the answer names none; "mysql"
     std::string series;   // "11.4"
     std::string version;  // the newest install of it; empty when none is
     int port = 0;         // the one chosen in Settings; 0: automatic
@@ -54,14 +68,24 @@ struct DbSeries {
 [[nodiscard]] DbServer db_server_from_json(const nlohmann::json& server);
 // The series' server in databases.list's answer (the main window's 2 s
 // snapshot), so Settings shows its state without asking anything itself.
-[[nodiscard]] DbServer db_server_from_list(const nlohmann::json& databases, std::string_view series);
+// A server that names no family is MariaDB's.
+[[nodiscard]] DbServer db_server_from_list(const nlohmann::json& databases, std::string_view series,
+                                           std::string_view family = "mariadb");
 
-// The installed MariaDB series, newest first, each with its newest version.
-[[nodiscard]] std::vector<std::pair<std::string, std::string>> installed_db_series(const Installed& installed);
+// The installed series of `family`, newest first, each with its newest version.
+[[nodiscard]] std::vector<std::pair<std::string, std::string>> installed_db_series(const Installed& installed,
+                                                                                   std::string_view family = "mariadb");
 // As settings_php_versions(): the poll's list, else Settings' own runtimes.list answer.
 [[nodiscard]] std::vector<std::pair<std::string, std::string>> settings_db_versions(bool has_installed,
                                                                                     const Installed& installed,
-                                                                                    const nlohmann::json& runtimes_reply);
+                                                                                    const nlohmann::json& runtimes_reply,
+                                                                                    std::string_view family = "mariadb");
+// The family a tab shows when the section opens: the one shown before when
+// it has an install, else the first engine that has one, else MariaDB.
+[[nodiscard]] std::string db_family_to_show(const std::string& shown, bool has_installed, const Installed& installed,
+                                            const nlohmann::json& runtimes_reply);
+// The note under MySQL's tab: FloServer offers its 8.4 LTS series only. Empty for the others.
+[[nodiscard]] std::string db_engine_note(std::string_view family, Lang lang);
 
 // The my.ini values shown as fields: `key` as config.json keeps it
 // (canonical: lower case, '_'), `label` as people write it.
@@ -77,7 +101,8 @@ struct DbIniField {
 // A name MariaDB doesn't know stops it from starting. Nothing when `known`
 // is empty or knows it; else the closest known name ("" when none is close).
 [[nodiscard]] std::optional<std::string> unknown_db_option(const std::vector<std::string>& known, std::string_view key);
-[[nodiscard]] std::string unknown_db_option_text(std::string_view series, std::string_view key,
+// `server`: db_server_title(), "MySQL 8.4".
+[[nodiscard]] std::string unknown_db_option_text(std::string_view server, std::string_view key,
                                                  const std::string& suggestion, Lang lang);
 
 // --- changes until Save -------------------------------------------------------
@@ -102,8 +127,12 @@ void db_set_port_text(const DbSeries& series, DbChanges& changes, const std::str
 [[nodiscard]] bool db_keep_running(const DbSeries& series, const DbChanges& changes);
 void db_toggle_keep_running(const DbSeries& series, DbChanges& changes);
 
-// database.set's parameters: only what changed.
-[[nodiscard]] nlohmann::json database_set_params(const std::string& series, const DbChanges& changes);
+// database.set's parameters: only what changed (and the family, when it isn't MariaDB).
+[[nodiscard]] nlohmann::json database_set_params(const std::string& series, const DbChanges& changes,
+                                                 std::string_view family = "mariadb");
+// A database.* request's parameters for one server: {"series"} and, when it
+// isn't MariaDB, {"family"} (a request without one is MariaDB's).
+[[nodiscard]] nlohmann::json db_params(std::string_view family, const std::string& series);
 
 // The footer: what Save restarts.
 [[nodiscard]] std::string db_restart_text(const DbSeries& series, const DbServer& server, Lang lang);

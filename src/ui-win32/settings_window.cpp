@@ -307,6 +307,9 @@ LRESULT SettingsWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             for (const auto& edit : mail_edits_) {
                 edit->set_font(fonts_.button.get());
             }
+            for (const auto& edit : redis_edits_) {
+                edit->set_font(fonts_.button.get());
+            }
             const RECT& r = *win::int_to_ptr<const RECT*>(lparam);
             SetWindowPos(hwnd_, nullptr, r.left, r.top, r.right - r.left, r.bottom - r.top,
                          SWP_NOZORDER | SWP_NOACTIVATE);
@@ -335,6 +338,9 @@ LRESULT SettingsWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
                     edit->set_font(fonts_.button.get());
                 }
                 for (const auto& edit : mail_edits_) {
+                    edit->set_font(fonts_.button.get());
+                }
+                for (const auto& edit : redis_edits_) {
                     edit->set_font(fonts_.button.get());
                 }
                 relayout();
@@ -513,6 +519,7 @@ void SettingsWindow::on_destroy() {
     db_edits_.clear();
     apache_edits_.clear();
     mail_edits_.clear();
+    redis_edits_.clear();
     SecureZeroMemory(root_shown_.data(), root_shown_.size());
     root_shown_.clear();
     WINDOWPLACEMENT wp{};
@@ -546,6 +553,9 @@ void SettingsWindow::apply_theme() {
     for (const auto& edit : mail_edits_) {
         InvalidateRect(edit->hwnd(), nullptr, TRUE);
     }
+    for (const auto& edit : redis_edits_) {
+        InvalidateRect(edit->hwnd(), nullptr, TRUE);
+    }
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
@@ -570,6 +580,16 @@ void SettingsWindow::on_snapshot(const Snapshot& snap) {
     if (snap.mail && !mail_saving_) {
         mail_ = snap.mail;
         mail_loading_ = false;
+    }
+    // Redis (D30) the same way; the projects that use it come from the section's own ask.
+    if (snap.redis && !redis_saving_) {
+        const bool known = redis_ && redis_->projects_known;
+        std::vector<std::string> names = redis_ ? redis_->projects : std::vector<std::string>{};
+        redis_ = snap.redis;
+        if (known && !redis_->projects_known) {
+            redis_->projects = std::move(names);
+            redis_->projects_known = true;
+        }
     }
     php_projects_ = static_cast<std::size_t>(
         std::count_if(snap.rows.begin(), snap.rows.end(), [](const ProjectRow& r) { return r.on && !r.php.empty(); }));
@@ -646,9 +666,12 @@ void SettingsWindow::on_snapshot(const Snapshot& snap) {
     if (!was_connected && connected_ && section_ == Section::Mail && !mail_ && !mail_loading_ && !mail_saving_) {
         load_mail();
     }
+    if (!was_connected && connected_ && section_ == Section::Redis && !redis_loading_ && !redis_saving_) {
+        load_redis();
+    }
     // The server's state, from the main window's poll: nothing is asked for it.
     if (!db_series_.empty()) {
-        db_server_ = db_server_from_list(databases_, db_series_);
+        db_server_ = db_server_from_list(databases_, db_series_, db_family_);
     }
     // Shared sites, from the main window's poll: nothing is asked for them.
     on_shared_answers(snap);
@@ -660,7 +683,8 @@ void SettingsWindow::on_snapshot(const Snapshot& snap) {
     const bool close_php = on_php_answers(snap);
     const bool close_apache = on_apache_answers(snap);
     const bool close_mail = on_mail_answers(snap);
-    const bool close_now = on_db_answers(snap) || close_php || close_apache || close_mail;
+    const bool close_redis = on_redis_answers(snap);
+    const bool close_now = on_db_answers(snap) || close_php || close_apache || close_mail || close_redis;
     if (!close_now && after_save_ != AfterSave::Close) {
         quit_on_close_ = false;  // the Save on the way out was refused: Settings stays, and so does FloServer
     }
@@ -747,6 +771,10 @@ SettingsWindow::Geometry SettingsWindow::layout(HDC dc) const {
     }
     if (section_ == Section::Mail) {
         layout_mail(dc, g, x0, x1, y);
+        return g;
+    }
+    if (section_ == Section::Redis) {
+        layout_redis(dc, g, x0, x1, y);
         return g;
     }
     if (section_ == Section::Php) {
@@ -885,7 +913,7 @@ SettingsWindow::Geometry SettingsWindow::layout(HDC dc) const {
         return px(kHeadH) + static_cast<int>(group.rows.size()) * px(kRowH);
     };
 
-    // PHP, MariaDB, Web servers and Tools take the full width; Node.js and
+    // PHP, MariaDB, MySQL, Web servers and Tools take the full width; Node.js and
     // Python share a row of cards (never more than two in a row).
     std::vector<std::size_t> grid;
     for (std::size_t i = 0; i < page_.groups.size(); ++i) {
@@ -941,6 +969,7 @@ void SettingsWindow::relayout() {
     place_db_edits();
     place_apache_edits();
     place_mail_edits();
+    place_redis_edits();
     place_scroll_bar();
 }
 
@@ -1038,6 +1067,9 @@ const RECT* SettingsWindow::rect_of(const Hit& hit) const {
             if (is_mail_part(hit.part)) {
                 return mail_rect_of(hit);
             }
+            if (is_redis_part(hit.part)) {
+                return redis_rect_of(hit);
+            }
             return is_db_part(hit.part) ? db_rect_of(hit) : php_rect_of(hit);
     }
     return nullptr;
@@ -1066,6 +1098,10 @@ std::vector<SettingsWindow::Hit> SettingsWindow::focus_order() const {
     }
     if (section_ == Section::Mail) {
         mail_focus_order(order);
+        return order;
+    }
+    if (section_ == Section::Redis) {
+        redis_focus_order(order);
         return order;
     }
     if (section_ == Section::Php) {
@@ -1210,6 +1246,8 @@ void SettingsWindow::on_click(const Hit& hit) {
                 on_apache_click(hit);
             } else if (is_mail_part(hit.part)) {
                 on_mail_click(hit);
+            } else if (is_redis_part(hit.part)) {
+                on_redis_click(hit);
             } else if (is_db_part(hit.part)) {
                 on_db_click(hit);
             } else {
@@ -1288,6 +1326,12 @@ void SettingsWindow::on_key(WPARAM key) {
             if (section_ == Section::Mail) {
                 if (mail_changes_.empty() && !mail_loading_ && !mail_saving_) {
                     load_mail();  // mail.status asked again
+                }
+                return;
+            }
+            if (section_ == Section::Redis) {
+                if (redis_changes_.empty() && !redis_loading_ && !redis_saving_) {
+                    load_redis();  // redis.status asked again
                 }
                 return;
             }
@@ -1583,6 +1627,11 @@ void SettingsWindow::paint_shapes(Canvas& c) const {
             c.round_outline({ix + px(2), iy + px(3), ix + px(14), iy + px(12)}, pxf(1.5F), p.text, pxf(1.3F));
             stroke(2.5F, 4.5F, 8, 9);
             stroke(8, 9, 13.5F, 4.5F);
+        } else if (section == Section::Redis) {
+            // Redis's: three stacked layers, a key-value store's cubes seen flat.
+            c.round_outline({ix + px(2), iy + px(2), ix + px(14), iy + px(6)}, pxf(1.5F), p.text, pxf(1.3F));
+            c.round_outline({ix + px(2), iy + px(6), ix + px(14), iy + px(10)}, pxf(1.5F), p.text, pxf(1.3F));
+            c.round_outline({ix + px(2), iy + px(10), ix + px(14), iy + px(14)}, pxf(1.5F), p.text, pxf(1.3F));
         } else if (section == Section::Php) {
             // PHP's: </>, as in the mockup.
             stroke(5, 5, 2, 8);
@@ -1624,6 +1673,10 @@ void SettingsWindow::paint_shapes(Canvas& c) const {
     }
     if (section_ == Section::Mail) {
         paint_mail_shapes(c);
+        return;
+    }
+    if (section_ == Section::Redis) {
+        paint_redis_shapes(c);
         return;
     }
     if (section_ == Section::Php) {
@@ -1719,6 +1772,10 @@ void SettingsWindow::paint_text(Canvas& c) const {
     }
     if (section_ == Section::Mail) {
         paint_mail_text(c);
+        return;
+    }
+    if (section_ == Section::Redis) {
+        paint_redis_text(c);
         return;
     }
     if (section_ == Section::Php) {

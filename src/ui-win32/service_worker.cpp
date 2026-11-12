@@ -243,8 +243,9 @@ void ServiceWorker::database_call(const std::string& method, const nlohmann::jso
     // MariaDB first (a minute, its first time). One at a time per project.
     // projects.rename reloads the web server and may wait for a folder.
     // Mail (D27): mail.test talks to Mailpit's SMTP and mail.clear deletes files.
+    // Redis (D30): redis.flush may wait for Garnet to start.
     if (method == "folders.get" || method == "folders.clean" || method == "projects.remove" ||
-        method == "projects.rename" || method == "mail.test" || method == "mail.clear") {
+        method == "projects.rename" || method == "mail.test" || method == "mail.clear" || method == "redis.flush") {
         start_side_call(method, params, purpose.empty() ? method : purpose);
         return;
     }
@@ -260,7 +261,8 @@ void ServiceWorker::start_side_call(const std::string& method, const nlohmann::j
     }
     std::thread([box = side_, window = window_, message = message_, method, params, purpose,
                  lost = std::string(text(lang_, Str::ConnectionLost))] {
-        Snapshot::DbAnswer answer{method, string_field(params, "series"), purpose, std::nullopt, {}};
+        Snapshot::DbAnswer answer{method, string_field(params, "series"), purpose, std::nullopt, {},
+                                  string_field(params, "family")};
         try {
             std::string error;
             const std::string instance = core::ipc::default_instance();
@@ -609,6 +611,18 @@ void ServiceWorker::run(const std::stop_token& stop) {
                     if (send(c.project, "databases.login", {{"name", c.project}}, reply)) {
                         wipe(clipboard);
                         clipboard = env_text(reply->result);
+                    } else if (reply && reply->error_code == "no_database") {
+                        // No database: Mailpit's and Redis's lines alone (D27, D30), when there are any.
+                        std::optional<core::protocol::Reply> lines;
+                        if (send(c.project, "mail.env", {{"name", c.project}}, lines) && lines->result.contains("env") &&
+                            lines->result["env"].is_array() && !lines->result["env"].empty()) {
+                            wipe(clipboard);
+                            clipboard = env_text(lines->result);
+                            change_error = {};  // the database's "no database" isn't an error here
+                        }
+                        if (lines) {
+                            wipe_strings(lines->result);
+                        }
                     }
                     if (reply) {
                         wipe_strings(reply->result);
@@ -888,7 +902,8 @@ void ServiceWorker::run(const std::stop_token& stop) {
                     }
                     break;
                 case Command::Kind::DatabaseCall: {
-                    Snapshot::DbAnswer answer{c.key, string_field(c.params, "series"), c.project, std::nullopt, {}};
+                    Snapshot::DbAnswer answer{c.key, string_field(c.params, "series"), c.project, std::nullopt, {},
+                                              string_field(c.params, "family")};
                     if (!client) {
                         answer.error = lost;
                     } else if (auto got = client->call(c.key, c.params); !got) {
@@ -939,6 +954,7 @@ void ServiceWorker::run(const std::stop_token& stop) {
         std::optional<core::protocol::Reply> shared;
         std::optional<core::protocol::Reply> updates;
         std::optional<core::protocol::Reply> mail;
+        std::optional<core::protocol::Reply> redis;
         if (client) {
             list = client->call("projects.list");
             status = list ? client->call("status") : std::nullopt;
@@ -958,7 +974,9 @@ void ServiceWorker::run(const std::stop_token& stop) {
             // Mail (D27): only while the service answers; cheap and cached on its side. An
             // older service doesn't know mail.status: Mailpit counts as not installed.
             mail = updates ? client->call("mail.status") : std::nullopt;
-            if (!databases || !shared || !updates || !mail) {
+            // Redis (D30) the same way; cheap without "projects" (no floserver.json is read).
+            redis = mail ? client->call("redis.status") : std::nullopt;
+            if (!databases || !shared || !updates || !mail || !redis) {
                 client.reset();
             }
             ++polls;
@@ -1165,6 +1183,15 @@ void ServiceWorker::run(const std::stop_token& stop) {
             } else if (mail && latest_.mail) {
                 // Failed some other way: the old numbers aren't kept on show.
                 latest_.mail->stale = true;
+            }
+            if (redis && redis->ok) {
+                if (auto fresh_redis = redis_status_from_reply(redis->result)) {
+                    latest_.redis = std::move(*fresh_redis);
+                }
+            } else if (redis && redis->error_code == kUnknownMethod) {
+                latest_.redis = RedisStatus{};  // an older service: not installed
+            } else if (redis && latest_.redis) {
+                latest_.redis->stale = true;
             }
             if (installed && installed->ok) {
                 latest_.installed = installed_from_list(installed->result);

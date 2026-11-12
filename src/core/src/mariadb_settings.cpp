@@ -48,6 +48,23 @@ constexpr std::array<std::string_view, 13> kManagedMore = {
     "defaults_file",  "defaults_extra_file",  "defaults_group_suffix",     "no_defaults",
     "print_defaults",
 };
+// MySQL's (D28): its X Protocol and admin interface listen on ports of their
+// own, and these move its files or log passwords. Refused for both families
+// (MariaDB has the same meaning for tmpdir, and none for the others).
+constexpr std::array<std::string_view, 10> kManagedMySql = {
+    "admin_address",          "admin_port",          "create_admin_listener_thread",
+    "innodb_directories",     "innodb_temp_tablespaces_dir", "innodb_redo_log_archive_dirs",
+    "innodb_temp_data_file_path", "tmpdir",          "keyring_file_data",
+    "log_raw",  // would write passwords into the general log
+};
+// MySQL's TLS (refused for MySQL only): FloServer's own tools check the
+// server's certificate against the CA MySQL's set-up made, so another
+// certificate or TLS rule would stop them. MariaDB's tools don't check one:
+// its TLS settings stay the user's.
+constexpr std::array<std::string_view, 11> kManagedMySqlTls = {
+    "ssl_ca",    "ssl_cert",         "ssl_key",    "ssl_capath",               "ssl_crl",           "ssl_crlpath",
+    "tls_version", "tls_ciphersuites", "ssl_cipher", "require_secure_transport", "auto_generate_certs",
+};
 // Real options that happen to start a managed name: not taken for a
 // shortened one ("general_log" is not general_log_file).
 constexpr std::array<std::string_view, 5> kRealPrefixes = {"general_log", "slow_query_log", "log_slow_query", "lc_messages",
@@ -75,16 +92,23 @@ bool is_option_char(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <=
 std::string why_refused(std::string_view name, std::string_view managed) {
     const std::string n(name);
     if (managed == "bind_address" || managed == "extra_port" || managed == "skip_networking" ||
-        managed == "proxy_protocol_networks" || managed.starts_with("wsrep")) {
-        return n + " can't be set: FloServer keeps MariaDB on this computer only (127.0.0.1), reached through its own port";
+        managed == "proxy_protocol_networks" || managed.starts_with("wsrep") || managed.starts_with("mysqlx") ||
+        managed.starts_with("admin_") || managed == "create_admin_listener_thread") {
+        return n + " can't be set: FloServer keeps the database server on this computer only (127.0.0.1), reached "
+                   "through its own port";
+    }
+    if (managed.starts_with("ssl_") || managed.starts_with("tls_") || managed == "require_secure_transport" ||
+        managed == "auto_generate_certs") {
+        return n + " can't be set: FloServer's own tools check the server's certificate (its own, made at set-up)";
     }
     if (managed == "skip_grant_tables" || managed == "init_file") {
         return n + " can't be set: it would let anyone in without a password";
     }
     if (managed == "port" || managed == "socket" || managed == "named_pipe" || managed.starts_with("shared_memory")) {
-        return n + " can't be set here: FloServer chooses how MariaDB is reached (change the port in Settings > Database)";
+        return n + " can't be set here: FloServer chooses how the database server is reached (change the port in "
+                   "Settings > Database)";
     }
-    return n + " is set by FloServer (where MariaDB keeps its files and logs) and can't be changed";
+    return n + " is set by FloServer (where the database server keeps its files and logs) and can't be changed";
 }
 
 }  // namespace
@@ -95,7 +119,7 @@ std::string canonical_mariadb_option(std::string_view name) {
     return out;
 }
 
-std::optional<std::string> mariadb_option_problem(std::string_view name) {
+std::optional<std::string> mariadb_option_problem(std::string_view name, std::string_view family) {
     const std::string shown = trimmed(name);
     if (shown.empty() || shown.size() > kMaxOptionLength || !std::all_of(shown.begin(), shown.end(), is_option_char) ||
         shown.front() == '-' || shown.front() == '_') {
@@ -120,6 +144,10 @@ std::optional<std::string> mariadb_option_problem(std::string_view name) {
         if (n.starts_with("wsrep")) {
             return why_refused(shown, "wsrep");
         }
+        // MySQL's X Protocol: mysqlx, mysqlx_port, mysqlx_bind_address...
+        if (n.starts_with("mysqlx")) {
+            return why_refused(shown, "mysqlx");
+        }
         const bool real = std::find(kRealPrefixes.begin(), kRealPrefixes.end(), n) != kRealPrefixes.end();
         const auto match = [&](std::string_view managed) {
             // The name itself, or a shortened form MariaDB would take for it.
@@ -133,6 +161,18 @@ std::optional<std::string> mariadb_option_problem(std::string_view name) {
         for (const std::string_view m : kManagedMore) {
             if (match(m)) {
                 return why_refused(shown, m);
+            }
+        }
+        for (const std::string_view m : kManagedMySql) {
+            if (match(m)) {
+                return why_refused(shown, m);
+            }
+        }
+        if (family == kMySqlFamily) {
+            for (const std::string_view m : kManagedMySqlTls) {
+                if (match(m)) {
+                    return why_refused(shown, m);
+                }
             }
         }
         return std::nullopt;
@@ -164,14 +204,20 @@ std::optional<std::string> mariadb_value_problem(std::string_view value) {
     return std::nullopt;
 }
 
-const std::vector<std::pair<std::string, std::string>>& mariadb_ini_defaults() {
+const std::vector<std::pair<std::string, std::string>>& mariadb_ini_defaults(std::string_view family) {
     // A development server: small memory, utf8mb4 everywhere.
     static const std::vector<std::pair<std::string, std::string>> defaults = {
         {"character_set_server", "utf8mb4"},
         {"collation_server", "utf8mb4_unicode_ci"},
         {"innodb_buffer_pool_size", "64M"},
     };
-    return defaults;
+    // MySQL 8's own collation for utf8mb4 (newer Unicode rules).
+    static const std::vector<std::pair<std::string, std::string>> mysql = {
+        {"character_set_server", "utf8mb4"},
+        {"collation_server", "utf8mb4_0900_ai_ci"},
+        {"innodb_buffer_pool_size", "64M"},
+    };
+    return family == kMySqlFamily ? mysql : defaults;
 }
 
 std::optional<std::string> mariadb_request_series(std::string_view series) {
@@ -182,11 +228,13 @@ std::optional<std::string> mariadb_request_series(std::string_view series) {
     return v->to_string();
 }
 
-MariaDbSettings read_mariadb_settings(const AppConfig& app, std::vector<std::string>* problems) {
+MariaDbSettings read_mariadb_settings(const AppConfig& app, std::vector<std::string>* problems, std::string_view family) {
     MariaDbSettings out;
-    const auto problem = [problems](std::string_view series, std::string_view what) {
+    const std::string key(family);
+    const std::string title = database_family_title(family);
+    const auto problem = [problems, &key](std::string_view series, std::string_view what) {
         if (problems != nullptr) {
-            std::string text = "config.json: mariadb ";
+            std::string text = "config.json: " + key + " ";
             if (!series.empty()) {
                 text.append(series).append(" ");
             }
@@ -194,7 +242,7 @@ MariaDbSettings read_mariadb_settings(const AppConfig& app, std::vector<std::str
         }
     };
     // A copy: GCC's -O3 null-dereference check trips on iterators into nlohmann::json.
-    const json stored = app.other.is_object() && app.other.contains("mariadb") ? app.other.at("mariadb") : json();
+    const json stored = app.other.is_object() && app.other.contains(key) ? app.other.at(key) : json();
     if (stored.is_null()) {
         return out;
     }
@@ -205,7 +253,7 @@ MariaDbSettings read_mariadb_settings(const AppConfig& app, std::vector<std::str
     for (const auto& [name, entry] : stored.items()) {
         const auto parsed = mariadb_request_series(name);
         if (!parsed) {
-            problem(name, "isn't a MariaDB series such as 11.4");
+            problem(name, "isn't a " + title + " series such as " + (family == kMySqlFamily ? "8.4" : "11.4"));
             continue;
         }
         const std::string& series = *parsed;
@@ -236,7 +284,7 @@ MariaDbSettings read_mariadb_settings(const AppConfig& app, std::vector<std::str
                 problem(name, "ini must be an object of text values");
             } else {
                 for (const auto& [k, v] : ini.items()) {
-                    if (!v.is_string() || mariadb_option_problem(k) || mariadb_value_problem(v.get<std::string>())) {
+                    if (!v.is_string() || mariadb_option_problem(k, family) || mariadb_value_problem(v.get<std::string>())) {
                         problem(name, "ini " + k + " is left out");
                         continue;
                     }
@@ -249,11 +297,13 @@ MariaDbSettings read_mariadb_settings(const AppConfig& app, std::vector<std::str
     return out;
 }
 
-void write_mariadb_series(AppConfig& app, const std::string& series, const MariaDbSeriesSettings& settings) {
+void write_mariadb_series(AppConfig& app, const std::string& series, const MariaDbSeriesSettings& settings,
+                          std::string_view family) {
     if (!app.other.is_object()) {
         app.other = json::object();
     }
-    json& all = app.other["mariadb"];
+    const std::string top(family);
+    json& all = app.other[top];
     if (!all.is_object()) {
         all = json::object();
     }
@@ -289,26 +339,28 @@ void write_mariadb_series(AppConfig& app, const std::string& series, const Maria
         all.erase(series);
     }
     if (all.empty()) {
-        app.other.erase("mariadb");
+        app.other.erase(top);
     }
 }
 
-fs::path mariadb_custom_ini_file(const fs::path& data, const std::string& series) {
-    return data / "mariadb" / path_from_utf8(series) / "custom.ini";
+fs::path mariadb_custom_ini_file(const fs::path& data, const std::string& series, std::string_view family) {
+    return data / path_from_utf8(std::string(family)) / path_from_utf8(series) / "custom.ini";
 }
 
-std::string mariadb_custom_ini_header(const std::string& series) {
-    return "# Your own my.ini lines for MariaDB " + series +
+std::string mariadb_custom_ini_header(const std::string& series, std::string_view family) {
+    const std::string title = database_family_title(family);
+    return "# Your own my.ini lines for " + title + " " + series +
            ".\n"
            "# FloServer adds them after the values in Settings > Database, in the [mysqld] group, so a line here wins.\n"
-           "# Lines that would move MariaDB's files, change its port, open it beyond this computer or let\n"
+           "# Lines that would move " + title + "'s files, change its port, open it beyond this computer or let\n"
            "# anyone in without a password are left out (Show the final my.ini says which).\n"
-           "# Changes are used the next time MariaDB " +
+           "# Changes are used the next time " + title + " " +
            series + " starts: Restart it in Settings > Database.\n\n";
 }
 
-bool ensure_mariadb_custom_ini(const fs::path& data, const std::string& series, std::string& error) {
-    const fs::path file = mariadb_custom_ini_file(data, series);
+bool ensure_mariadb_custom_ini(const fs::path& data, const std::string& series, std::string& error,
+                               std::string_view family) {
+    const fs::path file = mariadb_custom_ini_file(data, series, family);
     std::error_code ec;
     if (fs::exists(fs::symlink_status(file, ec))) {
         return true;
@@ -318,23 +370,23 @@ bool ensure_mariadb_custom_ini(const fs::path& data, const std::string& series, 
         error = "can't make " + path_to_utf8(file.parent_path()) + ": " + error_text(ec);
         return false;
     }
-    return write_file_atomically(file, mariadb_custom_ini_header(series), error);
+    return write_file_atomically(file, mariadb_custom_ini_header(series, family), error);
 }
 
-std::string read_mariadb_custom_ini(const fs::path& data, const std::string& series) {
-    const fs::path file = mariadb_custom_ini_file(data, series);
+std::string read_mariadb_custom_ini(const fs::path& data, const std::string& series, std::string_view family) {
+    const fs::path file = mariadb_custom_ini_file(data, series, family);
     std::error_code ec;
     if (!fs::is_regular_file(file, ec)) {
         return {};
     }
     std::string text = read_small_file(file, kMaxCustomIniBytes).value_or(std::string());
-    if (text == mariadb_custom_ini_header(series)) {
+    if (text == mariadb_custom_ini_header(series, family)) {
         return {};
     }
     return text;
 }
 
-FilteredCustomIni filter_mariadb_custom_ini(std::string_view text) {
+FilteredCustomIni filter_mariadb_custom_ini(std::string_view text, std::string_view family) {
     FilteredCustomIni out;
     std::set<std::string> keys;
     std::size_t pos = 0;
@@ -381,7 +433,7 @@ FilteredCustomIni filter_mariadb_custom_ini(std::string_view text) {
         const auto eq = line.find('=');
         const std::string key = trimmed(std::string_view(line).substr(0, eq));
         const std::string value = eq == std::string::npos ? std::string() : trimmed(std::string_view(line).substr(eq + 1));
-        if (const auto problem = mariadb_option_problem(key)) {
+        if (const auto problem = mariadb_option_problem(key, family)) {
             leave_out(*problem);
             continue;
         }
@@ -400,19 +452,20 @@ FilteredCustomIni filter_mariadb_custom_ini(std::string_view text) {
     return out;
 }
 
-MariaDbExtras mariadb_extras(const fs::path& data, const std::string& series, const MariaDbSeriesSettings* settings) {
+MariaDbExtras mariadb_extras(const fs::path& data, const std::string& series, const MariaDbSeriesSettings* settings,
+                             std::string_view family) {
     MariaDbExtras out;
     if (settings != nullptr) {
         for (const auto& [k, v] : settings->ini) {
-            if (!mariadb_option_problem(k) && !mariadb_value_problem(v)) {
+            if (!mariadb_option_problem(k, family) && !mariadb_value_problem(v)) {
                 out.ini[k] = v;
             }
         }
     }
-    const std::string custom = read_mariadb_custom_ini(data, series);
+    const std::string custom = read_mariadb_custom_ini(data, series, family);
     if (!custom.empty()) {
-        out.custom_ini = filter_mariadb_custom_ini(custom).text;
-        out.custom_ini_path = path_to_utf8(mariadb_custom_ini_file(data, series));
+        out.custom_ini = filter_mariadb_custom_ini(custom, family).text;
+        out.custom_ini_path = path_to_utf8(mariadb_custom_ini_file(data, series, family));
     }
     return out;
 }
@@ -510,7 +563,7 @@ std::optional<std::vector<std::string>> known_mariadb_options(const fs::path& se
     }
     std::error_code ec;
     if (!fs::is_regular_file(server_program, ec)) {
-        error = "mariadbd is missing";
+        error = path_to_utf8(server_program.filename()) + " is missing";
         return std::nullopt;
     }
     const fs::path folder = cache_file.parent_path();
@@ -530,14 +583,14 @@ std::optional<std::vector<std::string>> known_mariadb_options(const fs::path& se
         if (!child->wait(limit)) {
             child->kill();  // stuck: it would hold its files open for good
             timed_out = true;
-            error = "mariadbd didn't list its options in time";
+            error = path_to_utf8(server_program.filename()) + " didn't list its options in time";
         } else {
             auto list = parse_mariadb_help(read_small_file(out, kMaxHelpBytes).value_or(std::string()));
             // A real list has hundreds; a few names are an error message.
             if (list.size() >= 50) {
                 names = std::move(list);
             } else {
-                error = "mariadbd didn't list its options";
+                error = path_to_utf8(server_program.filename()) + " didn't list its options";
             }
         }
     }

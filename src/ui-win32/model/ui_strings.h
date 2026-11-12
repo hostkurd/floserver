@@ -71,13 +71,14 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     FieldPhp,
     FieldDatabase,
     FieldWeb,
-    FieldNode,
+    FieldJavascript,
     FieldPython,
     ChoiceNone,
     ChoiceNewest,
     NotInstalled,      // {0}: "8.1"
     SavedIn,           // {0}: "floserver.json"
     PhpOffNote,        // under the pickers: PHP off, the folder has .php files
+    BunPackagesNote,   // under the pickers: a Bun project without node_modules
     DatabaseTitle,     // {0}: the database name
     DatabaseDetail,    // {0}: "127.0.0.1:3306", {1}: the user
     CopyEnv,
@@ -271,11 +272,11 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     PortsOpenFailed,  // {0}: the reason
     PortsChanging,
     PortsCertUnreadable,  // a reason, after "Not added: "
-    // Settings > Database (MariaDB).
+    // Settings > Database (MariaDB, MySQL: one tab per engine).
     SettingsDatabase,
     DbTitle,
     DbHint,
-    DbNoneInstalled,
+    DbNoneInstalled,         // {0}: the engine, "MySQL"
     DbServer,
     DbStart,
     DbStop,
@@ -296,8 +297,8 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     DbUsedByNobody,
     DbShowFinal,
     DbEditFull,
-    DbUnknownOption,         // {0}: "11.4", {1}: the name
-    DbUnknownOptionMaybe,    // {0}: "11.4", {1}: the name, {2}: the known name it's closest to
+    DbUnknownOption,         // {0}: the server, "MariaDB 11.4", {1}: the name
+    DbUnknownOptionMaybe,    // {0}: "MariaDB 11.4", {1}: the name, {2}: the known name it's closest to
     DbCustomProblems,        // {0}: the lines left out
     DbCustomIniUsed,
     DbProblems,              // {0}: what the service skipped
@@ -319,23 +320,26 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     DbPasswordShort,
     DbPasswordLong,
     DbPasswordChars,
-    DbApplies,               // {0}: "11.4", {1}: who: "3 projects and shared sites"
-    DbAppliesSleeping,       // {0}: "11.4"
-    DbAppliesNobody,         // {0}: "11.4"
-    DbAskSave,               // {0}: "11.4"
-    DbReadFailed,            // {0}: "11.4", {1}: the service's reason
-    DbRestarting,            // {0}: "11.4"
-    DbServerFailed,          // {0}: "11.4", {1}: the service's reason
+    DbApplies,               // {0}: "MariaDB 11.4", {1}: who: "3 projects and shared sites"
+    DbAppliesSleeping,       // {0}: "MariaDB 11.4"
+    DbAppliesNobody,         // {0}: "MariaDB 11.4"
+    DbAskSave,               // {0}: "MariaDB 11.4"
+    DbReadFailed,            // {0}: "MariaDB 11.4", {1}: the service's reason
+    DbRestarting,            // {0}: "MariaDB 11.4"
+    DbServerFailed,          // {0}: "MariaDB 11.4", {1}: the service's reason
     DbOpenIniFailed,         // {0}: the reason
     DbIniOpened,
     DbFinalOpened,
+    DbMysqlLtsNote,          // under MySQL's tab: 8.4 LTS only (D28)
+    DbEngines,               // the engines' tabs, for screen readers
+    DbPathNotAscii,          // MySQL on Windows: no ASCII (8.3) form of its folder's path
     // phpMyAdmin (an optional tool).
     SettingsTools,
     PmaOpen,
     PmaOpenProject,
     PmaNotInstalled,
     PmaOpening,
-    PmaStarting,             // {0}: the MariaDB series, "11.8"
+    PmaStarting,             // {0}: the server, "MariaDB 11.8", "MySQL 8.4"
     PmaOpenFailed,          // {0}: the service's reason
     PmaAddress,              // {0}: "https://phpmyadmin.localhost"
     PmaNameTaken,
@@ -467,6 +471,7 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     FirstRunWhatMariadb,
     FirstRunWhatNode,
     FirstRunWhatComposer,
+    FirstRunWhatMysql,
     FirstRunWhatPython,
     FirstRunWhatPma,
     FirstRunWhatApache,
@@ -804,6 +809,52 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     MailDeleteAskOne,
     MailRemoveEmailsFailed,
     MailRemoveEmailsFailedNoWhy,
+    FirstRunWhatBun,   // first run's line for Bun (D31)
+    FirstRunWhatDeno,  // and for Deno
+    // Redis (D30)
+    SettingsRedis,
+    RedisHint,
+    RedisVersion,
+    RedisFailed,
+    RedisNotInstalledNote,
+    RedisInstall,
+    RedisAddress,
+    RedisServer,
+    RedisPassword,
+    RedisPasswordNote,
+    RedisEnvNote,
+    RedisOptions,
+    RedisKeepRunning,
+    RedisKeepRunningNote,
+    RedisMemory,
+    RedisMemoryUnit,
+    RedisMemoryBad,
+    RedisData,
+    RedisKeys,
+    RedisKeysOne,
+    RedisUsedBy,
+    RedisUsedByOne,
+    RedisUsedByNone,
+    RedisFlush,
+    RedisFlushAsk,
+    RedisFlushed,
+    RedisFlushFailed,
+    RedisUnsupported,
+    RedisFooter,
+    RedisAskSave,
+    RedisReadFailed,
+    RedisCopyFailed,
+    PanelRedis,
+    PanelRedisNote,
+    PanelRedisPhpredis,
+    PanelRedisPredis,
+    PanelRedisNotInstalled,
+    ChipRedis,
+    FirstRunWhatGarnet,
+    RedisCopied,
+    RedisSaving,
+    RedisSaveFailed,
+    RedisFlushConfirm,
     Count_,
 };
 
@@ -811,9 +862,9 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
 
 // The Settings sidebar, top to bottom (SettingsWindow::Section has the same
 // order). Opening Settings with no section asked for opens the first.
-inline constexpr std::array<Str, 9> kSettingsSidebar = {
-    Str::SettingsGeneral, Str::SettingsRuntimes, Str::SettingsPhp,     Str::SettingsPorts,  Str::SettingsDatabase,
-    Str::SettingsMail,    Str::SettingsApache,   Str::SettingsFolders, Str::SharedSites};
+inline constexpr std::array<Str, 10> kSettingsSidebar = {
+    Str::SettingsGeneral, Str::SettingsRuntimes, Str::SettingsPhp,    Str::SettingsPorts,   Str::SettingsDatabase,
+    Str::SettingsMail,    Str::SettingsRedis,    Str::SettingsApache, Str::SettingsFolders, Str::SharedSites};
 
 // U+202A LEFT-TO-RIGHT EMBEDDING, the text, U+202C POP DIRECTIONAL
 // FORMATTING. Embeddings, not the newer isolates (U+2066...), because

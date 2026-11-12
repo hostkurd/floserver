@@ -56,14 +56,16 @@ std::string random_suffix() {
     return std::to_string(rd());
 }
 
-// The newest installed MariaDB matching `version` ("11.4").
-const InstalledRuntime* best_mariadb(const std::vector<InstalledRuntime>& installed, const std::string& version) {
+// The newest installed server of `family` ("mariadb", "mysql": its runtime
+// kind) matching `version` ("11.4").
+const InstalledRuntime* best_server(const std::vector<InstalledRuntime>& installed, std::string_view family,
+                                    const std::string& version) {
     const auto want = Version::parse(version);
     const InstalledRuntime* best = nullptr;
     std::optional<Version> best_v;
     for (const InstalledRuntime& r : installed) {
         const auto v = Version::parse(r.version);
-        if (r.name == "mariadb" && v && want && want->matches(*v) && (!best_v || *v > *best_v)) {
+        if (r.name == family && v && want && want->matches(*v) && (!best_v || *v > *best_v)) {
             best = &r;
             best_v = v;
         }
@@ -101,6 +103,64 @@ std::optional<Port> saved_port(const fs::path& folder) {
     }
 }
 
+// The ports other database servers keep in their folders (<data>/data/
+// <family>-<series>/port): a new server never takes one, so the .env files
+// of a server that isn't running now stay right (D28: one rule for every family).
+std::set<Port> ports_kept_by_others(const fs::path& data_dir, const fs::path& own) {
+    std::set<Port> out;
+    std::error_code ec;
+    for (fs::directory_iterator it(data_dir / "data", ec), end; !ec && it != end; it.increment(ec)) {
+        const std::string name = path_to_utf8(it->path().filename());
+        const auto dash = name.find('-');
+        if (dash == std::string::npos || !mysql_protocol_family(std::string_view(name).substr(0, dash)) ||
+            it->path().filename() == own.filename()) {
+            continue;
+        }
+        if (const auto port = saved_port(it->path())) {
+            out.insert(*port);
+        }
+    }
+    return out;
+}
+
+// Another registered project whose database has `on_server` as its name on
+// a `family` server (a cut name can't equal a real one, but two are checked
+// all the same), or nothing.
+std::optional<std::string> project_with_server_database(const AppConfig& app, const std::string& project,
+                                                        std::string_view family, const std::string& on_server) {
+    for (const Project& other : app.projects) {
+        if (other.name == project) {
+            continue;
+        }
+        const ConfigResult cfg = read_project_config_file(other);
+        if (cfg.config && cfg.config->database && cfg.config->database->family == family &&
+            server_database_name(project_database_name(other), family) == on_server) {
+            return other.name;
+        }
+    }
+    return std::nullopt;
+}
+
+#ifdef _WIN32
+// MySQL on Windows: `files` with ASCII paths (ascii_mysql_files()), or why
+// they can't have them. The data folder is made first (a short form needs it).
+std::string ascii_files_problem(MariaDbFiles& files) {
+    std::error_code ec;
+    fs::create_directories(files.data_dir, ec);
+    fs::path bad;
+    bool missing = false;
+    if (ascii_mysql_files(files, windows_short_path, bad, missing)) {
+        return {};
+    }
+    if (missing) {
+        return "MySQL can't start: " + path_to_utf8(bad) + " is missing (download MySQL again in Settings → Runtimes)";
+    }
+    return "MySQL can't use " + path_to_utf8(bad) +
+           ": the path has letters outside English, and Windows keeps no short (8.3) name for it. Use MariaDB on this "
+           "computer, or a Windows user whose folder name has English letters only.";
+}
+#endif
+
 // Runs `f` when the scope ends.
 template <class F>
 class AtExit {
@@ -116,10 +176,10 @@ private:
     F f_;
 };
 
-ServiceRefusal not_installed(const std::string& version) {
-    return {"not_installed",
-            "MariaDB " + version + " isn't installed: download it in Settings → Runtimes (or: flo install mariadb " +
-                version + ")"};
+ServiceRefusal not_installed(std::string_view family, const std::string& version) {
+    return {"not_installed", database_family_title(family) + " " + version +
+                                 " isn't installed: download it in Settings → Runtimes (or: flo install " +
+                                 std::string(family) + " " + version + ")"};
 }
 
 // Installed, but its server isn't there yet: its old one is still shutting
@@ -128,8 +188,18 @@ ServiceRefusal removing(const std::string& project) {
     return {"removing", project + " is being removed from FloServer"};
 }
 
-ServiceRefusal no_server_yet(const std::string& series) {
-    return {"database_off", "MariaDB " + series + " can't take connections yet (its port is busy); try again in a few seconds"};
+ServiceRefusal no_server_yet(std::string_view family, const std::string& series) {
+    return {"database_off", database_family_title(family) + " " + series +
+                                " can't take connections yet (its port is busy); try again in a few seconds"};
+}
+
+// The database a project's floserver.json names, when the service runs its
+// family; else nothing.
+const DatabaseSpec* served(const ConfigResult& cfg) {
+    if (!cfg.config || !cfg.config->database || !mysql_protocol_family(cfg.config->database->family)) {
+        return nullptr;
+    }
+    return &*cfg.config->database;
 }
 
 }  // namespace
@@ -190,6 +260,11 @@ public:
     }
 
     [[nodiscard]] const MariaDbFiles& files() const { return files_; }
+    [[nodiscard]] const std::string& family() const { return files_.family; }
+    // "mysql-8.4": the server's name among the service's, its folder's and its secrets'.
+    [[nodiscard]] std::string key() const { return database_server_key(files_.family, files_.series); }
+    // "MySQL 8.4", for messages.
+    [[nodiscard]] std::string title() const { return database_family_title(files_.family) + " " + files_.series; }
     [[nodiscard]] const std::string& version() const { return version_; }
     [[nodiscard]] Port port() const { return port_; }
     [[nodiscard]] Port internal_port() const { return internal_; }
@@ -324,12 +399,13 @@ public:
             error = "can't keep the new password: " + error;
             return false;
         }
-        if (!run_sql(root_password_sql(password), error)) {
+        if (!run_sql(root_password_sql(password, files_.family), error)) {
             (void)secrets_.remove(pending);
             return false;
         }
         if (!secrets_.save(root_name(), password, error)) {
-            error = "MariaDB has the new password, but it couldn't be kept (it's under " + pending + "): " + error;
+            error = database_family_title(files_.family) + " has the new password, but it couldn't be kept (it's under " +
+                    pending + "): " + error;
             return false;
         }
         (void)secrets_.remove(pending);
@@ -341,9 +417,10 @@ public:
     [[nodiscard]] std::string config_text(bool first) const {
         std::string error;
         const auto app = load_app_config(app_config_file(data_dir_), error);
-        const MariaDbSettings all = app ? read_mariadb_settings(*app) : MariaDbSettings{};
+        const MariaDbSettings all = app ? read_mariadb_settings(*app, nullptr, files_.family) : MariaDbSettings{};
         const auto it = all.find(files_.series);
-        const MariaDbExtras extras = mariadb_extras(data_dir_, files_.series, it != all.end() ? &it->second : nullptr);
+        const MariaDbExtras extras =
+            mariadb_extras(data_dir_, files_.series, it != all.end() ? &it->second : nullptr, files_.family);
         return mariadb_config(files_, internal_, running_as_root(), first, &extras);
     }
 
@@ -351,7 +428,7 @@ public:
     bool run_sql(const std::string& sql, std::string& error) {
         const auto root = secrets_.read(root_name());
         if (!root) {
-            error = "root's password for MariaDB " + files_.series + " is missing from the secure store";
+            error = "root's password for " + title() + " is missing from the secure store";
             return false;
         }
         const fs::path file = files_.folder / ("query-" + random_suffix() + ".sql");
@@ -393,7 +470,7 @@ public:
             return false;
         }
         if (!process_->running()) {
-            error_ = "mariadbd stopped: " + tail(files_.error_log, 600);
+            error_ = path_to_utf8(files_.server.stem()) + " stopped: " + tail(files_.error_log, 600);
             process_.reset();
             state_ = State::Sleeping;  // the next connection starts it again
             return false;
@@ -423,7 +500,8 @@ public:
     [[nodiscard]] json describe() const {
         const std::lock_guard lock(mutex_);
         static constexpr const char* kStates[] = {"sleeping", "starting", "running", "stopping", "failed"};  // NOLINT
-        json j = {{"series", files_.series},
+        json j = {{"family", files_.family},
+                  {"series", files_.series},
                   {"version", version_},
                   {"port", port_},
                   {"internal_port", internal_.load()},
@@ -436,6 +514,9 @@ public:
         }
         if (!error_.empty()) {
             j["error"] = error_;
+            if (!path_problem_.empty()) {
+                j["error_code"] = std::string(kPathNotAsciiCode);
+            }
         }
         if (port_fallback_ && chosen_port_) {
             j["port_wanted"] = *chosen_port_;  // taken by another program
@@ -443,7 +524,15 @@ public:
         return j;
     }
 
-    [[nodiscard]] std::string root_name() const { return "mariadb-" + files_.series + "/root"; }
+    [[nodiscard]] std::string root_name() const { return key() + "/root"; }
+
+    // MySQL on Windows: a path it can't be given (ascii_mysql_files()). Set
+    // once, before the server is shared.
+    void set_path_problem(std::string problem) { path_problem_ = std::move(problem); }
+#ifdef _WIN32
+    // The install as FloServer keeps it (its own name, before any short form).
+    void set_install_dir(fs::path dir) { install_dir_ = std::move(dir); }
+#endif
 
 private:
     void shut_down(ChildProcess& process) const {
@@ -465,24 +554,61 @@ private:
         remove_secret_file(files_.init_file);
         for (fs::directory_iterator it(files_.folder, ec), end; !ec && it != end; it.increment(ec)) {
             const std::string name = path_to_utf8(it->path().filename());
-            if (name.ends_with(".sql") && (name.starts_with("query-") || name.starts_with("probe"))) {
+            // client-*.cnf and a half-written one (client-*.cnf.tmp-*). The
+            // ones a backup left in backups/job-* go with that folder when
+            // the backup service starts.
+            if ((name.ends_with(".sql") && (name.starts_with("query-") || name.starts_with("probe"))) ||
+                (name.starts_with("client-") && name.find(".cnf") != std::string::npos)) {
                 remove_secret_file(it->path());
             }
         }
     }
 
-    // One of MariaDB's programs as a client of this server: TCP to the
-    // internal port, as root, the password in MYSQL_PWD only.
-    bool run_tool(const fs::path& program, const std::vector<std::string>& extra, const std::string& password,
-                  const fs::path& input, std::chrono::seconds limit, std::string& error) const {
-        ChildOptions o;
+    // How one of the server's programs connects to it: an owner-only option
+    // file in `dir` (deleted after the run, `cnf`) holds the password, read
+    // with --defaults-file, so no other option file (and, for MySQL, no
+    // ~/.mylogin.cnf: MYSQL_TEST_LOGIN_FILE names none) is read and the
+    // password is in no argument and no environment variable. TCP to the
+    // internal port; MySQL's tools check the server's certificate against
+    // the CA its set-up made in the owner-only data folder (`ca`: its path as
+    // the program is given it), so a program that took the internal port
+    // first never sees root's password.
+    bool client_options(ChildOptions& o, const fs::path& program, const std::string& user, const std::string& password,
+                        const fs::path& dir, const std::string& ca, fs::path& cnf, std::string& error) const {
+        cnf = dir / ("client-" + random_suffix() + ".cnf");
+        if (!write_private_file_atomically(cnf, client_password_option_file(password), error)) {
+            return false;
+        }
         o.program = program;
-        o.args = {"--no-defaults", "--protocol=TCP", "--host=127.0.0.1", "--port=" + std::to_string(internal_.load()),
-                  "--user=root"};
+        o.args = {"--defaults-file=" + path_to_utf8(cnf.filename()), "--protocol=TCP", "--host=127.0.0.1",
+                  "--port=" + std::to_string(internal_.load()), "--user=" + user};
+        if (files_.family == kMySqlFamily) {
+            std::error_code ec;
+            const bool have_ca = fs::is_regular_file(files_.data_dir / "ca.pem", ec);
+            o.args.emplace_back(have_ca ? "--ssl-mode=VERIFY_CA" : "--ssl-mode=REQUIRED");
+            if (have_ca) {
+                o.args.push_back("--ssl-ca=" + ca);
+            }
+        }
+        o.working_dir = dir;
+        o.env = {{"MYSQL_TEST_LOGIN_FILE", path_to_utf8(dir / "no-login-file")}};
+        o.remove_env = {"MYSQL_HOST", "MYSQL_TCP_PORT", "MYSQL_UNIX_PORT", "MYSQL_PWD", "LIBMYSQL_ENABLE_CLEARTEXT_PLUGIN"};
+        return true;
+    }
+
+    // One of the server's programs as a client of it, as root, run in the
+    // server's folder. `output`: what it printed, when it succeeded.
+    bool run_tool(const fs::path& program, const std::vector<std::string>& extra, const std::string& password,
+                  const fs::path& input, std::chrono::seconds limit, std::string& error,
+                  std::string* output = nullptr) const {
+        ChildOptions o;
+        fs::path cnf;
+        // The CA relative to the folder it runs in: a plain name.
+        const std::string ca = path_to_utf8(files_.data_dir.filename() / "ca.pem");
+        if (!client_options(o, program, "root", password, files_.folder, ca, cnf, error)) {
+            return false;
+        }
         o.args.insert(o.args.end(), extra.begin(), extra.end());
-        o.working_dir = files_.folder;
-        o.env = {{"MYSQL_PWD", password}};
-        o.remove_env = {"MYSQL_HOST", "MYSQL_TCP_PORT", "MYSQL_UNIX_PORT"};
         o.stdin_file = input;
         o.output_log = files_.folder / ("client-" + random_suffix() + ".log");  // one per run: runs may overlap
         auto child = ChildProcess::start(o, error);
@@ -493,18 +619,22 @@ private:
             if (!ok) {
                 error = path_to_utf8(program.filename()) + ": " +
                         (code ? tail(o.output_log, 600) : std::string("didn't finish in time"));
+            } else if (output != nullptr) {
+                *output = read_small_file(o.output_log, std::size_t{64} * 1024).value_or("");
             }
         }
+        child.reset();
+        remove_secret_file(cnf);
         std::error_code ec;
         fs::remove(o.output_log, ec);
         return ok;
     }
 
 public:
-    // One of MariaDB's programs with a project's own login (backups, D22):
-    // TCP to the internal port, the password in MYSQL_PWD only, run in
-    // `work` (so file names on its command line are plain relative ones),
-    // standard input from `input` when it's given. Ended when `cancel` is set.
+    // One of the server's programs with a project's own login (backups, D22):
+    // as client_options() says, run in `work` (so file names on its command
+    // line are plain relative ones), standard input from `input` when it's
+    // given. Ended when `cancel` is set.
     bool run_as(const fs::path& program, const DatabaseLogin& login, const std::vector<std::string>& extra,
                 const fs::path& work, const fs::path& input, const std::atomic<bool>& cancel, std::string& error) {
         std::error_code ec;
@@ -513,13 +643,13 @@ public:
             return false;
         }
         ChildOptions o;
-        o.program = program;
-        o.args = {"--no-defaults", "--protocol=TCP", "--host=127.0.0.1", "--port=" + std::to_string(internal_.load()),
-                  "--user=" + login.user};
+        fs::path cnf;
+        if (!client_options(o, program, login.user, login.password, work, path_to_utf8(files_.data_dir / "ca.pem"), cnf,
+                            error)) {
+            return false;
+        }
+        const AtExit gone([&cnf] { remove_secret_file(cnf); });
         o.args.insert(o.args.end(), extra.begin(), extra.end());
-        o.working_dir = work;
-        o.env = {{"MYSQL_PWD", login.password}};
-        o.remove_env = {"MYSQL_HOST", "MYSQL_TCP_PORT", "MYSQL_UNIX_PORT"};
         o.stdin_file = input;
         o.output_log = work / ("client-" + random_suffix() + ".log");
         auto child = ChildProcess::start(o, error);
@@ -555,21 +685,42 @@ private:
     // password was refused.
     std::unique_ptr<ChildProcess> start_server(bool reset_root, bool& wrong_root, std::string& error) {
         wrong_root = false;
+        if (!path_problem_.empty()) {
+            error = path_problem_;
+            return nullptr;
+        }
+#ifdef _WIN32
+        // Checked again at each start: a folder may have gone, or been made
+        // again with another short name, since the server was made.
+        if (files_.family == kMySqlFamily) {
+            MariaDbFiles fresh = mariadb_files(install_dir_, version_, data_dir_, files_.family);
+            if (std::string problem = ascii_files_problem(fresh); !problem.empty()) {
+                error = std::move(problem);
+                return nullptr;
+            }
+            if (fresh.server != files_.server || fresh.data_dir != files_.data_dir || fresh.folder != files_.folder) {
+                error = "MySQL's folders have other short (8.3) names than when FloServer started: restart FloServer";
+                return nullptr;
+            }
+        }
+#endif
         std::error_code ec;
         fs::create_directories(files_.folder, ec);
 #ifndef _WIN32
         fs::permissions(files_.folder, fs::perms::owner_all, fs::perm_options::replace, ec);
 #endif
         if (!fs::is_regular_file(files_.server, ec)) {
-            error = "mariadbd is missing from " + path_to_utf8(files_.base_dir);
+            error = path_to_utf8(files_.server.filename()) + " is missing from " + path_to_utf8(files_.base_dir);
             return nullptr;
         }
         const fs::path marker = files_.folder / "root-password-set";
+        bool new_install = false;  // set up in this start: its whole log is FloServer's doing
         if (!mariadb_initialized(files_)) {
             if (!set_up(error)) {
                 return nullptr;
             }
             fs::remove(marker, ec);
+            new_install = true;
         }
         auto root = reset_root ? std::nullopt : secrets_.read(root_name());
         if (!root) {
@@ -587,7 +738,7 @@ private:
         if (!probe_(internal_)) {
             const auto port = internal_ports_->pick(internal_.load(), port_, probe_);
             if (!port) {
-                error = "no free port for MariaDB " + files_.series;
+                error = "no free port for " + title();
                 return nullptr;
             }
             internal_ = *port;
@@ -603,7 +754,8 @@ private:
         });
         if (first) {
             fs::create_directories(files_.data_dir, ec);
-            if (!write_private_file_atomically(files_.init_file, std::string(kPlainSqlMode) + root_password_sql(*root),
+            if (!write_private_file_atomically(files_.init_file,
+                                               std::string(kPlainSqlMode) + root_password_sql(*root, files_.family),
                                                error)) {
                 return nullptr;
             }
@@ -612,7 +764,7 @@ private:
             return nullptr;
         }
         fs::remove(files_.pid_file, ec);
-        const auto log_from = fs::exists(files_.error_log, ec) ? fs::file_size(files_.error_log, ec) : 0;
+        const std::uintmax_t log_from = log_size();
 
         ChildOptions o;
         o.program = files_.server;
@@ -622,7 +774,7 @@ private:
             o.args.push_back(std::move(a));
         }
         o.working_dir = files_.folder;
-        o.output_log = files_.folder / "mariadbd.out";
+        o.output_log = files_.folder / (path_to_utf8(files_.server.stem()) + ".out");
         auto process = ChildProcess::start(o, error);
         if (!process) {
             return nullptr;
@@ -676,12 +828,25 @@ private:
         }
         if (!ready) {
             if (!login_error.empty() && process->running()) {
-                error = "root can't log in to MariaDB " + files_.series + ": " + login_error;
+                error = "root can't log in to " + title() + ": " + login_error;
             } else {
-                error = "mariadbd didn't start: " + start_errors(log_from, o.output_log);
+                error = path_to_utf8(files_.server.stem()) + " didn't start: " + start_errors(log_from, o.output_log);
             }
             shut_down(*process);
             return nullptr;
+        }
+        // In MySQL's init file a failing statement skips the ones after it,
+        // and the server still starts: a start with the init file is only
+        // trusted when root's three accounts have a password and there's no
+        // anonymous one, and a new install's start logged no error. (Root's
+        // password was reset: the user's own accounts are theirs, and the
+        // log may hold their errors from before.)
+        if (first && files_.family == kMySqlFamily) {
+            if (const std::string why = first_start_problem(*root, log_from, new_install); !why.empty()) {
+                error = "setting up " + title() + " didn't finish: " + why;
+                shut_down(*process);
+                return nullptr;
+            }
         }
         if (first) {
             (void)write_file_atomically(marker, "1\n", error);
@@ -689,11 +854,76 @@ private:
         return process;
     }
 
+    // Why a MySQL start with the init file can't be trusted, or nothing.
+    [[nodiscard]] std::string first_start_problem(const std::string& root, std::uintmax_t log_from,
+                                                  bool new_install) const {
+        if (new_install) {
+            if (const std::string errors = error_lines(log_from); !errors.empty()) {
+                return "its first start logged errors: " + errors;
+            }
+        }
+        const fs::path query = files_.folder / ("query-" + random_suffix() + ".sql");
+        std::string error;
+        if (!write_private_file_atomically(query, root_accounts_check_sql(), error)) {
+            return error;
+        }
+        std::string out;
+        const bool ran = run_tool(files_.client, {"--batch", "--skip-column-names"}, root, query, 30s, error, &out);
+        remove_secret_file(query);
+        if (!ran) {
+            return "its accounts can't be checked: " + error;
+        }
+        while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) {
+            out.pop_back();
+        }
+        const auto line = out.rfind('\n');
+        if (out.substr(line == std::string::npos ? 0 : line + 1) != "0") {
+            return "root's accounts didn't all get their password, or an anonymous account is left";
+        }
+        return {};
+    }
+
+    // The [ERROR] lines this start wrote to the error log (not the last
+    // "Aborting"), at most 1500 characters; empty when there are none.
+    [[nodiscard]] std::string error_lines(std::uintmax_t log_from) const {
+        const std::string fresh = log_since(log_from);
+        std::string errors;
+        std::size_t pos = 0;
+        while (pos < fresh.size()) {
+            const auto end = fresh.find('\n', pos);
+            const std::string line = fresh.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+            pos = end == std::string::npos ? fresh.size() : end + 1;
+            if (line.find("[ERROR]") != std::string::npos && line.find("Aborting") == std::string::npos) {
+                errors.append(errors.empty() ? "" : "\n").append(line);
+            }
+        }
+        return errors.size() > 1500 ? errors.substr(0, 1500) + "..." : errors;
+    }
+
+    // How long the error log is now (0 when it's not there or can't be read).
+    [[nodiscard]] std::uintmax_t log_size() const {
+        std::error_code ec;
+        const std::uintmax_t size = fs::file_size(files_.error_log, ec);
+        return ec ? 0 : size;
+    }
+
+    // What the error log got from `from` on (at most 4 MiB of it), read
+    // from there whatever the log's size.
+    [[nodiscard]] std::string log_since(std::uintmax_t from) const {
+        std::ifstream in(files_.error_log, std::ios::binary);
+        if (!in || !in.seekg(static_cast<std::streamoff>(from))) {
+            return {};
+        }
+        std::string out(std::size_t{4} * 1024 * 1024, '\0');
+        in.read(out.data(), static_cast<std::streamsize>(out.size()));
+        out.resize(static_cast<std::size_t>(in.gcount()));
+        return out;
+    }
+
     // What this start wrote to the error log: its [ERROR] lines, or the
     // end of the log when there are none.
     [[nodiscard]] std::string start_errors(std::uintmax_t log_from, const fs::path& output_log) const {
-        const auto log = read_small_file(files_.error_log, std::size_t{4} * 1024 * 1024).value_or("");
-        const std::string fresh = log.size() > log_from ? log.substr(static_cast<std::size_t>(log_from)) : std::string();
+        const std::string fresh = log_since(log_from);
         std::string errors;
         std::size_t pos = 0;
         while (pos < fresh.size()) {
@@ -710,13 +940,16 @@ private:
         return errors.size() > 1500 ? errors.substr(0, 1500) + "..." : errors;
     }
 
-    // mariadb-install-db, once. A folder left half-way is moved aside,
-    // never deleted: it may hold someone's databases. The marker is only
-    // written once install-db has finished.
+    // mariadb-install-db (MySQL: mysqld --initialize-insecure), once. A
+    // folder left half-way is moved aside, never deleted: it may hold
+    // someone's databases. The marker is only written once it has finished.
     bool set_up(std::string& error) {
         std::error_code ec;
         fs::remove(files_.installed_marker, ec);
-        if (fs::exists(files_.data_dir, ec)) {
+        // An empty one (made for MySQL's short path on Windows) is used as it is.
+        if (fs::is_directory(files_.data_dir, ec) && fs::is_empty(files_.data_dir, ec) && files_.family == kMySqlFamily) {
+            ec.clear();
+        } else if (fs::exists(files_.data_dir, ec)) {
             fs::path aside = files_.data_dir;
             aside += ".failed-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
             fs::rename(files_.data_dir, aside, ec);
@@ -724,6 +957,9 @@ private:
                 error = "can't move the unfinished data folder aside: " + error_text(ec);
                 return false;
             }
+        }
+        if (files_.family == kMySqlFamily) {
+            return set_up_mysql(error);
         }
         ChildOptions o;
         o.program = files_.install_db;
@@ -753,6 +989,44 @@ private:
         return write_file_atomically(files_.installed_marker, "1\n", error);
     }
 
+    // MySQL sets its data folder up itself: mysqld --initialize-insecure
+    // with the my.ini it will run with (datadir, basedir outside Windows,
+    // user=root in containers), into an empty data folder. root@localhost
+    // gets no password here; the first start's init file gives every root
+    // account its own before any connection is taken.
+    bool set_up_mysql(std::string& error) {
+        std::error_code ec;
+        fs::create_directories(files_.data_dir, ec);
+        if (ec) {
+            error = "can't make " + path_to_utf8(files_.data_dir) + ": " + error_text(ec);
+            return false;
+        }
+        if (!write_file_atomically(files_.config, config_text(false), error)) {
+            return false;
+        }
+        const std::uintmax_t log_from = log_size();
+        ChildOptions o;
+        o.program = files_.server;
+        // --defaults-file must come first; relative: the folder is its cwd.
+        o.args = {"--defaults-file=" + path_to_utf8(files_.config.filename()), "--initialize-insecure"};
+        o.working_dir = files_.folder;
+        o.output_log = files_.folder / "install.log";
+        auto child = ChildProcess::start(o, error);
+        if (!child) {
+            return false;
+        }
+        const auto code = child->wait(start_limit_);
+        if (!code) {
+            child->kill();
+        }
+        if (code != 0 || !fs::is_directory(files_.data_dir / "mysql", ec)) {
+            child.reset();
+            error = "setting up MySQL " + files_.series + " failed: " + start_errors(log_from, o.output_log);
+            return false;
+        }
+        return write_file_atomically(files_.installed_marker, "1\n", error);
+    }
+
     const fs::path data_dir_;
     const MariaDbFiles files_;
     const std::string version_;
@@ -776,6 +1050,10 @@ private:
     bool keep_running_ = false;
     std::optional<Port> chosen_port_;
     bool port_fallback_ = false;
+    std::string path_problem_;
+#ifdef _WIN32
+    fs::path install_dir_;
+#endif
 
     std::atomic<int> active_{0};
     std::mutex activity_mutex_;
@@ -938,23 +1216,29 @@ void DatabaseService::reload_locked() {
 
     struct Want {
         const InstalledRuntime* runtime = nullptr;
+        std::string family;
         std::vector<std::string> projects;
         bool keep_running = false;
     };
+    // By server: "mariadb-11.4", "mysql-8.4" (D28).
     std::map<std::string, Want> wanted;
-    for (const PlannedSite& site : plan.sites) {
-        if (site.state != SiteState::Ready || !site.database || site.database->family != "mariadb") {
-            continue;
-        }
-        const InstalledRuntime* r = best_mariadb(installed, site.database->version);
-        if (r == nullptr) {
-            continue;
-        }
-        const std::string series = mariadb_series(r->version);
-        Want& w = wanted[series];
+    const auto want_of = [&wanted](const InstalledRuntime* r) -> Want& {
+        Want& w = wanted[database_server_key(r->name, mariadb_series(r->version))];
         if (w.runtime == nullptr || Version::parse(r->version) > Version::parse(w.runtime->version)) {
             w.runtime = r;
         }
+        w.family = r->name;
+        return w;
+    };
+    for (const PlannedSite& site : plan.sites) {
+        if (site.state != SiteState::Ready || !site.database || !mysql_protocol_family(site.database->family)) {
+            continue;
+        }
+        const InstalledRuntime* r = best_server(installed, site.database->family, site.database->version);
+        if (r == nullptr) {
+            continue;
+        }
+        Want& w = want_of(r);
         w.projects.push_back(site.name);
         if (const Project* p = find_project(*app, site.name)) {
             w.keep_running = w.keep_running || p->keep_running;
@@ -962,56 +1246,58 @@ void DatabaseService::reload_locked() {
     }
     // Shared sites' database (D19), when they're on and ask for one.
     if (plan.shared && plan.shared->state == SiteState::Ready && plan.shared->database &&
-        plan.shared->database->family == "mariadb") {
-        if (const InstalledRuntime* r = best_mariadb(installed, plan.shared->database->version)) {
-            Want& w = wanted[mariadb_series(r->version)];
-            if (w.runtime == nullptr || Version::parse(r->version) > Version::parse(w.runtime->version)) {
-                w.runtime = r;
-            }
-            w.projects.push_back(plan.shared->name);
+        mysql_protocol_family(plan.shared->database->family)) {
+        if (const InstalledRuntime* r =
+                best_server(installed, plan.shared->database->family, plan.shared->database->version)) {
+            want_of(r).projects.push_back(plan.shared->name);
         }
     }
     // Settings > Database: "Keep running" runs a series even when nothing
-    // uses it, and a chosen port moves its server there.
-    const MariaDbSettings settings = read_mariadb_settings(*app);
-    for (const auto& [series, s] : settings) {
-        if (!s.keep_running) {
+    // uses it, and a chosen port moves its server there. By server.
+    std::map<std::string, MariaDbSeriesSettings> settings;
+    for (const std::string& family : database_families()) {
+        if (!mysql_protocol_family(family)) {
             continue;
         }
-        if (const InstalledRuntime* r = best_mariadb(installed, series); r != nullptr && mariadb_series(r->version) == series) {
-            Want& w = wanted[series];
-            if (w.runtime == nullptr || Version::parse(r->version) > Version::parse(w.runtime->version)) {
-                w.runtime = r;
+        for (auto& [series, one] : read_mariadb_settings(*app, nullptr, family)) {
+            if (one.keep_running) {
+                if (const InstalledRuntime* r = best_server(installed, family, series);
+                    r != nullptr && mariadb_series(r->version) == series) {
+                    (void)want_of(r);
+                }
             }
+            settings[database_server_key(family, series)] = std::move(one);
         }
     }
     // Every other installed series has a server too, asleep until something
     // connects: phpMyAdmin (its own login form or FloServer's one click) and
-    // other clients reach any installed MariaDB, which then sleeps when idle.
+    // other clients reach any installed MariaDB or MySQL, which then sleeps
+    // when idle.
     for (const InstalledRuntime& one : installed) {
-        if (one.name != "mariadb") {
+        if (!mysql_protocol_family(one.name)) {
             continue;
         }
         const std::string series = mariadb_series(one.version);
-        if (wanted.contains(series)) {
+        if (wanted.contains(database_server_key(one.name, series))) {
             continue;
         }
-        if (const InstalledRuntime* r = best_mariadb(installed, series); r != nullptr && mariadb_series(r->version) == series) {
-            wanted[series].runtime = r;
+        if (const InstalledRuntime* r = best_server(installed, one.name, series);
+            r != nullptr && mariadb_series(r->version) == series) {
+            (void)want_of(r);
         }
     }
-    for (const auto& [series, count] : held_) {
-        wanted.erase(series);
+    for (const auto& [key, count] : held_) {
+        wanted.erase(key);
     }
-    const auto chosen_port = [&settings](const std::string& series) -> std::optional<Port> {
-        const auto it = settings.find(series);
+    const auto chosen_port = [&settings](const std::string& key) -> std::optional<Port> {
+        const auto it = settings.find(key);
         if (it == settings.end()) {
             return std::nullopt;
         }
         return it->second.port;
     };
-    for (auto& [series, want] : wanted) {
-        const auto it = settings.find(series);
+    for (auto& [key, want] : wanted) {
+        const auto it = settings.find(key);
         want.keep_running = want.keep_running || (it != settings.end() && it->second.keep_running);
     }
 
@@ -1031,31 +1317,33 @@ void DatabaseService::reload_locked() {
         }
     }
     std::erase_if(retired_, [](const std::weak_ptr<Server>& w) { return w.expired(); });
+    // Every family's servers in one set: the first server of any family
+    // takes 3306, the next 3307... (D28).
     std::set<Port> taken;
     std::set<Port> retiring;
-    std::set<std::string> retiring_series;
-    for (const auto& [series, server] : servers_) {
+    std::set<std::string> retiring_keys;
+    for (const auto& [key, server] : servers_) {
         taken.insert(server->port());
     }
     for (const auto& w : retired_) {
         if (const auto s = w.lock()) {
             retiring.insert(s->port());
-            retiring_series.insert(s->files().series);
+            retiring_keys.insert(s->key());
         }
     }
-    for (auto& [series, want] : wanted) {
-        if (const auto it = servers_.find(series); it != servers_.end()) {
+    for (auto& [key, want] : wanted) {
+        if (const auto it = servers_.find(key); it != servers_.end()) {
             it->second->set_projects(want.projects, want.keep_running);
             continue;
         }
-        if (retiring_series.contains(series)) {
+        if (retiring_keys.contains(key)) {
             continue;  // its old server still uses the data folder: next time
         }
-        MariaDbFiles files = mariadb_files(want.runtime->dir, want.runtime->version, config_.data_dir);
+        MariaDbFiles files = mariadb_files(want.runtime->dir, want.runtime->version, config_.data_dir, want.family);
         // The series keeps its port (.env files have it). D12: the first
         // time 3306 when free, else 3307, 3308... never another stack's.
         // A port chosen in Settings comes first.
-        const std::optional<Port> chosen = chosen_port(series);
+        const std::optional<Port> chosen = chosen_port(key);
         std::optional<Port> port = chosen ? chosen : saved_port(files.folder);
         if (port && retiring.contains(*port)) {
             continue;  // our old server still holds it: next time
@@ -1085,6 +1373,8 @@ void DatabaseService::reload_locked() {
             if (chosen) {
                 avoid.insert(*chosen);
             }
+            const std::set<Port> kept = ports_kept_by_others(config_.data_dir, files.folder);
+            avoid.insert(kept.begin(), kept.end());
             port = pick_port_from(kFirstDatabasePort, avoid, config_.probe);
             if (!port) {
                 continue;
@@ -1102,12 +1392,26 @@ void DatabaseService::reload_locked() {
         fs::create_directories(files.folder, ec);
         (void)write_file_atomically(files.folder / "port", std::to_string(*port) + "\n", error);
         taken.insert(*port);
+        std::string path_problem;
+#ifdef _WIN32
+        const fs::path install_dir = files.base_dir;
+        // Oracle's mysqld.exe reads paths in the ANSI code page: ASCII (8.3) forms.
+        if (want.family == kMySqlFamily) {
+            path_problem = ascii_files_problem(files);
+        }
+#endif
         auto server = std::make_shared<Server>(config_.data_dir, std::move(files), want.runtime->version, *port, *internal,
                                                std::move(listener), secrets_, internal_ports_, config_.probe,
                                                config_.start_limit);
         server->set_projects(want.projects, want.keep_running);
         server->set_chosen_port(chosen, fallback);
-        servers_[series] = std::move(server);
+#ifdef _WIN32
+        server->set_install_dir(install_dir);
+#endif
+        if (!path_problem.empty()) {
+            server->set_path_problem(std::move(path_problem));
+        }
+        servers_[key] = std::move(server);
     }
 }
 
@@ -1193,20 +1497,39 @@ std::optional<DatabaseLogin> DatabaseService::project_login(const std::string& p
     }
     const ConfigResult cfg = read_project_config_file(*p);
     if (!cfg.config || !cfg.config->database) {
-        refusal = {"no_database", project + " has no database in its floserver.json (add one with: flo use mariadb 11.4)"};
+        refusal = {"no_database", project + " has no database in its floserver.json (add one with: flo use mariadb 11.4, "
+                                            "or flo use mysql 8.4)"};
         return std::nullopt;
     }
+    const DatabaseSpec* spec = served(cfg);
+    if (spec == nullptr) {
+        refusal = {"no_database", project + "'s floserver.json names " + cfg.config->database->family +
+                                      ", which this FloServer doesn't run"};
+        return std::nullopt;
+    }
+    const std::string family = spec->family;
     if (project_held(project)) {
         refusal = removing(project);
         return std::nullopt;
     }
     DatabaseLogin login;
-    login.database = project_database_name(*p);  // kept through a rename (D22)
-    login.user = login.database;
-    if (reserved_database_name(login.database)) {
+    // FloServer's name for it, kept through a rename (D22); on MySQL a long
+    // one is cut to fit its limits, the same way every time.
+    const std::string own_name = project_database_name(*p);
+    login.database = server_database_name(own_name, family);
+    login.user = project_database_user(login.database, family);  // MySQL's: at most 32 characters
+    if (login.database != own_name && app) {
+        if (const auto other = project_with_server_database(*app, project, family, login.database)) {
+            refusal = {"database_shared", "the database " + login.database + " on " + database_family_title(family) +
+                                              " would also be " + *other + "'s; rename one of them"};
+            return std::nullopt;
+        }
+    }
+    if (reserved_database_name(own_name)) {
         // MariaDB's own name follows a rename; shared sites' is kept by one,
         // so only a project under another name gets a database of its own.
-        refusal = {"reserved_name", "\"" + login.database + "\" is one of MariaDB's or shared sites' names; " +
+        refusal = {"reserved_name", "\"" + login.database + "\" is one of " + database_family_title(family) +
+                                        "'s or shared sites' names; " +
                                         (database_follows_rename(login.database)
                                              ? "rename the project (flo rename " + project + " <other name>)"
                                              : "remove the project and add it again under another name (flo remove " +
@@ -1219,14 +1542,14 @@ std::optional<DatabaseLogin> DatabaseService::project_login(const std::string& p
     std::shared_ptr<Server> server;
     {
         const auto installed = list_installed(runtimes_dir(config_.data_dir));
-        const InstalledRuntime* r = best_mariadb(installed, cfg.config->database->version);
+        const InstalledRuntime* r = best_server(installed, family, spec->version);
         if (r == nullptr) {
-            refusal = not_installed(cfg.config->database->version);
+            refusal = not_installed(family, spec->version);
             return std::nullopt;
         }
-        server = server_of(mariadb_series(r->version));
+        server = server_of(family, mariadb_series(r->version));
         if (!server) {
-            refusal = no_server_yet(mariadb_series(r->version));
+            refusal = no_server_yet(family, mariadb_series(r->version));
             return std::nullopt;
         }
     }
@@ -1249,7 +1572,7 @@ std::optional<DatabaseLogin> DatabaseService::project_login(const std::string& p
         return std::nullopt;
     }
     login.port = server->port();
-    const std::string secret = "mariadb-" + server->files().series + "/" + login.database;
+    const std::string secret = server->key() + "/" + own_name;
     auto password = secrets_.read(secret);
     if (!password) {
         password = generate_password();
@@ -1259,7 +1582,7 @@ std::optional<DatabaseLogin> DatabaseService::project_login(const std::string& p
         }
     }
     login.password = *password;
-    if (!server->run_sql(project_database_sql(login.database, login.user, login.password), error)) {
+    if (!server->run_sql(project_database_sql(login.database, login.user, login.password, family), error)) {
         refusal = {"database_failed", error};
         return std::nullopt;
     }
@@ -1276,19 +1599,21 @@ std::shared_ptr<DatabaseService::Server> DatabaseService::project_server(const s
         return nullptr;
     }
     const ConfigResult cfg = read_project_config_file(*p);
-    if (!cfg.config || !cfg.config->database) {
+    const DatabaseSpec* spec = served(cfg);
+    if (spec == nullptr) {
         refusal = {"no_database", project + " has no database in its floserver.json"};
         return nullptr;
     }
+    const std::string& family = spec->family;
     const auto installed = list_installed(runtimes_dir(config_.data_dir));
-    const InstalledRuntime* r = best_mariadb(installed, cfg.config->database->version);
+    const InstalledRuntime* r = best_server(installed, family, spec->version);
     if (r == nullptr) {
-        refusal = not_installed(cfg.config->database->version);
+        refusal = not_installed(family, spec->version);
         return nullptr;
     }
-    auto server = server_of(mariadb_series(r->version));
+    auto server = server_of(family, mariadb_series(r->version));
     if (!server) {
-        refusal = no_server_yet(mariadb_series(r->version));
+        refusal = no_server_yet(family, mariadb_series(r->version));
     }
     return server;
 }
@@ -1303,9 +1628,19 @@ std::vector<std::string> mariadb_load_args(bool force) {
     return out;
 }
 
-std::vector<std::string> mariadb_dump_args(const std::string& database, const std::string& file) {
-    return {"--single-transaction", "--triggers", "--routines", "--events", "--hex-blob",
-            "--default-character-set=utf8mb4", "--result-file=" + file, database};
+std::vector<std::string> mariadb_dump_args(const std::string& database, const std::string& file, std::string_view family) {
+    std::vector<std::string> out = {"--single-transaction", "--triggers", "--routines", "--events", "--hex-blob",
+                                    "--default-character-set=utf8mb4"};
+    if (family == kMySqlFamily) {
+        // MySQL's mysqldump wants the PROCESS right for tablespaces (a
+        // project's login has none, and a project needs none), and would
+        // write GTID lines only a server's admin may load.
+        out.emplace_back("--no-tablespaces");
+        out.emplace_back("--set-gtid-purged=OFF");
+    }
+    out.push_back("--result-file=" + file);
+    out.push_back(database);
+    return out;
 }
 
 std::chrono::seconds database_tool_limit() {
@@ -1338,7 +1673,8 @@ bool DatabaseService::run_project_tool(const std::string& project, bool dump, co
         return false;
     }
     const bool ok = dump ? server->run_as(server->files().dump, *login,
-                                          mariadb_dump_args(login->database, std::string(kDumpFileName)), work, {},
+                                          mariadb_dump_args(login->database, std::string(kDumpFileName), server->family()),
+                                          work, {},
                                           cancel, error)
                          : server->run_as(server->files().client, *login, mariadb_load_args(false), work, input,
                                           cancel, error);
@@ -1396,18 +1732,20 @@ std::optional<std::uint64_t> DatabaseService::project_database_bytes(const std::
         return std::nullopt;
     }
     const ConfigResult cfg = read_project_config_file(*p);
-    if (!cfg.config || !cfg.config->database) {
+    const DatabaseSpec* spec = served(cfg);
+    if (spec == nullptr) {
         return std::nullopt;
     }
     const auto installed = list_installed(runtimes_dir(config_.data_dir));
-    const InstalledRuntime* r = best_mariadb(installed, cfg.config->database->version);
+    const InstalledRuntime* r = best_server(installed, spec->family, spec->version);
     if (r == nullptr) {
         return std::nullopt;
     }
     // Its own folder in the series' data: one file per table (and the
     // folder's own .opt), so the sum is close to what the dump holds.
-    const MariaDbFiles files = mariadb_files(r->dir, r->version, config_.data_dir);
-    const fs::path folder = files.data_dir / path_from_utf8(project_database_name(*p));  // kept through a rename
+    const MariaDbFiles files = mariadb_files(r->dir, r->version, config_.data_dir, spec->family);
+    const fs::path folder =
+        files.data_dir / path_from_utf8(server_database_name(project_database_name(*p), spec->family));  // kept through a rename
     std::error_code ec;
     if (!fs::is_directory(folder, ec)) {
         return std::nullopt;
@@ -1461,9 +1799,8 @@ bool DatabaseService::drop_project_database(const std::string& project, ServiceR
     }
     // The names are the service's own, as project_login() makes them.
     const std::string database = project_database_name(*p);
-    const std::string& user = database;
     if (reserved_database_name(database)) {
-        refusal = {"reserved_name", "\"" + database + "\" is one of MariaDB's or shared sites' names, so FloServer never "
+        refusal = {"reserved_name", "\"" + database + "\" is one of MariaDB's, MySQL's or shared sites' names, so FloServer never "
                                     "made it for " + project + " and won't delete it; remove the project without its database"};
         return false;
     }
@@ -1472,41 +1809,41 @@ bool DatabaseService::drop_project_database(const std::string& project, ServiceR
                    "the database " + database + " is also " + *other + "'s; remove the project without its database"};
         return false;
     }
-    // Where it was made: each installed series that keeps its password, and
-    // the one its floserver.json names now.
-    const auto secret_of = [&database](const std::string& s) {
-        return std::string("mariadb-").append(s).append("/").append(database);
-    };
+    // Where it was made: each installed server (of any family) that keeps
+    // its password, and the one its floserver.json names now. By server key.
+    const auto secret_of = [&database](const std::string& key) { return std::string(key).append("/").append(database); };
     const auto installed = list_installed(runtimes_dir(config_.data_dir));
-    std::set<std::string> series;
+    std::map<std::string, std::pair<std::string, std::string>> servers;  // key -> family, series
     for (const InstalledRuntime& r : installed) {
-        if (r.name != "mariadb") {
+        if (!mysql_protocol_family(r.name)) {
             continue;
         }
         const std::string s = mariadb_series(r.version);
-        if (!s.empty() && secrets_.read(secret_of(s))) {
-            series.insert(s);
+        const std::string key = database_server_key(r.name, s);
+        if (!s.empty() && secrets_.read(secret_of(key))) {
+            servers[key] = {r.name, s};
         }
     }
-    if (const ConfigResult cfg = read_project_config_file(*p);
-        cfg.config && cfg.config->database && cfg.config->database->family == "mariadb") {
-        if (const InstalledRuntime* r = best_mariadb(installed, cfg.config->database->version)) {
-            series.insert(mariadb_series(r->version));
+    const ConfigResult cfg = read_project_config_file(*p);
+    if (const DatabaseSpec* spec = served(cfg)) {
+        const std::string& family = spec->family;
+        if (const InstalledRuntime* r = best_server(installed, family, spec->version)) {
+            servers[database_server_key(family, mariadb_series(r->version))] = {family, mariadb_series(r->version)};
         }
     }
-    // Series already done, for a refusal part-way: trying again finishes the rest.
+    // Servers already done, for a refusal part-way: trying again finishes the rest.
     std::vector<std::string> done;
     const auto failed = [&](const std::string& s, ServiceRefusal why) {
         if (!done.empty()) {
             std::string list;
             for (const std::string& d : done) {
-                list.append(list.empty() ? "" : ", ").append("MariaDB ").append(d);
+                list.append(list.empty() ? "" : ", ").append(d);
             }
             why.message = std::string("the database ")
                               .append(database)
                               .append(" is already deleted on ")
                               .append(list)
-                              .append("; on MariaDB ")
+                              .append("; on ")
                               .append(s)
                               .append(": ")
                               .append(why.message)
@@ -1515,10 +1852,23 @@ bool DatabaseService::drop_project_database(const std::string& project, ServiceR
         refusal = std::move(why);
         return false;
     };
-    for (const std::string& s : series) {
-        const std::shared_ptr<Server> server = server_of(s);
+    // A name another project also has on one of those servers: refused
+    // before anything is dropped anywhere.
+    for (const auto& [key, which] : servers) {
+        const std::string on_server = server_database_name(database, which.first);
+        if (const auto other = project_with_server_database(*app, project, which.first, on_server);
+            other && on_server != database) {
+            refusal = {"database_shared", "the database " + on_server + " on " + database_family_title(which.first) +
+                                              " is also " + *other + "'s; remove the project without its database"};
+            return false;
+        }
+    }
+    for (const auto& [key, which] : servers) {
+        const auto& [family, s] = which;
+        const std::string title = database_family_title(family) + " " + s;
+        const std::shared_ptr<Server> server = server_of(family, s);
         if (!server) {
-            return failed(s, no_server_yet(s));
+            return failed(title, no_server_yet(family, s));
         }
         // As a login: counted as a connection, so it doesn't sleep meanwhile;
         // asked for by the user, so a failed start is tried again now.
@@ -1526,21 +1876,23 @@ bool DatabaseService::drop_project_database(const std::string& project, ServiceR
         const AtExit closed([&server] { server->connection_closed(); });
         server->clear_failure();
         if (!server->ensure_running(error)) {
-            return failed(s, {"database_failed", error});
+            return failed(title, {"database_failed", error});
         }
         const std::lock_guard lock(server->login_mutex());
-        const bool made = secrets_.read(secret_of(s)).has_value();  // FloServer made one there
-        if (!server->run_sql(drop_project_database_sql(database, user), error)) {
-            return failed(s, {"database_failed",
-                              std::string("the database ").append(database).append(" couldn't be deleted: ").append(error)});
+        const bool made = secrets_.read(secret_of(key)).has_value();  // FloServer made one there
+        const std::string on_server = server_database_name(database, family);
+        if (!server->run_sql(
+                drop_project_database_sql(on_server, project_database_user(on_server, family), family), error)) {
+            return failed(title, {"database_failed",
+                                  std::string("the database ").append(database).append(" couldn't be deleted: ").append(error)});
         }
         dropped = dropped || made;
-        if (!secrets_.remove(secret_of(s))) {
-            return failed(s, {"secret_failed", std::string("the database ")
-                                                   .append(database)
-                                                   .append(" is deleted, but its password can't be removed from the secure store")});
+        if (!secrets_.remove(secret_of(key))) {
+            return failed(title, {"secret_failed", std::string("the database ")
+                                                       .append(database)
+                                                       .append(" is deleted, but its password can't be removed from the secure store")});
         }
-        done.push_back(s);
+        done.push_back(title);
     }
     return true;
 }
@@ -1557,7 +1909,7 @@ std::optional<DatabaseLogin> DatabaseService::shared_login(ServiceRefusal& refus
         refusal = {"shared_off", "shared sites are off: flo shared on"};
         return std::nullopt;
     }
-    if (!shared->database || shared->database->family != "mariadb") {
+    if (!shared->database || !mysql_protocol_family(shared->database->family)) {
         refusal = {"no_database", "shared sites have no database (choose one in Settings, or: flo shared db 11.4)"};
         return std::nullopt;
     }
@@ -1576,19 +1928,20 @@ std::optional<DatabaseLogin> DatabaseService::shared_login(ServiceRefusal& refus
     std::shared_ptr<Server> server;
     {
         const auto installed = list_installed(runtimes_dir(config_.data_dir));
-        const InstalledRuntime* r = best_mariadb(installed, shared->database->version);
+        const InstalledRuntime* r = best_server(installed, shared->database->family, shared->database->version);
         const std::lock_guard lock(mutex_);
         reload_locked();
         if (r != nullptr) {
-            if (const auto it = servers_.find(mariadb_series(r->version)); it != servers_.end()) {
+            if (const auto it = servers_.find(database_server_key(r->name, mariadb_series(r->version)));
+                it != servers_.end()) {
                 server = it->second;
             }
         }
     }
     if (!server) {
-        refusal = {"database_off", "the shared sites' MariaDB " + shared->database->version +
-                                       " isn't installed or can't run yet (flo install mariadb " +
-                                       shared->database->version + ")"};
+        refusal = {"database_off", "the shared sites' " + database_family_title(shared->database->family) + " " +
+                                       shared->database->version + " isn't installed or can't run yet (flo install " +
+                                       shared->database->family + " " + shared->database->version + ")"};
         return std::nullopt;
     }
     server->connection_opened();
@@ -1602,7 +1955,7 @@ std::optional<DatabaseLogin> DatabaseService::shared_login(ServiceRefusal& refus
     login.database = std::string(kSharedDatabaseUser);
     login.user = std::string(kSharedDatabaseUser);
     login.port = server->port();
-    const std::string secret = "mariadb-" + server->files().series + "/" + std::string(kSharedDatabaseUser);
+    const std::string secret = server->key() + "/" + std::string(kSharedDatabaseUser);
     auto password = secrets_.read(secret);
     if (!password) {
         password = generate_password();
@@ -1612,7 +1965,7 @@ std::optional<DatabaseLogin> DatabaseService::shared_login(ServiceRefusal& refus
         }
     }
     login.password = *password;
-    if (!server->run_sql(shared_database_sql(login.password), error)) {
+    if (!server->run_sql(shared_database_sql(login.password, server->family()), error)) {
         refusal = {"database_failed", error};
         return std::nullopt;
     }
@@ -1621,18 +1974,19 @@ std::optional<DatabaseLogin> DatabaseService::shared_login(ServiceRefusal& refus
 
 // --------------------------------------------------------- Settings → Database
 
-std::shared_ptr<DatabaseService::Server> DatabaseService::server_of(const std::string& series) {
+std::shared_ptr<DatabaseService::Server> DatabaseService::server_of(std::string_view family, const std::string& series) {
     const std::lock_guard lock(mutex_);
     reload_locked();
-    const auto it = servers_.find(series);
+    const auto it = servers_.find(database_server_key(family, series));
     return it != servers_.end() ? it->second : nullptr;
 }
 
-json DatabaseService::series_status(const std::string& series) const {
+json DatabaseService::series_status(const std::string& series, std::string_view family) const {
+    const std::string key = database_server_key(family, series);
     json out = {{"server", nullptr}};
     {
         const std::lock_guard lock(mutex_);
-        if (const auto it = servers_.find(series); it != servers_.end()) {
+        if (const auto it = servers_.find(key); it != servers_.end()) {
             out["server"] = describe_server_json(it->second->describe());
         }
     }
@@ -1642,12 +1996,12 @@ json DatabaseService::series_status(const std::string& series) const {
     if (const auto app = load_app_config(app_config_file(config_.data_dir), error)) {
         for (const Project& p : app->projects) {
             const std::string db = project_database_name(p);
-            if (!reserved_database_name(db) && secrets_.read(std::string("mariadb-").append(series).append("/").append(db))) {
+            if (!reserved_database_name(db) && secrets_.read(std::string(key).append("/").append(db))) {
                 databases.push_back(p.name);
             }
         }
     }
-    if (secrets_.read("mariadb-" + series + "/" + std::string(kSharedDatabaseUser))) {
+    if (secrets_.read(key + "/" + std::string(kSharedDatabaseUser))) {
         databases.push_back(std::string(kSharedSiteName));
     }
     out["databases"] = std::move(databases);
@@ -1658,25 +2012,26 @@ namespace {
 
 // Why a series has no server: it isn't installed (the usual reason: every
 // installed series has one), or it can't have one just now.
-ServiceRefusal no_server(const fs::path& data_dir, const std::string& series) {
+ServiceRefusal no_server(const fs::path& data_dir, std::string_view family, const std::string& series) {
     const auto installed = list_installed(runtimes_dir(data_dir));
-    const InstalledRuntime* r = best_mariadb(installed, series);
+    const InstalledRuntime* r = best_server(installed, family, series);
     if (r == nullptr || mariadb_series(r->version) != series) {
-        return not_installed(series);
+        return not_installed(family, series);
     }
-    return no_server_yet(series);
+    return no_server_yet(family, series);
 }
 
 }  // namespace
 
-bool DatabaseService::server_action(const std::string& series, const std::string& action, ServiceRefusal& refusal) {
+bool DatabaseService::server_action(const std::string& series, const std::string& action, ServiceRefusal& refusal,
+                                    std::string_view family) {
     if (action != "start" && action != "stop" && action != "restart") {
         refusal = {"bad_params", "action is start, stop or restart"};
         return false;
     }
-    auto server = server_of(series);
+    auto server = server_of(family, series);
     if (!server) {
-        refusal = no_server(config_.data_dir, series);
+        refusal = no_server(config_.data_dir, family, series);
         return false;
     }
     run_later([server = std::move(server), action] {
@@ -1695,11 +2050,12 @@ bool DatabaseService::server_action(const std::string& series, const std::string
     return true;
 }
 
-bool DatabaseService::restart_if_running(const std::string& series) {
+bool DatabaseService::restart_if_running(const std::string& series, std::string_view family) {
     std::shared_ptr<Server> server;
     {
         const std::lock_guard lock(mutex_);
-        if (const auto it = servers_.find(series); it != servers_.end() && it->second->running()) {
+        if (const auto it = servers_.find(database_server_key(family, series));
+            it != servers_.end() && it->second->running()) {
             server = it->second;
         }
     }
@@ -1713,33 +2069,36 @@ bool DatabaseService::restart_if_running(const std::string& series) {
     return true;
 }
 
-std::optional<std::string> DatabaseService::root_password(const std::string& series, ServiceRefusal& refusal) const {
-    auto password = secrets_.read("mariadb-" + series + "/root");
+std::optional<std::string> DatabaseService::root_password(const std::string& series, ServiceRefusal& refusal,
+                                                          std::string_view family) const {
+    auto password = secrets_.read(database_server_key(family, series) + "/root");
     if (!password) {
-        refusal = {"no_password", "MariaDB " + series + " has no root password yet: it gets one the first time it starts"};
+        refusal = {"no_password", database_family_title(family) + " " + series +
+                                      " has no root password yet: it gets one the first time it starts"};
     }
     return password;
 }
 
-DatabaseService::RemovalHold DatabaseService::hold_for_removal(const std::string& version) {
+DatabaseService::RemovalHold DatabaseService::hold_for_removal(const std::string& version, std::string_view family) {
     const std::string series = mariadb_series(version);
+    const std::string key = database_server_key(family, series);
     std::vector<std::shared_ptr<Server>> going;
     {
         const std::lock_guard lock(mutex_);
         // Runs from it: the series' server, or one still shutting down.
         bool runs_from_it = false;
-        if (const auto it = servers_.find(series); it != servers_.end() && it->second->version() == version) {
+        if (const auto it = servers_.find(key); it != servers_.end() && it->second->version() == version) {
             runs_from_it = true;
         }
         for (const auto& w : retired_) {
-            if (const auto s = w.lock(); s && s->files().series == series && s->version() == version) {
+            if (const auto s = w.lock(); s && s->key() == key && s->version() == version) {
                 runs_from_it = true;
             }
         }
         // The series' last install: its server goes with it.
         bool last = true;
         for (const InstalledRuntime& r : list_installed(runtimes_dir(config_.data_dir))) {
-            if (r.name == "mariadb" && r.version != version && mariadb_series(r.version) == series) {
+            if (r.name == family && r.version != version && mariadb_series(r.version) == series) {
                 last = false;
             }
         }
@@ -1747,17 +2106,17 @@ DatabaseService::RemovalHold DatabaseService::hold_for_removal(const std::string
             return {};  // an older patch release nothing runs from: the server stays up
         }
         for (const auto& w : retired_) {
-            if (const auto s = w.lock(); s && s->files().series == series) {
+            if (const auto s = w.lock(); s && s->key() == key) {
                 going.push_back(s);
             }
         }
-        if (const auto it = servers_.find(series); it != servers_.end()) {
+        if (const auto it = servers_.find(key); it != servers_.end()) {
             going.push_back(it->second);
         }
-        ++held_[series];
+        ++held_[key];
     }
     // From here the hold ends with the guard, whatever happens.
-    RemovalHold hold(this, series);
+    RemovalHold hold(this, key);
     {
         const std::lock_guard lock(mutex_);
         reload_locked();  // retires it
@@ -1765,12 +2124,23 @@ DatabaseService::RemovalHold DatabaseService::hold_for_removal(const std::string
     for (const auto& s : going) {
         s->stop(true);  // waits for a stop under way too
     }
+    // Gone for good before the hold is handed back: the threads that still
+    // hold one (its stopper, the supervisor's list) let go within moments,
+    // and with it its port, so the series' server can be made again as soon
+    // as the hold ends.
+    std::vector<std::weak_ptr<Server>> gone(going.begin(), going.end());
+    going.clear();
+    const auto until = Clock::now() + 3s;
+    while (Clock::now() < until &&
+           std::any_of(gone.begin(), gone.end(), [](const std::weak_ptr<Server>& w) { return !w.expired(); })) {
+        std::this_thread::sleep_for(20ms);
+    }
     return hold;
 }
 
-void DatabaseService::release_series(const std::string& series) noexcept {
+void DatabaseService::release_series(const std::string& key) noexcept {
     const std::lock_guard lock(mutex_);
-    if (const auto it = held_.find(series); it != held_.end() && --it->second <= 0) {
+    if (const auto it = held_.find(key); it != held_.end() && --it->second <= 0) {
         held_.erase(it);
     }
     try {
@@ -1779,10 +2149,11 @@ void DatabaseService::release_series(const std::string& series) noexcept {
     }
 }
 
-std::optional<DatabaseLogin> DatabaseService::root_login(const std::string& series, ServiceRefusal& refusal) {
-    const auto server = server_of(series);
+std::optional<DatabaseLogin> DatabaseService::root_login(const std::string& series, ServiceRefusal& refusal,
+                                                         std::string_view family) {
+    const auto server = server_of(family, series);
     if (!server) {
-        refusal = no_server(config_.data_dir, series);
+        refusal = no_server(config_.data_dir, family, series);
         return std::nullopt;
     }
     // Counts as a connection meanwhile; afterwards the idle time starts
@@ -1792,12 +2163,12 @@ std::optional<DatabaseLogin> DatabaseService::root_login(const std::string& seri
     server->clear_failure();  // asked for by the user: a failed start is tried again now
     std::string error;
     if (!server->ensure_running(error)) {
-        refusal = {"database_failed", "MariaDB " + series + " didn't start: " + error};
+        refusal = {"database_failed", server->title() + " didn't start: " + error};
         return std::nullopt;
     }
     auto password = secrets_.read(server->root_name());
     if (!password) {
-        refusal = {"no_password", "root's password for MariaDB " + series + " is missing from the secure store"};
+        refusal = {"no_password", "root's password for " + server->title() + " is missing from the secure store"};
         return std::nullopt;
     }
     DatabaseLogin login;
@@ -1807,14 +2178,15 @@ std::optional<DatabaseLogin> DatabaseService::root_login(const std::string& seri
     return login;
 }
 
-bool DatabaseService::set_root_password(const std::string& series, const std::string& password, ServiceRefusal& refusal) {
+bool DatabaseService::set_root_password(const std::string& series, const std::string& password, ServiceRefusal& refusal,
+                                        std::string_view family) {
     if (const auto problem = root_password_problem(password)) {
         refusal = {"bad_params", *problem};
         return false;
     }
-    const auto server = server_of(series);
+    const auto server = server_of(family, series);
     if (!server) {
-        refusal = no_server(config_.data_dir, series);
+        refusal = no_server(config_.data_dir, family, series);
         return false;
     }
     std::string error;
@@ -1825,11 +2197,13 @@ bool DatabaseService::set_root_password(const std::string& series, const std::st
     return true;
 }
 
-std::optional<fs::path> DatabaseService::final_ini(const std::string& series, ServiceRefusal& refusal) const {
+std::optional<fs::path> DatabaseService::final_ini(const std::string& series, ServiceRefusal& refusal,
+                                                   std::string_view family) const {
+    const std::string title = database_family_title(family) + " " + series;
     std::shared_ptr<Server> server;
     {
         const std::lock_guard lock(mutex_);
-        if (const auto it = servers_.find(series); it != servers_.end()) {
+        if (const auto it = servers_.find(database_server_key(family, series)); it != servers_.end()) {
             server = it->second;
         }
     }
@@ -1839,28 +2213,30 @@ std::optional<fs::path> DatabaseService::final_ini(const std::string& series, Se
         text = server->config_text(false);
         port_note = "# port=" + std::to_string(server->internal_port()) +
                     " below is FloServer's own: projects connect to " + std::to_string(server->port()) +
-                    ", and FloServer passes each connection on (and starts MariaDB when it sleeps).\n";
+                    ", and FloServer passes each connection on (and starts " + database_family_title(family) +
+                    " when it sleeps).\n";
     } else {
         const auto installed = list_installed(runtimes_dir(config_.data_dir));
-        const InstalledRuntime* r = best_mariadb(installed, series);
+        const InstalledRuntime* r = best_server(installed, family, series);
         if (r == nullptr || mariadb_series(r->version) != series) {
-            refusal = {"not_installed", "MariaDB " + series + " isn't installed"};
+            refusal = {"not_installed", title + " isn't installed"};
             return std::nullopt;
         }
         std::string error;
         const auto app = load_app_config(app_config_file(config_.data_dir), error);
-        const MariaDbSettings all = app ? read_mariadb_settings(*app) : MariaDbSettings{};
+        const MariaDbSettings all = app ? read_mariadb_settings(*app, nullptr, family) : MariaDbSettings{};
         const auto it = all.find(series);
-        const MariaDbExtras extras = mariadb_extras(config_.data_dir, series, it != all.end() ? &it->second : nullptr);
-        text = mariadb_config(mariadb_files(r->dir, r->version, config_.data_dir), kFirstInternalDatabasePort,
+        const MariaDbExtras extras =
+            mariadb_extras(config_.data_dir, series, it != all.end() ? &it->second : nullptr, family);
+        text = mariadb_config(mariadb_files(r->dir, r->version, config_.data_dir, family), kFirstInternalDatabasePort,
                               running_as_root(), false, &extras);
-        port_note = "# MariaDB " + series + " isn't running for any project now; the port below is chosen when it starts.\n";
+        port_note = "# " + title + " isn't running for any project now; the port below is chosen when it starts.\n";
     }
-    text = "# What MariaDB " + series +
+    text = "# What " + title +
            " reads when it starts. Written by FloServer when you ask to see it: edits here are lost and do nothing.\n"
            "# Change values in Settings > Database, or add your own lines to custom.ini beside this file.\n" +
            port_note + "\n" + text;
-    fs::path file = mariadb_custom_ini_file(config_.data_dir, series).parent_path() / "final-my.ini";
+    fs::path file = mariadb_custom_ini_file(config_.data_dir, series, family).parent_path() / "final-my.ini";
     std::error_code ec;
     fs::create_directories(file.parent_path(), ec);
     // Read-only, so Notepad says so on Save; made writable again to replace it.

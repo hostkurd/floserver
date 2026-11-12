@@ -9,6 +9,7 @@
 // A config.json that can't be read is never overwritten: requests that would
 // change it are refused until it's fixed.
 
+#include "floserver/core/database_engine.h"
 #include "floserver/core/project_registry.h"
 #include "floserver/core/runtime_service.h"
 #include "floserver/core/runtime_store.h"  // ServiceRefusal
@@ -180,21 +181,22 @@ public:
     // nothing. The config as saved.
     [[nodiscard]] std::optional<AppConfig> change_config(const std::function<bool(AppConfig&, ServiceRefusal&)>& change,
                                                          ServiceRefusal& refusal);
-    // Settings → Database (MariaDB) for one series ("11.4"), what config.json
-    // and the series' files say (the server's state comes from
-    // DatabaseService::series_status()):
-    //   {"series": "11.4", "version": "11.4.5" | null (the newest install of it),
+    // Settings → Database for one series ("11.4") of `family` (MariaDB, or
+    // MySQL since D28), what config.json and the series' files say (the
+    // server's state comes from DatabaseService::series_status()):
+    //   {"family": "mariadb", "series": "11.4", "version": "11.4.5" | null (the newest install of it),
     //    "port": 3307 | null (the one chosen; null: 3306 or the next free one),
     //    "keep_running": bool, "kept_by": ["shop"] (projects set to keep running that use it),
     //    "ini": {FloServer's defaults and the series' values}, "changed": {the series' own values},
-    //    "custom_ini": "<data>/mariadb/11.4/custom.ini", "custom_ini_exists": bool,
+    //    "custom_ini": "<data>/mariadb/11.4/custom.ini" (<data>/mysql/8.4/...), "custom_ini_exists": bool,
     //    "custom_problems"?: ["line 3: ..."] (lines left out), "custom_keys": [names custom.ini sets],
     //    "used_by": ["blog", "_shared"], "problems"?: ["..."],
     //    "known_options"?: [every option name the install knows, canonical, sorted]}
     // "known_options" is asked of the install's mariadbd the first time
     // (known_mariadb_options), then read from
     // <data>/mariadb/<series>/known-options-<version>.json.
-    [[nodiscard]] std::optional<nlohmann::json> database_get(const std::string& series, ServiceRefusal& refusal) const;
+    [[nodiscard]] std::optional<nlohmann::json> database_get(const std::string& series, ServiceRefusal& refusal,
+                                                             std::string_view family = kMariaDbFamily) const;
     // Changes the series' settings: `ini` {"max_connections": "300"|null},
     // `port` 3307|null (null: back to the automatic one), `keep_running`
     // true|false; each may be left out (a json null for `ini`, nothing for
@@ -202,10 +204,11 @@ public:
     // server then restarts). The reply is database_get()'s.
     [[nodiscard]] std::optional<nlohmann::json> database_set(const std::string& series, const nlohmann::json& ini,
                                                              const nlohmann::json* port, const nlohmann::json* keep_running,
-                                                             bool& changed_ini, ServiceRefusal& refusal);
+                                                             bool& changed_ini, ServiceRefusal& refusal,
+                                                             std::string_view family = kMariaDbFamily);
     // The series' custom.ini, made (with a comment saying what it's for) when it isn't there.
-    [[nodiscard]] std::optional<std::filesystem::path> database_custom_ini(const std::string& series,
-                                                                           ServiceRefusal& refusal) const;
+    [[nodiscard]] std::optional<std::filesystem::path> database_custom_ini(
+        const std::string& series, ServiceRefusal& refusal, std::string_view family = kMariaDbFamily) const;
 
     // The registered folder of a project, or nothing.
     [[nodiscard]] std::optional<std::filesystem::path> folder(const std::string& name, ServiceRefusal& refusal) const;

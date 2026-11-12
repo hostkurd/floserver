@@ -125,11 +125,19 @@ std::string backup_versions_text(const json& versions) {
     const std::string database = text_of(versions, "database");
     if (database.starts_with("mariadb-")) {
         add("MariaDB " + database.substr(8));
+    } else if (database.starts_with("mysql-")) {
+        add("MySQL " + database.substr(6));
     } else if (database == "mariadb") {
         add("MariaDB");
     }
     if (const std::string node = text_of(versions, "node"); !node.empty()) {
         add("Node.js " + node);
+    }
+    if (const std::string bun = text_of(versions, "bun"); !bun.empty()) {
+        add("Bun " + bun);
+    }
+    if (const std::string deno = text_of(versions, "deno"); !deno.empty()) {
+        add("Deno " + deno);
     }
     if (const std::string python = text_of(versions, "python"); !python.empty()) {
         add("Python " + python);

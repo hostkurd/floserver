@@ -2,6 +2,7 @@
 
 #include "floserver/core/build_info.h"
 #include "floserver/core/mailpit.h"
+#include "floserver/core/mariadb.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/plain_file.h"
 #include "floserver/core/project_config.h"
@@ -159,7 +160,8 @@ json all_tools() {
     tools.push_back(tool(
         "list_projects", "List projects",
         "Lists the user's FloServer projects (local websites): each one's name, address, whether it's on, its "
-        "state (running, asleep, needs a download, a problem), its PHP/Node.js/Python versions, its web server, "
+        "state (running, asleep, needs a download, a problem), its PHP, Node.js, Bun, Deno or Python versions, "
+        "its web server, "
         "its folder and its database engine. Read-only.",
         no_arguments(),
         object_of({{"projects", array_of(object_of({{"name", typed("string")},
@@ -209,8 +211,8 @@ json all_tools() {
     tools.push_back(tool(
         "service_status", "FloServer status",
         "What FloServer is running now: its version and memory, nginx's HTTP and HTTPS ports, Apache, each PHP "
-        "version's servers (running or asleep) and the projects on them, Node.js and Python app servers, the "
-        "database servers with their ports, and Mailpit. Read-only.",
+        "version's servers (running or asleep) and the projects on them, Node.js, Bun, Deno and Python app "
+        "servers, the database servers (MariaDB, MySQL) with their ports, Redis (Garnet) and Mailpit. Read-only.",
         no_arguments(),
         object_of({{"service", typed("object")},
                    {"web", typed("object")},
@@ -438,7 +440,7 @@ std::string shown_problem(const json& p) {
     // FloServer's own examples stay ("8.2", "newest", "mariadb-11.4"...);
     // any other quoted part came from the file and is left out.
     static constexpr std::array<std::string_view, 6> kExamples = {
-        "newest", "mariadb-11.4", "11.4", "npm run serve -- --port {port}", "public", "8.2.27"};
+        "newest", "mariadb-11.4", "mysql-8.4", "bun-1.3", "npm run serve -- --port {port}", "public"};
     std::string out;
     std::size_t at = 0;
     while (at < text.size()) {
@@ -478,6 +480,21 @@ std::string start_failure(const std::string& error) {
     return out + "; FloServer's window shows why";
 }
 
+// The Redis server (Garnet, D30) as service_status shows it: never its password.
+json redis_server(const json& r) {
+    json out = {{"installed", true},
+                {"version", text_of(r, "version")},
+                {"state", text_of(r, "state")},  // asleep, starting, running, saving, failed
+                {"host", text_of(r, "host")},
+                {"port", field(r, "port")},
+                {"stored_items", field(r, "keys")},  // "keys" would read as a secret's name
+                {"keep_running", flag(object_at(r, "settings"), "keep_running")}};
+    if (!text_of(r, "error").empty()) {
+        out["error"] = start_failure(text_of(r, "error"));
+    }
+    return out;
+}
+
 // A project's state in words, as `flo projects` says it.
 std::string status_words(const json& p) {
     const std::string state = text_of(p, "state");
@@ -505,7 +522,7 @@ std::string status_words(const json& p) {
 
 json versions_of(const json& p) {
     json v = json::object();
-    for (const char* key : {"php", "node", "python"}) {
+    for (const char* key : {"php", "node", "bun", "deno", "python"}) {
         if (!text_of(p, key).empty()) {
             v[key] = text_of(p, key);
         }
@@ -534,9 +551,10 @@ json project_summary(const json& p) {
 }  // namespace
 
 bool read_only_method(std::string_view method) {
-    static constexpr std::array<std::string_view, 8> kAllowed = {"status",       "projects.list", "projects.log",
+    // Not redis.password, databases.login, shared.login, database.root, phpmyadmin.login, mail.env: they give secrets.
+    static constexpr std::array<std::string_view, 9> kAllowed = {"status",       "projects.list", "projects.log",
                                                                  "runtimes.list", "web.status",   "databases.list",
-                                                                 "mail.status",  "mail.recent"};
+                                                                 "mail.status",  "mail.recent", "redis.status"};
     return std::find(kAllowed.begin(), kAllowed.end(), method) != kAllowed.end();
 }
 
@@ -951,7 +969,9 @@ json valid_setting(const std::string& key, const json& v) {
     if (key == "php" && v.is_string() && v.get<std::string>() == kPhpNewest) {
         return v;
     }
-    if (key == "php" || key == "node" || key == "python" || key == "bun" || key == "deno") {
+    // "mariadb": "11.4" and "mysql": "8.4" are the database's shorthand (D28).
+    if (key == "php" || key == "node" || key == "python" || key == "bun" || key == "deno" || key == "mariadb" ||
+        key == "mysql") {
         return v.is_string() && version_like(v.get<std::string>()) ? v : json(kNotValid);
     }
     if (key == "web") {
@@ -978,7 +998,7 @@ json valid_setting(const std::string& key, const json& v) {
         }
         const auto& d = v.get_ref<const std::string&>();
         const std::size_t dash = d.find('-');
-        static constexpr std::array<std::string_view, 3> kFamilies = {"mariadb", "mysql", "postgresql"};
+        static constexpr std::array<std::string_view, 2> kFamilies = {"mariadb", "mysql"};
         std::string family = d.substr(0, std::min(dash, d.size()));
         for (char& c : family) {
             c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));  // MariaDB-11.4, as the service takes it
@@ -1036,8 +1056,8 @@ json key_names(const json& object, std::string_view extra, int& hidden) {
 // what it says; the other keys by name. Names that may be secrets themselves
 // are counted in "hidden_names" instead.
 json safe_project_config(const json& config) {
-    static constexpr std::array<std::string_view, 9> kSettings = {"php", "node", "python", "bun", "deno",
-                                                                  "web", "root", "redis", "database"};
+    static constexpr std::array<std::string_view, 11> kSettings = {"php",  "node", "python", "bun",   "deno",    "web",
+                                                                   "root", "redis", "database", "mariadb", "mysql"};
     json out = json::object();
     json other = json::array();
     int hidden = 0;
@@ -1424,25 +1444,32 @@ json Server::call_tool(const std::string& name, const json& args, std::string_vi
             const std::string family = engine.substr(0, dash);
             const std::string series = dash == std::string::npos ? std::string() : engine.substr(dash + 1);
             const std::string db_name = text_of(*p, "database_name");
+            // The names on that server, as the service makes them (MySQL's may be shortened, D28).
             database = {{"engine", family},
                         {"version", series},
                         {"host", "127.0.0.1"},
-                        {"database", db_name},
-                        {"user", db_name},
+                        {"database", server_database_name(db_name, family)},
+                        {"user", project_database_user(db_name, family)},
                         {"note", "The password isn't given to AI tools. The project's .env (flo env) has it."}};
             if (const auto servers = ask("databases.list", json::object())) {
                 for (const json& s : array_at(*servers, "servers")) {
-                    if (text_of(s, "series") == series && s.contains("port")) {
+                    const std::string server_family = text_of(s, "family").empty() ? "mariadb" : text_of(s, "family");
+                    if (server_family == family && text_of(s, "series") == series && s.contains("port")) {
                         database["port"] = s.at("port");
                         database["server"] = text_of(s, "state");
                     }
                 }
             }
         }
-        // Redis (D30): on when the project's floserver.json asks for it.
+        // Redis (D30): the service's word on who has it on, and its server; never its password.
         json redis = {{"on", false}};
-        if (const json& r = field(config, "redis"); (r.is_boolean() && r.get<bool>()) || r.is_string()) {
-            redis = {{"on", true}, {"asked_for", r}};
+        if (const auto r = ask("redis.status", {{"projects", true}})) {
+            const json& names = array_at(*r, "projects");
+            const bool on = std::any_of(names.begin(), names.end(), [&](const json& n) { return n == summary.at("name"); });
+            redis = {{"on", on}, {"installed", flag(*r, "installed")}};
+            if (flag(*r, "installed")) {
+                redis["server"] = redis_server(*r);
+            }
         }
         json mail = {{"installed", false}};
         if (const auto status = ask("mail.status", json::object())) {
@@ -1502,6 +1529,10 @@ json Server::call_tool(const std::string& name, const json& args, std::string_vi
         }
         if (!text_of(*r, "list_error").empty()) {
             out["list_problem"] = text_of(*r, "list_error");
+        }
+        // Redis (Garnet, D30) runs as a server: its state with the runtimes it needs.
+        if (const auto redis = ask("redis.status", json::object()); redis && flag(*redis, "installed")) {
+            out["redis"] = redis_server(*redis);
         }
         return tool_answer(std::move(out));
     }
@@ -1569,7 +1600,7 @@ json Server::call_tool(const std::string& name, const json& args, std::string_vi
         }
         if (const auto dbs = ask("databases.list", json::object())) {
             for (const json& s : array_at(*dbs, "servers")) {
-                out["databases"].push_back({{"engine", "mariadb"},
+                out["databases"].push_back({{"engine", text_of(s, "family").empty() ? "mariadb" : text_of(s, "family")},
                                             {"series", text_of(s, "series")},
                                             {"version", text_of(s, "version")},
                                             {"port", field(s, "port")},
@@ -1577,6 +1608,9 @@ json Server::call_tool(const std::string& name, const json& args, std::string_vi
                                             {"connections", field(s, "connections")},
                                             {"projects", array_at(s, "projects")}});
             }
+        }
+        if (const auto r = ask("redis.status", json::object())) {
+            out["redis"] = flag(*r, "installed") ? redis_server(*r) : json{{"installed", false}};
         }
         if (const auto mail = ask("mail.status", json::object())) {
             out["mail"] = {{"installed", flag(*mail, "installed")}};

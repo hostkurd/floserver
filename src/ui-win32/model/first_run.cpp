@@ -45,7 +45,13 @@ constexpr std::array kOffers{
     OfferSpec{"node", "24", Str::FirstRunWhatNode, true, false},
     OfferSpec{"composer", "", Str::FirstRunWhatComposer, true, false},
     OfferSpec{"mailpit", "", Str::FirstRunWhatMailpit, true, false},
+    // D30: offered, not ticked; its .NET runtime and phpredis come with it.
+    OfferSpec{"garnet", "", Str::FirstRunWhatGarnet, false, false},
     OfferSpec{"python", "3.13", Str::FirstRunWhatPython, false, false},
+    // MySQL 8.4 LTS (D28): offered, not ticked; MariaDB is the usual database.
+    OfferSpec{"mysql", "8.4", Str::FirstRunWhatMysql, false, false},
+    OfferSpec{"bun", "", Str::FirstRunWhatBun, false, false},
+    OfferSpec{"deno", "", Str::FirstRunWhatDeno, false, false},
     OfferSpec{"phpmyadmin", "5.2", Str::FirstRunWhatPma, false, false},
     OfferSpec{"apache", "2.4", Str::FirstRunWhatApache, false, false},
     OfferSpec{"nginx", "", Str::FirstRunWhatNginx, true, true},
@@ -65,7 +71,7 @@ std::string shown_series(std::string_view name, std::string_view series, std::st
     if (name == "composer") {
         return std::string(version.substr(0, version.find('.')));
     }
-    if (name == "mailpit") {
+    if (name == "mailpit" || name == "garnet") {
         return std::string(version);  // "Mailpit 1.27.3": it has no series people name it by
     }
     return version_series(name, version);
@@ -115,9 +121,11 @@ std::vector<FirstRunOffer> first_run_offers(const json& runtimes_reply) {
         for (const json& r : available) {
             const std::string variant = text_of(r, "variant");
             const std::string version = text_of(r, "version");
-            // Only PHP's usual build (the service installs nothing else).
-            if (text_of(r, "name") != spec.name || version.empty() || !(variant.empty() || variant == "nts") ||
-                !in_series(version, spec.series)) {
+            // Only PHP's usual build (the service installs nothing else); Bun's
+            // baseline build is the one a CPU without AVX2 is offered, in
+            // place of the regular one (the service lists one of them).
+            const bool usual = variant.empty() || variant == "nts" || (spec.name == std::string_view("bun") && variant == "baseline");
+            if (text_of(r, "name") != spec.name || version.empty() || !usual || !in_series(version, spec.series)) {
                 continue;
             }
             if (best && !is_newer_version(version, best->version)) {

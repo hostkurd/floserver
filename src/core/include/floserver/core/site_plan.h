@@ -14,6 +14,7 @@
 // project's floserver.json result, each PHP series' custom.ini and the
 // installed runtimes, so it can be tested with plain values.
 
+#include "floserver/core/cpu_features.h"
 #include "floserver/core/php_settings.h"
 #include "floserver/core/ports.h"
 #include "floserver/core/project_config.h"
@@ -45,8 +46,11 @@ enum class SiteState : std::uint8_t {
 
 // The newest install of `name` matching `wanted` ("8.2"), or the newest of
 // all when `wanted` is empty; PHP only counts NTS builds (the pools' kind).
+// Bun (D31) comes in a regular and a "baseline" build: the one that runs on
+// this CPU (`avx2`: the regular one) comes first, whatever the versions.
 [[nodiscard]] const InstalledRuntime* best_installed(const std::vector<InstalledRuntime>& installed,
-                                                     const std::string& name, const std::string& wanted);
+                                                     const std::string& name, const std::string& wanted,
+                                                     bool avx2 = cpu_has_avx2());
 
 // The Apache the shared Apache runs: config.json's "apache" "version" when
 // it's installed (Settings > Apache), else the newest. Nothing when none is.
@@ -88,11 +92,14 @@ struct PhpPool {
     std::vector<Port> ports;
 };
 
-enum class AppKind : std::uint8_t { Node, Python, Apache };
+enum class AppKind : std::uint8_t { Node, Python, Apache, Bun, Deno };
+
+// The runtime's name in the list: "node", "bun", "deno", "python".
+[[nodiscard]] const char* app_runtime_name(AppKind kind);
 
 // A project that runs its own server, which nginx forwards to: a Python
-// project (one that asks for Python and not PHP, D17) or a Node project (one
-// that asks for Node and neither PHP nor Python, D11).
+// project (one that asks for Python and not PHP, D17) or a Node, Bun or Deno
+// project (one that asks for that and neither PHP nor Python, D11, D31).
 struct AppSpec {
     std::string name;                   // the project's
     AppKind kind = AppKind::Node;
@@ -102,13 +109,16 @@ struct AppSpec {
     std::optional<std::string> command; // from floserver.json
     bool keep_running = false;
     Port port = 0;                      // held by the service; given by assign_app_ports()
-    // A Python app that names Node too: that Node is on its PATH (its
-    // build tools), as "24.22.1" in the status.
+    // A Python app that names a JavaScript runtime too: that one is on its
+    // PATH (its build tools), as "24.22.1" in the status.
     std::filesystem::path node_dir;
     std::string node_version;
     // The shared Apache: its config, with kApachePortPlaceholder for the
     // port it's started on (apache_config.h); written to dir/httpd.conf.
     std::string server_config;
+    // The JavaScript runtime the project names: "node", "bun" or "deno"
+    // (for a Python app, the one on its PATH).
+    std::string tools_name = "node";
 };
 
 struct WebPlan {

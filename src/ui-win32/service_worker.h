@@ -4,7 +4,7 @@
 // (starting the service the way the CLI does), asks for projects.list,
 // status, web.status, databases.list, shared.get (without the www
 // folder's folders: nothing reads it in the background), updates.status and
-// mail.status (D27) every 2 seconds,
+// mail.status (D27) and redis.status (D30) every 2 seconds,
 // and sends the user's changes. While a project's panel is open it also asks for that
 // project's log. The UI thread never waits on the pipe: the worker keeps the
 // latest snapshot and posts a message to the window when it changes.
@@ -12,6 +12,7 @@
 #include "model/app_update.h"
 #include "model/first_run.h"
 #include "model/mail_page.h"
+#include "model/redis_page.h"
 #include "model/runtimes_page.h"
 #include "model/ui_strings.h"
 #include "model/view_model.h"
@@ -77,6 +78,8 @@ struct Snapshot {
     // Mail (D27): mail.status, asked with each poll while the service answers.
     // Nothing until the first answer; an older service counts as not installed.
     std::optional<MailStatus> mail;
+    // Redis (D30): redis.status (without its projects), asked with each poll the same way.
+    std::optional<RedisStatus> redis;
     // New project (D9): the templates, once asked for.
     bool templates_loaded = false;
     std::string templates_error;
@@ -127,6 +130,7 @@ struct Snapshot {
         std::string purpose;  // what the window asked it for ("show" or "copy" root's password)
         std::optional<nlohmann::json> reply;
         std::string error;    // the service's reason, or the connection's
+        std::string family;   // the family asked about (D28); empty: MariaDB
     };
     std::vector<DbAnswer> db;
     std::string custom_ini;        // php.custom_ini's (or php.final_ini's) path, to open in Notepad

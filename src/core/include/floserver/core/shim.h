@@ -1,12 +1,12 @@
 #pragma once
 
-// The terminal shims (D10, D17): small php, node, npm, npx, composer,
-// python and pip programs in one folder on the user's PATH. Each finds the
-// nearest floserver.json from the current folder and runs the version it
-// asks for; outside a project, the default (for now the newest installed;
-// Settings will set it), or when FloServer has none, the program of that
-// name next on the PATH, as if the shim weren't there. They run runtimes directly and don't go through the
-// service.
+// The terminal shims (D10, D17, D31): small php, node, npm, npx, composer,
+// python, pip, bun, bunx and deno programs in one folder on the user's PATH.
+// Each finds the nearest floserver.json from the current folder and runs the
+// version it asks for; outside a project, the default (for now the newest
+// installed; Settings will set it), or when FloServer has none, the program
+// of that name next on the PATH, as if the shim weren't there. They run
+// runtimes directly and don't go through the service.
 //
 //   php       php(.exe) of the project's PHP, with a php.ini FloServer writes
 //             for that install and the project's extensions (the base ones
@@ -14,8 +14,12 @@
 //   node      the project's Node
 //   npm, npx  the project's Node running its own npm-cli.js / npx-cli.js
 //   composer  the project's PHP running the newest installed composer.phar
+//   bun       the project's Bun (D31); bunx runs it as `bun x`
+//   deno      the project's Deno
 //   python    the project's .venv when it has one, else its Python install
 //   pip       the same python with -m pip
+
+#include "floserver/core/cpu_features.h"
 
 #include <filesystem>
 #include <optional>
@@ -37,9 +41,11 @@ struct ShimTarget {
 
 // What `tool` ("php", "npm"...) runs in `cwd`. Nothing (with `error`, in plain
 // English, saying what to install or fix) when it can't. May write the php.ini
-// for a PHP install under data/cli/php.
+// for a PHP install under data/cli/php. `avx2`: whether this CPU has it, which
+// picks Bun's regular or baseline build when both are installed (D31).
 [[nodiscard]] std::optional<ShimTarget> resolve_shim(const std::string& tool, const std::filesystem::path& cwd,
-                                                     const std::filesystem::path& data_dir, std::string& error);
+                                                     const std::filesystem::path& data_dir, std::string& error,
+                                                     bool avx2 = cpu_has_avx2());
 
 [[nodiscard]] std::filesystem::path shims_dir(const std::filesystem::path& data);
 

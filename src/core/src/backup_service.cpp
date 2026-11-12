@@ -7,6 +7,7 @@
 #include "floserver/core/project_registry.h"
 #include "floserver/core/secret_store.h"
 #include "floserver/core/shim.h"
+#include "floserver/core/site_plan.h"
 #include "floserver/core/zip_extract.h"
 
 #include <algorithm>
@@ -626,7 +627,10 @@ bool BackupService::check_database_entry(const fs::path& zip, const BackupInfo& 
 std::string BackupService::database_of(const std::string& project) const {
     std::string ignored;
     const auto p = hooks_.project ? hooks_.project(project, ignored) : std::nullopt;
-    return p && !p->database_name.empty() ? p->database_name : project_database_name(project);
+    const std::string name = p && !p->database_name.empty() ? p->database_name : project_database_name(project);
+    // Its name on its server: MySQL's cut to fit its limits (D28).
+    const ConfigResult cfg = p ? read_project_config_file(Project{p->name, p->dir, true, false, {}}) : ConfigResult{};
+    return cfg.config && cfg.config->database ? server_database_name(name, cfg.config->database->family) : name;
 }
 
 bool BackupService::load_from_backup(const std::shared_ptr<Job>& job, const fs::path& zip, const BackupInfo& info,

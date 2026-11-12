@@ -4,14 +4,15 @@
 //
 //   {
 //     "php": "8.2",                  // or false (never PHP), or "newest"
-//     "node": "22",
+//     "node": "22",                  // or "bun": "1.3", or "deno": "2.9" (D31)
 //     "python": "3.13",
-//     "database": "mariadb-11.4",
+//     "database": "mariadb-11.4",   // or "mysql-8.4" (D28); also "mysql": "8.4"
 //     "web": "nginx",
 //     "root": "public",
 //     "extensions": ["intl", "gd", "-exif"],
 //     "php_ini": {"memory_limit": "1024M"},
-//     "command": "npm run serve -- --port {port}"
+//     "command": "npm run serve -- --port {port}",
+//     "redis": true                  // D30: the shared Redis (Garnet), keys prefixed <name>_
 //   }
 //
 // Every key is optional. Unknown keys are kept as warnings, not errors, so a
@@ -33,7 +34,7 @@ inline constexpr std::size_t kMaxProjectConfigBytes = std::size_t{64} * 1024;
 enum class WebServer : std::uint8_t { Nginx, Apache };
 
 struct DatabaseSpec {
-    std::string family;   // "mariadb" (1.0); "mysql" may follow (Q7)
+    std::string family;   // "mariadb" or "mysql" (D28), database_engine.h
     std::string version;  // "11.4"
     bool operator==(const DatabaseSpec&) const = default;
 };
@@ -50,6 +51,10 @@ struct ProjectConfig {
     std::optional<std::string> php;        // "8.2", "8.2.27"; set, it wins over php_choice
     PhpChoice php_choice = PhpChoice::Auto;
     std::optional<std::string> node;       // "22", "22.11.0"
+    // A project has one JavaScript runtime: node, bun or deno (D31); naming
+    // two is an error.
+    std::optional<std::string> bun;        // "1.3"
+    std::optional<std::string> deno;       // "2.9"
     std::optional<std::string> python;     // "3.13" (D17)
     std::optional<DatabaseSpec> database;  // absent: the project needs no database
     WebServer web = WebServer::Nginx;
@@ -64,6 +69,9 @@ struct ProjectConfig {
     // instead of what FloServer would pick; {port} is replaced by the
     // port to listen on, which is also in the PORT variable.
     std::optional<std::string> command;
+    // Redis (D30): the project uses the shared Garnet server; its .env lines
+    // get REDIS_* and its PHP loads phpredis where there's a build for it.
+    bool redis = false;
 
     bool operator==(const ProjectConfig&) const = default;
 };
@@ -72,6 +80,24 @@ struct ProjectConfig {
 [[nodiscard]] inline bool php_off(const ProjectConfig& c) { return !c.php && c.php_choice == PhpChoice::Off; }
 // PHP is asked for: a version or "newest".
 [[nodiscard]] inline bool php_asked(const ProjectConfig& c) { return c.php || c.php_choice == PhpChoice::Newest; }
+
+// The project's JavaScript runtime, when it names one (D31).
+struct JsRuntime {
+    std::string name;     // "node", "bun" or "deno": the runtime's name in the list
+    std::string version;  // as written in floserver.json
+};
+[[nodiscard]] inline std::optional<JsRuntime> js_runtime(const ProjectConfig& c) {
+    if (c.node) {
+        return JsRuntime{"node", *c.node};
+    }
+    if (c.bun) {
+        return JsRuntime{"bun", *c.bun};
+    }
+    if (c.deno) {
+        return JsRuntime{"deno", *c.deno};
+    }
+    return std::nullopt;
+}
 
 // The words `flo use php` and projects.use take besides a version: "none"
 // writes false, "newest" writes "newest".
@@ -104,18 +130,24 @@ find_project_config(const std::filesystem::path& start);
 inline constexpr std::string_view kProjectConfigFileName = "floserver.json";
 
 // The keys the window and `flo use` change one at a time.
-enum class ConfigKey : std::uint8_t { Php, Node, Python, Database, Web };
+enum class ConfigKey : std::uint8_t { Php, Node, Bun, Deno, Javascript, Python, Database, Web, Redis };
 
-// "php", "node", "python", "database" (also "mariadb", as in `flo use
-// mariadb 11.4`), "web". Nothing for anything else.
+// "php", "node", "bun", "deno", "javascript" (the window's picker: the value
+// is "node-24", "bun-1.3" or "deno-2.9", and nothing removes whichever the
+// project has), "python", "database" (also "mariadb" and "mysql", as in
+// `flo use mysql 8.4`), "web", "redis". Nothing for anything else.
 [[nodiscard]] std::optional<ConfigKey> parse_config_key(std::string_view name);
 
 // Sets one key in the text of a floserver.json, keeping every other key and
 // its order; nothing for `value` removes the key. Versions are checked
 // (Version::parse), and "php" also takes "none" (written as false) and
-// "newest"; "database" takes "mariadb-11.4", and "mariadb" takes the
-// version alone; "web" takes "nginx" (the default, so the key is removed) or
-// "apache". Empty text is an empty file. Returns the new text, or nothing
+// "newest"; "database" takes "mariadb-11.4" or "mysql-8.4", and "mariadb"
+// and "mysql" take the version alone (written as "database": "mysql-8.4",
+// and a "mariadb" or "mysql" key written by hand goes: one engine); "web"
+// takes "nginx" (the default, so the key is removed) or "apache"; "redis"
+// takes "on" (written as true) or "off" (the default, so the key is
+// removed). Setting node, bun or deno (or javascript) replaces the
+// project's other JavaScript runtime, since it has one. Empty text is an empty file. Returns the new text, or nothing
 // with `error` (plain English) when the old text or the new value is wrong.
 [[nodiscard]] std::optional<std::string> set_project_config_value(std::string_view text, ConfigKey key,
                                                                   std::string_view key_name,

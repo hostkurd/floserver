@@ -314,11 +314,12 @@ std::vector<TemplateNeed> template_runtime_needs(const ProjectTemplate& t, const
     // PHP when it's asked for, or when the template is a PHP one whose version
     // was left to "the newest"; a static or Node/Python project, or one with
     // PHP off ("php": false), has none.
-    if (php_asked(pc) || (!php_off(pc) && t.config.contains("php") && !pc.node && !pc.python)) {
+    const auto js = js_runtime(pc);
+    if (php_asked(pc) || (!php_off(pc) && t.config.contains("php") && !js && !pc.python)) {
         need("php", pc.php.value_or(""));
     }
-    if (pc.node) {
-        need("node", *pc.node);
+    if (js) {
+        need(js->name, js->version);
     }
     if (pc.python) {
         need("python", *pc.python);

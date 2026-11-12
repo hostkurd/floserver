@@ -78,6 +78,11 @@ struct ProjectMenuState {
 // The project's database and user as the service names them: the name it
 // kept through a rename (D22), else the one its name gives.
 [[nodiscard]] std::string row_database_name(const ProjectRow& row);
+// Its name and its user on its server, as the service makes them: the
+// database's name, or MySQL's shortened ones (core::server_database_name(),
+// core::project_database_user()).
+[[nodiscard]] std::string row_server_database(const ProjectRow& row);
+[[nodiscard]] std::string row_database_user(const ProjectRow& row);
 
 // The Rename dialog (D22, approved 5 Nov) for what's typed in its New name
 // box, worked out again on every key. `rows` are every project listed (the

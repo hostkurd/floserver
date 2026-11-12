@@ -11,9 +11,12 @@ add_executable(floserver_tests
     test_manifest.cpp
     test_mailpit.cpp
     test_mail_service.cpp
+    test_garnet.cpp
+    test_redis_service.cpp
     test_mariadb.cpp
     test_mariadb_settings.cpp
     test_mcp_server.cpp
+    test_mysql.cpp
     test_database_service.cpp
     test_data_folder.cpp
     test_ports.cpp
@@ -36,6 +39,7 @@ add_executable(floserver_tests
     test_ui_backup.cpp
     test_ui_database.cpp
     test_ui_mail.cpp
+    test_ui_redis.cpp
     test_ui_general.cpp
     test_ui_folders.cpp
     test_ui_first_run.cpp
@@ -58,6 +62,14 @@ add_executable(floserver_tests
     test_templates.cpp
     test_version.cpp
     test_zip.cpp)
+# A stand-in for Garnet (test_redis_service.cpp), where the real one can't be had.
+if(NOT WIN32)
+    add_executable(fake_garnet fake_garnet.cpp)
+    find_package(Threads REQUIRED)
+    target_link_libraries(fake_garnet PRIVATE floserver_third_party Threads::Threads)
+    add_dependencies(floserver_tests fake_garnet)
+    target_compile_definitions(floserver_tests PRIVATE FLOSERVER_TEST_FAKE_GARNET="$<TARGET_FILE:fake_garnet>")
+endif()
 # test_service.cpp runs the real floserverd; test_mcp_server.cpp the real flo mcp too.
 add_dependencies(floserver_tests floserverd floserver_shim floserver_cli)
 target_compile_definitions(floserver_tests PRIVATE FLOSERVER_TEST_BIN_DIR="$<TARGET_FILE_DIR:floserverd>")

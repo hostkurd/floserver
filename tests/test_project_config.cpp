@@ -105,13 +105,59 @@ TEST_CASE("bad values are errors on their own key") {
     CHECK(has_error(parse_project_config(R"({"extensions": ["a b"]})"), "extensions[0]"));
 }
 
-TEST_CASE("MySQL is refused with a pointer to MariaDB (Q7)") {
-    for (const char* text : {R"({"database": "mysql-8.0"})", R"({"database": "mysql"})"}) {
+TEST_CASE("MySQL is a database family beside MariaDB (D28); one engine per project") {
+    for (const char* text : {R"({"database": "mysql-8.4"})", R"({"mysql": "8.4"})", R"({"database": "MySQL-08.4"})"}) {
         CAPTURE(text);
         const auto r = parse_project_config(text);
-        REQUIRE(has_error(r, "database"));
-        CHECK(r.errors[0].message.find("use MariaDB") != std::string::npos);
+        REQUIRE(r.config.has_value());
+        REQUIRE(r.config->database.has_value());
+        CHECK(r.config->database->family == "mysql");
+        CHECK(r.config->database->version == "8.4");
+        CHECK(r.warnings.empty());
     }
+    const auto maria = parse_project_config(R"({"mariadb": "11.4"})");
+    REQUIRE(maria.config.has_value());
+    CHECK(maria.config->database == DatabaseSpec{"mariadb", "11.4"});
+    // Written back as "database": the one key FloServer writes.
+    CHECK(write_project_config(*parse_project_config(R"({"mysql": "8.4"})").config).find(R"("database": "mysql-8.4")") !=
+          std::string::npos);
+
+    // Two engines named: a clear problem.
+    for (const char* text : {R"({"mariadb": "11.4", "mysql": "8.4"})", R"({"database": "mariadb-11.4", "mysql": "8.4"})"}) {
+        CAPTURE(text);
+        const auto r = parse_project_config(text);
+        CHECK_FALSE(r.config.has_value());
+        REQUIRE(!r.errors.empty());
+        CHECK(r.errors[0].message.find("a project has one database") != std::string::npos);
+    }
+    // Bad values.
+    CHECK(has_error(parse_project_config(R"({"database": "mysql"})"), "database"));
+    CHECK(has_error(parse_project_config(R"({"mysql": "eight"})"), "mysql"));
+    CHECK(has_error(parse_project_config(R"({"mysql": 8.4})"), "mysql"));
+    const auto other = parse_project_config(R"({"database": "oracle-23"})");
+    REQUIRE(has_error(other, "database"));
+    CHECK(other.errors[0].message.find("MariaDB or MySQL") != std::string::npos);
+}
+
+TEST_CASE("flo use mysql 8.4 writes the database key and drops the other engine (D28)") {
+    std::string error;
+    auto text = set_project_config_value(R"({"php": "8.4", "mariadb": "11.4"})", ConfigKey::Database, "mysql",
+                                         std::string("8.4"), error);
+    REQUIRE_MESSAGE(text, error);
+    CHECK(text->find(R"("database": "mysql-8.4")") != std::string::npos);
+    CHECK(text->find("mariadb") == std::string::npos);
+    CHECK(text->find(R"("php": "8.4")") != std::string::npos);
+    text = set_project_config_value(*text, ConfigKey::Database, "mariadb", std::string("11.8"), error);
+    REQUIRE_MESSAGE(text, error);
+    CHECK(text->find(R"("database": "mariadb-11.8")") != std::string::npos);
+    CHECK(text->find("mysql") == std::string::npos);
+    CHECK_FALSE(set_project_config_value("{}", ConfigKey::Database, "mysql", std::string("x"), error));
+    CHECK(error.find("8.4") != std::string::npos);
+    CHECK(parse_config_key("mysql") == ConfigKey::Database);
+    // No value: the database goes, whichever key named it.
+    text = set_project_config_value(R"({"mysql": "8.4"})", ConfigKey::Database, "database", std::nullopt, error);
+    REQUIRE(text);
+    CHECK(parse_project_config(*text).config->database == std::nullopt);
 }
 
 TEST_CASE("names and versions are tidied") {
@@ -346,6 +392,110 @@ TEST_CASE("setting a key writes the project's own floserver.json") {
     fs::create_directories(other.path() / "floserver.json");
     CHECK_FALSE(set_project_config_file_value(other.path(), ConfigKey::Php, "php", std::string("8.4"), error));
     CHECK(error.find("plain file") != std::string::npos);
+}
+
+// --- Bun and Deno (D31) ----------------------------------------------------------------
+
+TEST_CASE("bun and deno are versions, and a project has one JavaScript runtime") {
+    auto r = parse_project_config(R"({"bun": "1.3", "root": "public"})");
+    REQUIRE(r.config);
+    CHECK(r.config->bun == std::optional<std::string>("1.3"));
+    CHECK_FALSE(r.config->deno);
+    CHECK(r.warnings.empty());
+    REQUIRE(js_runtime(*r.config));
+    CHECK(js_runtime(*r.config)->name == "bun");
+    CHECK(js_runtime(*r.config)->version == "1.3");
+    CHECK(write_project_config(*r.config) == "{\n  \"bun\": \"1.3\",\n  \"root\": \"public\"\n}\n");
+
+    r = parse_project_config(R"({"deno": "02.9.8"})");
+    REQUIRE(r.config);
+    CHECK(r.config->deno == std::optional<std::string>("2.9.8"));
+    CHECK(js_runtime(*r.config)->name == "deno");
+
+    r = parse_project_config(R"({"node": "24"})");
+    REQUIRE(r.config);
+    CHECK(js_runtime(*r.config)->name == "node");
+    CHECK_FALSE(js_runtime(*parse_project_config("{}").config));
+
+    // PHP and Python may name one, as they name Node today.
+    r = parse_project_config(R"({"php": "8.5", "deno": "2.9", "python": "3.13"})");
+    REQUIRE(r.config);
+
+    // Two named: an error that says what to do, against the second one.
+    r = parse_project_config(R"({"node": "24", "bun": "1.3"})");
+    CHECK_FALSE(r.config);
+    REQUIRE(r.errors.size() == 1);
+    CHECK(r.errors[0].key == "bun");
+    CHECK(r.errors[0].message ==
+          "is named together with \"node\", but a project runs on one JavaScript runtime: keep one of node and bun in "
+          "floserver.json");
+    r = parse_project_config(R"({"bun": "1.3", "deno": "2.9"})");
+    CHECK_FALSE(r.config);
+    REQUIRE(r.errors.size() == 1);
+    CHECK(r.errors[0].key == "deno");
+    CHECK(r.errors[0].message.find("\"bun\"") != std::string::npos);
+    r = parse_project_config(R"({"deno": "2.9", "node": "24", "bun": "1"})");
+    CHECK_FALSE(r.config);
+    REQUIRE(r.errors.size() == 1);
+    CHECK(r.errors[0].message.find("node, bun and deno") != std::string::npos);
+
+    // A bad version is that key's own error.
+    r = parse_project_config(R"({"bun": 1.3})");
+    CHECK_FALSE(r.config);
+    REQUIRE(r.errors.size() == 1);
+    CHECK(r.errors[0].key == "bun");
+    r = parse_project_config(R"({"deno": "latest"})");
+    CHECK_FALSE(r.config);
+    CHECK(r.errors[0].key == "deno");
+}
+
+TEST_CASE("flo use bun and flo use deno, and the window's JavaScript key, replace the project's runtime") {
+    std::string error;
+    CHECK(parse_config_key("bun") == ConfigKey::Bun);
+    CHECK(parse_config_key("deno") == ConfigKey::Deno);
+    CHECK(parse_config_key("javascript") == ConfigKey::Javascript);
+
+    auto out = set_project_config_value(R"({"php": false, "node": "22"})", ConfigKey::Bun, "bun", std::string("1.3.14"), error);
+    REQUIRE_MESSAGE(out, error);
+    CHECK(*out == "{\n  \"php\": false,\n  \"bun\": \"1.3.14\"\n}\n");  // node is gone: one runtime
+    out = set_project_config_value(*out, ConfigKey::Deno, "deno", std::string("2.9"), error);
+    REQUIRE(out);
+    CHECK(*out == "{\n  \"php\": false,\n  \"deno\": \"2.9\"\n}\n");
+    out = set_project_config_value(*out, ConfigKey::Node, "node", std::string("24"), error);
+    REQUIRE(out);
+    CHECK(*out == "{\n  \"php\": false,\n  \"node\": \"24\"\n}\n");
+    // Removing one key removes only it.
+    out = set_project_config_value(*out, ConfigKey::Bun, "bun", std::nullopt, error);
+    REQUIRE(out);
+    CHECK(out->find("\"node\": \"24\"") != std::string::npos);
+
+    // "javascript": "<runtime>-<version>", or nothing for none.
+    out = set_project_config_value(R"({"deno": "2.9", "root": "public"})", ConfigKey::Javascript, "javascript",
+                                   std::string("bun-1.3"), error);
+    REQUIRE_MESSAGE(out, error);
+    // The new runtime takes the first one's place in the file.
+    CHECK(*out == "{\n  \"bun\": \"1.3\",\n  \"root\": \"public\"\n}\n");
+    out = set_project_config_value(*out, ConfigKey::Javascript, "javascript", std::string("node-24"), error);
+    REQUIRE(out);
+    CHECK(*out == "{\n  \"node\": \"24\",\n  \"root\": \"public\"\n}\n");
+    CHECK(out->find("\"node\": \"24\"") != std::string::npos);
+    CHECK(out->find("bun") == std::string::npos);
+    out = set_project_config_value(*out, ConfigKey::Javascript, "javascript", std::nullopt, error);
+    REQUIRE(out);
+    CHECK(*out == "{\n  \"root\": \"public\"\n}\n");
+    // Nothing there before: added at the end; `flo use bun` over node keeps its place too.
+    out = set_project_config_value(R"({"php": "8.4", "node": "22", "web": "nginx"})", ConfigKey::Bun, "bun",
+                                   std::string("1.3"), error);
+    REQUIRE(out);
+    CHECK(*out == "{\n  \"php\": \"8.4\",\n  \"bun\": \"1.3\",\n  \"web\": \"nginx\"\n}\n");
+    out = set_project_config_value(R"({"php": "8.4"})", ConfigKey::Deno, "deno", std::string("2.9"), error);
+    REQUIRE(out);
+    CHECK(*out == "{\n  \"php\": \"8.4\",\n  \"deno\": \"2.9\"\n}\n");
+    for (const char* bad : {"ruby-3.4", "bun", "bun-", "bun-latest", "php-8.4", "javascript-1"}) {
+        CHECK_FALSE(set_project_config_value("{}", ConfigKey::Javascript, "javascript", std::string(bad), error));
+        CHECK(error.find("bun-1.3") != std::string::npos);
+    }
+    CHECK_FALSE(set_project_config_value("{}", ConfigKey::Bun, "bun", std::string("fast"), error));
 }
 
 TEST_CASE("a number JSON can't hold is a problem, not an exception (D32 review)") {

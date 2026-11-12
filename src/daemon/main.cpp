@@ -18,6 +18,8 @@
 #include "floserver/core/ipc.h"
 #include "floserver/core/mail_service.h"
 #include "floserver/core/mailpit.h"
+#include "floserver/core/garnet.h"
+#include "floserver/core/redis_service.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/phpmyadmin.h"
 #include "floserver/core/process.h"
@@ -254,6 +256,7 @@ struct Service {
     std::unique_ptr<floserver::core::BackupService> backups;
     std::unique_ptr<floserver::core::PhpMyAdminConfigWriter> phpmyadmin;
     std::unique_ptr<floserver::core::MailService> mail;
+    std::unique_ptr<floserver::core::RedisService> redis;
     std::optional<std::filesystem::path> data;
 
     // integration.json for FloCMS Studio (D14): rewritten when what it says
@@ -362,6 +365,88 @@ struct Service {
         }
     }
 
+    // After an install (D30): Garnet is updated in place like Mailpit (the
+    // older installs go, saved and stopped meanwhile; its data stays in
+    // <data>/garnet), and a new Garnet, .NET or phpredis reaches the
+    // service and the pools (a PHP with Redis on loads phpredis).
+    void after_install(const std::string& name, const std::string& version) const noexcept {
+        namespace core = floserver::core;
+        replace_older_mailpit(name, version);
+        if (!redis || !runtimes || !data) {
+            return;
+        }
+        try {
+            if (name == core::kGarnetRuntime) {
+                // Garnet, and the .NET runtime that came with it: only the newest stays.
+                const core::RedisService::RemovalHold hold = redis->hold_for_removal();
+                const auto installed = core::list_installed(core::runtimes_dir(*data));
+                const core::InstalledRuntime* dotnet = core::newest_dotnet(installed);
+                for (const core::InstalledRuntime& r : installed) {
+                    const bool old_garnet = r.name == name && r.version != version;
+                    const bool old_dotnet = r.name == core::kDotnetRuntime && dotnet != nullptr && r.dir != dotnet->dir;
+                    if (old_garnet || old_dotnet) {
+                        core::ServiceRefusal ignored;  // left for the user to remove
+                        (void)runtimes->remove(r.name, core::path_to_utf8(r.dir.filename()), ignored);
+                    }
+                }
+                redis->reload();  // the new install, before the hold lets Garnet start again
+            }
+            if (name == core::kGarnetRuntime || name == core::kDotnetRuntime || name == core::kPhpRedisRuntime ||
+                name == "php") {
+                redis->reload();
+                if (web) {
+                    (void)web->reload();  // the pools load the newest phpredis now
+                }
+                remove_older_php_redis();
+            }
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the older install stays; nothing breaks
+        }
+    }
+
+    // phpredis: only the newest of each PHP series stays (D30). One a pool
+    // still has loaded (Windows) stays until the next install.
+    void remove_older_php_redis() const {
+        namespace core = floserver::core;
+        if (!data || !runtimes) {
+            return;
+        }
+        const auto installed = core::list_installed(core::runtimes_dir(data.value()));
+        for (const core::InstalledRuntime& r : installed) {
+            if (r.name != core::kPhpRedisRuntime) {
+                continue;
+            }
+            const auto series = core::php_redis_series_of_variant(r.variant);
+            const core::InstalledRuntime* newest = series ? core::php_redis_for(installed, *series + ".0") : nullptr;
+            if (newest != nullptr && newest->dir != r.dir) {
+                core::ServiceRefusal ignored;
+                (void)runtimes->remove(r.name, core::path_to_utf8(r.dir.filename()), ignored);
+            }
+        }
+    }
+
+    // After Garnet's last install went (D30): what came with it goes too
+    // (the .NET runtime and phpredis: nothing else uses them), once the
+    // pools no longer load phpredis.
+    void remove_garnet_parts() const {
+        namespace core = floserver::core;
+        if (!runtimes || !data) {
+            return;
+        }
+        const auto installed = core::list_installed(core::runtimes_dir(*data));
+        if (core::newest_garnet(installed) != nullptr) {
+            return;
+        }
+        if (web) {
+            (void)web->reload();
+        }
+        for (const core::InstalledRuntime& r : installed) {
+            if (r.name == core::kDotnetRuntime || r.name == core::kPhpRedisRuntime) {
+                core::ServiceRefusal ignored;  // a file in use stays; it's hidden and harmless
+                (void)runtimes->remove(r.name, core::path_to_utf8(r.dir.filename()), ignored);
+            }
+        }
+    }
+
     // The reply to one runtime or job request.
     [[nodiscard]] std::string runtime_request(const protocol::Request& r) const {
         if (!runtimes) {
@@ -413,7 +498,7 @@ struct Service {
         }
         if (r.method == "runtimes.install") {
             const auto id = runtimes->install(string_param(r.params, "name"), string_param(r.params, "version"),
-                                              refusal);
+                                              refusal, string_param(r.params, "variant"));
             return id ? protocol::make_result(r.id, {{"job", *id}})
                       : protocol::make_error(r.id, refusal.code, refusal.message);
         }
@@ -440,9 +525,9 @@ struct Service {
                                                     "; give them another version first");
                 }
             }
-            // Every installed MariaDB has a server (asleep, or woken by
-            // phpMyAdmin): one running from this install lets go of its
-            // files first. The hold ends with `hold`, whatever happens.
+            // Every installed MariaDB and MySQL has a server (asleep, or
+            // woken by phpMyAdmin): one running from this install lets go of
+            // its files first. The hold ends with `hold`, whatever happens.
             const std::string name = string_param(r.params, "name");
             const std::string version = string_param(r.params, "version");
             // Mailpit (D27): "keep_emails" (default true) keeps mailpit.db for a later install.
@@ -453,9 +538,20 @@ struct Service {
                 }
                 keep_emails = r.params.at("keep_emails").get<bool>();
             }
+            // The .NET runtime is Garnet's (D30): it goes with Garnet.
+            if (name == floserver::core::kDotnetRuntime && data &&
+                floserver::core::newest_garnet(floserver::core::list_installed(floserver::core::runtimes_dir(*data))) !=
+                    nullptr) {
+                return protocol::make_error(r.id, "in_use", "Garnet (Redis) needs the .NET runtime; remove Garnet instead");
+            }
             const floserver::core::DatabaseService::RemovalHold hold =
-                name == "mariadb" && databases ? databases->hold_for_removal(version)
-                                               : floserver::core::DatabaseService::RemovalHold();
+                floserver::core::mysql_protocol_family(name) && databases
+                    ? databases->hold_for_removal(version, name)
+                    : floserver::core::DatabaseService::RemovalHold();
+            // Garnet saves and stops first (D30): its program is in use while it runs.
+            const bool is_garnet = name == floserver::core::kGarnetRuntime && redis;
+            floserver::core::RedisService::RemovalHold redis_hold =
+                is_garnet ? redis->hold_for_removal() : floserver::core::RedisService::RemovalHold();
             // Mailpit stops first (its program and database are in use while it runs).
             const bool is_mailpit = name == floserver::core::kMailpitRuntime && mail;
             // A plain guard, not std::optional: GCC -O3 warns (maybe-uninitialized) about the optional.
@@ -480,6 +576,28 @@ struct Service {
                 }
             }
             mail_hold.release();
+            redis_hold.release();
+            if (removed && is_garnet) {
+                remove_garnet_parts();
+                redis->reload();
+            }
+            if (removed && name == "php" && data) {
+                // phpredis for a series no PHP is left on goes too.
+                const auto left = floserver::core::list_installed(floserver::core::runtimes_dir(*data));
+                for (const auto& pr : left) {
+                    if (pr.name != floserver::core::kPhpRedisRuntime) {
+                        continue;
+                    }
+                    const auto series = floserver::core::php_redis_series_of_variant(pr.variant);
+                    const bool still = series && std::any_of(left.begin(), left.end(), [&](const auto& php) {
+                        return php.name == "php" && floserver::core::php_series_of(php.version) == *series;
+                    });
+                    if (!still) {
+                        floserver::core::ServiceRefusal ignored;
+                        (void)runtimes->remove(pr.name, floserver::core::path_to_utf8(pr.dir.filename()), ignored);
+                    }
+                }
+            }
             if (removed && is_mailpit) {
                 mail->reload();
                 if (web) {
@@ -936,8 +1054,8 @@ struct Service {
         return out;
     }
 
-    // The MariaDB servers phpMyAdmin offers: every installed series' (asleep
-    // ones wake on phpMyAdmin's connection).
+    // The MariaDB and MySQL servers phpMyAdmin offers: every installed
+    // series' (asleep ones wake on phpMyAdmin's connection).
     [[nodiscard]] std::vector<floserver::core::PhpMyAdminServer> phpmyadmin_servers() const {
         std::vector<floserver::core::PhpMyAdminServer> out;
         if (!databases) {
@@ -951,13 +1069,16 @@ struct Service {
             if (s.is_object() && s.contains("series") && s.at("series").is_string() && s.contains("port") &&
                 s.at("port").is_number_unsigned() && s.at("port").get<std::uint64_t>() < 65536) {
                 out.push_back({s.at("series").get<std::string>(),
-                               static_cast<floserver::core::Port>(s.at("port").get<std::uint64_t>())});
+                               static_cast<floserver::core::Port>(s.at("port").get<std::uint64_t>()),
+                               s.contains("family") && s.at("family").is_string()
+                                   ? s.at("family").get<std::string>()
+                                   : std::string(floserver::core::kMariaDbFamily)});
             }
         }
         return out;
     }
 
-    // phpmyadmin.login {"series": "11.4"} (as root) or {"project": "shop"}
+    // phpmyadmin.login {"series": "11.4", "family"?: "mysql"} (as root) or {"project": "shop"}
     // (the project's own user, its database only), "lang"?: the window's
     // language -> {"url"}: a one-click login link that works once, for 60 s.
     // The login waits in a private file; nothing secret is in the link.
@@ -991,6 +1112,7 @@ struct Service {
         }
         core::PhpMyAdminLoginRequest ask;
         ask.series = string_param(r.params, "series");
+        ask.family = string_param(r.params, "family");
         ask.project = string_param(r.params, "project");
         ask.lang = string_param(r.params, "lang");
         // This may wait for MariaDB to start: the window asks on a connection
@@ -1069,6 +1191,12 @@ struct Service {
                     for (const auto& [key, value] : mail_env_lines(dir, parsed.config && parsed.config->python)) {
                         env.push_back({key, value});
                     }
+                    // And Redis when the project has it on (D30).
+                    // (No floserver.json to read: the defaults, Redis off.)
+                    for (const auto& [key, value] :
+                         redis_env_lines(name, parsed.config.value_or(core::ProjectConfig{}))) {
+                        env.push_back({key, value});
+                    }
                     result["env_style"] = laravel ? "laravel" : "flocms";
                     result["env"] = env;
                     result["env_file"] = core::path_to_utf8(dir / ".env");
@@ -1110,6 +1238,86 @@ struct Service {
             address = core::site_address(std::string(core::kMailHostName), ports, nginx.value("tls", false));
         }
         return address;
+    }
+
+    // Redis's .env lines (D30) for a project with "redis": true while Garnet
+    // is installed: phpredis when the project's PHP has its DLL, else predis.
+    [[nodiscard]] std::vector<std::pair<std::string, std::string>> redis_env_lines(
+        const std::string& name, const floserver::core::ProjectConfig& config) const {
+        namespace core = floserver::core;
+        if (!config.redis || !redis || !data) {
+            return {};
+        }
+        const auto port = redis->port();
+        std::string why;
+        const auto password = port ? redis->password(why) : std::nullopt;
+        if (!port || !password) {
+            return {};
+        }
+        const auto installed = core::list_installed(core::runtimes_dir(*data));
+        const core::InstalledRuntime* php = core::best_installed(installed, "php", config.php.value_or(""));
+        const bool phpredis = php != nullptr && !core::php_redis_extension(installed, php->version).empty();
+        return core::redis_env_values(*port, *password, name, phpredis);
+    }
+
+    // Redis (D30), protocol.h:
+    //   redis.status {projects?} -> RedisService::status() with "phpredis" (the PHP
+    //     series it's installed for) and, when asked, "projects" (those with Redis on);
+    //   redis.set {keep_running?, memory_mb?} -> {"ok": true};
+    //   redis.flush -> {"ok": true}; redis.password -> {"password"} (Settings' Copy).
+    [[nodiscard]] std::string redis_request(const protocol::Request& r) const {
+        namespace core = floserver::core;
+        if (!redis || !projects || !data) {
+            return protocol::make_error(r.id, "no_data_folder",
+                                        "FloServer can't find a folder to keep its settings in (LOCALAPPDATA or HOME)");
+        }
+        core::ServiceRefusal refusal;
+        if (r.method == "redis.status") {
+            json out = redis->status();
+            // Only when asked: it reads every project's floserver.json (Settings
+            // asks once; the window's 2 s poll doesn't).
+            if (bool_param(r.params, "projects").value_or(false)) {
+                json names = json::array();
+                if (const auto config = projects->config(refusal)) {
+                    for (const core::Project& p : config->projects) {
+                        const auto parsed = core::read_project_config_file(p);
+                        if (parsed.config && parsed.config->redis) {
+                            names.push_back(p.name);
+                        }
+                    }
+                }
+                out["projects"] = std::move(names);
+            }
+            json series = json::array();
+            for (const core::InstalledRuntime& i : core::list_installed(core::runtimes_dir(*data))) {
+                if (i.name == core::kPhpRedisRuntime) {
+                    if (const auto s = core::php_redis_series_of_variant(i.variant)) {
+                        series.push_back(*s);
+                    }
+                }
+            }
+            out["phpredis"] = std::move(series);
+            return protocol::make_result(r.id, out);
+        }
+        if (r.method == "redis.set") {
+            return redis->set(r.params.is_object() ? r.params : json::object(), refusal)
+                       ? protocol::make_result(r.id, {{"ok", true}})
+                       : protocol::make_error(r.id, refusal.code, refusal.message);
+        }
+        if (r.method == "redis.password") {
+            if (!redis->port()) {
+                return protocol::make_error(r.id, "not_installed",
+                                            "Redis (Garnet) isn't installed: download it in Settings → Runtimes "
+                                            "(or: flo install garnet)");
+            }
+            std::string why;
+            const auto password = redis->password(why);
+            return password ? protocol::make_result(r.id, {{"password", *password}})
+                            : protocol::make_error(r.id, "redis_failed", why);
+        }
+        // redis.flush: may wait for Garnet to start; each client has its own thread here.
+        return redis->flush(refusal) ? protocol::make_result(r.id, {{"ok", true}})
+                                     : protocol::make_error(r.id, refusal.code, refusal.message);
     }
 
     // Mailpit (D27), protocol.h:
@@ -1173,7 +1381,8 @@ struct Service {
         if (!projects) {
             return protocol::make_error(r.id, "no_data_folder", "FloServer can't find its data folder");
         }
-        if (!mail->smtp_port()) {
+        const bool redis_installed = redis && redis->port();
+        if (!mail->smtp_port() && !redis_installed) {
             return protocol::make_error(r.id, "not_installed",
                                         "Mailpit isn't installed: download it in Settings → Runtimes (or: flo install mailpit)");
         }
@@ -1191,10 +1400,14 @@ struct Service {
         for (const auto& [key, value] : mail_env_lines(p->dir, parsed.config && parsed.config->python)) {
             env.push_back({key, value});
         }
+        for (const auto& [key, value] : redis_env_lines(name, parsed.config.value_or(core::ProjectConfig{}))) {
+            env.push_back({key, value});  // D30
+        }
         return protocol::make_result(r.id, {{"env", env}, {"env_file", core::path_to_utf8(p->dir / ".env")}});
     }
 
-    // Settings → Database (MariaDB), per series ("11.4"):
+    // Settings → Database, per series ("11.4") and family ("family": "mariadb"
+    // when left out, or "mysql" since D28; every method below takes it):
     //   database.get {series}: ProjectService::database_get() with "server"
     //     and "databases" from DatabaseService::series_status();
     //   database.set {series, ini?, port?, keep_running?}: the same reply, and
@@ -1210,39 +1423,46 @@ struct Service {
         }
         core::ServiceRefusal refusal;
         const std::string text = string_param(r.params, "series");
+        std::string family;
+        if (!core::request_database_family(string_param(r.params, "family"), family)) {
+            return protocol::make_error(r.id, "bad_params", R"("family" is "mariadb" or "mysql")");
+        }
         const auto series = core::mariadb_request_series(text);
         if (!series) {
-            return protocol::make_error(r.id, "bad_params", "\"" + text + "\" isn't a MariaDB series such as 11.4");
+            return protocol::make_error(r.id, "bad_params", "\"" + text + "\" isn't a " +
+                                                                core::database_family_title(family) +
+                                                                " series such as " +
+                                                                (family == core::kMySqlFamily ? "8.4" : "11.4"));
         }
         const auto with_status = [&](json reply) {
-            json status = databases->series_status(*series);
+            json status = databases->series_status(*series, family);
             reply["server"] = status["server"];
             reply["databases"] = status["databases"];
             return reply;
         };
         if (r.method == "database.custom_ini" || r.method == "database.final_ini") {
-            const auto path = r.method == "database.custom_ini" ? projects->database_custom_ini(*series, refusal)
-                                                                : databases->final_ini(*series, refusal);
+            const auto path = r.method == "database.custom_ini" ? projects->database_custom_ini(*series, refusal, family)
+                                                                : databases->final_ini(*series, refusal, family);
             return path ? protocol::make_result(r.id, {{"path", core::path_to_utf8(*path)}})
                         : protocol::make_error(r.id, refusal.code, refusal.message);
         }
         if (r.method == "database.root") {
-            const auto password = databases->root_password(*series, refusal);
+            const auto password = databases->root_password(*series, refusal, family);
             return password ? protocol::make_result(r.id, {{"password", *password}})
                             : protocol::make_error(r.id, refusal.code, refusal.message);
         }
         if (r.method == "database.root_set") {
-            return databases->set_root_password(*series, string_param(r.params, "password"), refusal)
+            return databases->set_root_password(*series, string_param(r.params, "password"), refusal, family)
                        ? protocol::make_result(r.id, json::object())
                        : protocol::make_error(r.id, refusal.code, refusal.message);
         }
         if (r.method == "database.server") {
-            return databases->server_action(*series, string_param(r.params, "action"), refusal)
-                       ? protocol::make_result(r.id, databases->series_status(*series))
+            return databases->server_action(*series, string_param(r.params, "action"), refusal, family)
+                       ? protocol::make_result(r.id, databases->series_status(*series, family))
                        : protocol::make_error(r.id, refusal.code, refusal.message);
         }
         if (r.method == "database.get") {
-            const auto result = projects->database_get(*series, refusal);
+            const auto result = projects->database_get(*series, refusal, family);
             return result ? protocol::make_result(r.id, with_status(*result))
                           : protocol::make_error(r.id, refusal.code, refusal.message);
         }
@@ -1253,12 +1473,13 @@ struct Service {
         const json keep = params.contains("keep_running") ? params.at("keep_running") : json();
         bool changed_ini = false;
         auto result = projects->database_set(*series, params.value("ini", none), params.contains("port") ? &port : nullptr,
-                                             params.contains("keep_running") ? &keep : nullptr, changed_ini, refusal);
+                                             params.contains("keep_running") ? &keep : nullptr, changed_ini, refusal,
+                                             family);
         if (!result) {
             return protocol::make_error(r.id, refusal.code, refusal.message);
         }
         (void)databases->reload();  // a new port or "keep running" now
-        (*result)["restarting"] = changed_ini && databases->restart_if_running(*series);
+        (*result)["restarting"] = changed_ini && databases->restart_if_running(*series, family);
         return protocol::make_result(r.id, with_status(*result));
     }
 
@@ -1531,7 +1752,10 @@ struct Service {
             }
             json database = nullptr;
             if (plan->database) {
-                database = {{"name", plan->database_name},
+                // As its server names it (MySQL's may be cut to fit, D28).
+                const core::ConfigResult cfg = core::read_project_config_file(core::Project{plan->name, plan->dir, true, false, {}});
+                const std::string family = cfg.config && cfg.config->database ? cfg.config->database->family : std::string();
+                database = {{"name", core::server_database_name(plan->database_name, family)},
                             {"bytes", databases ? databases->project_database_bytes(plan->name).value_or(0) : 0}};
             }
             const auto file = default_file(plan->name);
@@ -1705,6 +1929,9 @@ struct Service {
                 reply = folders_request(*request);
             } else if (request->method == "phpmyadmin.login") {
                 reply = phpmyadmin_request(*request);
+            } else if (request->method == "redis.status" || request->method == "redis.set" ||
+                       request->method == "redis.flush" || request->method == "redis.password") {
+                reply = redis_request(*request);
             } else if (request->method == "mail.status" || request->method == "mail.set" ||
                        request->method == "mail.test" || request->method == "mail.clear" ||
                        request->method == "mail.env" || request->method == "mail.recent") {
@@ -1951,7 +2178,7 @@ int run(bool spawned, bool& listening) {
     const std::shared_ptr<floserver::core::HttpTransport> transport = floserver::core::make_system_transport();
     // Mailpit is updated in place (D27): a new install replaces the older ones.
     service->runtimes = make_runtimes(transport, [s = service.get()](const std::string& name, const std::string& version) {
-        s->replace_older_mailpit(name, version);
+        s->after_install(name, version);
     });
     if (service->runtimes) {
         service->updates = make_updates(*service->runtimes, transport);
@@ -1994,6 +2221,26 @@ int run(bool spawned, bool& listening) {
             service->mail = std::make_unique<floserver::core::MailService>(std::move(mail), *service->secrets);
         }
         {
+            // Redis through Garnet (D30): its port and sleep, its settings in config.json.
+            floserver::core::RedisServiceConfig redis;
+            redis.data_dir = *data;
+            redis.idle_after = db.idle_after;
+            const Service* s = service.get();
+            redis.change_config = [s](const std::function<void(floserver::core::AppConfig&)>& change, std::string& why) {
+                floserver::core::ServiceRefusal refusal;
+                const bool ok = s->projects->change_config(
+                                    [&change](floserver::core::AppConfig& config, floserver::core::ServiceRefusal&) {
+                                        change(config);
+                                        return true;
+                                    },
+                                    refusal)
+                                    .has_value();
+                why = refusal.message;
+                return ok;
+            };
+            service->redis = std::make_unique<floserver::core::RedisService>(std::move(redis), *service->secrets);
+        }
+        {
             // phpMyAdmin's config.inc.php, kept in line by the web service's reloads.
             const Service* s = service.get();
             service->phpmyadmin = std::make_unique<floserver::core::PhpMyAdminConfigWriter>(
@@ -2007,6 +2254,7 @@ int run(bool spawned, bool& listening) {
             service->web = std::make_unique<floserver::core::WebService>(std::move(config), *service->certs);
         }
         service->mail->start();
+        service->redis->start();
         service->web->start();
         {
             floserver::core::WebSettingsService::Hooks hooks;
@@ -2090,6 +2338,9 @@ int run(bool spawned, bool& listening) {
     }
     if (service->mail) {
         service->mail->stop();
+    }
+    if (service->redis) {
+        service->redis->stop();  // saved first: the data comes back next time
     }
     if (service->databases) {
         service->databases->stop();  // a clean shutdown of each MariaDB

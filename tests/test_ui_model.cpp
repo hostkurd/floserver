@@ -358,9 +358,13 @@ TEST_CASE("the panel's version pickers list what's installed and what's asked fo
 
     CHECK(fields[2].key == "web");
     CHECK(fields[2].current == 0);
-    CHECK(fields[3].key == "node");
+    CHECK(fields[3].key == "javascript");
+    CHECK(fields[3].label == "JavaScript");
     REQUIRE(fields[3].choices.size() == 3);
-    CHECK(fields[3].choices[1].label == "24");
+    CHECK(fields[3].choices[0].label == "None");
+    CHECK_FALSE(fields[3].choices[0].value.has_value());
+    CHECK(fields[3].choices[1].label == "Node 24");
+    CHECK(fields[3].choices[1].value == std::optional<std::string>("node-24"));
     CHECK(fields[3].current == 0);  // None
 
     SUBCASE("asked for but not installed") {
@@ -382,7 +386,7 @@ TEST_CASE("the panel's version pickers list what's installed and what's asked fo
         CHECK(fields[0].choices[0].label == "None");
         CHECK(fields[0].current == 0);
         CHECK(fields[0].implicit);
-        CHECK(fields[3].choices[fields[3].current].label == "24");
+        CHECK(fields[3].choices[fields[3].current].label == "Node 24");
     }
     SUBCASE("without the key: what's in effect is ticked and still writes the key") {
         row.wants.php.clear();
@@ -554,8 +558,8 @@ TEST_CASE("template cards come from templates.list in the window's language") {
     CHECK(wp[2].current == 1);  // Apache
     const auto node = template_fields(cards[1], installed, Lang::En);
     REQUIRE(node.size() == 1);
-    CHECK(node[0].key == "node");
-    CHECK(node[0].choices[node[0].current].label == "24");
+    CHECK(node[0].key == "javascript");
+    CHECK(node[0].choices[node[0].current].label == "Node 24");
 }
 
 TEST_CASE("template versions: an installed same-or-newer series is picked, an older one isn't") {
@@ -603,12 +607,19 @@ TEST_CASE("template versions: Settings' default is picked when installed and not
     f = template_fields(bare, installed, Lang::En, {{"php", "8.2"}, {"mariadb", "11.8"}});
     CHECK(f[0].choices[f[0].current].value == "8.2");
     CHECK_FALSE(f[1].choices[f[1].current].value.has_value());
-    // Node: the series is the major.
+    // Node: the series is the major, and the JavaScript picker's values name the runtime.
     TemplateCard node;
     node.config.node = "22";
     f = template_fields(node, {{"node", {"24.12.0", "22.21.1"}}}, Lang::En, {{"node", "24"}});
     REQUIRE(f.size() == 1);
-    CHECK(f[0].choices[f[0].current].value == "24");
+    CHECK(f[0].choices[f[0].current].value == "node-24");
+    // A Bun template (D31) is offered Bun's series, from the installed ones.
+    TemplateCard bun;
+    bun.config.bun = "1.3";
+    f = template_fields(bun, {{"bun", {"1.4.4", "1.3.14"}}, {"node", {"24.12.0"}}}, Lang::En, {{"node", "24"}});
+    REQUIRE(f.size() == 1);
+    CHECK(f[0].choices[f[0].current].value == "bun-1.3");  // installed: kept; Settings' Node default isn't Bun's
+    CHECK(f[0].choices.size() == 4);  // None, Node 24, Bun 1.4, Bun 1.3
 }
 
 TEST_CASE("the defaults come from runtimes.list") {
@@ -839,12 +850,14 @@ TEST_CASE("Settings > Runtimes: phpMyAdmin in the Tools card, with how it's serv
     CHECK(phpmyadmin_line(json(), Lang::En).empty());
 
     // The pressed button while its server is started first, then while phpMyAdmin opens.
-    CHECK(phpmyadmin_busy_text("11.8", "sleeping", Lang::En) == "Starting MariaDB 11.8…");
-    CHECK(phpmyadmin_busy_text("11.8", "starting", Lang::En) == "Starting MariaDB 11.8…");
-    CHECK(phpmyadmin_busy_text("11.8", "", Lang::En) == "Starting MariaDB 11.8…");
-    CHECK(phpmyadmin_busy_text("11.8", "running", Lang::En) == "Opening phpMyAdmin…");
+    CHECK(phpmyadmin_busy_text("MariaDB 11.8", "sleeping", Lang::En) == "Starting MariaDB 11.8…");
+    CHECK(phpmyadmin_busy_text("MariaDB 11.8", "starting", Lang::En) == "Starting MariaDB 11.8…");
+    CHECK(phpmyadmin_busy_text("MariaDB 11.8", "", Lang::En) == "Starting MariaDB 11.8…");
+    CHECK(phpmyadmin_busy_text("MySQL 8.4", "sleeping", Lang::En) == "Starting MySQL 8.4…");
+    CHECK(phpmyadmin_busy_text("MariaDB 11.8", "running", Lang::En) == "Opening phpMyAdmin…");
     CHECK(phpmyadmin_busy_text("", "", Lang::En) == "Opening phpMyAdmin…");
-    CHECK(phpmyadmin_busy_text("11.8", "sleeping", Lang::Ar).find("11.8") != std::string::npos);
+    CHECK(phpmyadmin_busy_text("MariaDB 11.8", "sleeping", Lang::Ar).find("MariaDB 11.8") != std::string::npos);
+    CHECK(phpmyadmin_busy_text("MySQL 8.4", "sleeping", Lang::Ku).find("MySQL 8.4") != std::string::npos);
     const json servers = {{"servers", json::array({{{"series", "11.8"}, {"version", "11.8.9"}, {"port", 3306},
                                                      {"state", "sleeping"}}})}};
     CHECK(database_server(servers, "mariadb-11.8").series == "11.8");
@@ -1514,4 +1527,223 @@ TEST_CASE("scroll bars: a click on the track pages toward it; a drag keeps the g
     CHECK(drag.offset_at(m, 340) == 840);
     CHECK(drag.offset_at(m, -2000) == 0);    // the mouse far off the bar: the end, not beyond
     CHECK(drag.offset_at(m, 5000) == 1200);
+}
+
+TEST_CASE("MySQL beside MariaDB in the window's model (D28): the picker, the chip, the server, Runtimes") {
+    const Installed installed = {{"php", {"8.4.27"}}, {"mariadb", {"11.8.5", "11.4.9"}}, {"mysql", {"8.4.11"}}};
+    ProjectRow row;
+    row.wants.known = true;
+    row.wants.php = "8.4";
+    row.wants.database = "mysql-8.4";
+    const auto fields = version_fields(row, installed, Lang::En);
+    const auto db = std::find_if(fields.begin(), fields.end(), [](const VersionField& f) { return f.key == "database"; });
+    REQUIRE(db != fields.end());
+    // None, MariaDB's series, then MySQL's.
+    REQUIRE(db->choices.size() == 4);
+    CHECK(db->choices[0].label == "None");
+    CHECK(db->choices[1].label == "MariaDB 11.8");
+    CHECK(db->choices[2].label == "MariaDB 11.4");
+    CHECK(db->choices[3].label == "MySQL 8.4");
+    CHECK(db->choices[3].value == std::optional<std::string>("mysql-8.4"));
+    CHECK(db->current == 3);
+    // Asked for but not installed: still listed, and said so.
+    const Installed no_mysql = {{"php", {"8.4.27"}}, {"mariadb", {"11.4.9"}}};
+    const auto missing = version_fields(row, no_mysql, Lang::En);
+    const auto mdb = std::find_if(missing.begin(), missing.end(), [](const VersionField& f) { return f.key == "database"; });
+    REQUIRE(mdb != missing.end());
+    CHECK(mdb->choices[mdb->current].value == std::optional<std::string>("mysql-8.4"));
+    CHECK(mdb->choices[mdb->current].label.find("MySQL 8.4") != std::string::npos);
+
+    CHECK(database_chip("mysql-8.4") == "MySQL 8.4");
+    CHECK(runtime_label("mysql") == "MySQL");
+
+    // Each family's own server: a MySQL 8.4 is never taken for a MariaDB one.
+    const json servers = {{"servers", json::array({{{"family", "mariadb"}, {"series", "11.4"}, {"version", "11.4.9"},
+                                                    {"port", 3306}, {"state", "running"}},
+                                                   {{"family", "mysql"}, {"series", "8.4"}, {"version", "8.4.11"},
+                                                    {"port", 3307}, {"state", "sleeping"}},
+                                                   {{"series", "11.8"}, {"version", "11.8.5"}, {"port", 3308}}})}};
+    CHECK(database_port(servers, "mysql-8.4") == 3307);
+    CHECK(database_port(servers, "mariadb-11.4") == 3306);
+    CHECK(database_port(servers, "mariadb-11.8") == 3308);  // no family: MariaDB's
+    CHECK(database_port(servers, "mariadb-8.4") == 0);
+    const DatabaseServerState my = database_server(servers, "mysql-8.4");
+    CHECK(my.state == "sleeping");
+    CHECK(my.family == "mysql");
+    CHECK(database_server_title(my) == "MySQL 8.4");
+    CHECK(database_server_title({}).empty());
+}
+
+// --- Bun and Deno (D31) ----------------------------------------------------------------
+
+TEST_CASE("Bun and Deno projects show their chips, and a server that can't start") {
+    const auto rows = rows_from_list(
+        json{{"projects", json::array({{{"name", "edge"}, {"on", true}, {"state", "ready"}, {"run", "sleeping"},
+                                        {"address", "http://edge.localhost"}, {"bun", "1.3.14"},
+                                        {"wants", {{"web", "nginx"}, {"bun", "1.3"}}}},
+                                       {{"name", "fresh"}, {"on", true}, {"state", "ready"}, {"run", "failed"},
+                                        {"deno", "2.9.8"}, {"wants", {{"web", "nginx"}, {"deno", "2.9"}}}},
+                                       {{"name", "tools"}, {"on", false}, {"state", "needs_download"},
+                                        {"missing", json::array({"deno 2.9"})}}})}},
+        Lang::En);
+    REQUIRE(rows.size() == 3);
+    CHECK(rows[0].chips == std::vector<std::string>{"Bun 1.3.14", "nginx"});
+    CHECK(rows[0].state == RowState::Asleep);
+    CHECK(rows[0].bun == "1.3.14");
+    CHECK(rows[0].wants.bun == "1.3");
+    CHECK(rows[1].chips == std::vector<std::string>{"Deno 2.9.8", "nginx"});
+    CHECK(rows[1].wants.deno == "2.9");
+    CHECK(rows[1].state == RowState::Problem);
+    CHECK(rows[1].detail == "The project's server can't start");  // not "PHP can't start"
+    CHECK(rows[2].state == RowState::NeedsDownload);
+}
+
+TEST_CASE("the JavaScript picker: None, then Node, Bun and Deno series; a project has one") {
+    const Installed installed = installed_from_list(json{
+        {"installed",
+         json::array({{{"name", "node"}, {"version", "24.22.1"}},
+                      {{"name", "node"}, {"version", "22.23.4"}},
+                      {{"name", "bun"}, {"version", "1.3.14"}},
+                      {{"name", "bun"}, {"version", "1.3.9"}, {"variant", "baseline"}},
+                      {{"name", "deno"}, {"version", "2.9.8"}}})}});
+    CHECK(version_series("bun", "1.3.14") == "1.3");
+    CHECK(version_series("deno", "2.9.8") == "2.9");
+    CHECK(version_series("node", "24.22.1") == "24");
+
+    ProjectRow row;
+    row.wants.known = true;
+    auto fields = version_fields(row, installed, Lang::En);
+    const VersionField& js = fields[3];
+    CHECK(js.field == Field::Javascript);
+    CHECK(js.key == "javascript");
+    std::vector<std::string> labels;
+    std::vector<std::optional<std::string>> values;
+    for (const Choice& c : js.choices) {
+        labels.push_back(c.label);
+        values.push_back(c.value);
+    }
+    CHECK(labels == std::vector<std::string>{"None", "Node 24", "Node 22", "Bun 1.3", "Deno 2.9"});
+    CHECK(values == std::vector<std::optional<std::string>>{std::nullopt, "node-24", "node-22", "bun-1.3", "deno-2.9"});
+    CHECK(js.current == 0);
+
+    SUBCASE("Bun asked for") {
+        row.wants.bun = "1.3";
+        fields = version_fields(row, installed, Lang::En);
+        CHECK(fields[3].current == 3);
+        CHECK(fields[0].current == 0);  // no PHP: a project with its own server
+        CHECK(fields[0].implicit);
+    }
+    SUBCASE("Deno asked for") {
+        row.wants.deno = "2.9";
+        fields = version_fields(row, installed, Lang::En);
+        CHECK(fields[3].current == 4);
+    }
+    SUBCASE("a series that isn't installed is listed so the picker tells the truth") {
+        row.wants.bun = "1.2";
+        fields = version_fields(row, installed, Lang::En);
+        CHECK(fields[3].choices[fields[3].current].label == "Bun 1.2 (not installed)");
+        CHECK(fields[3].choices[fields[3].current].value == std::optional<std::string>("bun-1.2"));
+    }
+    SUBCASE("none installed: just None") {
+        fields = version_fields(row, {}, Lang::En);
+        CHECK(fields[3].choices.size() == 1);
+    }
+    SUBCASE("the wizard's picker for a Bun template") {
+        TemplateCard card;
+        card.config.known = true;
+        card.config.bun = "1.3";
+        const auto wizard = template_fields(card, installed, Lang::En);
+        REQUIRE(wizard.size() == 1);
+        CHECK(wizard[0].key == "javascript");
+        CHECK(wizard[0].choices[wizard[0].current].value == std::optional<std::string>("bun-1.3"));
+    }
+    for (const Lang lang : {Lang::Ar, Lang::Ku}) {
+        const auto translated = version_fields(row, installed, lang);
+        CHECK(translated[3].label.find("JavaScript") != std::string::npos);
+    }
+}
+
+TEST_CASE("a Bun project without node_modules gets a note under the pickers") {
+    const auto rows = rows_from_list(
+        json{{"projects", json::array({{{"name", "edge"}, {"on", true}, {"state", "ready"}, {"run", "sleeping"},
+                                        {"bun", "1.3.14"}, {"packages_missing", "bun install"}},
+                                       {{"name", "ok"}, {"on", true}, {"state", "ready"}, {"run", "sleeping"},
+                                        {"bun", "1.3.14"}}})}},
+        Lang::En);
+    REQUIRE(rows.size() == 2);
+    CHECK(rows[0].packages_missing == "bun install");
+    CHECK(field_note(rows[0], Lang::En) == "node_modules is missing. Run bun install in the project's terminal.");
+    CHECK(field_note(rows[1], Lang::En).empty());
+    for (const Lang lang : {Lang::Ar, Lang::Ku}) {
+        const std::string note = field_note(rows[0], lang);
+        CHECK(note.find("bun install") != std::string::npos);
+        CHECK(note.find("node_modules") != std::string::npos);
+    }
+    // PHP off with .php files keeps its own note.
+    ProjectRow php_off;
+    php_off.wants.php_off = true;
+    php_off.php_files = true;
+    CHECK(field_note(php_off, Lang::En) == php_off_note(php_off, Lang::En));
+}
+
+TEST_CASE("a project with Bun or Deno doesn't use PHP") {
+    ProjectRow row;
+    row.wants.known = true;
+    row.wants.bun = "1.3";
+    CHECK_FALSE(project_uses_php(row));
+    row.wants.bun.clear();
+    row.wants.deno = "2.9";
+    CHECK_FALSE(project_uses_php(row));
+}
+
+TEST_CASE("Settings > Runtimes: Bun and Deno cards (D31)") {
+    const json reply = {{"installed",
+                   json::array({{{"name", "bun"}, {"version", "1.3.14"}, {"variant", ""}, {"folder", "1.3.14"},
+                                 {"used_by", json::array({"edge"})}},
+                                {{"name", "nginx"}, {"version", "1.30.6"}, {"variant", ""}, {"folder", "1.30.6"},
+                                 {"used_by", json::array({"FloServer"})}}})},
+                  {"available",
+                   json::array({{{"name", "bun"}, {"version", "1.3.14"}, {"variant", ""}, {"size", 52000000}},
+                                {{"name", "deno"}, {"version", "2.9.8"}, {"variant", ""}, {"size", 42000000}}})},
+                  {"list", {{"sequence", 42}, {"expires", "2027-01-28T00:00:00Z"}}},
+                  {"defaults", json::object()}};
+    const RuntimesPage page = runtimes_page(reply, nullptr, json(), Lang::En);
+    std::vector<std::string> titles;
+    titles.reserve(page.groups.size());
+    for (const RuntimeGroup& g : page.groups) {
+        titles.push_back(g.title);
+    }
+    // The narrow cards share the rows below the wide ones.
+    CHECK(titles == std::vector<std::string>{"Web servers", "Bun", "Deno"});
+    const RuntimeGroup& bun = page.groups[1];
+    CHECK_FALSE(bun.wide);
+    CHECK(bun.runtime == "bun");
+    REQUIRE(bun.rows.size() == 1);
+    CHECK(bun.rows[0].installed);
+    CHECK(bun.rows[0].usage == "1 project");
+    CHECK(bun.rows[0].action == RowAction::Remove);
+    CHECK_FALSE(bun.rows[0].is_default);  // no default for new projects
+    CHECK_FALSE(bun.picker);
+    const RuntimeGroup& deno = page.groups[2];
+    REQUIRE(deno.rows.size() == 1);
+    CHECK_FALSE(deno.rows[0].installed);
+    CHECK(deno.rows[0].action == RowAction::Download);
+    CHECK(size_text(deno.rows[0].size) == "40 MB");
+    CHECK_FALSE(deno.rows[0].is_default);
+
+    // A CPU without AVX2 has the baseline build: its own folder, one row.
+    json baseline = reply;
+    baseline["installed"] = json::array({{{"name", "bun"}, {"version", "1.3.14"}, {"variant", "baseline"},
+                                          {"folder", "1.3.14-baseline"}, {"used_by", json::array()}}});
+    baseline["available"] = json::array({{{"name", "bun"}, {"version", "1.3.14"}, {"variant", "baseline"}, {"size", 53000000}},
+                                         {{"name", "bun"}, {"version", "1.3.15"}, {"variant", "baseline"}, {"size", 53000000}}});
+    const RuntimesPage slow = runtimes_page(baseline, nullptr, json(), Lang::En);
+    REQUIRE(slow.groups.size() == 1);
+    const auto& rows = slow.groups[0].rows;
+    REQUIRE(rows.size() == 2);
+    CHECK(rows[0].version == "1.3.15");
+    CHECK(rows[0].action == RowAction::Download);
+    CHECK(rows[1].folder == "1.3.14-baseline");
+    CHECK(rows[1].label == "1.3.14 baseline");
+    CHECK(rows[1].action == RowAction::Remove);
 }

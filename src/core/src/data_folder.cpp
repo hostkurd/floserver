@@ -1,5 +1,6 @@
 #include "floserver/core/data_folder.h"
 
+#include "floserver/core/database_engine.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/project_registry.h"  // real_folder
 
@@ -631,7 +632,7 @@ DiskUsage disk_usage(const fs::path& dir, Clock::time_point deadline) {
 
 // See the rule in data_folder.h: older copies in the log places are deleted,
 // a current *.log emptied once quiet for a day; never a project's request log
-// (web/logs/sites/ isn't a place), a pool's *.access.log, MariaDB's files
+// (web/logs/sites/ isn't a place), a pool's *.access.log, MariaDB's and MySQL's files
 // (not in a place), anything in a sub-folder.
 bool is_log_file(const fs::path& data, const fs::path& path) {
     const fs::path p = path.lexically_normal();
@@ -852,9 +853,17 @@ bool is_uninstall_item(const fs::path& data, const fs::path& path) {
             return true;
         }
     }
-    // A MariaDB's folder is named after its series: "mariadb-11.4".
-    return p.parent_path() == (data / "data").lexically_normal() && starts_with(p.filename(), "mariadb-") &&
-           p.filename() != "mariadb-";
+    if (p == (data / "garnet").lexically_normal()) {
+        return true;  // Redis's data (D30)
+    }
+    // A database server's folder is named after its family and series:
+    // "mariadb-11.4", "mysql-8.4" (D28).
+    if (p.parent_path() != (data / "data").lexically_normal()) {
+        return false;
+    }
+    return std::ranges::any_of(database_families(), [&](const std::string& family) {
+        return starts_with(p.filename(), family + "-") && p.filename() != family + "-";
+    });
 }
 
 std::vector<CleanItem> uninstall_items(const fs::path& data, bool runtimes, bool databases,
@@ -896,6 +905,7 @@ std::vector<CleanItem> uninstall_items(const fs::path& data, bool runtimes, bool
                 add(p);
             }
         }
+        add(data / "garnet");  // Redis's keys (D30)
     }
     return out;
 }

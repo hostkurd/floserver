@@ -28,12 +28,15 @@ struct Wants {
     std::string php;       // "8.4", "newest", or empty (no key, or PHP off)
     bool php_off = false;  // "php": false
     std::string node;
+    std::string bun;       // a project has one JavaScript runtime: node, bun or deno (D31)
+    std::string deno;
     std::string python;
     std::string database;  // "mariadb-11.4"
     std::string web = "nginx";
     // The project's own PHP changes (D20): "bcmath", "-exif"; "memory_limit" -> "1024M".
     std::vector<std::string> extensions;
     std::map<std::string, std::string> php_ini;
+    bool redis = false;  // "redis": true (D30)
 };
 
 struct ProjectRow {
@@ -54,8 +57,13 @@ struct ProjectRow {
     std::string path;
     std::string php;       // "8.4.27"
     std::string node;
+    std::string bun;
+    std::string deno;
     std::string python;
     std::string database;  // "mariadb-11.4"
+    // A Bun project whose packages aren't installed: the command that
+    // installs them ("bun install"), else empty. FloServer doesn't run it.
+    std::string packages_missing;
     // Its database and user as the service names them ("my_shop"; a renamed
     // project keeps its own, D22); empty from an older service.
     std::string database_name;
@@ -114,15 +122,19 @@ struct FooterText {
 // The installed versions per runtime ("php" -> {"8.5.12", "8.4.27"}), newest
 // first, from runtimes.list's "installed".
 using Installed = std::map<std::string, std::vector<std::string>>;
+// Also under kInstalledPhpRedisSeries: the PHP series phpredis is installed
+// for ("8.4"), from php-redis's variants (D30).
+inline constexpr std::string_view kInstalledPhpRedisSeries = "php-redis:series";
 [[nodiscard]] Installed installed_from_list(const nlohmann::json& result);
 
-// "8.4.27" -> "8.4" (PHP, MariaDB, Python); Node keeps only its major: "24".
+// "8.4.27" -> "8.4" (PHP, MariaDB, Python, Bun, Deno); Node keeps only its
+// major: "24".
 [[nodiscard]] std::string version_series(std::string_view runtime, std::string_view version);
 
 // Whether `a` is a newer version than `b`, number by number ("8.10" after "8.9").
 [[nodiscard]] bool is_newer_version(std::string_view a, std::string_view b);
 
-enum class Field : std::uint8_t { Php, Database, Web, Node, Python };
+enum class Field : std::uint8_t { Php, Database, Web, Javascript, Python };
 
 struct Choice {
     std::string label;                 // in the window's language
@@ -131,7 +143,7 @@ struct Choice {
 
 struct VersionField {
     Field field;
-    std::string key;      // projects.use's key: "php", "database", "web", "node", "python"
+    std::string key;      // projects.use's key: "php", "database", "web", "javascript", "python"
     std::string label;    // "PHP", "Web server"
     std::vector<Choice> choices;
     std::size_t current = 0;  // index into choices
@@ -141,7 +153,9 @@ struct VersionField {
 };
 
 // The panel's version pickers for a project: PHP, Database, Web server,
-// Node.js, and Python when one is installed or asked for. Each lists what's
+// JavaScript (None, then each installed Node, Bun and Deno series, as
+// "node-24", "bun-1.3", "deno-2.9": a project has one, D31), and Python when
+// one is installed or asked for. Each lists what's
 // installed (one entry per series), plus what floserver.json asks for when
 // that isn't installed ("8.1 (not installed)"). PHP starts with None (sends
 // "none": false in the file) and Newest installed ("newest"). Without the
@@ -153,16 +167,24 @@ struct VersionField {
 // .php files (they're sent as they are, not run); empty otherwise.
 [[nodiscard]] std::string php_off_note(const ProjectRow& row, Lang lang);
 
+// What the panel puts under the pickers: php_off_note(), or for a Bun project
+// whose node_modules is missing the note that says to run `bun install` in
+// its terminal (D31); empty when there's nothing to say.
+[[nodiscard]] std::string field_note(const ProjectRow& row, Lang lang);
+
 // The port the project's database server listens on, from databases.list
 // (the server whose series matches `database`, "mariadb-11.4"), or 0.
 [[nodiscard]] std::uint16_t database_port(const nlohmann::json& databases, std::string_view database);
-// That server's series ("11.4") and state ("sleeping", "running"...); both
-// empty when databases.list has none.
+// That server's series ("11.4"), state ("sleeping", "running"...) and family
+// ("mariadb", "mysql"); all empty when databases.list has none.
 struct DatabaseServerState {
     std::string series;
     std::string state;
+    std::string family;
 };
 [[nodiscard]] DatabaseServerState database_server(const nlohmann::json& databases, std::string_view database);
+// "MySQL 8.4"; empty when there's no server.
+[[nodiscard]] std::string database_server_title(const DatabaseServerState& server);
 
 struct LogLine {
     std::string time;    // "19:41:02"

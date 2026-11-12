@@ -1,15 +1,20 @@
 #pragma once
 
-// The MariaDB servers (D11, D12): one per installed series, shared by the
-// projects that ask for it, each project with its own database and user. A
-// series nothing uses sleeps until something connects (phpMyAdmin, say).
+// The MariaDB servers (D11, D12), and MySQL's (D28): one per installed
+// series of each family, shared by the projects that ask for it, each project
+// with its own database and user. A series nothing uses sleeps until
+// something connects (phpMyAdmin, say). Every family's servers share one
+// port rule: the first takes 3306, the next 3307, and so on.
+//
+// A server is named by its family and series ("mysql", "8.4"); calls that
+// take a series alone mean MariaDB's, as before D28.
 //
 // Sleep when idle: MariaDB can't be handed a listening socket the way
 // php-cgi is (Q1), so the service holds the public port itself (3306, or the
 // next free one; never another stack's) and relays each connection to
-// mariadbd on an internal port. The first connection starts mariadbd and
+// mariadbd (mysqld) on an internal port. The first connection starts it and
 // waits for it; when no connection has been open for the idle time it is
-// shut down cleanly (mariadb-admin shutdown), and the port stays.
+// shut down cleanly (mariadb-admin / mysqladmin shutdown), and the port stays.
 //
 // Everything listens on 127.0.0.1 only. root's password and each project's
 // are kept in the secure store (secret_store.h), never written to logs,
@@ -51,9 +56,11 @@ struct DatabaseServiceConfig {
 inline constexpr Port kFirstInternalDatabasePort = 33100;
 
 // Backups (D22): what the mariadb program gets when it loads a backup's SQL
-// (`force`: routines and events, going on past errors), and mariadb-dump.
+// (`force`: routines and events, going on past errors), and mariadb-dump
+// (MySQL's mysql and mysqldump take the same, and mysqldump --no-tablespaces).
 [[nodiscard]] std::vector<std::string> mariadb_load_args(bool force);
-[[nodiscard]] std::vector<std::string> mariadb_dump_args(const std::string& database, const std::string& file);
+[[nodiscard]] std::vector<std::string> mariadb_dump_args(const std::string& database, const std::string& file,
+                                                         std::string_view family = kMariaDbFamily);
 // How long a dump or a load may run: 30 minutes, or FLOSERVER_DB_TOOL_SECONDS.
 [[nodiscard]] std::chrono::seconds database_tool_limit();
 
@@ -81,7 +88,7 @@ public:
     // Servers no longer needed are shut down in the background.
     nlohmann::json reload();
 
-    //   {"servers": [{"series", "version", "port", "internal_port",
+    //   {"servers": [{"family", "series", "version", "port", "internal_port",
     //                 "state": "sleeping"|"starting"|"running"|"stopping"|"failed",
     //                 "pid"?, "connections", "projects", "keep_running", "error"?}]}
     [[nodiscard]] nlohmann::json status() const;
@@ -95,8 +102,9 @@ public:
 
     // projects.remove's "drop_database" (approved 2 Nov), before the project
     // leaves config.json: its own database and user (project_database_name(),
-    // never a name from the client) are dropped on each installed series that
-    // has them (its password is kept there) or that its floserver.json names,
+    // never a name from the client) are dropped on each installed server (any
+    // family) that has them (its password is kept there) or that its
+    // floserver.json names,
     // the server started if it sleeps; then the password is deleted from the
     // secure store. A series that isn't installed has nothing to drop. False
     // (with `refusal`) when the name is reserved, another registered project's
@@ -156,26 +164,29 @@ public:
     // sites must be on and have a database.
     [[nodiscard]] std::optional<DatabaseLogin> shared_login(ServiceRefusal& refusal);
 
-    // Settings → Database for one series ("11.4"):
+    // Settings → Database for one series ("11.4") of `family`:
     //   {"server": that server as status() lists it, or null when it has none
     //              (the series isn't installed),
     //    "databases": ["blog", "_shared"]: the projects (and shared sites)
     //                 whose own database has been made on it}
-    [[nodiscard]] nlohmann::json series_status(const std::string& series) const;
+    [[nodiscard]] nlohmann::json series_status(const std::string& series,
+                                               std::string_view family = kMariaDbFamily) const;
     // "start", "stop" or "restart" the series' server, on a thread of its
     // own (the reply doesn't wait). Stopping is a clean shutdown; a stopped
     // server starts again when a project connects. False (with `refusal`)
     // when the series has no server.
-    bool server_action(const std::string& series, const std::string& action, ServiceRefusal& refusal);
+    bool server_action(const std::string& series, const std::string& action, ServiceRefusal& refusal,
+                       std::string_view family = kMariaDbFamily);
     // After its my.ini settings changed: restarts the series' server in the
     // background when it runs (a sleeping one reads them when it wakes).
     // True when a restart was started.
-    bool restart_if_running(const std::string& series);
+    bool restart_if_running(const std::string& series, std::string_view family = kMariaDbFamily);
     // root's login on the series' server, started (and waited for) when it
     // sleeps or never ran: its first start makes root's password. It then
     // sleeps when idle like any other, unless it's kept running.
-    [[nodiscard]] std::optional<DatabaseLogin> root_login(const std::string& series, ServiceRefusal& refusal);
-    // Before the MariaDB install `version` ("11.4.2") is removed: when a
+    [[nodiscard]] std::optional<DatabaseLogin> root_login(const std::string& series, ServiceRefusal& refusal,
+                                                          std::string_view family = kMariaDbFamily);
+    // Before the MariaDB (or `family`'s) install `version` ("11.4.2") is removed: when a
     // server of its series runs from it (or is still shutting down from
     // it), or it's the series' last install, that server shuts down (this
     // waits, so no file is in use) and none is made for the series until
@@ -185,7 +196,7 @@ public:
     public:
         RemovalHold() = default;
         RemovalHold(DatabaseService* service, std::string series)
-            : service_(service), series_(std::move(series)) {}
+            : service_(service), series_(std::move(series)) {}  // `series`: the server's key
         RemovalHold(const RemovalHold&) = delete;
         RemovalHold& operator=(const RemovalHold&) = delete;
         RemovalHold(RemovalHold&& other) noexcept
@@ -202,28 +213,31 @@ public:
         DatabaseService* service_ = nullptr;
         std::string series_;
     };
-    [[nodiscard]] RemovalHold hold_for_removal(const std::string& version);
+    [[nodiscard]] RemovalHold hold_for_removal(const std::string& version, std::string_view family = kMariaDbFamily);
     // root's password, from the secure store.
-    [[nodiscard]] std::optional<std::string> root_password(const std::string& series, ServiceRefusal& refusal) const;
+    [[nodiscard]] std::optional<std::string> root_password(const std::string& series, ServiceRefusal& refusal,
+                                                           std::string_view family = kMariaDbFamily) const;
     // A new password for root (root_password_problem() says which are
     // refused): set with ALTER USER on the running server (started if it
     // sleeps), then kept in the secure store.
-    bool set_root_password(const std::string& series, const std::string& password, ServiceRefusal& refusal);
+    bool set_root_password(const std::string& series, const std::string& password, ServiceRefusal& refusal,
+                           std::string_view family = kMariaDbFamily);
     // The my.ini the series' server uses, written to
-    // <data>/mariadb/<series>/final-my.ini (read-only) for the user to look at.
-    [[nodiscard]] std::optional<std::filesystem::path> final_ini(const std::string& series,
-                                                                 ServiceRefusal& refusal) const;
+    // <data>/mariadb/<series>/final-my.ini (<data>/mysql/...; read-only) for
+    // the user to look at.
+    [[nodiscard]] std::optional<std::filesystem::path> final_ini(const std::string& series, ServiceRefusal& refusal,
+                                                                 std::string_view family = kMariaDbFamily) const;
 
     class Server;
     struct InternalPorts;
 
 private:
     void supervise();
-    void release_series(const std::string& series) noexcept;
+    void release_series(const std::string& key) noexcept;
     void release_project(const std::string& project) noexcept;
     [[nodiscard]] bool project_held(const std::string& project) const;
     void reload_locked();
-    [[nodiscard]] std::shared_ptr<Server> server_of(const std::string& series);
+    [[nodiscard]] std::shared_ptr<Server> server_of(std::string_view family, const std::string& series);
     // The server a project's database is on (its floserver.json's series).
     [[nodiscard]] std::shared_ptr<Server> project_server(const std::string& project, ServiceRefusal& refusal);
     bool run_project_tool(const std::string& project, bool dump, const std::filesystem::path& work,
@@ -239,9 +253,9 @@ private:
     SecretStore secrets_;
     std::shared_ptr<InternalPorts> internal_ports_;
     mutable std::mutex mutex_;
-    std::map<std::string, std::shared_ptr<Server>> servers_;  // by series
+    std::map<std::string, std::shared_ptr<Server>> servers_;  // by server key ("mariadb-11.4", "mysql-8.4")
     std::vector<std::weak_ptr<Server>> retired_;              // may still hold their port
-    std::map<std::string, int> held_;                         // series being removed: no server
+    std::map<std::string, int> held_;                         // servers being removed (by key): no server
     std::map<std::string, int> held_projects_;                // projects being removed: no login
     std::atomic<bool> stopping_{false};
     bool stopped_ = false;

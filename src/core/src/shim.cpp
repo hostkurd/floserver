@@ -1,5 +1,7 @@
 #include "floserver/core/shim.h"
 
+#include "floserver/core/garnet.h"
+
 #include "floserver/core/app_runner.h"
 #include "floserver/core/mailpit.h"
 #include "floserver/core/paths.h"
@@ -27,8 +29,13 @@ bool is_file(const fs::path& p) {
 
 // The newest install of `name` matching `wanted` ("8.2"; empty: any). For
 // PHP the usual NTS build is preferred over a thread-safe one.
+// `variant` is the build to prefer when it's there (Bun: the one that runs
+// on this CPU, "" or "baseline"); empty for the usual NTS one. The matching
+// build comes before the newer version: an older Bun that runs beats a newer
+// one that crashes on a CPU without AVX2, as a thread-safe PHP never beats an
+// NTS one.
 const InstalledRuntime* newest(const std::vector<InstalledRuntime>& installed, const std::string& name,
-                               const std::string& wanted) {
+                               const std::string& wanted, std::string_view variant = {}, bool any_variant = false) {
     const auto want = wanted.empty() ? std::nullopt : Version::parse(wanted);
     const InstalledRuntime* best = nullptr;
     std::optional<Version> best_v;
@@ -38,7 +45,7 @@ const InstalledRuntime* newest(const std::vector<InstalledRuntime>& installed, c
         if (r.name != name || !v || (want && !want->matches(*v))) {
             continue;
         }
-        const bool nts = r.variant.empty() || r.variant == "nts";
+        const bool nts = any_variant ? r.variant == variant : (r.variant.empty() || r.variant == "nts");
         if (best == nullptr || !best_v || (nts && !best_nts) || (nts == best_nts && *v > *best_v)) {
             best = &r;
             best_v = v;
@@ -115,8 +122,13 @@ std::optional<ShimTarget> php_target(const InstalledRuntime& php, const ProjectC
     PhpIniSettings settings = effective_php_settings(series, found != all.end() ? &found->second : nullptr,
                                                      read_php_custom_ini(data_dir, series), &project);
     // PHP's mail() to Mailpit, as in the pools (D27).
+    const auto installed = list_installed(runtimes_dir(data_dir));
     if (app) {
-        settings.mail_ini = mail_php_ini(*app, list_installed(runtimes_dir(data_dir)));
+        settings.mail_ini = mail_php_ini(*app, installed);
+    }
+    // phpredis for a project with Redis on, as in its pool (D30).
+    if (project.redis) {
+        settings.redis_extension = php_redis_extension(installed, php.version);
     }
     const std::string key =
         php.version + (php.variant.empty() ? std::string() : "-" + php.variant) + php_settings_key(settings);
@@ -153,11 +165,12 @@ std::optional<ShimTarget> php_target(const InstalledRuntime& php, const ProjectC
 
 const std::vector<std::string>& shim_names() {
 #ifdef _WIN32
-    static const std::vector<std::string> names = {"php", "node", "npm", "npx", "composer", "python", "pip"};
+    static const std::vector<std::string> names = {"php",    "node", "npm", "npx", "composer",
+                                                   "python", "pip",  "bun", "bunx", "deno"};
 #else
     // The names people type on macOS and Linux too.
-    static const std::vector<std::string> names = {"php",    "node", "npm",     "npx", "composer",
-                                                   "python", "pip",  "python3", "pip3"};
+    static const std::vector<std::string> names = {"php",    "node", "npm",     "npx",  "composer", "python",
+                                                   "pip",    "python3", "pip3", "bun", "bunx",     "deno"};
 #endif
     return names;
 }
@@ -223,7 +236,7 @@ std::optional<fs::path> next_on_path(const std::string& name, const fs::path& da
 }
 
 std::optional<ShimTarget> resolve_installed(const std::string& tool, const fs::path& cwd, const fs::path& data_dir,
-                                            std::string& error) {
+                                            std::string& error, bool avx2) {
     const auto& names = shim_names();
     if (std::find(names.begin(), names.end(), tool) == names.end()) {
         error = "\"" + tool + "\" isn't a FloServer shim";
@@ -292,6 +305,32 @@ std::optional<ShimTarget> resolve_installed(const std::string& tool, const fs::p
         return guard(t, data_dir, error);
     }
 
+    // bun, bunx, deno (D31): the project's own, else the newest installed.
+    if (tool == "bun" || tool == "bunx" || tool == "deno") {
+        const bool is_deno = tool == "deno";
+        const std::string name = is_deno ? "deno" : "bun";
+        const std::optional<std::string>& wanted = is_deno ? pc.deno : pc.bun;
+        const InstalledRuntime* runtime =
+            newest(installed, name, wanted.value_or(""), avx2 || is_deno ? "" : "baseline", true);
+        if (runtime == nullptr) {
+            error = not_installed(is_deno ? "Deno" : "Bun", name, wanted);
+            return std::nullopt;
+        }
+        const auto program = js_program(name, runtime->dir);
+        if (!program) {
+            error = std::string(is_deno ? "Deno " : "Bun ") + runtime->version + " in " + path_to_utf8(runtime->dir) +
+                    " has no " + name + " program";
+            return std::nullopt;
+        }
+        ShimTarget t;
+        t.program = *program;
+        t.version = runtime->version;
+        if (tool == "bunx") {
+            t.args = {"x"};  // bunx is `bun x`
+        }
+        return guard(t, data_dir, error);
+    }
+
     // python, pip: the project's .venv first (D17), else its Python.
     ShimTarget t;
     if (project->dir && is_file(venv_python(*project->dir))) {
@@ -325,8 +364,8 @@ std::optional<ShimTarget> resolve_installed(const std::string& tool, const fs::p
 }  // namespace
 
 std::optional<ShimTarget> resolve_shim(const std::string& tool, const fs::path& cwd, const fs::path& data_dir,
-                                       std::string& error) {
-    auto t = resolve_installed(tool, cwd, data_dir, error);
+                                       std::string& error, bool avx2) {
+    auto t = resolve_installed(tool, cwd, data_dir, error, avx2);
     const auto& names = shim_names();
     if (t || std::find(names.begin(), names.end(), tool) == names.end() || find_project_config(cwd)) {
         return t;

@@ -34,6 +34,19 @@
 //   mail.recent      {"limit"?: 1-20 (default 10)} -> {"messages": [{"id", "subject", "from", "to",
 //                    "time", "read", "size"}], "total", "inbox_url"}   newest first, cleaned
 //                    (flo mcp's recent_mail, D32); read-only, wakes Mailpit unless none is caught
+//   redis.status     {"projects"?: bool} -> {"installed", "version"?, "dotnet_version"?, "state": "not_installed"|
+//                    "asleep"|"starting"|"running"|"saving"|"failed", "error"?, "save_error"? (the last
+//                    SAVE failed; kept until one works), "host": "127.0.0.1", "port",
+//                    "keys" (DBSIZE when last asked), "refused" (connections closed as HTTP since
+//                    the service started), "settings": {"keep_running", "memory_mb"},
+//                    "projects"? (asked for: names with "redis": true), "phpredis": ["8.4", ...]} (D30)
+//   redis.set        {"keep_running"?, "memory_mb"?: 16..65536} -> {"ok": true}
+//   redis.flush      {} -> {"ok": true}   every key deleted, then saved (wakes Garnet)
+//   redis.password   {} -> {"password"}   for Settings → Redis's Copy (never shown)
+//                    A project's REDIS_* lines are in databases.login's and mail.env's "env"
+//                    when it has "redis": true; mail.env answers for Redis alone too.
+//   runtimes.install also takes "variant" (php-redis's "php8-4"); garnet brings dotnet and
+//                    php-redis with it (runtime_service.h).
 //   jobs.get         {"id": 3} -> runtime_service.h, RuntimeService::job()
 //   jobs.cancel      {"id": 3} -> {"cancelled": bool}
 //   projects.list    {} -> project_service.h, ProjectService::list()
@@ -45,12 +58,12 @@
 //   projects.remove  {"name": "shop", "drop_database"?: bool} -> {} or, with drop_database,
 //                    {"database_dropped": bool} (false: there was none to drop)
 //                    (the folder is never touched)
-//                    drop_database: first the project's own MariaDB database and
+//                    drop_database: first the project's own MariaDB (or MySQL) database and
 //                    user (named by the service: "my-shop" -> my_shop, never by
 //                    the request) are dropped and their password deleted from the
 //                    secure store; reserved or shared names are refused, and a
 //                    failed drop keeps the project. Nothing to drop when that
-//                    MariaDB isn't installed. No login makes it again meanwhile.
+//                    server isn't installed. No login makes it again meanwhile.
 //   projects.set     {"name": "shop", "on"?: bool, "keep_running"?: bool} -> the project
 //   projects.rename  {"name": "shop", "new_name": "store", "rename_folder"?: bool}
 //                    -> the project, with "old_name", "old_path" and "old_database_name" (D22)

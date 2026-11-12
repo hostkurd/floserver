@@ -250,12 +250,18 @@ json backup_versions(const fs::path& dir) {
     if (!j.is_object()) {
         return out;
     }
-    for (const char* key : {"php", "node", "python", "database", "web"}) {
+    for (const char* key : {"php", "node", "bun", "deno", "python", "database", "web"}) {
         if (j.contains(key) && j.at(key).is_string()) {
             out[key] = j.at(key);
         } else if (std::string_view(key) == "php" && j.contains(key) && j.at(key).is_boolean() &&
                    !j.at(key).get<bool>()) {
             out[key] = std::string(kPhpNone);
+        }
+    }
+    // "mysql": "8.4" (or "mariadb": "11.4") written by hand: the same as "database" (D28).
+    for (const char* family : {"mariadb", "mysql"}) {
+        if (!out.contains("database") && j.contains(family) && j.at(family).is_string()) {
+            out["database"] = std::string(family) + "-" + j.at(family).get<std::string>();
         }
     }
     return out;

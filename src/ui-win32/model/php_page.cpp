@@ -426,7 +426,7 @@ bool project_uses_php(const ProjectRow& row) {
     if (row.static_site) {
         return false;
     }
-    return row.wants.node.empty() && row.wants.python.empty();
+    return row.wants.node.empty() && row.wants.bun.empty() && row.wants.deno.empty() && row.wants.python.empty();
 }
 
 std::optional<std::string> project_php_series(const ProjectRow& row, const Installed& installed) {

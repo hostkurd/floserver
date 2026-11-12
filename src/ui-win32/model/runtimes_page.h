@@ -50,9 +50,9 @@ struct RuntimeRow {
 };
 
 struct RuntimeGroup {
-    std::string title;    // "PHP", "MariaDB", "Node.js", "Python", "Web servers"
+    std::string title;    // "PHP", "MariaDB", "MySQL", "Node.js", "Python", "Web servers"
     std::string runtime;  // runtimes.default's name; empty for Web servers
-    bool wide = false;    // PHP, MariaDB, Web servers and Tools take the full width; the rest share a row
+    bool wide = false;    // PHP, MariaDB, MySQL, Web servers and Tools take the full width; the rest share a row
     // The default for new projects: "Newest installed" and each installed
     // series (PHP and MariaDB). Its key is the runtime's name.
     std::optional<VersionField> picker;
@@ -67,7 +67,7 @@ struct RuntimesPage {
 
 // `reply` is runtimes.list's full answer. `installed` is what the window's
 // 2 s poll saw last, which wins over the reply's (nullptr: the reply's).
-// `databases` is databases.list's answer, for MariaDB's port.
+// `databases` is databases.list's answer, for MariaDB's and MySQL's ports.
 [[nodiscard]] RuntimesPage runtimes_page(const nlohmann::json& reply, const Installed* installed,
                                          const nlohmann::json& databases, Lang lang);
 
@@ -88,8 +88,9 @@ inline constexpr int kRuntimeGridMaxColumns = 2;
 
 // A pressed "Open phpMyAdmin" button: "Starting MariaDB 11.8…" while the
 // server it opens isn't running (it's started first and waited for), else
-// "Opening phpMyAdmin…". `state` is databases.list's for that server.
-[[nodiscard]] std::string phpmyadmin_busy_text(std::string_view series, std::string_view state, Lang lang);
+// "Opening phpMyAdmin…". `server` is its name ("MySQL 8.4"; empty: not
+// known), `state` databases.list's for it.
+[[nodiscard]] std::string phpmyadmin_busy_text(std::string_view server, std::string_view state, Lang lang);
 
 // True for http(s)://phpmyadmin.localhost followed by '/', ':' or nothing:
 // the only links phpmyadmin.login's answer may open.
