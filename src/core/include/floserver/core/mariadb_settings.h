@@ -61,8 +61,11 @@ using MariaDbSettings = std::map<std::string, MariaDbSeriesSettings>;
 // the passwords (skip-grant-tables). The prefixes
 // MariaDB reads (loose-, skip-, enable-, disable-, maximum-) and the
 // shortened names it accepts ("skip-grant" for skip-grant-tables) are seen
-// through. `name` may be written with '-' or '_'.
-[[nodiscard]] std::optional<std::string> mariadb_option_problem(std::string_view name);
+// through. `name` may be written with '-' or '_'. For MySQL (`family`) its
+// TLS settings are refused too (ssl_*, tls_*, require_secure_transport,
+// auto_generate_certs): FloServer's tools check its own certificate.
+[[nodiscard]] std::optional<std::string> mariadb_option_problem(std::string_view name,
+                                                                std::string_view family = kMariaDbFamily);
 // One line, no control characters, at most 1000 bytes.
 [[nodiscard]] std::optional<std::string> mariadb_value_problem(std::string_view value);
 
@@ -103,7 +106,8 @@ struct FilteredCustomIni {
     std::vector<std::string> problems;
     std::vector<std::string> keys;
 };
-[[nodiscard]] FilteredCustomIni filter_mariadb_custom_ini(std::string_view text);
+[[nodiscard]] FilteredCustomIni filter_mariadb_custom_ini(std::string_view text,
+                                                          std::string_view family = kMariaDbFamily);
 
 // What a server's my.ini holds beyond FloServer's own lines.
 struct MariaDbExtras {

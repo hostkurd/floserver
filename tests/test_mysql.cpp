@@ -382,17 +382,43 @@ TEST_CASE("MySQL's TLS settings are FloServer's: its tools check the server's ow
     for (const char* name : {"ssl_ca", "ssl-cert", "ssl_key", "ssl_capath", "ssl_crl", "ssl_crlpath", "tls_version",
                              "tls-ciphersuites", "ssl_cipher", "require_secure_transport", "loose-ssl-ca", "skip-ssl"}) {
         CAPTURE(name);
-        const auto problem = mariadb_option_problem(name);
+        const auto problem = mariadb_option_problem(name, kMySqlFamily);
         REQUIRE(problem);
         CHECK(problem->find("certificate") != std::string::npos);
     }
-    CHECK_FALSE(mariadb_option_problem("ssl_fips_mode_x"));  // not one of them
-    CHECK(filter_mariadb_custom_ini("[mysqld]\nssl_ca=/tmp/evil.pem\nmax_connections=50\n").problems.size() == 1);
+    CHECK_FALSE(mariadb_option_problem("ssl_fips_mode_x", kMySqlFamily));  // not one of them
+    CHECK(filter_mariadb_custom_ini("[mysqld]\nssl_ca=/tmp/evil.pem\nmax_connections=50\n", kMySqlFamily).problems.size() ==
+          1);
+    // MariaDB's tools check no certificate: its TLS settings stay the user's.
+    for (const char* name : {"ssl_ca", "ssl-cert", "tls_version", "require_secure_transport", "skip-ssl"}) {
+        CAPTURE(name);
+        CHECK_FALSE(mariadb_option_problem(name, kMariaDbFamily));
+    }
+    const FilteredCustomIni maria = filter_mariadb_custom_ini("[mysqld]\nssl_ca=/etc/my-ca.pem\n", kMariaDbFamily);
+    CHECK(maria.problems.empty());
+    CHECK(maria.text.find("ssl_ca=/etc/my-ca.pem") != std::string::npos);
+    AppConfig app;
+    MariaDbSeriesSettings one;
+    one.ini["ssl_ca"] = "/etc/my-ca.pem";
+    write_mariadb_series(app, "11.4", one);
+    CHECK(read_mariadb_settings(app).at("11.4").ini.contains("ssl_ca"));
+    write_mariadb_series(app, "8.4", one, kMySqlFamily);
+    std::vector<std::string> problems;
+    CHECK(read_mariadb_settings(app, &problems, kMySqlFamily).at("8.4").ini.empty());  // left out, and said so
+    CHECK(problems.size() == 1);
+    // MySQL's certificates are its set-up's.
+    CHECK(mariadb_option_problem("auto_generate_certs", kMySqlFamily));
+    CHECK(mariadb_option_problem("auto-generate-certs", kMySqlFamily));
 }
 
 TEST_CASE("MySQL's root check counts only what the init file is responsible for") {
     const std::string sql = root_accounts_check_sql();
     CHECK(sql.find("User = 'root'") != std::string::npos);
-    CHECK(sql.find("User = ''") != std::string::npos);
+    CHECK(sql.find("User = '' AND Host IN ('localhost', '127.0.0.1', '%')") != std::string::npos);
+    CHECK(sql.find("User = 'root' AND (authentication_string") == std::string::npos);  // no root on another host
+    // The init file drops exactly those anonymous accounts, last.
+    const std::string init = root_password_sql("pw", kMySqlFamily);
+    CHECK(init.rfind("DROP USER IF EXISTS ''@'localhost', ''@'127.0.0.1', ''@'%';") ==
+          init.size() - std::string("DROP USER IF EXISTS ''@'localhost', ''@'127.0.0.1', ''@'%';\n").size());
     CHECK(sql.find("'localhost', '127.0.0.1', '::1'") != std::string::npos);
 }

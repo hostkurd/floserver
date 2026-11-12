@@ -355,9 +355,12 @@ std::string root_password_sql(const std::string& password, std::string_view fami
 }
 
 std::string root_accounts_check_sql() {
-    return "SELECT (SELECT COUNT(*) FROM mysql.user WHERE User = '' OR (User = 'root' AND (authentication_string = '' "
-           "OR authentication_string IS NULL))) + (3 - (SELECT COUNT(*) FROM mysql.user WHERE User = 'root' AND Host IN "
-           "('localhost', '127.0.0.1', '::1') AND authentication_string <> ''));\n";
+    // Exactly what the init file sets (root on its three hosts) and drops
+    // (the anonymous accounts on localhost, 127.0.0.1 and %): never an
+    // account the user made, on another host or with a password.
+    return "SELECT (SELECT COUNT(*) FROM mysql.user WHERE User = '' AND Host IN ('localhost', '127.0.0.1', '%')) + "
+           "(3 - (SELECT COUNT(*) FROM mysql.user WHERE User = 'root' AND Host IN ('localhost', '127.0.0.1', '::1') "
+           "AND authentication_string <> ''));\n";
 }
 
 std::string client_password_option_file(const std::string& password) {

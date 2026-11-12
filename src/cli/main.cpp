@@ -448,7 +448,6 @@ void print_served(const nlohmann::json& p) {
     }
 }
 
-// What the web server says when something is wrong, and the HTTPS hint.
 // A project's database as its server names it: the name it kept through a
 // rename (D22), and MySQL's cut to fit its limits (D28). The service works it
 // out again itself.
@@ -463,13 +462,18 @@ std::string server_database_of(floserver::core::ServiceClient& client, const std
             if (!text_of(p, "database_name").empty()) {
                 database = text_of(p, "database_name");
             }
-            const std::string db = text_of(p, "database");  // "mysql-8.4"
+            // "mysql-8.4": the one it runs on, else the one its floserver.json asks for.
+            std::string db = text_of(p, "database");
+            if (db.empty() && p.contains("wants") && p["wants"].is_object()) {
+                db = text_of(p["wants"], "database");
+            }
             family = db.substr(0, db.find('-'));
         }
     }
     return floserver::core::server_database_name(database, family);
 }
 
+// What the web server says when something is wrong, and the HTTPS hint.
 void print_web_notes(floserver::core::ServiceClient& client) {
     const auto web = client.call("web.status");
     if (!web || !web->ok) {

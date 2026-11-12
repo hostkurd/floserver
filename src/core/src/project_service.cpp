@@ -1281,7 +1281,7 @@ std::optional<json> ProjectService::database_get(const std::string& series_text,
     std::error_code ec;
     out["custom_ini"] = path_to_utf8(custom);
     out["custom_ini_exists"] = fs::is_regular_file(custom, ec);
-    const FilteredCustomIni filtered = filter_mariadb_custom_ini(read_mariadb_custom_ini(data_dir_, *series, family));
+    const FilteredCustomIni filtered = filter_mariadb_custom_ini(read_mariadb_custom_ini(data_dir_, *series, family), family);
     if (!filtered.problems.empty()) {
         out["custom_problems"] = filtered.problems;
     }
@@ -1379,7 +1379,7 @@ std::optional<json> ProjectService::database_set(const std::string& series_text,
         const std::string own_key = database_server_key(family, *series);
         if (ini.is_object()) {
             for (const auto& [key, value] : ini.items()) {
-                if (const auto problem = mariadb_option_problem(key)) {
+                if (const auto problem = mariadb_option_problem(key, family)) {
                     refusal = {"bad_params", *problem};
                     return std::nullopt;
                 }

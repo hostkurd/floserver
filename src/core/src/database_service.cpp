@@ -764,7 +764,7 @@ private:
             return nullptr;
         }
         fs::remove(files_.pid_file, ec);
-        const auto log_from = fs::exists(files_.error_log, ec) ? fs::file_size(files_.error_log, ec) : 0;
+        const std::uintmax_t log_from = log_size();
 
         ChildOptions o;
         o.program = files_.server;
@@ -900,8 +900,13 @@ private:
         return errors.size() > 1500 ? errors.substr(0, 1500) + "..." : errors;
     }
 
-    // What this start wrote to the error log: its [ERROR] lines, or the
-    // end of the log when there are none.
+    // How long the error log is now (0 when it's not there or can't be read).
+    [[nodiscard]] std::uintmax_t log_size() const {
+        std::error_code ec;
+        const std::uintmax_t size = fs::file_size(files_.error_log, ec);
+        return ec ? 0 : size;
+    }
+
     // What the error log got from `from` on (at most 4 MiB of it), read
     // from there whatever the log's size.
     [[nodiscard]] std::string log_since(std::uintmax_t from) const {
@@ -915,6 +920,8 @@ private:
         return out;
     }
 
+    // What this start wrote to the error log: its [ERROR] lines, or the
+    // end of the log when there are none.
     [[nodiscard]] std::string start_errors(std::uintmax_t log_from, const fs::path& output_log) const {
         const std::string fresh = log_since(log_from);
         std::string errors;
@@ -997,7 +1004,7 @@ private:
         if (!write_file_atomically(files_.config, config_text(false), error)) {
             return false;
         }
-        const auto log_from = fs::exists(files_.error_log, ec) ? fs::file_size(files_.error_log, ec) : 0;
+        const std::uintmax_t log_from = log_size();
         ChildOptions o;
         o.program = files_.server;
         // --defaults-file must come first; relative: the folder is its cwd.
@@ -1845,6 +1852,17 @@ bool DatabaseService::drop_project_database(const std::string& project, ServiceR
         refusal = std::move(why);
         return false;
     };
+    // A name another project also has on one of those servers: refused
+    // before anything is dropped anywhere.
+    for (const auto& [key, which] : servers) {
+        const std::string on_server = server_database_name(database, which.first);
+        if (const auto other = project_with_server_database(*app, project, which.first, on_server);
+            other && on_server != database) {
+            refusal = {"database_shared", "the database " + on_server + " on " + database_family_title(which.first) +
+                                              " is also " + *other + "'s; remove the project without its database"};
+            return false;
+        }
+    }
     for (const auto& [key, which] : servers) {
         const auto& [family, s] = which;
         const std::string title = database_family_title(family) + " " + s;
@@ -1863,11 +1881,6 @@ bool DatabaseService::drop_project_database(const std::string& project, ServiceR
         const std::lock_guard lock(server->login_mutex());
         const bool made = secrets_.read(secret_of(key)).has_value();  // FloServer made one there
         const std::string on_server = server_database_name(database, family);
-        if (const auto other = project_with_server_database(*app, project, family, on_server);
-            other && on_server != database) {
-            return failed(title, {"database_shared", "the database " + on_server + " is also " + *other +
-                                                         "'s; remove the project without its database"});
-        }
         if (!server->run_sql(
                 drop_project_database_sql(on_server, project_database_user(on_server, family), family), error)) {
             return failed(title, {"database_failed",

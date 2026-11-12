@@ -133,8 +133,9 @@ struct MariaDbExtras;  // mariadb_settings.h
 // keep the empty password the set-up gave it.
 [[nodiscard]] std::string root_password_sql(const std::string& password, std::string_view family = kMariaDbFamily);
 // MySQL: one number, 0 when the init file did its work: root@localhost,
-// root@127.0.0.1 and root@::1 each have a password and there's no anonymous
-// account. Accounts the user made (passwordless ones too) aren't counted.
+// root@127.0.0.1 and root@::1 each have a password, and the anonymous
+// accounts it drops (''@localhost, ''@127.0.0.1, ''@'%') are gone. Accounts
+// the user made (root@'%' with no password, ''@'::1'...) aren't counted.
 // FloServer checks it before it trusts a start with the init file.
 [[nodiscard]] std::string root_accounts_check_sql();
 

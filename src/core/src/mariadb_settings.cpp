@@ -49,17 +49,21 @@ constexpr std::array<std::string_view, 13> kManagedMore = {
     "print_defaults",
 };
 // MySQL's (D28): its X Protocol and admin interface listen on ports of their
-// own, and these move its files. Unknown to MariaDB, so refusing them there
-// changes nothing.
-constexpr std::array<std::string_view, 20> kManagedMySql = {
+// own, and these move its files or log passwords. Refused for both families
+// (MariaDB has the same meaning for tmpdir, and none for the others).
+constexpr std::array<std::string_view, 10> kManagedMySql = {
     "admin_address",          "admin_port",          "create_admin_listener_thread",
     "innodb_directories",     "innodb_temp_tablespaces_dir", "innodb_redo_log_archive_dirs",
     "innodb_temp_data_file_path", "tmpdir",          "keyring_file_data",
     "log_raw",  // would write passwords into the general log
-    // TLS: FloServer's own tools check the server's certificate against the
-    // CA MySQL's set-up made; another certificate or TLS rule would stop them.
-    "ssl_ca", "ssl_cert", "ssl_key", "ssl_capath", "ssl_crl", "ssl_crlpath", "tls_version", "tls_ciphersuites",
-    "ssl_cipher", "require_secure_transport",
+};
+// MySQL's TLS (refused for MySQL only): FloServer's own tools check the
+// server's certificate against the CA MySQL's set-up made, so another
+// certificate or TLS rule would stop them. MariaDB's tools don't check one:
+// its TLS settings stay the user's.
+constexpr std::array<std::string_view, 11> kManagedMySqlTls = {
+    "ssl_ca",    "ssl_cert",         "ssl_key",    "ssl_capath",               "ssl_crl",           "ssl_crlpath",
+    "tls_version", "tls_ciphersuites", "ssl_cipher", "require_secure_transport", "auto_generate_certs",
 };
 // Real options that happen to start a managed name: not taken for a
 // shortened one ("general_log" is not general_log_file).
@@ -93,7 +97,8 @@ std::string why_refused(std::string_view name, std::string_view managed) {
         return n + " can't be set: FloServer keeps the database server on this computer only (127.0.0.1), reached "
                    "through its own port";
     }
-    if (managed.starts_with("ssl_") || managed.starts_with("tls_") || managed == "require_secure_transport") {
+    if (managed.starts_with("ssl_") || managed.starts_with("tls_") || managed == "require_secure_transport" ||
+        managed == "auto_generate_certs") {
         return n + " can't be set: FloServer's own tools check the server's certificate (its own, made at set-up)";
     }
     if (managed == "skip_grant_tables" || managed == "init_file") {
@@ -114,7 +119,7 @@ std::string canonical_mariadb_option(std::string_view name) {
     return out;
 }
 
-std::optional<std::string> mariadb_option_problem(std::string_view name) {
+std::optional<std::string> mariadb_option_problem(std::string_view name, std::string_view family) {
     const std::string shown = trimmed(name);
     if (shown.empty() || shown.size() > kMaxOptionLength || !std::all_of(shown.begin(), shown.end(), is_option_char) ||
         shown.front() == '-' || shown.front() == '_') {
@@ -161,6 +166,13 @@ std::optional<std::string> mariadb_option_problem(std::string_view name) {
         for (const std::string_view m : kManagedMySql) {
             if (match(m)) {
                 return why_refused(shown, m);
+            }
+        }
+        if (family == kMySqlFamily) {
+            for (const std::string_view m : kManagedMySqlTls) {
+                if (match(m)) {
+                    return why_refused(shown, m);
+                }
             }
         }
         return std::nullopt;
@@ -272,7 +284,7 @@ MariaDbSettings read_mariadb_settings(const AppConfig& app, std::vector<std::str
                 problem(name, "ini must be an object of text values");
             } else {
                 for (const auto& [k, v] : ini.items()) {
-                    if (!v.is_string() || mariadb_option_problem(k) || mariadb_value_problem(v.get<std::string>())) {
+                    if (!v.is_string() || mariadb_option_problem(k, family) || mariadb_value_problem(v.get<std::string>())) {
                         problem(name, "ini " + k + " is left out");
                         continue;
                     }
@@ -374,7 +386,7 @@ std::string read_mariadb_custom_ini(const fs::path& data, const std::string& ser
     return text;
 }
 
-FilteredCustomIni filter_mariadb_custom_ini(std::string_view text) {
+FilteredCustomIni filter_mariadb_custom_ini(std::string_view text, std::string_view family) {
     FilteredCustomIni out;
     std::set<std::string> keys;
     std::size_t pos = 0;
@@ -421,7 +433,7 @@ FilteredCustomIni filter_mariadb_custom_ini(std::string_view text) {
         const auto eq = line.find('=');
         const std::string key = trimmed(std::string_view(line).substr(0, eq));
         const std::string value = eq == std::string::npos ? std::string() : trimmed(std::string_view(line).substr(eq + 1));
-        if (const auto problem = mariadb_option_problem(key)) {
+        if (const auto problem = mariadb_option_problem(key, family)) {
             leave_out(*problem);
             continue;
         }
@@ -445,14 +457,14 @@ MariaDbExtras mariadb_extras(const fs::path& data, const std::string& series, co
     MariaDbExtras out;
     if (settings != nullptr) {
         for (const auto& [k, v] : settings->ini) {
-            if (!mariadb_option_problem(k) && !mariadb_value_problem(v)) {
+            if (!mariadb_option_problem(k, family) && !mariadb_value_problem(v)) {
                 out.ini[k] = v;
             }
         }
     }
     const std::string custom = read_mariadb_custom_ini(data, series, family);
     if (!custom.empty()) {
-        out.custom_ini = filter_mariadb_custom_ini(custom).text;
+        out.custom_ini = filter_mariadb_custom_ini(custom, family).text;
         out.custom_ini_path = path_to_utf8(mariadb_custom_ini_file(data, series, family));
     }
     return out;
