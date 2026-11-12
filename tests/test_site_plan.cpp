@@ -729,3 +729,36 @@ TEST_CASE("Settings' users of each runtime include Bun and Deno (D31)") {
     CHECK(users.at("deno/2.9.8") == std::vector<std::string>{"fresh"});
     CHECK_FALSE(users.contains("bun/1.2.9"));
 }
+
+TEST_CASE("Bun's build for this CPU is chosen before any newer version of the other (D31)") {
+    InstalledRuntime regular = runtime("bun", "1.3.14");
+    InstalledRuntime baseline = runtime("bun", "1.3.14", "baseline");
+    baseline.dir = kBase / "runtimes" / "bun" / "1.3.14-baseline";
+    InstalledRuntime older_baseline = runtime("bun", "1.3.9", "baseline");
+    older_baseline.dir = kBase / "runtimes" / "bun" / "1.3.9-baseline";
+    const std::vector<InstalledRuntime> both = {regular, baseline};
+    CHECK(best_installed(both, "bun", "1.3", true)->dir == regular.dir);
+    CHECK(best_installed(both, "bun", "1.3", false)->dir == baseline.dir);
+    // The matching build wins over a newer version of the other one.
+    const std::vector<InstalledRuntime> mixed = {regular, older_baseline};
+    CHECK(best_installed(mixed, "bun", "", false)->dir == older_baseline.dir);
+    CHECK(best_installed(mixed, "bun", "", true)->dir == regular.dir);
+    // Only the other build there: it's used, not nothing.
+    CHECK(best_installed({regular}, "bun", "1.3", false)->dir == regular.dir);
+    CHECK(best_installed({baseline}, "bun", "1.3", true)->dir == baseline.dir);
+    // Other runtimes don't care about the CPU.
+    CHECK(best_installed(kInstalled, "deno", "2", false)->version == "2.9.8");
+
+    // A project's plan, this machine's CPU: the app and a Python app's tools run the build that fits.
+    const bool avx2 = cpu_has_avx2();
+    const fs::path fits = avx2 ? regular.dir : baseline.dir;
+    AppConfig config;
+    config.projects = {project("edge"), project("api")};
+    const auto plan = plan_sites(
+        config, reader({{"edge", R"({"bun": "1.3"})"}, {"api", R"({"python": "3.13", "bun": "1.3"})"}}),
+        {regular, baseline, runtime("python", "3.13.18")}, std::nullopt);
+    REQUIRE(plan.apps.size() == 2);
+    for (const AppSpec& app : plan.apps) {
+        CHECK((app.name == "edge" ? app.runtime_dir : app.node_dir) == fits);
+    }
+}

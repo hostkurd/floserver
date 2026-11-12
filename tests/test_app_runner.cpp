@@ -395,7 +395,8 @@ TEST_CASE("a Deno app starts from its dev task, else deno run --watch with only 
     std::string error;
 
     SUBCASE("deno task dev from deno.json") {
-        test_util::write_file(app.dir / "deno.json", R"({"tasks": {"start": "deno run main.ts", "dev": "deno run -A --watch main.ts"}})");
+        test_util::write_file(app.dir / "deno.json",
+                              R"({"tasks": {"start": "deno run main.ts", "dev": "deno run -A --watch main.ts"}})");
         test_util::write_file(app.dir / "main.ts", "");
         const auto l = app_launch(app, 9601, error);
         REQUIRE_MESSAGE(l, error);
@@ -419,14 +420,17 @@ TEST_CASE("a Deno app starts from its dev task, else deno run --watch with only 
         CHECK(std::none_of(b->options.env.begin(), b->options.env.end(),
                            [](const auto& kv) { return kv.first == "DENO_SERVE_ADDRESS"; }));
     }
-    SUBCASE("a task with a dependency list and no command isn't one; package.json's dev script is used too") {
+    SUBCASE("a dev task of any shape is Deno's; package.json's script only when deno.json has none") {
         test_util::write_file(app.dir / "deno.json", R"({"tasks": {"dev": {"dependencies": ["build"]}}})");
         test_util::write_file(app.dir / "main.ts", "");
+        test_util::write_file(app.dir / "package.json", R"({"scripts": {"dev": "vite"}})");
         auto l = app_launch(app, 9606, error);
         REQUIRE_MESSAGE(l, error);
-        CHECK(l->shown.starts_with("deno run --watch"));
-        // `deno task` runs package.json's scripts as well.
-        test_util::write_file(app.dir / "package.json", R"({"scripts": {"dev": "vite"}})");
+        CHECK(l->options.args == Args{"task", "dev"});  // what Deno runs: deno.json's, not package.json's
+        CHECK(l->shown == "deno task dev");
+        CHECK(env_of(*l, "DENO_SERVE_ADDRESS") == "tcp:127.0.0.1:9606");
+        // `deno task` runs package.json's scripts when deno.json has no such task.
+        test_util::write_file(app.dir / "deno.json", R"({"tasks": {"start": "deno run main.ts"}})");
         l = app_launch(app, 9606, error);
         REQUIRE_MESSAGE(l, error);
         CHECK(l->options.args == Args{"task", "dev", "--port", "9606", "--strictPort", "--host", "127.0.0.1"});
@@ -435,6 +439,36 @@ TEST_CASE("a Deno app starts from its dev task, else deno run --watch with only 
         l = app_launch(app, 9606, error);
         REQUIRE_MESSAGE(l, error);
         CHECK(l->shown.starts_with("deno run --watch"));
+    }
+    SUBCASE("a framework's dev server gets its port as arguments and no DENO_SERVE_ADDRESS") {
+        // That setting would reach the servers its child processes start, which would find the port taken.
+        for (const char* script : {"vite", "deno run -A npm:vite@5", "next dev", "nuxt dev", "astro dev", "ng serve"}) {
+            test_util::write_file(app.dir / "deno.json",
+                                  nlohmann::json{{"tasks", {{"dev", script}}}}.dump());
+            const auto l = app_launch(app, 9607, error);
+            REQUIRE_MESSAGE(l, error);
+            INFO(script);
+            CHECK(l->options.args.size() > 2);  // task dev --port ...
+            CHECK(env_of(*l, "PORT") == "9607");
+            CHECK(std::none_of(l->options.env.begin(), l->options.env.end(),
+                               [](const auto& kv) { return kv.first == "DENO_SERVE_ADDRESS"; }));
+        }
+        // A plain script keeps it.
+        test_util::write_file(app.dir / "deno.json", R"({"tasks": {"dev": "deno run --watch main.ts"}})");
+        const auto plain = app_launch(app, 9607, error);
+        REQUIRE_MESSAGE(plain, error);
+        CHECK(env_of(*plain, "DENO_SERVE_ADDRESS") == "tcp:127.0.0.1:9607");
+    }
+    SUBCASE("deno.json and deno.jsonc both there: Deno reads deno.json only") {
+        test_util::write_file(app.dir / "deno.json", R"({"tasks": {"start": "deno run main.ts"}})");
+        test_util::write_file(app.dir / "deno.jsonc", R"({"tasks": {"dev": "vite"}})");
+        test_util::write_file(app.dir / "main.ts", "");
+        const auto l = app_launch(app, 9608, error);
+        REQUIRE_MESSAGE(l, error);
+        CHECK(l->shown.starts_with("deno run --watch"));  // deno.jsonc's dev task isn't seen
+        test_util::write_file(app.dir / "deno.json", "{oops");
+        CHECK_FALSE(app_launch(app, 9608, error));
+        CHECK(error == "deno.json can't be read or isn't valid JSON");
     }
     SUBCASE("deno.jsonc, with comments and a trailing comma; a task may be an object") {
         test_util::write_file(app.dir / "deno.jsonc", R"({
@@ -1023,6 +1057,26 @@ TEST_CASE("a Deno app runs deno run --watch on a real Deno, with no -A (D31)") {
     CHECK_MESSAGE(body.ends_with(" /cart web.localhost"), body);
     CHECK(runner->describe()["command"] ==
           "deno run --watch --allow-net --allow-read=. --allow-env main.ts");
+    // Loopback only: no socket in the listening table is bound to every address on the app's port.
+    {
+        const int app_port = runner->describe().at("internal_port").get<int>();  // the server's own, behind the relay
+        char hex[16];  // NOLINT(modernize-avoid-c-arrays)
+        (void)std::snprintf(hex, sizeof hex, "%04X", app_port);  // NOLINT(cppcoreguidelines-pro-type-vararg)
+        std::ifstream table("/proc/net/tcp");
+        std::string row;
+        bool loopback = false;
+        bool everywhere = false;
+        while (std::getline(table, row)) {
+            if (row.find(std::string(":") + hex + " ") == std::string::npos ||
+                row.find(" 0A ") == std::string::npos) {  // 0A: listening
+                continue;
+            }
+            loopback = loopback || row.find(" 0100007F:" + std::string(hex)) != std::string::npos;
+            everywhere = everywhere || row.find(" 00000000:" + std::string(hex)) != std::string::npos;
+        }
+        CHECK(loopback);
+        CHECK_FALSE(everywhere);
+    }
     runner->tick(AppRunner::Clock::now() + 3600s, 1s);
     CHECK(eventually([&] { return runner->state() == AppState::Sleeping; }));
     CHECK(get(app.port, "/again", 90s).ends_with(" /again web.localhost"));

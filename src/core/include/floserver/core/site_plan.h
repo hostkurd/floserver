@@ -14,6 +14,7 @@
 // project's floserver.json result, each PHP series' custom.ini and the
 // installed runtimes, so it can be tested with plain values.
 
+#include "floserver/core/cpu_features.h"
 #include "floserver/core/php_settings.h"
 #include "floserver/core/ports.h"
 #include "floserver/core/project_config.h"
@@ -45,8 +46,11 @@ enum class SiteState : std::uint8_t {
 
 // The newest install of `name` matching `wanted` ("8.2"), or the newest of
 // all when `wanted` is empty; PHP only counts NTS builds (the pools' kind).
+// Bun (D31) comes in a regular and a "baseline" build: the one that runs on
+// this CPU (`avx2`: the regular one) comes first, whatever the versions.
 [[nodiscard]] const InstalledRuntime* best_installed(const std::vector<InstalledRuntime>& installed,
-                                                     const std::string& name, const std::string& wanted);
+                                                     const std::string& name, const std::string& wanted,
+                                                     bool avx2 = cpu_has_avx2());
 
 // The Apache the shared Apache runs: config.json's "apache" "version" when
 // it's installed (Settings > Apache), else the newest. Nothing when none is.

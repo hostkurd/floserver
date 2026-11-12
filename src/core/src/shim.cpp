@@ -28,7 +28,10 @@ bool is_file(const fs::path& p) {
 // The newest install of `name` matching `wanted` ("8.2"; empty: any). For
 // PHP the usual NTS build is preferred over a thread-safe one.
 // `variant` is the build to prefer when it's there (Bun: the one that runs
-// on this CPU, "" or "baseline"); empty for the usual NTS one.
+// on this CPU, "" or "baseline"); empty for the usual NTS one. The matching
+// build comes before the newer version: an older Bun that runs beats a newer
+// one that crashes on a CPU without AVX2, as a thread-safe PHP never beats an
+// NTS one.
 const InstalledRuntime* newest(const std::vector<InstalledRuntime>& installed, const std::string& name,
                                const std::string& wanted, std::string_view variant = {}, bool any_variant = false) {
     const auto want = wanted.empty() ? std::nullopt : Version::parse(wanted);

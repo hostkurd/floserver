@@ -91,9 +91,10 @@ std::vector<std::string> words(std::string_view text) {
 fs::path venv_dir(const AppSpec& app) { return app.dir / ".venv"; }
 
 // What the environment of the app's processes adds: the port and HOST (the
-// address most servers read; Bun has no such setting and Node's and Bun's
-// own defaults listen on every address, as on any machine), no browser opened by the dev server, plain text in the log, and the
-// project's runtime first on PATH (for Python its .venv, then the install).
+// address most servers read; Bun has no such setting, and Node's and Bun's own
+// defaults listen on every address), no browser opened by the dev server,
+// plain text in the log, and the project's runtime first on PATH (for Python
+// its .venv, then the install).
 void set_environment(ChildOptions& o, const AppSpec& app, Port port) {
     std::vector<std::string> first;
     if (app.kind == AppKind::Python) {
@@ -611,10 +612,11 @@ std::optional<std::string> script_text(const json& scripts, const char* name) {
 
 // `extra` after the script, as `npm run dev -- --port N` has it; Bun and
 // Deno take them straight after the script's name.
-void add_port_arguments(AppLaunch& launch, const std::string& script, Port port, bool separator) {
+// True when it added some (the script is a framework's dev server).
+bool add_port_arguments(AppLaunch& launch, const std::string& script, Port port, bool separator) {
     const auto extra = port_arguments(script, port);
     if (extra.empty()) {
-        return;
+        return false;
     }
     if (separator) {
         launch.options.args.emplace_back("--");
@@ -624,6 +626,7 @@ void add_port_arguments(AppLaunch& launch, const std::string& script, Port port,
         launch.options.args.push_back(a);
         launch.shown += " " + a;
     }
+    return true;
 }
 
 constexpr std::array<const char*, 6> kBunEntries = {"index.ts",     "index.js",     "server.ts",
@@ -664,6 +667,19 @@ std::optional<AppLaunch> bun_launch(AppLaunch launch, const AppSpec& app, Port p
     return std::nullopt;
 }
 
+// `deno task dev`. A framework's dev server (Vite, Next...) is given its
+// port and host as arguments, and then has no DENO_SERVE_ADDRESS: that
+// setting would reach every server its child processes start as well, which
+// would find the port taken. A plain script keeps it.
+AppLaunch deno_task(AppLaunch launch, const std::optional<std::string>& script, Port port) {
+    launch.options.args = {"task", "dev"};
+    launch.shown = "deno task dev";
+    if (script && add_port_arguments(launch, *script, port, false)) {
+        std::erase_if(launch.options.env, [](const auto& kv) { return kv.first == "DENO_SERVE_ADDRESS"; });
+    }
+    return launch;
+}
+
 // Deno (D31): `deno task dev` when deno.json or deno.jsonc has a "dev" task,
 // else `deno run --watch` on the first entry file, with only the permissions
 // a web server needs.
@@ -674,23 +690,20 @@ std::optional<AppLaunch> deno_launch(AppLaunch launch, const AppSpec& app, Port 
         return std::nullopt;
     }
     launch.options.program = *program;
-    for (const char* file : {"deno.json", "deno.jsonc"}) {
-        const fs::path config = app.dir / file;
-        if (!is_file(config)) {
-            continue;
-        }
+    // Deno reads deno.json, and deno.jsonc only when there is no deno.json.
+    const char* const config_name = is_file(app.dir / "deno.json") ? "deno.json" : "deno.jsonc";
+    if (const fs::path config = app.dir / config_name; is_file(config)) {
         const auto text = read_small_file(config, kMaxPackageJson);
         // deno.jsonc has comments and may end lists with a comma.
         const json doc = text ? json::parse(without_trailing_commas(*text), nullptr, false, true) : json();
         if (!doc.is_object()) {
-            error = std::string(file) + " can't be read or isn't valid JSON";
+            error = std::string(config_name) + " can't be read or isn't valid JSON";
             return std::nullopt;
         }
-        if (const auto dev = doc.contains("tasks") ? script_text(doc.at("tasks"), "dev") : std::nullopt) {
-            launch.options.args = {"task", "dev"};
-            launch.shown = "deno task dev";
-            add_port_arguments(launch, *dev, port, false);
-            return launch;
+        // A "dev" task of any shape is what Deno runs (one with only
+        // dependencies runs them and ends), not package.json's script.
+        if (doc.contains("tasks") && doc.at("tasks").is_object() && doc.at("tasks").contains("dev")) {
+            return deno_task(std::move(launch), script_text(doc.at("tasks"), "dev"), port);
         }
     }
     // `deno task` runs package.json's scripts too.
@@ -699,19 +712,19 @@ std::optional<AppLaunch> deno_launch(AppLaunch launch, const AppSpec& app, Port 
         const json doc = text ? json::parse(*text, nullptr, false) : json();
         if (const auto dev = doc.is_object() && doc.contains("scripts") ? script_text(doc.at("scripts"), "dev")
                                                                         : std::nullopt) {
-            launch.options.args = {"task", "dev"};
-            launch.shown = "deno task dev";
-            add_port_arguments(launch, *dev, port, false);
-            return launch;
+            return deno_task(std::move(launch), dev, port);
         }
     }
     if (const auto entry = first_entry(app.dir, kDenoEntries)) {
+        // Reads are limited to the project's folder: a file outside it is
+        // refused (a "command" in floserver.json takes its own flags).
         launch.options.args = {"run", "--watch", "--allow-net", "--allow-read=.", "--allow-env", *entry};
         launch.shown = "deno run --watch --allow-net --allow-read=. --allow-env " + *entry;
         return launch;
     }
-    error = "FloServer can't tell how to start this Deno project (no \"dev\" task in deno.json or deno.jsonc or \"dev\" script in package.json, and "
-            "none of " + list_names(kDenoEntries) + "); add one, or a \"command\" in floserver.json";
+    error = "FloServer can't tell how to start this Deno project (no \"dev\" task in deno.json or deno.jsonc, or "
+            "\"dev\" script in package.json, and none of " + list_names(kDenoEntries) +
+            "); add one, or a \"command\" in floserver.json";
     return std::nullopt;
 }
 

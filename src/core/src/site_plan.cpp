@@ -59,13 +59,14 @@ bool has_php_files(const fs::path& doc_root) { return find_php_files(doc_root, t
 bool has_php_files_seen(const fs::path& doc_root) { return find_php_files(doc_root, false); }
 
 const InstalledRuntime* best_installed(const std::vector<InstalledRuntime>& installed, const std::string& name,
-                                       const std::string& wanted) {
+                                       const std::string& wanted, bool avx2) {
     const std::optional<Version> want = wanted.empty() ? std::nullopt : Version::parse(wanted);
     if (!wanted.empty() && !want) {
         return nullptr;
     }
     const InstalledRuntime* best = nullptr;
     std::optional<Version> best_version;
+    bool best_fits = false;
     for (const InstalledRuntime& r : installed) {
         if (r.name != name || (name == "php" && !is_pool_php(r))) {
             continue;
@@ -74,9 +75,13 @@ const InstalledRuntime* best_installed(const std::vector<InstalledRuntime>& inst
         if (!v || (want && !want->matches(*v))) {
             continue;
         }
-        if (!best_version || *v > *best_version) {
+        // Bun's build for this CPU beats the other one of any version: the
+        // regular build crashes without AVX2 (D31).
+        const bool fits = name != "bun" || r.variant == (avx2 ? "" : "baseline");
+        if (!best_version || (fits && !best_fits) || (fits == best_fits && *v > *best_version)) {
             best = &r;
             best_version = v;
+            best_fits = fits;
         }
     }
     return best;
