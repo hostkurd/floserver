@@ -643,7 +643,12 @@ void WebService::reload_locked() {
             continue;
         }
         std::string why;
-        auto runner = AppRunner::open(spec, {work_, app_internal_ports_, config_.probe}, why);
+        AppRunnerConfig app_config;
+        app_config.work_dir = work_;
+        app_config.internal_ports = app_internal_ports_;
+        app_config.probe = config_.probe;
+        app_config.first_internal_port = config_.first_app_internal_port;
+        auto runner = AppRunner::open(spec, std::move(app_config), why);
         if (!runner) {
             app_errors[spec.name] = why;
             continue;

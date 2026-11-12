@@ -670,6 +670,45 @@ private:
 
 Port free_port(Port from) { return pick_port_from(from, {}, can_listen_on_loopback).value_or(0); }
 
+AppRunnerConfig runner_config(const fs::path& work) {
+    AppRunnerConfig config;
+    config.work_dir = work;
+    config.first_internal_port = test_util::app_port_base();
+    return config;
+}
+
+// `n` ports in a row from `from` up that nothing listens on (0 when none).
+Port free_run(Port from, int n) {
+    for (Port first = from; first < from + 500; ++first) {
+        bool all = true;
+        for (int i = 0; i < n && all; ++i) {
+            all = can_listen_on_loopback(static_cast<Port>(first + i));
+        }
+        if (all) {
+            return first;
+        }
+    }
+    return 0;
+}
+
+// Takes every connection waiting on `l` (another program's port); true when
+// one of them sent anything, as a relayed request would. FloServer's own
+// checks only connect and close.
+bool got_a_request(const LoopbackListener& l) {
+    bool sent = false;
+    const std::vector<const LoopbackListener*> self = {&l};
+    while (!waiting_connections(self, 0ms).empty()) {
+        const auto c = l.accept_connection();
+        if (!c) {
+            break;
+        }
+        const auto data = receive_some(*c, 200ms);
+        sent = sent || (data && !data->empty());
+        close_socket(*c);
+    }
+    return sent;
+}
+
 }  // namespace
 
 TEST_CASE("an app's server starts on the first request, sleeps when idle and wakes again") {
@@ -686,7 +725,7 @@ TEST_CASE("an app's server starts on the first request, sleeps when idle and wak
     app.port = free_port(19300);
     test_util::write_file(app.dir / "hello.txt", "hello from web");
     std::string error;
-    auto runner = AppRunner::open(app, {tmp.path() / "work", nullptr, nullptr}, error);
+    auto runner = AppRunner::open(app, runner_config(tmp.path() / "work"), error);
     REQUIRE_MESSAGE(runner, error);
     const Pump pump(runner);
 
@@ -750,7 +789,7 @@ TEST_CASE("an app that can't start answers why, and Keep running starts it witho
     app.port = free_port(19320);
     fs::create_directories(app.dir);
     std::string error;
-    auto runner = AppRunner::open(app, {tmp.path() / "work", nullptr, nullptr}, error);
+    auto runner = AppRunner::open(app, runner_config(tmp.path() / "work"), error);
     REQUIRE(runner);
     const Pump pump(runner);
 
@@ -793,7 +832,7 @@ TEST_CASE("settings changed while starting: the old start is thrown away") {
     app.command = "sleep 1; exec python3 -m http.server {port} --bind 127.0.0.1 --directory a";
     app.port = free_port(19360);
     std::string error;
-    auto runner = AppRunner::open(app, {tmp.path() / "work", nullptr, nullptr}, error);
+    auto runner = AppRunner::open(app, runner_config(tmp.path() / "work"), error);
     REQUIRE(runner);
     const Pump pump(runner);
     std::string first;
@@ -821,7 +860,7 @@ TEST_CASE("a server that listens on [::1] only is found there") {
     app.command = "exec python3 -m http.server {port} --bind ::1";
     app.port = free_port(19380);
     std::string error;
-    auto runner = AppRunner::open(app, {tmp.path() / "work", nullptr, nullptr}, error);
+    auto runner = AppRunner::open(app, runner_config(tmp.path() / "work"), error);
     REQUIRE(runner);
     const Pump pump(runner);
     CHECK(get(app.port, "/x.txt") == "200 six");
@@ -848,7 +887,7 @@ TEST_CASE("a Node app runs its dev script through the project's own npm") {
         }).listen(Number(process.env.PORT), process.env.HOST);
     )");
     std::string error;
-    auto runner = AppRunner::open(app, {tmp.path() / "work", nullptr, nullptr}, error);
+    auto runner = AppRunner::open(app, runner_config(tmp.path() / "work"), error);
     REQUIRE(runner);
     const Pump pump(runner);
     const std::string body = get(app.port, "/cart?x=1");
@@ -910,7 +949,7 @@ class H(http.server.BaseHTTPRequestHandler):
 http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
 )");
     std::string error;
-    auto runner = AppRunner::open(app, {tmp.path() / "work", nullptr, nullptr}, error);
+    auto runner = AppRunner::open(app, runner_config(tmp.path() / "work"), error);
     REQUIRE(runner);
     const Pump pump(runner);
     const std::string body = get(app.port, "/");
@@ -981,7 +1020,7 @@ TEST_CASE("a Bun app runs bun --hot on a real Bun, sleeps when idle and wakes ag
         });
     )");
     std::string error;
-    auto runner = AppRunner::open(app, {tmp.path() / "work", nullptr, nullptr}, error);
+    auto runner = AppRunner::open(app, runner_config(tmp.path() / "work"), error);
     REQUIRE_MESSAGE(runner, error);
     const Pump pump(runner);
     const std::string body = get(app.port, "/cart?x=1", 60s);
@@ -1016,7 +1055,7 @@ TEST_CASE("a Bun app runs its dev script, and Keep running starts it without a r
         Bun.serve({port: Number(process.env.PORT), hostname: "127.0.0.1", fetch: () => new Response("dev script")});
     )");
     std::string error;
-    auto runner = AppRunner::open(app, {tmp.path() / "work", nullptr, nullptr}, error);
+    auto runner = AppRunner::open(app, runner_config(tmp.path() / "work"), error);
     REQUIRE_MESSAGE(runner, error);
     const Pump pump(runner);
     runner->wake();  // Keep running: started by the service without a request
@@ -1048,7 +1087,7 @@ TEST_CASE("a Deno app runs deno run --watch on a real Deno, with no -A (D31)") {
         Deno.serve((req) => new Response(message + " " + new URL(req.url).pathname + " " + req.headers.get("host")));
     )");
     std::string error;
-    auto runner = AppRunner::open(app, {tmp.path() / "work", nullptr, nullptr}, error);
+    auto runner = AppRunner::open(app, runner_config(tmp.path() / "work"), error);
     REQUIRE_MESSAGE(runner, error);
     const Pump pump(runner);
     const std::string body = get(app.port, "/cart", 90s);
@@ -1101,7 +1140,7 @@ TEST_CASE("a Deno app runs its dev task; a server that can't start says why (D31
         Deno.serve({port: Number(Deno.env.get("PORT")), hostname: "127.0.0.1"}, () => new Response("dev task"));
     )");
     std::string error;
-    auto runner = AppRunner::open(app, {tmp.path() / "work", nullptr, nullptr}, error);
+    auto runner = AppRunner::open(app, runner_config(tmp.path() / "work"), error);
     REQUIRE_MESSAGE(runner, error);
     {
         const Pump pump(runner);
@@ -1116,7 +1155,7 @@ TEST_CASE("a Deno app runs its dev task; a server that can't start says why (D31
     broken.port = free_port(19500);
     test_util::write_file(broken.dir / "deno.json", R"({"tasks": {"dev": "deno run server.ts"}})");
     test_util::write_file(broken.dir / "server.ts", "throw new Error(\"boom from deno\");\n");
-    auto bad = AppRunner::open(broken, {tmp.path() / "work", nullptr, nullptr}, error);
+    auto bad = AppRunner::open(broken, runner_config(tmp.path() / "work"), error);
     REQUIRE_MESSAGE(bad, error);
     {
         const Pump pump(bad);
@@ -1125,6 +1164,225 @@ TEST_CASE("a Deno app runs its dev task; a server that can't start says why (D31
         CHECK(page.find("boom from deno") != std::string::npos);
     }
     bad->close();
+}
+
+TEST_CASE("another program on the app's internal port: the exit report, never a relay to it") {
+    const test_util::TempDir tmp;
+    const Port internal = free_run(static_cast<Port>(test_util::app_port_base() + 50), 2);
+    REQUIRE(internal != 0);
+    std::string error;
+    // It started listening after FloServer found the port free.
+    const auto other = LoopbackListener::open(internal, error);
+    REQUIRE_MESSAGE(other, error);
+    AppSpec app;
+    app.name = "web";
+    app.dir = tmp.path() / "web";
+    app.runtime_dir = fake_node(tmp.path() / "node");
+    app.command = "echo cannot find module express; exit 3";
+    app.port = free_port(19520);
+    fs::create_directories(app.dir);
+    auto config = runner_config(tmp.path() / "work");
+    config.first_internal_port = internal;
+    config.probe = [internal](Port p) { return p == internal || can_listen_on_loopback(p); };
+    auto runner = AppRunner::open(app, config, error);
+    REQUIRE(runner);
+    const Pump pump(runner);
+
+    const std::string page = get(app.port, "/", 10s);
+    CHECK_MESSAGE(page.starts_with("502 FloServer: web's server isn't running."), page);
+    CHECK(page.find("ended (exit 3)") != std::string::npos);
+    CHECK(page.find("cannot find module express") != std::string::npos);
+    CHECK(runner->state() == AppState::Failed);
+    CHECK_FALSE(got_a_request(*other));
+    runner->close();
+}
+
+#ifdef __linux__
+
+TEST_CASE("a server still starting while another program has its port moves to the next port") {
+    const test_util::TempDir tmp;
+    const Port internal = free_run(static_cast<Port>(test_util::app_port_base() + 60), 4);
+    REQUIRE(internal != 0);
+    std::string error;
+    const auto other = LoopbackListener::open(internal, error);
+    REQUIRE_MESSAGE(other, error);
+    AppSpec app;
+    app.name = "web";
+    app.dir = tmp.path() / "web";
+    app.runtime_dir = fake_node(tmp.path() / "node");
+    app.port = free_port(19540);
+    test_util::write_file(app.dir / "x.txt", "mine");
+    auto config = runner_config(tmp.path() / "work");
+    config.first_internal_port = internal;
+    config.probe = [internal](Port p) { return p == internal || can_listen_on_loopback(p); };
+
+    SUBCASE("it ends: the exit report from the next port") {
+        // Alive while the other program answers on its port, then it ends.
+        app.command = "sleep 1; echo cannot find module express; exit 3";
+        auto runner = AppRunner::open(app, config, error);
+        REQUIRE(runner);
+        const Pump pump(runner);
+        const std::string page = get(app.port, "/", 10s);
+        CHECK_MESSAGE(page.starts_with("502 FloServer: web's server isn't running."), page);
+        CHECK(page.find("ended (exit 3)") != std::string::npos);
+        CHECK(page.find("port " + std::to_string(internal + 1)) != std::string::npos);
+        CHECK_FALSE(got_a_request(*other));
+        runner->close();
+    }
+    SUBCASE("it listens: served from the next port") {
+        if (!on_path("python3")) {
+            MESSAGE("python3 isn't installed here; skipped");
+            return;
+        }
+        // Started by the shell, not exec'd: the listener is the child's child.
+        app.command = "python3 -m http.server {port} --bind 127.0.0.1 & wait";
+        auto runner = AppRunner::open(app, config, error);
+        REQUIRE(runner);
+        const Pump pump(runner);
+        CHECK(get(app.port, "/x.txt", 20s) == "200 mine");
+        CHECK(runner->state() == AppState::Running);
+        CHECK(runner->describe()["internal_port"].get<int>() == internal + 1);
+        CHECK_FALSE(got_a_request(*other));
+        runner->close();
+    }
+}
+
+TEST_CASE("a server that never listens while other programs hold its ports says so") {
+    const test_util::TempDir tmp;
+    const Port internal = free_run(static_cast<Port>(test_util::app_port_base() + 70), 3);
+    REQUIRE(internal != 0);
+    std::string error;
+    std::vector<std::unique_ptr<LoopbackListener>> others;
+    for (Port p = internal; p < internal + 3; ++p) {
+        others.push_back(LoopbackListener::open(p, error));
+        REQUIRE_MESSAGE(others.back(), error);
+    }
+    AppSpec app;
+    app.name = "web";
+    app.dir = tmp.path() / "web";
+    app.runtime_dir = fake_node(tmp.path() / "node");
+    app.command = "exec sleep 60";
+    app.port = free_port(19560);
+    fs::create_directories(app.dir);
+    auto config = runner_config(tmp.path() / "work");
+    config.first_internal_port = internal;
+    config.probe = [internal](Port p) { return (p >= internal && p < internal + 3) || can_listen_on_loopback(p); };
+    auto runner = AppRunner::open(app, config, error);
+    REQUIRE(runner);
+    const Pump pump(runner);
+
+    const std::string page = get(app.port, "/", 20s);
+    CHECK_MESSAGE(page.starts_with("502 FloServer: web's server isn't running."), page);
+    CHECK(page.find("port " + std::to_string(internal + 2) + " is used by another program") != std::string::npos);
+    CHECK(runner->state() == AppState::Failed);
+    CHECK_FALSE(runner->describe().contains("pid"));
+    for (const auto& other : others) {
+        CHECK_FALSE(got_a_request(*other));
+    }
+    runner->close();
+}
+
+TEST_CASE("who listens on a port: the child, what it started, or another program") {
+    if (!on_path("python3")) {
+        MESSAGE("python3 isn't installed here; skipped");
+        return;
+    }
+    const test_util::TempDir tmp;
+    const Port port = free_run(static_cast<Port>(test_util::app_port_base() + 80), 1);
+    REQUIRE(port != 0);
+    const auto start = [&](const std::string& command) {
+        ChildOptions o;
+        o.program = "/bin/sh";
+        o.args = {"-c", command};
+        o.working_dir = tmp.path();
+        std::string error;
+        auto child = ChildProcess::start(o, error);
+        REQUIRE_MESSAGE(child, error);
+        return child;
+    };
+    const auto listening = [port] {
+        return eventually([port] {
+            const auto s = connect_loopback(port);
+            if (s) {
+                close_socket(*s);
+            }
+            return s.has_value();
+        }, 20s);
+    };
+
+    auto idle = start("exec sleep 60");
+    CHECK(idle->listener_owner(port, false) == ListenerOwner::Unknown);  // nobody listens
+    {
+        std::string error;
+        const auto other = LoopbackListener::open(port, error);
+        REQUIRE_MESSAGE(other, error);
+        CHECK(idle->listener_owner(port, false) == ListenerOwner::Other);
+    }
+    idle->kill();
+
+    const std::string server = "python3 -m http.server " + std::to_string(port) + " --bind 127.0.0.1";
+    for (const std::string& command : {"exec " + server, server + " & wait"}) {
+        CAPTURE(command);
+        auto child = start(command);
+        REQUIRE(listening());
+        CHECK(child->listener_owner(port, false) == ListenerOwner::Child);
+        CHECK(idle->listener_owner(port, false) == ListenerOwner::Other);
+        child->kill();
+    }
+    if (on_path("setsid")) {
+        // Out of the child's process group, but still its descendant.
+        auto child = start("setsid " + server + " & echo $! > pid; wait");
+        REQUIRE(listening());
+        CHECK(child->listener_owner(port, false) == ListenerOwner::Child);
+        const auto pid = std::stoi(test_util::read_file(tmp.path() / "pid"));
+        ::kill(pid, SIGKILL);
+        child->kill();
+    }
+}
+
+#endif
+
+#endif
+
+#ifdef _WIN32
+
+TEST_CASE("who listens on a port: the child's job or another program") {
+    const fs::path system = path_from_utf8(get_env("SystemRoot").value_or("C:\\Windows")) / "System32";
+    const Port port =
+        pick_port_from(static_cast<Port>(test_util::app_port_base() + 80), {}, can_listen_on_loopback).value_or(0);
+    REQUIRE(port != 0);
+    std::string error;
+    ChildOptions idle_options;
+    idle_options.program = system / "PING.EXE";
+    idle_options.args = {"-n", "60", "127.0.0.1"};
+    const auto idle = ChildProcess::start(idle_options, error);
+    REQUIRE_MESSAGE(idle, error);
+    CHECK(idle->listener_owner(port, false) == ListenerOwner::Unknown);  // nobody listens
+    {
+        const auto other = LoopbackListener::open(port, error);
+        REQUIRE_MESSAGE(other, error);
+        CHECK(idle->listener_owner(port, false) == ListenerOwner::Other);
+    }
+
+    ChildOptions server;
+    server.program = system / "WindowsPowerShell" / "v1.0" / "powershell.exe";
+    server.args = {"-NoProfile", "-NonInteractive", "-Command",
+                   "$l = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, " +
+                       std::to_string(port) + "); $l.Start(); Start-Sleep 60"};
+    const auto child = ChildProcess::start(server, error);
+    REQUIRE_MESSAGE(child, error);
+    bool listening = false;
+    for (int i = 0; i < 300 && !listening && child->running(); ++i) {
+        if (const auto s = connect_loopback(port)) {
+            close_socket(*s);
+            listening = true;
+        } else {
+            std::this_thread::sleep_for(100ms);
+        }
+    }
+    REQUIRE(listening);
+    CHECK(child->listener_owner(port, false) == ListenerOwner::Child);
+    CHECK(idle->listener_owner(port, false) == ListenerOwner::Other);
 }
 
 #endif

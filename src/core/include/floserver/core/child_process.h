@@ -130,6 +130,13 @@ struct ChildOptions {
 // Waits until process `pid` is gone; true when it is.
 bool wait_for_process_exit(std::uint32_t pid, std::chrono::milliseconds limit);
 
+// Whose server a connection to a loopback port reaches.
+enum class ListenerOwner : std::uint8_t {
+    Child,    // the child or a program it started (npm's node, a watcher's server)
+    Other,    // a program that isn't
+    Unknown,  // can't tell here (no such listener seen, or not this system)
+};
+
 class ChildProcess {
 public:
     [[nodiscard]] static std::unique_ptr<ChildProcess> start(const ChildOptions& options, std::string& error);
@@ -147,6 +154,11 @@ public:
     [[nodiscard]] std::optional<int> wait(std::chrono::milliseconds limit);
     // Ends it and everything it started, and waits for that.
     void kill();
+    // Who listens where a connection to 127.0.0.1:port ([::1]:port with
+    // `ipv6`) goes: this child's unit (Linux: its process group and their
+    // descendants; Windows: its job object) or another program. Unknown
+    // on other systems.
+    [[nodiscard]] ListenerOwner listener_owner(Port port, bool ipv6) const;
 
 private:
     struct Native;

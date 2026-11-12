@@ -10,7 +10,10 @@
 // on an internal port. The first connection runs the app's setup (below),
 // starts it and waits until it listens; when no connection has been open
 // for the idle time it is stopped, and the port stays. A server that can't
-// start answers with a page saying why.
+// start answers with a page saying why. It counts as up only while it runs
+// and, where the system tells (Linux, Windows), only when the listener on
+// its internal port is its own or a program it started: another program
+// there gets none of the project's requests, and the next port is tried.
 //
 // Setup: Node runs `npm install` when package.json lists packages and
 // node_modules is missing. Python makes .venv in the project with the
@@ -127,6 +130,9 @@ struct AppRunnerConfig {
     PortProbe probe;
     std::chrono::seconds start_limit{120};    // from starting until it listens
     std::chrono::seconds install_limit{600};  // npm install
+    // Internal ports are given out from here up (tests use a base of their
+    // own, so test programs running side by side don't meet).
+    Port first_internal_port = kFirstAppInternalPort;
 };
 
 class AppRunner : public std::enable_shared_from_this<AppRunner> {
@@ -169,8 +175,9 @@ private:
     AppRunner(const AppSpec& app, AppRunnerConfig config, std::unique_ptr<LoopbackListener> listener);
     // Starts it unless it runs, and waits. False (with `error`) when it can't.
     bool ensure_running(std::string& error);
+    // `foreign_port` is set when another program listens on `port`.
     std::unique_ptr<ChildProcess> start_server(const AppSpec& app, Port port, std::string& shown, bool& ipv6,
-                                               std::string& error);
+                                               bool& foreign_port, std::string& error);
     void serve(std::uintptr_t client);
     // Takes the server out (state Sleeping); it's stopped on a thread of
     // its own, so a slow shutdown holds up nothing else.

@@ -11,6 +11,7 @@
 #include <nlohmann/json.hpp>
 
 #include <array>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -23,6 +24,18 @@
 namespace test_util {
 
 namespace fs = std::filesystem;
+
+// Where this test program's project servers get their internal ports
+// (AppRunnerConfig::first_internal_port): one base per process, picked at
+// random, so test programs running side by side (or the same one twice) don't
+// start their servers on each other's ports. Below the ephemeral ports.
+inline std::uint16_t app_port_base() {
+    static const std::uint16_t base = [] {
+        std::random_device rd;
+        return static_cast<std::uint16_t>(20000 + (rd() % 120) * 100);
+    }();
+    return base;
+}
 
 class TempDir {
 public:

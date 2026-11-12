@@ -60,6 +60,8 @@ struct WebServiceConfig {
     std::size_t php_workers = kPhpWorkers;  // php-cgi processes per pool, one port each
     std::chrono::seconds reload_every{5};
     PortProbe probe;  // empty: can_listen_on_loopback
+    // Where the projects' own servers' internal ports start (app_runner.h).
+    Port first_app_internal_port = kFirstAppInternalPort;
     // phpMyAdmin (phpmyadmin.h): writes its config.inc.php when what it
     // says changed. Called on each reload while phpMyAdmin is served, after
     // the service has written the signon script and the install's stub.
