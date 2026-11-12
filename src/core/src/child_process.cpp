@@ -1190,6 +1190,22 @@ std::string whole_file(const char* path) {
     return text.str();
 }
 
+// The state letter in /proc/<pid>/stat ("pid (comm) S ppid ..."), or
+// nothing when it can't be read; comm can hold spaces and ')'.
+std::optional<char> process_state(const std::string& stat_text) {
+    const auto paren = stat_text.rfind(')');
+    if (paren == std::string::npos || paren + 2 >= stat_text.size()) {
+        return std::nullopt;
+    }
+    return stat_text[paren + 2];
+}
+
+// The process has exited: a zombie, dead, or gone from /proc.
+bool has_ended(long pid) {
+    const auto state = process_state(whole_file(("/proc/" + std::to_string(pid) + "/stat").c_str()));
+    return !state || *state == 'Z' || *state == 'X';
+}
+
 }  // namespace
 
 // Rows after the header:
@@ -1327,7 +1343,10 @@ ListenerOwner ChildProcess::listener_owner(Port port, bool ipv6) const {
                 ours.push_back(inode);
             }
         }
-        unreadable = unreadable || fd_ec == std::errc::permission_denied;
+        // An exited process (a zombie not yet reaped, or gone) holds no
+        // descriptors; its /proc files belong to root, so to anyone else
+        // its fd folder can't be read. Only a live one counts as hidden.
+        unreadable = unreadable || (fd_ec == std::errc::permission_denied && !has_ended(pid));
     }
     return judge_listeners(listeners, self, ours, unreadable);
 }

@@ -10,6 +10,7 @@
 #include <doctest/doctest.h>
 
 #include <array>
+#include <bit>
 #include <atomic>
 #include <cstdio>
 #include <sstream>
@@ -701,6 +702,30 @@ Port free_run(Port from, int n) {
     return 0;
 }
 
+// What a failed check on a runner should say: its state, its log, and on
+// Linux who listens on its internal port and who this is.
+std::string runner_diagnostics(const AppRunner& runner, Port internal) {
+    std::string text = runner.describe().dump() + "\n--- log:\n" +
+                       read_small_file(runner.log_file(), 1 << 20).value_or("(none)");
+#ifdef __linux__
+    const auto proc_text = [](const char* path) {
+        const std::ifstream in(path);
+        std::ostringstream all;
+        all << in.rdbuf();
+        return all.str();
+    };
+    text += "\n--- this process: euid " + std::to_string(geteuid()) + "; listeners on 127.0.0.1:" +
+            std::to_string(internal) + " (inode/uid):";
+    for (const ProcListener& l : proc_net_listeners(proc_text("/proc/net/tcp"), proc_text("/proc/net/tcp6"), internal,
+                                                    false)) {
+        text += " " + std::to_string(l.inode) + "/" + std::to_string(l.uid);
+    }
+#else
+    (void)internal;
+#endif
+    return text;
+}
+
 // Takes every connection waiting on `l` (another program's port); true when
 // one of them sent anything, as a relayed request would. FloServer's own
 // checks only connect and close.
@@ -1211,6 +1236,7 @@ TEST_CASE("another program on the app's internal port: the exit report, never a 
     const Pump pump(runner);
 
     const std::string page = get(app.port, "/", 10s);
+    INFO(runner_diagnostics(*runner, internal));
     CHECK_MESSAGE(page.starts_with("502 FloServer: web's server isn't running."), page);
     CHECK(page.find("ended (exit 3)") != std::string::npos);
     CHECK(page.find("cannot find module express") != std::string::npos);
@@ -1245,6 +1271,7 @@ TEST_CASE("a server still starting while another program has its port moves to t
         REQUIRE(runner);
         const Pump pump(runner);
         const std::string page = get(app.port, "/", 10s);
+        INFO(runner_diagnostics(*runner, internal));
         CHECK_MESSAGE(page.starts_with("502 FloServer: web's server isn't running."), page);
         CHECK(page.find("ended (exit 3)") != std::string::npos);
         CHECK(page.find("port " + std::to_string(internal + 1)) != std::string::npos);
@@ -1261,6 +1288,7 @@ TEST_CASE("a server still starting while another program has its port moves to t
         auto runner = AppRunner::open(app, config, error);
         REQUIRE(runner);
         const Pump pump(runner);
+        INFO(runner_diagnostics(*runner, internal + 1));
         CHECK(get(app.port, "/x.txt", 20s) == "200 mine");
         CHECK(runner->state() == AppState::Running);
         CHECK(runner->describe()["internal_port"].get<int>() == internal + 1);
@@ -1294,6 +1322,7 @@ TEST_CASE("a server that never listens while other programs hold its ports says 
     const Pump pump(runner);
 
     const std::string page = get(app.port, "/", 20s);
+    INFO(runner_diagnostics(*runner, internal + 2));
     CHECK_MESSAGE(page.starts_with("502 FloServer: web's server isn't running."), page);
     CHECK(page.find("port " + std::to_string(internal + 2) + " is used by another program") != std::string::npos);
     CHECK(runner->state() == AppState::Failed);
@@ -1474,6 +1503,41 @@ TEST_CASE("the listeners a loopback connection reaches, from /proc/net/tcp and t
     const auto unreadable = proc_net_listeners(kProcHeader + bad, kProcHeader, 9603, false);
     REQUIRE(unreadable.size() == 1);
     CHECK(unreadable[0].uid == 0xFFFFFFFFU);
+}
+
+TEST_CASE("listeners in /proc/net/tcp6 as a little-endian kernel prints them") {
+    if constexpr (std::endian::native != std::endian::little) {
+        MESSAGE("not a little-endian machine; skipped");
+        return;
+    }
+    // Copied from x86-64 kernels: [::1] (python --bind ::1), [::] (Node,
+    // Bun and Deno listening on every address, dual-stack), and
+    // ::ffff:127.0.0.1; port 0x2580 = 9600.
+    const std::string tcp6 =
+        kProcHeader +
+        "   0: 00000000000000000000000001000000:2580 00000000000000000000000000000000:0000 0A 00000000:00000000 "
+        "00:00000000 00000000  1001        0 4001 1 0000000000000000 100 0 0 10 0\n"
+        "   1: 00000000000000000000000000000000:2581 00000000000000000000000000000000:0000 0A 00000000:00000000 "
+        "00:00000000 00000000  1001        0 4002 1 0000000000000000 100 0 0 10 0\n"
+        "   2: 0000000000000000FFFF00000100007F:2582 00000000000000000000000000000000:0000 0A 00000000:00000000 "
+        "00:00000000 00000000  1001        0 4003 1 0000000000000000 100 0 0 10 0\n";
+    const std::string tcp = kProcHeader +
+                            "   0: 0100007F:2583 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1001        "
+                            "0 4004 1 0000000000000000 100 0 0 10 0\n"
+                            "   1: 00000000:2584 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        "
+                            "0 4005 1 0000000000000000 100 0 0 10 0\n";
+    using Inodes = std::vector<std::uint64_t>;
+    CHECK(inodes(proc_net_listeners(tcp, tcp6, 9600, true)) == Inodes{4001});
+    CHECK(proc_net_listeners(tcp, tcp6, 9600, false).empty());  // [::1] doesn't take IPv4
+    CHECK(inodes(proc_net_listeners(tcp, tcp6, 9601, false)) == Inodes{4002});  // dual-stack [::]
+    CHECK(inodes(proc_net_listeners(tcp, tcp6, 9601, true)) == Inodes{4002});
+    CHECK(inodes(proc_net_listeners(tcp, tcp6, 9602, false)) == Inodes{4003});
+    CHECK(inodes(proc_net_listeners(tcp, tcp6, 9603, false)) == Inodes{4004});
+    const auto any = proc_net_listeners(tcp, tcp6, 9604, false);
+    REQUIRE(any.size() == 1);
+    CHECK(any[0].uid == 0);
+    CHECK(judge_listeners(any, 1001, {4005}, true) == ListenerOwner::Other);  // root's, on 0.0.0.0
+    CHECK(judge_listeners(proc_net_listeners(tcp, tcp6, 9601, false), 1001, {4002}, false) == ListenerOwner::Child);
 }
 
 TEST_CASE("a listener is the child's only when every one is this user's and the child's") {

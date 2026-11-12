@@ -1193,7 +1193,12 @@ std::unique_ptr<ChildProcess> AppRunner::start_server(const AppSpec& app, Port p
                 ended = true;  // the exit report, next time round
                 break;
             }
-            if (child->listener_owner(port, v6) == ListenerOwner::Other) {
+            const auto owner = child->listener_owner(port, v6);
+            if (!child->running()) {
+                ended = true;  // it ended while its listener was looked for
+                break;
+            }
+            if (owner == ListenerOwner::Other) {
                 child->kill();
                 append_line(log_, "--- FloServer: port " + std::to_string(port) + " is used by another program");
                 error = "port " + std::to_string(port) + " is used by another program, so " + shown +
@@ -1201,6 +1206,9 @@ std::unique_ptr<ChildProcess> AppRunner::start_server(const AppSpec& app, Port p
                 foreign_port = true;
                 return nullptr;
             }
+            append_line(log_, "--- FloServer: taking connections on " +
+                                  std::string(v6 ? "[::1]:" : "127.0.0.1:") + std::to_string(port) +
+                                  (owner == ListenerOwner::Child ? "" : " (whose listener it is can't be told here)"));
             ipv6 = v6;
             return child;
         }
