@@ -25,6 +25,7 @@ add_library(floserver_core STATIC
     src/builtin.cpp
     src/der.cpp
     src/child_process.cpp
+    src/cpu_features.cpp
     src/php_pool.cpp
     src/php_settings.cpp
     src/phpmyadmin.cpp

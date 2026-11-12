@@ -71,13 +71,14 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     FieldPhp,
     FieldDatabase,
     FieldWeb,
-    FieldNode,
+    FieldJavascript,
     FieldPython,
     ChoiceNone,
     ChoiceNewest,
     NotInstalled,      // {0}: "8.1"
     SavedIn,           // {0}: "floserver.json"
     PhpOffNote,        // under the pickers: PHP off, the folder has .php files
+    BunPackagesNote,   // under the pickers: a Bun project without node_modules
     DatabaseTitle,     // {0}: the database name
     DatabaseDetail,    // {0}: "127.0.0.1:3306", {1}: the user
     CopyEnv,
@@ -794,6 +795,8 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     MailDeleteAskOne,
     MailRemoveEmailsFailed,
     MailRemoveEmailsFailedNoWhy,
+    FirstRunWhatBun,   // first run's line for Bun (D31)
+    FirstRunWhatDeno,  // and for Deno
     // Redis (D30)
     SettingsRedis,
     RedisHint,

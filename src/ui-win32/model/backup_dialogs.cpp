@@ -131,6 +131,12 @@ std::string backup_versions_text(const json& versions) {
     if (const std::string node = text_of(versions, "node"); !node.empty()) {
         add("Node.js " + node);
     }
+    if (const std::string bun = text_of(versions, "bun"); !bun.empty()) {
+        add("Bun " + bun);
+    }
+    if (const std::string deno = text_of(versions, "deno"); !deno.empty()) {
+        add("Deno " + deno);
+    }
     if (const std::string python = text_of(versions, "python"); !python.empty()) {
         add("Python " + python);
     }

@@ -44,6 +44,10 @@ struct RuntimeServiceConfig {
     std::chrono::milliseconds retry_delay{3000};
     // A list fetched less than this long ago is used without asking again.
     std::chrono::minutes list_max_age{60};
+    // Whether this computer's CPU has AVX2 (D31): Bun's regular build needs
+    // it, and without it the "baseline" build is installed. Empty: ask the
+    // CPU (cpu_has_avx2()); tests replace it.
+    std::function<bool()> has_avx2;
     // The templates used when no signed list with templates can be had
     // (offline, first run): a JSON array, normally kBuiltInTemplatesJson.
     std::string builtin_templates_json = "[]";

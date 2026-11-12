@@ -68,7 +68,7 @@ void print_help(std::ostream& out) {
         << "  rename <name> <new> [--folder]  Rename a project (its address follows); --folder: its folder too\n"
         << "  backup <project> [--to <zip>] [--no-database]  Back up a project as a .zip (Documents\\FloServer Backups)\n"
         << "  restore <project> <zip>    Put a project's files and database back from a backup\n"
-        << "  use <php|node|python|mariadb> <v> Set a version in this project's floserver.json\n"
+        << "  use <php|node|bun|deno|python|mariadb> <v>  Set a version in this project's floserver.json\n"
         << "  use php <none|newest|auto>  ...no PHP, always the newest PHP, or PHP when there are .php files\n"
         << "  use redis <on|off>         The shared Redis server for this project (its .env gets REDIS_*)\n"
         << "  php <series>               PHP settings for a series (8.5): extensions and php.ini values\n"
@@ -91,7 +91,7 @@ void print_help(std::ostream& out) {
         << "  untrust                    Remove FloServer's certificate authority\n"
         << "  check [folder]             Check the floserver.json for a project\n"
         << "  studio [project|folder]    Open a FloCMS project in FloCMS Studio\n"
-        << "  shims [install|remove]     php, node, npm, composer, python... in your terminal, at each project's version\n"
+        << "  shims [install|remove]     php, node, npm, composer, python, bun, deno... in your terminal, at each project's version\n"
         << "  version                    Show the version\n"
         << "  help                       Show this help\n";
 }
@@ -384,8 +384,9 @@ std::string state_line(const nlohmann::json& p) {
             if (text_of(p, "web") == "apache") {
                 return "on, Apache can't start" + (why.empty() ? "" : ": " + why);
             }
-            return text_of(p, "node").empty() && text_of(p, "python").empty() ? "on, PHP can't start"
-                                              : "on, its server can't start" + (why.empty() ? "" : ": " + why);
+            const bool own_server = !text_of(p, "node").empty() || !text_of(p, "bun").empty() ||
+                                    !text_of(p, "deno").empty() || !text_of(p, "python").empty();
+            return !own_server ? "on, PHP can't start" : "on, its server can't start" + (why.empty() ? "" : ": " + why);
         }
         return run == "running" ? "on, running" : run == "starting" ? "on, starting" : run.empty() ? "on" : "on, asleep";
     }
@@ -426,11 +427,15 @@ int projects(const std::vector<std::string>& args) {
     for (const auto& p : list) {
         const std::string php = text_of(p, "php");
         const std::string node = text_of(p, "node");
+        const std::string bun = text_of(p, "bun");
+        const std::string deno = text_of(p, "deno");
         const std::string python = text_of(p, "python");
         std::cout << std::left << std::setw(22) << text_of(p, "name") << std::setw(16)
                   << (!php.empty()      ? "php " + php
                       : !python.empty() ? "python " + python
                       : !node.empty()   ? "node " + node
+                      : !bun.empty()    ? "bun " + bun
+                      : !deno.empty()   ? "deno " + deno
                                         : std::string("-"))
                   << (p.value("keep_running", false) ? "keep running  " : "") << state_line(p) << "\n";
         if (!text_of(p, "address").empty()) {
@@ -1025,10 +1030,11 @@ std::optional<fs::path> project_folder_for(const fs::path& here) {
 // installed) and auto (no key: the folder decides).
 int use(const std::vector<std::string>& args) {
     const bool redis_word = args.size() == 3 && args[1] == "redis" && (args[2] == "on" || args[2] == "off");
-    if (args.size() != 3 ||
-        (args[1] != "php" && args[1] != "node" && args[1] != "python" && args[1] != "mariadb" && !redis_word)) {
-        std::cerr << "Usage: flo use <php|node|python|mariadb> <version>   for example: flo use php 8.4\n"
+    if (args.size() != 3 || (args[1] != "php" && args[1] != "node" && args[1] != "bun" && args[1] != "deno" &&
+                             args[1] != "python" && args[1] != "mariadb" && !redis_word)) {
+        std::cerr << "Usage: flo use <php|node|bun|deno|python|mariadb> <version>   for example: flo use php 8.4\n"
                   << "       flo use php <none|newest|auto>   no PHP, always the newest PHP, or as the folder says\n"
+                  << "       (a project has one JavaScript runtime: flo use bun 1.3 replaces its node or deno)\n"
                   << "       flo use redis <on|off>   the shared Redis server (Garnet) for this project\n";
         return 2;
     }
@@ -1262,7 +1268,7 @@ int shims(const std::vector<std::string>& args) {
             std::cerr << error << "\n";
             return 1;
         }
-        std::cout << "Shims for php, node, npm, npx, composer, python and pip are in " << shown(dir) << "\n";
+        std::cout << "Shims for php, node, npm, npx, composer, python, pip, bun, bunx and deno are in " << shown(dir) << "\n";
         if (change == core::PathChange::Unsupported) {
             std::cout << "Add this line to your shell's profile (~/.zshrc, ~/.bashrc):\n  export PATH=\""
                       << core::path_to_utf8(dir) << ":$PATH\"\n";
@@ -1339,7 +1345,9 @@ int check(const fs::path& start) {
                             : c.php_choice == floserver::core::PhpChoice::Off    ? std::string("none")
                             : c.php_choice == floserver::core::PhpChoice::Newest ? std::string("newest")
                                                                                  : std::string("default");
-    std::cout << "  php " << php << ", node " << c.node.value_or("default")
+    const auto js = floserver::core::js_runtime(c);
+    std::cout << "  php " << php << ", "
+              << (js ? js->name : std::string("node")) << " " << (js ? js->version : std::string("default"))
               << ", database "
               << (c.database ? c.database->family + "-" + c.database->version : std::string("none"))
               << ", web " << (c.web == floserver::core::WebServer::Apache ? "apache" : "nginx")

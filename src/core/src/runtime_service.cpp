@@ -1,5 +1,6 @@
 #include "floserver/core/runtime_service.h"
 
+#include "floserver/core/cpu_features.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/downloader.h"
 #include "floserver/core/garnet.h"
@@ -38,6 +39,20 @@ bool runs_on(const RuntimeFile& r, std::string_view platform) {
     return r.platform == platform || r.platform == "any";
 }
 
+// Whether FloServer installs this entry of the list here: PHP's usual (NTS)
+// build, a runtime with no variant, never a Mailpit with a known security
+// problem; Bun's regular build on a CPU with AVX2 and its "baseline" build on
+// one without (D31).
+bool installable(const RuntimeFile& r, bool avx2) {
+    if (!runtime_version_allowed(r.name, r.version)) {
+        return false;
+    }
+    if (r.name == "bun") {
+        return r.variant == (avx2 ? "" : "baseline");
+    }
+    return r.variant.empty() || r.variant == "nts";
+}
+
 bool is_finished(std::string_view state) {
     return state == "done" || state == "failed" || state == "cancelled";
 }
@@ -74,6 +89,9 @@ RuntimeService::RuntimeService(RuntimeServiceConfig config, std::shared_ptr<Http
     : config_(std::move(config)), transport_(std::move(transport)) {
     if (!config_.now) {
         config_.now = system_now;
+    }
+    if (!config_.has_avx2) {
+        config_.has_avx2 = cpu_has_avx2;
     }
     // No install can be running yet: clear what a crash may have left.
     remove_leftovers(runtimes_root());
@@ -226,8 +244,9 @@ json RuntimeService::list(bool refresh, bool installed_only, bool cached_only) {
                    {"key", cached->key_id},
                    {"warnings", cached->warnings}};
     for (const RuntimeFile& r : cached->manifest.runtimes) {
-        if (!runs_on(r, config_.platform) || !runtime_version_allowed(r.name, r.version)) {
-            continue;
+        if (!runs_on(r, config_.platform) || !runtime_version_allowed(r.name, r.version) ||
+            (r.name == "bun" && !installable(r, config_.has_avx2()))) {
+            continue;  // Bun: the build this CPU runs, not both
         }
         out["available"].push_back({{"name", r.name},
                                     {"version", r.version},
@@ -460,8 +479,23 @@ bool RuntimeService::remove(const std::string& name, const std::string& version,
             --service.removing_;
         }
     } const done(*this);
+    // Bun's baseline build lives in "<version>-baseline" (D31): "1.3.14"
+    // finds it too, this CPU's build first.
+    std::string folder = version;
+    if (name == "bun" && !version.ends_with("-baseline")) {
+        const std::string baseline = version + "-baseline";
+        const std::array<std::string, 2> order = config_.has_avx2() ? std::array<std::string, 2>{version, baseline}
+                                                                    : std::array<std::string, 2>{baseline, version};
+        std::error_code ec;
+        for (const std::string& candidate : order) {
+            if (fs::is_directory(runtimes_root() / "bun" / path_from_utf8(candidate), ec)) {
+                folder = candidate;
+                break;
+            }
+        }
+    }
     std::string error;
-    if (!remove_runtime(runtimes_root(), name, version, error)) {
+    if (!remove_runtime(runtimes_root(), name, folder, error)) {
         refusal = {"not_removed", error};
         return false;
     }
@@ -518,10 +552,11 @@ void RuntimeService::worker() {
 namespace {
 
 // The newest entry of `name` for this platform (or "any") matching `wanted`
-// and, when given, `variant` exactly; else only plain and NTS builds.
+// and, when given, `variant` exactly; else what installable() takes (plain
+// and NTS builds; Bun's baseline build on a CPU without AVX2).
 // `offered` gets every version looked at.
 std::optional<RuntimeFile> pick_entry(const Manifest& manifest, const std::string& name, const std::string& platform,
-                                      const std::string& wanted_text, const std::string& variant,
+                                      const std::string& wanted_text, const std::string& variant, bool avx2,
                                       std::vector<std::string>* offered = nullptr) {
     const auto wanted = wanted_text.empty() ? std::optional<Version>() : Version::parse(wanted_text);
     std::vector<RuntimeFile> candidates = runtimes_for(manifest, name, platform);
@@ -533,7 +568,7 @@ std::optional<RuntimeFile> pick_entry(const Manifest& manifest, const std::strin
     });
     std::optional<RuntimeFile> entry;
     for (const RuntimeFile& r : candidates) {
-        const bool kind = variant.empty() ? (r.variant.empty() || r.variant == "nts") : r.variant == variant;
+        const bool kind = variant.empty() ? installable(r, avx2) : r.variant == variant;
         if (!kind || !runtime_version_allowed(r.name, r.version)) {
             continue;  // a Mailpit with a known security problem is never installed
         }
@@ -630,8 +665,9 @@ void RuntimeService::run(Job& job) {
 
     // Newest first; PHP's thread-safe builds aren't what FloServer runs.
     std::vector<std::string> offered;
+    const bool avx2 = config_.has_avx2();
     const std::optional<RuntimeFile> entry =
-        pick_entry(cached->manifest, job.name, config_.platform, job.requested, job.variant, &offered);
+        pick_entry(cached->manifest, job.name, config_.platform, job.requested, job.variant, avx2, &offered);
     if (!entry) {
         std::string message = "the runtime list has no " + job.name +
                               (job.requested.empty() ? "" : " " + job.requested) +
@@ -657,7 +693,7 @@ void RuntimeService::run(Job& job) {
     std::vector<std::string> notes;
     const auto add_php_redis = [&](const std::string& series) {
         if (const auto r = pick_entry(cached->manifest, std::string(kPhpRedisRuntime), config_.platform, "",
-                                      php_redis_variant(series))) {
+                                      php_redis_variant(series), avx2)) {
             if (!is_installed(root, *r)) {
                 extras.push_back(*r);
             }
@@ -667,7 +703,7 @@ void RuntimeService::run(Job& job) {
     };
     if (job.name == kGarnetRuntime) {
         dotnet = pick_entry(cached->manifest, std::string(kDotnetRuntime), config_.platform,
-                            std::string(kGarnetDotnetSeries), "");
+                            std::string(kGarnetDotnetSeries), "", avx2);
         if (!dotnet) {
             set_state(job, "failed",
                       "the runtime list has no .NET " + std::string(kGarnetDotnetSeries) + " runtime, which Garnet needs");

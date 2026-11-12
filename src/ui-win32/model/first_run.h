@@ -47,8 +47,8 @@ struct FirstRunOffer {
 };
 
 // runtimes.list's full answer: PHP 8.5, MariaDB 11.4, Node.js 24, Composer
-// and Mailpit (D27) ticked, Python 3.13, phpMyAdmin 5.2 and Apache 2.4 offered, nginx
-// always; each the newest of its series in the signed list ("available"),
+// and Mailpit (D27) ticked, Python 3.13, Bun and Deno (D31, the newest of
+// each), phpMyAdmin 5.2 and Apache 2.4 offered, nginx always; each the newest of its series in the signed list ("available"),
 // in that order. A series the list doesn't have is left out.
 [[nodiscard]] std::vector<FirstRunOffer> first_run_offers(const nlohmann::json& runtimes_reply);
 

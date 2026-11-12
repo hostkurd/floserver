@@ -78,7 +78,7 @@ struct BackupInfo {
     std::string date;      // when it was made, local time: "2026-11-05 14:30"
     std::string made_by;   // FloServer's version
     std::string computer;  // computer_id() of the one that made it
-    // From its floserver.json: "php", "node", "python", "database", "web"
+    // From its floserver.json: "php", "node", "bun", "deno", "python", "database", "web"
     // as written there ("8.5", "mariadb-11.4"; "php": "none" for false).
     nlohmann::json versions = nlohmann::json::object();
     std::vector<std::string> left_out;  // "vendor", "node_modules", ".venv"

@@ -742,7 +742,7 @@ void WebService::reload_locked() {
             ns.app_port = spec.port;
             ns.tls = site_tls;
             site.app = true;
-            site.app_kind = spec.kind == AppKind::Python ? "python" : "node";
+            site.app_kind = app_runtime_name(spec.kind);
             site.app_name = spec.name;
             site.address = ns.tls ? "https" : "http";
             serve.push_back(std::move(ns));

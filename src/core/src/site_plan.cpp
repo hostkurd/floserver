@@ -61,13 +61,14 @@ bool has_php_files(const fs::path& doc_root) { return find_php_files(doc_root, t
 bool has_php_files_seen(const fs::path& doc_root) { return find_php_files(doc_root, false); }
 
 const InstalledRuntime* best_installed(const std::vector<InstalledRuntime>& installed, const std::string& name,
-                                       const std::string& wanted) {
+                                       const std::string& wanted, bool avx2) {
     const std::optional<Version> want = wanted.empty() ? std::nullopt : Version::parse(wanted);
     if (!wanted.empty() && !want) {
         return nullptr;
     }
     const InstalledRuntime* best = nullptr;
     std::optional<Version> best_version;
+    bool best_fits = false;
     for (const InstalledRuntime& r : installed) {
         if (r.name != name || (name == "php" && !is_pool_php(r))) {
             continue;
@@ -76,9 +77,13 @@ const InstalledRuntime* best_installed(const std::vector<InstalledRuntime>& inst
         if (!v || (want && !want->matches(*v))) {
             continue;
         }
-        if (!best_version || *v > *best_version) {
+        // Bun's build for this CPU beats the other one of any version: the
+        // regular build crashes without AVX2 (D31).
+        const bool fits = name != "bun" || r.variant == (avx2 ? "" : "baseline");
+        if (!best_version || (fits && !best_fits) || (fits == best_fits && *v > *best_version)) {
             best = &r;
             best_version = v;
+            best_fits = fits;
         }
     }
     return best;
@@ -312,6 +317,21 @@ void plan_phpmyadmin(WebPlan& plan, const AppConfig& config, const std::vector<I
 
 }  // namespace
 
+const char* app_runtime_name(AppKind kind) {
+    switch (kind) {
+        case AppKind::Bun:
+            return "bun";
+        case AppKind::Deno:
+            return "deno";
+        case AppKind::Python:
+            return "python";
+        case AppKind::Node:
+        case AppKind::Apache:
+            break;
+    }
+    return "node";
+}
+
 WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
                    const std::vector<InstalledRuntime>& installed, const std::optional<std::string>& default_php,
                    const CustomIniReader& custom_ini) {
@@ -357,22 +377,26 @@ WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
             plan.sites.push_back(std::move(site));
             continue;
         }
-        // Python or Node without PHP: the project's own server, forwarded to
-        // (D11, D17). Python serves when both are named (a Django app with a
-        // Vite front end); with PHP, they're only there for their tools.
-        if ((pc.node || pc.python) && !php_asked(pc) && !apache) {
-            const AppKind kind = pc.python ? AppKind::Python : AppKind::Node;
-            const std::string runtime_name = pc.python ? "python" : "node";
-            const std::string wanted = pc.python ? *pc.python : *pc.node;
+        // Python, Node, Bun or Deno without PHP: the project's own server,
+        // forwarded to (D11, D17, D31). Python serves when both are named (a
+        // Django app with a Vite front end); with PHP, the JavaScript runtime
+        // is only there for its tools.
+        const std::optional<JsRuntime> js = js_runtime(pc);
+        if ((js || pc.python) && !php_asked(pc) && !apache) {
+            AppKind kind = AppKind::Python;
+            if (!pc.python) {
+                kind = js->name == "bun" ? AppKind::Bun : (js->name == "deno" ? AppKind::Deno : AppKind::Node);
+            }
+            const std::string runtime_name = pc.python ? "python" : js->name;
+            const std::string wanted = pc.python ? *pc.python : js->version;
             const InstalledRuntime* runtime = best_installed(installed, runtime_name, wanted);
             if (runtime == nullptr) {
                 site.missing.push_back(runtime_name);
                 site.missing.back().append(" ").append(wanted);
             }
-            const InstalledRuntime* tools =
-                pc.python && pc.node ? best_installed(installed, "node", *pc.node) : nullptr;
-            if (pc.python && pc.node && tools == nullptr) {
-                site.missing.push_back("node " + *pc.node);
+            const InstalledRuntime* tools = pc.python && js ? best_installed(installed, js->name, js->version) : nullptr;
+            if (pc.python && js && tools == nullptr) {
+                site.missing.push_back(js->name + " " + js->version);
             }
             if (pc.database && best_installed(installed, pc.database->family, pc.database->version) == nullptr) {
                 site.missing.push_back(pc.database->family + " " + pc.database->version);
@@ -384,7 +408,8 @@ WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
             }
             plan.apps.push_back({project.name, kind, project.dir, runtime->version, runtime->dir, pc.command,
                                  project.keep_running, 0, tools != nullptr ? tools->dir : fs::path(),
-                                 tools != nullptr ? tools->version : std::string(), {}});
+                                 tools != nullptr ? tools->version : std::string(), {},
+                                 js ? js->name : std::string("node")});
             site.app = plan.apps.size() - 1;
             site.state = SiteState::Ready;
             plan.sites.push_back(std::move(site));
@@ -399,7 +424,7 @@ WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
         if (off) {
             site.php_files = has_php_files_seen(site.doc_root);
         }
-        if (!php_asked(pc) && !pc.node && !pc.python && !apache && (off || !has_php_files(site.doc_root))) {
+        if (!php_asked(pc) && !js && !pc.python && !apache && (off || !has_php_files(site.doc_root))) {
             if (pc.database && best_installed(installed, pc.database->family, pc.database->version) == nullptr) {
                 site.missing.push_back(pc.database->family + " " + pc.database->version);
                 site.state = SiteState::NeedsDownload;
@@ -416,8 +441,8 @@ WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
             if (apache_runtime == nullptr) {
                 site.missing.emplace_back("apache");
             }
-            if (pc.node && best_installed(installed, "node", *pc.node) == nullptr) {
-                site.missing.push_back("node " + *pc.node);
+            if (js && best_installed(installed, js->name, js->version) == nullptr) {
+                site.missing.push_back(js->name + " " + js->version);
             }
             if (pc.python && best_installed(installed, "python", *pc.python) == nullptr) {
                 site.missing.push_back("python " + *pc.python);
@@ -444,8 +469,8 @@ WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
         if (php == nullptr) {
             site.missing.push_back(wanted_php.empty() ? "php" : "php " + wanted_php);
         }
-        if (pc.node && best_installed(installed, "node", *pc.node) == nullptr) {
-            site.missing.push_back("node " + *pc.node);
+        if (js && best_installed(installed, js->name, js->version) == nullptr) {
+            site.missing.push_back(js->name + " " + js->version);
         }
         if (pc.python && best_installed(installed, "python", *pc.python) == nullptr) {
             site.missing.push_back("python " + *pc.python);
@@ -564,11 +589,11 @@ std::map<std::string, std::vector<std::string>> runtime_users(const AppConfig& c
         }
     }
     for (const AppSpec& app : plan.apps) {
-        if (app.kind == AppKind::Node) {
-            use("node", app.runtime_dir, app.name);
+        if (app.kind == AppKind::Node || app.kind == AppKind::Bun || app.kind == AppKind::Deno) {
+            use(app_runtime_name(app.kind), app.runtime_dir, app.name);
         } else if (app.kind == AppKind::Python) {
             use("python", app.runtime_dir, app.name);
-            use("node", app.node_dir, app.name);
+            use(app.tools_name, app.node_dir, app.name);
         }
     }
     // What each project names, whatever state the plan left it in: one that
@@ -580,9 +605,9 @@ std::map<std::string, std::vector<std::string>> runtime_users(const AppConfig& c
                 use("php", r->dir, who);
             }
         }
-        if (pc.node) {
-            if (const InstalledRuntime* r = best_installed(installed, "node", *pc.node)) {
-                use("node", r->dir, who);
+        if (const auto js = js_runtime(pc)) {
+            if (const InstalledRuntime* r = best_installed(installed, js->name, js->version)) {
+                use(js->name, r->dir, who);
             }
         }
         if (pc.python) {
