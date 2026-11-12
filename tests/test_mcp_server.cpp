@@ -650,13 +650,19 @@ TEST_CASE("mcp: the filters' shapes, names and known tokens") {
     for (const char* k : {"%74oken", "api%5Fkey", "code", "auth_code", "otp_code", "signature", "X-Amz-Signature", "jwt",
                           "otp", "sid", "session", "session_id", "sessionid", "PHPSESSID", "jsessionid", "pat", "sk",
                           "salt", "hmac", "masterkey", "licenseKey", "client_pin", "pass", "db_pass", "passcode",
-                          "passwd", "passphrase", "APP_KEY", "api_key", "apiKey", "signing_key", "key", "keys"}) {
+                          "passwd", "passphrase", "APP_KEY", "api_key", "apiKey", "signing_key", "key", "keys",
+                          // At dba855d these hid; round 3 let them through (the final review).
+                          "dbpass", "rootpass", "smtppass", "OPENAI_KEY", "SENDGRID_KEY", "MAILGUN_KEY",
+                          "ALGOLIA_ADMIN_KEY", "SUPABASE_SERVICE_ROLE_KEY", "stripeKey", "webhook_key", "pkey",
+                          "NONCE_KEY", "LOGGED_IN_KEY", "laravel_session", "ci_session", "totp", "otpcode"}) {
         INFO(k);
         CHECK(mcp::secret_key(k));
     }
     for (const char* k : {"monkey", "keyboard", "path", "author", "status", "uptime_s", "inbox", "decode_x", "bypass",
                           "compass", "footprint", "sort_key", "primary_key", "country_code", "status_code",
-                          "session_lifetime", "session_driver"}) {
+                          "session_lifetime", "session_driver", "surpass", "overpass", "underpass", "trespass",
+                          "encompass", "foreign_key", "unique_key", "cache_key", "partition_key", "public_key",
+                          "publickey", "sortkey", "turkey", "hockey", "donkey", "jockey", "whiskey"}) {
         INFO(k);
         CHECK_FALSE(mcp::secret_key(k));
     }
@@ -681,6 +687,16 @@ TEST_CASE("mcp: the filters' shapes, names and known tokens") {
     CHECK(blanked(R"(mysql -p"pw2" db)") == R"(mysql -p"[hidden]" db)");
     CHECK(blanked("env('DB_PASSWORD', 'SECRET9')") == "env('DB_PASSWORD', '[hidden]')");
     CHECK(blanked("env('APP_NAME', 'Shop')") == "env('APP_NAME', 'Shop')");
+    CHECK(blanked("$dbpass = 'hunter2';") == "$dbpass = '[hidden]';");
+    CHECK(blanked("'password' => env('DB_PASSWORD', 'secret9'),") == "'password' => env('DB_PASSWORD', '[hidden]'),");
+    CHECK(blanked("'password' => env('X', 'secret10'),") == "'password' => env('X', '[hidden]'),");
+    CHECK(blanked("password=env('DB_PASSWORD','s11')") == "password=env('DB_PASSWORD','[hidden]')");
+    CHECK(blanked("'key' => env('APP_KEY', 'base64:s12'),") == "'key' => env('APP_KEY', '[hidden]'),");
+    CHECK(blanked("define('DB_PASSWORD', 'hunter2');") == "define('DB_PASSWORD', '[hidden]');");
+    CHECK(blanked("define('AUTH_KEY', 'x y z');") == "define('AUTH_KEY', '[hidden]');");
+    CHECK(blanked("define('WP_DEBUG', true);") == "define('WP_DEBUG', true);");
+    CHECK(blanked("Illuminate\\Session\\TokenMismatchException: CSRF token mismatch.") ==
+          "Illuminate\\Session\\TokenMismatchException: CSRF token mismatch.");
     CHECK(blanked("mysql://root:p@ss@localhost/db") == "mysql://root:[hidden]@localhost/db");
     CHECK(blanked("see https://example.test/a@b") == "see https://example.test/a@b");
     CHECK(blanked("k=-----BEGIN RSA PRIVATE KEY-----\nMIIEabc\n-----END RSA PRIVATE KEY----- after") ==
@@ -713,7 +729,11 @@ TEST_CASE("mcp: the filters' shapes, names and known tokens") {
                                   {"uri", "/login?next=%2Freset%3Ftoken%3DSECRET1&redirect=https%3A%2F%2Fu%3APW2%40h.test"
                                           "&twice=%252Fx%253Ftoken%253DSECRET3&page=2"}},
                                  {{"t", 0}, {"status", 200}, {"ms", 1}, {"method", "GET"},
-                                  {"uri", "/password/reset/9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08?e=me"}}})}};
+                                  {"uri", "/password/reset/9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08?e=me"}},
+                                 {{"t", 0}, {"status", 200}, {"ms", 1}, {"method", "GET"},
+                                  {"uri", "/blog/how-to-install-php-8-4-on-windows-11-step-by-step"}},
+                                 {{"t", 0}, {"status", 200}, {"ms", 1}, {"method", "GET"},
+                                  {"uri", "/orders/123e4567-e89b-12d3-a456-426614174000"}}})}};
     mcp::Server server(backend);
     const json r = call_tool(server, "read_log", {{"name", "shop"}});
     CHECK(r["structuredContent"]["lines"][0] ==
@@ -721,14 +741,20 @@ TEST_CASE("mcp: the filters' shapes, names and known tokens") {
     CHECK(r["structuredContent"]["lines"][1] ==
           "1970-01-01T00:00:00.000Z 302 1ms GET /login?next=[hidden]&redirect=[hidden]&twice=[hidden]&page=2");
     CHECK(r["structuredContent"]["lines"][2] == "1970-01-01T00:00:00.000Z 200 1ms GET /password/reset/[hidden]?e=me");
+    // A slug and a UUID stay readable.
+    CHECK(r["structuredContent"]["lines"][3] ==
+          "1970-01-01T00:00:00.000Z 200 1ms GET /blog/how-to-install-php-8-4-on-windows-11-step-by-step");
+    CHECK(r["structuredContent"]["lines"][4] == "1970-01-01T00:00:00.000Z 200 1ms GET /orders/123e4567-e89b-12d3-a456-426614174000");
     // PHP stack frames: quoted arguments left out, the rest as it is.
     backend.results["projects.log"] = {
         {"lines", json::array({"#0 /s/app/Auth.php(42): Auth->login('me@example.test', 'hunter2', 3)",
+                               "#1 [internal function]: App\\Foo->bar('hunter2')",
                                "#1 {main}", "  thrown in /s/app/Auth.php on line 42"})},
         {"file", "php-8.4.27.php-errors.log"}, {"php", "8.4.27"}, {"shared_with", json::array()}};
     const json php = call_tool(server, "read_log", {{"name", "shop"}, {"kind", "php"}});
     CHECK(php["structuredContent"]["lines"] ==
-          json::array({"#0 /s/app/Auth.php(42): Auth->login('\u2026', '\u2026', 3)", "#1 {main}",
+          json::array({"#0 /s/app/Auth.php(42): Auth->login('\u2026', '\u2026', 3)",
+                       "#1 [internal function]: App\\Foo->bar('\u2026')", "#1 {main}",
                        "  thrown in /s/app/Auth.php on line 42"}));
 }
 
@@ -765,6 +791,9 @@ TEST_CASE("mcp: floserver.json's settings only as FloServer takes them") {
     CHECK(more["structuredContent"]["floserver_json"]["php"] == "newest");
     CHECK(more["structuredContent"]["floserver_json"]["node"] == "(set, not valid)");
     CHECK(more["structuredContent"]["floserver_json"]["database"] == "(set, not valid)");
+    backend.files["/home/me/sites/shop"] = R"({"database": "MariaDB-11.4", "python": "3.13"})";
+    CHECK(call_tool(server, "project_info", {{"name", "shop"}})["structuredContent"]["floserver_json"]["database"] ==
+          "MariaDB-11.4");
     backend.files["/home/me/sites/shop"] = R"({"database": "oracle-19", "python": "3.13"})";
     const json family = call_tool(server, "project_info", {{"name", "shop"}});
     CHECK(family["structuredContent"]["floserver_json"]["database"] == "(set, not valid)");

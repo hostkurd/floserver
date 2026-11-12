@@ -365,7 +365,18 @@ std::string blank_secret_query(std::string_view uri) {
         // A segment of 32 or more letters, digits, - and _ is a token (a
         // password reset link's, say), not a name.
         const std::string_view name = segment.substr(0, semi);
-        const bool token = name.size() >= 32 && std::all_of(name.begin(), name.end(), [](char c) { return name_char(c, "-_"); });
+        bool token = name.size() >= 32 && std::all_of(name.begin(), name.end(), [](char c) { return name_char(c, "-_"); }) &&
+                     name.find_first_of("0123456789") != std::string_view::npos;
+        // ...with a run of 16 or more between - and _ (a hex or base64 token, not a slug or a UUID).
+        if (token) {
+            std::size_t longest = 0;
+            std::size_t run = 0;
+            for (const char c : name) {
+                run = c == '-' || c == '_' ? 0 : run + 1;
+                longest = std::max(longest, run);
+            }
+            token = longest >= 16;
+        }
         out += token ? std::string("[hidden]") : std::string(name);
         if (semi != std::string_view::npos) {
             out += ";" + blank_params(segment.substr(semi + 1), ';');
@@ -392,7 +403,11 @@ std::string php_frame(std::string_view line) {
     if (at >= line.size() || line[at] != '#' || at + 1 >= line.size() || line[at + 1] < '0' || line[at + 1] > '9') {
         return std::string(line);
     }
-    const std::size_t call = line.find("): ", at);
+    // #3 /s/app.php(12): f(...), or #0 [internal function]: f(...).
+    std::size_t call = line.find("): ", at);
+    if (call == std::string_view::npos) {
+        call = line.find("]: ", at);
+    }
     const std::size_t args = call == std::string_view::npos ? std::string_view::npos : line.find('(', call + 3);
     if (args == std::string_view::npos) {
         return std::string(line);
@@ -640,6 +655,7 @@ std::vector<Span> secret_spans(std::string_view s) {
         spans.push_back({body, end_dashes == std::string_view::npos ? n : end_dashes + 5});
     }
     std::size_t i = 0;
+    std::size_t secret_call_at = std::string_view::npos;  // an env( after a secret's name
     while (i < n) {
         if (!run_char(s[i])) {
             ++i;
@@ -666,8 +682,10 @@ std::vector<Span> secret_spans(std::string_view s) {
             spans.push_back({a + 2, e});
             continue;
         }
-        // env('DB_PASSWORD', 'default'): the default, when the name is a secret's.
-        if ((lower_equal(run, "env") || lower_equal(run, "getenv")) && e < n && s[e] == '(') {
+        // env('DB_PASSWORD', 'default') / define('DB_PASSWORD', 'value'): the
+        // second argument, when the first names a secret (or a secret's name
+        // came just before: 'password' => env('X', 'default')).
+        if ((lower_equal(run, "env") || lower_equal(run, "getenv") || lower_equal(run, "define")) && e < n && s[e] == '(') {
             std::size_t q = e + 1;
             while (q < n && blank(s[q])) {
                 ++q;
@@ -678,7 +696,8 @@ std::vector<Span> secret_spans(std::string_view s) {
                 while (comma < n && blank(s[comma])) {
                     ++comma;
                 }
-                if (name_end < n && comma < n && s[comma] == ',' && secret_key(s.substr(q + 1, name_end - q - 1))) {
+                if (name_end < n && comma < n && s[comma] == ',' &&
+                    (a == secret_call_at || secret_key(s.substr(q + 1, name_end - q - 1)))) {
                     std::size_t v = comma + 1;
                     while (v < n && blank(s[v])) {
                         ++v;
@@ -735,8 +754,10 @@ std::vector<Span> secret_spans(std::string_view s) {
         while (!name.empty() && (name.front() == '-' || name.front() == '.')) {
             name.remove_prefix(1);
         }
-        // A bare "code" in text is an error code ("(code: 1045)"), not OAuth's.
-        if (!separated || name.empty() || !secret_key(name) || lower_equal(name, "code")) {
+        // A bare "code" in text is an error code ("(code: 1045)"), not OAuth's;
+        // a namespaced class (Illuminate\Session\TokenMismatchException:) isn't a name.
+        const bool class_name = (a > 0 && s[a - 1] == '\\') || (e < n && s[e] == '\\');
+        if (!separated || name.empty() || class_name || !secret_key(name) || lower_equal(name, "code")) {
             continue;
         }
         std::size_t v = k;
@@ -751,6 +772,19 @@ std::vector<Span> secret_spans(std::string_view s) {
         if (s.substr(v).starts_with("[hidden]")) {
             i = v + 8;  // already left out
             continue;
+        }
+        // 'password' => env('DB_PASSWORD', 'default'): the env() rule takes it, with this name's say.
+        if (quote == 0) {
+            std::size_t w = v;
+            while (w < n && run_char(s[w])) {
+                ++w;
+            }
+            const std::string_view call = s.substr(v, w - v);
+            if (w < n && s[w] == '(' && (lower_equal(call, "env") || lower_equal(call, "getenv"))) {
+                secret_call_at = v;
+                i = v;
+                continue;
+            }
         }
         std::size_t ve = value_end(v, quote);
         // Authorization: Bearer <token>: the scheme and the token.
@@ -804,11 +838,17 @@ bool secret_key(std::string_view raw_key) {
         "password", "passwd", "passphrase", "pwd",   "secret", "token", "cookie", "credential",
         "dsn",      "authorization", "authentication", "bearer", "signature", "salt", "hmac", "jwt"};
     // ...or as a part of its own (not "author").
-    static constexpr std::array<std::string_view, 9> kParts = {"auth", "auths", "pw", "sig", "sid", "pat", "sk", "pin", "mfa"};
-    // A key with what it's for: api_key, APP_KEY, signingKey, masterkey, licensekey (not sort_key, primary_key).
-    static constexpr std::array<std::string_view, 13> kKeyKinds = {"api",  "secret",  "private", "access", "master",
-                                                                   "license", "app",  "signing", "encryption", "client",
-                                                                   "crypt", "session", "hmac"};
+    static constexpr std::array<std::string_view, 10> kParts = {"auth", "auths", "pw",  "sig", "sid",
+                                                                "pat",  "sk",    "pin", "mfa", "totp"};
+    // Keys that aren't secrets: a database's or a cache's (sort_key, primary_key, public_key...).
+    static constexpr std::array<std::string_view, 21> kPlainKeys = {
+        "sort",  "primary", "foreign",   "unique",    "cache",     "partition", "index",
+        "lookup", "row",    "group",     "map",       "public",    "site",      "publishable",
+        "composite", "natural", "surrogate", "hash", "shard",   "routing",   "dedup"};
+    // Words ending in "key" or "pass" that aren't about one.
+    static constexpr std::array<std::string_view, 6> kKeyWords = {"monkey", "turkey", "hockey", "donkey", "jockey", "whiskey"};
+    static constexpr std::array<std::string_view, 7> kPassWords = {"bypass",   "compass",  "surpass", "overpass",
+                                                                   "underpass", "trespass", "encompass"};
     // A code with what it's for: auth_code, otp_code (not country_code, status_code).
     static constexpr std::array<std::string_view, 12> kCodeKinds = {"auth", "otp", "oauth", "verification", "verify", "mfa",
                                                                     "sms",  "reset", "confirm", "recovery", "backup", "totp"};
@@ -816,24 +856,34 @@ bool secret_key(std::string_view raw_key) {
     if (std::any_of(kWithin.begin(), kWithin.end(), [&](std::string_view w) { return joined.find(w) != std::string::npos; })) {
         return true;
     }
+    // Secret unless it's one of the harmless kinds named above.
     for (std::size_t i = 0; i < parts.size(); ++i) {
         const std::string& p = parts[i];
         const std::string_view before_part = i > 0 ? std::string_view(parts[i - 1]) : std::string_view();
-        // pass at a part's start (pass, passcode, db_pass), not inside bypass or compass.
-        if (p.starts_with("pass") || has(kParts, p) || p == "otp" ||
-            ((p == "key" || p == "keys") && (parts.size() == 1 || has(kKeyKinds, before_part))) ||
-            (p == "code" && (parts.size() == 1 || has(kCodeKinds, before_part))) ||
-            // A session's id, not its settings (session_lifetime, session_driver).
-            (p == "session" && (parts.size() == 1 || (i + 1 < parts.size() && (parts[i + 1] == "id" || parts[i + 1] == "key" ||
-                                                                                parts[i + 1] == "value")))) ||
-            p.ends_with("sessid") || p.ends_with("sessionid")) {
+        const bool last = i + 1 == parts.size();
+        if (has(kParts, p) || p.starts_with("otp") || p.ends_with("sessid") || p.ends_with("sessionid")) {
             return true;
         }
-        // One word: apikey, masterkey, licensekey, secretkey.
-        for (const std::string_view kind : kKeyKinds) {
-            if (p.size() == kind.size() + 3 && p.starts_with(kind) && p.ends_with("key")) {
-                return true;
-            }
+        // pass, passcode, db_pass, dbpass, rootpass (not bypass, compass).
+        if ((p.starts_with("pass") || p.ends_with("pass")) && !has(kPassWords, p)) {
+            return true;
+        }
+        // key or keys: OPENAI_KEY, stripeKey, webhook_key, LOGGED_IN_KEY (not sort_key, primary_key).
+        if ((p == "key" || p == "keys") && !has(kPlainKeys, before_part)) {
+            return true;
+        }
+        // One word ending in key: pkey, apikey, masterkey (not monkey, publickey, sortkey).
+        if (p.size() > 3 && p.ends_with("key") && !has(kKeyWords, p) &&
+            !has(kPlainKeys, std::string_view(p).substr(0, p.size() - 3))) {
+            return true;
+        }
+        if (p == "code" && (parts.size() == 1 || has(kCodeKinds, before_part))) {
+            return true;
+        }
+        // A session last (laravel_session, ci_session, session) or as an id;
+        // not a setting's first word (session_lifetime, session_driver).
+        if (p == "session" && (last || parts[i + 1] == "id" || parts[i + 1] == "key" || parts[i + 1] == "value")) {
+            return true;
         }
     }
     return false;
@@ -929,8 +979,11 @@ json valid_setting(const std::string& key, const json& v) {
         const auto& d = v.get_ref<const std::string&>();
         const std::size_t dash = d.find('-');
         static constexpr std::array<std::string_view, 3> kFamilies = {"mariadb", "mysql", "postgresql"};
-        const bool ok = dash != std::string::npos &&
-                        std::find(kFamilies.begin(), kFamilies.end(), std::string_view(d).substr(0, dash)) != kFamilies.end() &&
+        std::string family = d.substr(0, std::min(dash, d.size()));
+        for (char& c : family) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));  // MariaDB-11.4, as the service takes it
+        }
+        const bool ok = dash != std::string::npos && std::find(kFamilies.begin(), kFamilies.end(), family) != kFamilies.end() &&
                         version_like(d.substr(dash + 1));
         return ok ? v : json(kNotValid);
     }
@@ -1028,7 +1081,8 @@ std::optional<std::string> read_project_json(const std::filesystem::path& folder
     PlainFileRefusal refusal = PlainFileRefusal::None;
     auto file = read_plain_file(folder / "floserver.json", kLimit, 0, refusal);
     if (!file) {
-        why = refusal == PlainFileRefusal::Missing ? std::string() : "floserver.json " + plain_file_refusal_text(refusal, kLimit);
+        why = refusal == PlainFileRefusal::Missing ? std::string()
+                                                   : "floserver.json " + plain_file_refusal_text(refusal, kLimit);
         return std::nullopt;
     }
     why.clear();

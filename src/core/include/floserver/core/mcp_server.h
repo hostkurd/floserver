@@ -113,7 +113,8 @@ void redact_secrets(nlohmann::json& value);
 
 // <folder>/floserver.json's text for project_info: only the folder's own
 // plain file (plain_file.h: no symbolic or hard link, checked on the open
-// file), at most kMaxProjectConfigBytes (64 KiB, as the service reads it). Nothing otherwise, with `why` (empty when there's
+// file), at most kMaxProjectConfigBytes (64 KiB, as the service reads it).
+// Nothing otherwise, with `why` (empty when there's
 // none): a floserver.json that leads elsewhere (to ~/.docker/config.json,
 // say) is never read.
 [[nodiscard]] std::optional<std::string> read_project_json(const std::filesystem::path& folder, std::string& why);

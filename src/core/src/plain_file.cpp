@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <iterator>
 #include <utility>
 
 namespace floserver::core {
@@ -36,6 +37,23 @@ std::optional<std::string> read_up_to(std::uint64_t limit, ReadSome read_some) {
     return out;
 }
 
+#ifdef _WIN32
+// The same file: by volume and 128-bit file id (ReFS, Dev Drive), else by
+// the 32-bit volume serial and 64-bit index.
+bool same_file(HANDLE a, const BY_HANDLE_FILE_INFORMATION& a_info, HANDLE b, const BY_HANDLE_FILE_INFORMATION& b_info) {
+    FILE_ID_INFO a_id{};
+    FILE_ID_INFO b_id{};
+    if (GetFileInformationByHandleEx(a, FileIdInfo, &a_id, sizeof a_id) != FALSE &&
+        GetFileInformationByHandleEx(b, FileIdInfo, &b_id, sizeof b_id) != FALSE) {
+        return a_id.VolumeSerialNumber == b_id.VolumeSerialNumber &&
+               std::equal(std::begin(a_id.FileId.Identifier), std::end(a_id.FileId.Identifier),
+                          std::begin(b_id.FileId.Identifier));
+    }
+    return a_info.dwVolumeSerialNumber == b_info.dwVolumeSerialNumber && a_info.nFileIndexHigh == b_info.nFileIndexHigh &&
+           a_info.nFileIndexLow == b_info.nFileIndexLow;
+}
+#endif
+
 }  // namespace
 
 std::optional<PlainFileText> read_plain_file(const std::filesystem::path& file, std::uint64_t max_bytes,
@@ -43,7 +61,7 @@ std::optional<PlainFileText> read_plain_file(const std::filesystem::path& file, 
     why = PlainFileRefusal::None;
     PlainFileText out;
 #ifdef _WIN32
-    const auto open = [&file](DWORD flags) {
+    const auto open_file = [&file](DWORD flags) {
         return CreateFileW(file.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                            OPEN_EXISTING, flags, nullptr);
     };
@@ -60,7 +78,8 @@ std::optional<PlainFileText> read_plain_file(const std::filesystem::path& file, 
             }
         }
     };
-    const Close first(open(FILE_FLAG_OPEN_REPARSE_POINT));
+    // BACKUP_SEMANTICS: a folder opens too, and is told apart as not a plain file.
+    const Close first(open_file(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS));
     if (first.h == INVALID_HANDLE_VALUE) {
         const DWORD error = GetLastError();
         why = error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ? PlainFileRefusal::Missing
@@ -89,23 +108,34 @@ std::optional<PlainFileText> read_plain_file(const std::filesystem::path& file, 
     }
     Close data(INVALID_HANDLE_VALUE);
     HANDLE h = first.h;
+    BY_HANDLE_FILE_INFORMATION used = info;
     if (reparse) {
-        // OneDrive, compressed or deduplicated: the data comes through its filter.
-        data.h = open(0);
+        // OneDrive, compressed or deduplicated: the data comes through its
+        // filter (reading a OneDrive placeholder downloads it). Read only
+        // when the handle is to the same file, checked again in full.
+        data.h = open_file(0);
         BY_HANDLE_FILE_INFORMATION again{};
         if (data.h == INVALID_HANDLE_VALUE || GetFileInformationByHandle(data.h, &again) == FALSE ||
-            again.dwVolumeSerialNumber != info.dwVolumeSerialNumber || again.nFileIndexHigh != info.nFileIndexHigh ||
-            again.nFileIndexLow != info.nFileIndexLow) {
+            !same_file(first.h, info, data.h, again)) {
             why = PlainFileRefusal::Unreadable;  // not the file just checked
             return std::nullopt;
         }
+        if ((again.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+            why = PlainFileRefusal::NotRegular;
+            return std::nullopt;
+        }
+        if (again.nNumberOfLinks != 1) {
+            why = PlainFileRefusal::HardLink;
+            return std::nullopt;
+        }
         h = data.h;
+        used = again;
     }
     if (GetFileType(h) != FILE_TYPE_DISK) {
         why = PlainFileRefusal::NotRegular;
         return std::nullopt;
     }
-    const std::uint64_t size = (std::uint64_t{info.nFileSizeHigh} << 32U) | info.nFileSizeLow;
+    const std::uint64_t size = (std::uint64_t{used.nFileSizeHigh} << 32U) | used.nFileSizeLow;
     std::uint64_t start = 0;
     if (tail_bytes > 0) {
         start = size > tail_bytes + 1 ? size - tail_bytes - 1 : 0;

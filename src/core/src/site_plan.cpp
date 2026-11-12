@@ -20,7 +20,6 @@ namespace fs = std::filesystem;
 
 namespace {
 
-
 // PHP installs this build can run as a pool: the usual NTS builds.
 bool is_pool_php(const InstalledRuntime& r) {
     return r.name == "php" && (r.variant.empty() || r.variant == "nts");
