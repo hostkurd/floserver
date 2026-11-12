@@ -406,7 +406,10 @@ struct Service {
     // still has loaded (Windows) stays until the next install.
     void remove_older_php_redis() const {
         namespace core = floserver::core;
-        const auto installed = core::list_installed(core::runtimes_dir(*data));
+        if (!data || !runtimes) {
+            return;
+        }
+        const auto installed = core::list_installed(core::runtimes_dir(data.value()));
         for (const core::InstalledRuntime& r : installed) {
             if (r.name != core::kPhpRedisRuntime) {
                 continue;
