@@ -933,7 +933,12 @@ TEST_CASE("mcp: only read-only service methods, and secrets hidden at any depth"
     }
     (*at)["password"] = "z";
     mcp::redact_secrets(deep);
-    CHECK(deep.dump().find("\"z\"") == std::string::npos);
+    // Walked down, not dumped: dump() recurses, and under ASan 5000 levels use up the stack.
+    const json* leaf = &deep;
+    for (int i = 0; i < 5000; ++i) {
+        leaf = &leaf->at("x");
+    }
+    CHECK(leaf->at("password") == "[hidden]");
 }
 
 TEST_CASE("request_log: a plain text log's last lines") {

@@ -110,9 +110,8 @@ ConfigResult read_project_config_file(const Project& project) {
         ConfigResult r;
         if (why == PlainFileRefusal::Missing) {
             r.config = ProjectConfig{};
-        } else if (why == PlainFileRefusal::Link || why == PlainFileRefusal::HardLink) {
-            r.errors.push_back({"", "floserver.json " + plain_file_refusal_text(why, kMaxProjectConfigBytes)});
         } else {
+            // "floserver.json is a link; ...", "... has another name (a hard link); ...", "... is larger than 64 KB"
             r.errors.push_back({"", "floserver.json " + plain_file_refusal_text(why, kMaxProjectConfigBytes)});
         }
         return r;

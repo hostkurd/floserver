@@ -60,7 +60,7 @@ std::optional<PlainFileText> read_plain_file(const std::filesystem::path& file, 
             }
         }
     };
-    Close first(open(FILE_FLAG_OPEN_REPARSE_POINT));
+    const Close first(open(FILE_FLAG_OPEN_REPARSE_POINT));
     if (first.h == INVALID_HANDLE_VALUE) {
         const DWORD error = GetLastError();
         why = error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ? PlainFileRefusal::Missing
