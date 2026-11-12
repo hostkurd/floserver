@@ -252,6 +252,8 @@ void run_service_test(bool real) {
         REQUIRE(r.size() == 2);
         CHECK(eventually([&] { return service.status()["state"] == "asleep"; }));
         CHECK(service.status().value("save_error", std::string()).find("checkpoint failed") != std::string::npos);
+        // Kept in status.json, so a restarted FloServer still says so.
+        CHECK(test_util::read_file(paths.status).find("checkpoint failed") != std::string::npos);
         fs::remove(paths.checkpoints / "fail-save");
         test_util::write_file(paths.checkpoints / "slow-save", "");
         r = replies(talk(*port, resp_command({"AUTH", *password}) + resp_command({"SET", "x", "2"})));
@@ -262,7 +264,25 @@ void run_service_test(bool real) {
         CHECK(eventually([&] { return service.status()["state"] == "asleep"; }));
         CHECK(garnet_cmdlines(data).empty());
         CHECK_FALSE(service.status().contains("save_error"));
+        CHECK(test_util::read_file(paths.status).find("save_error") == std::string::npos);
         fs::remove(paths.checkpoints / "slow-save");
+        // Garnet's own checkpoint running: SAVE is tried again, before a sleep and after Flush all.
+        r = replies(talk(*port, resp_command({"AUTH", *password}) + resp_command({"SET", "y", "1"})));
+        REQUIRE(r.size() == 2);
+        test_util::write_file(paths.checkpoints / "busy-saves", "3");
+        CHECK(eventually([&] { return service.status()["state"] == "asleep"; }));
+        CHECK_FALSE(service.status().contains("save_error"));
+        CHECK(test_util::read_file(paths.checkpoints / "busy-saves") == "0");
+        test_util::write_file(paths.checkpoints / "busy-saves", "2");
+        ServiceRefusal busy_refusal;
+        CHECK(service.flush(busy_refusal));
+        CHECK_FALSE(service.status().contains("save_error"));
+        CHECK(test_util::read_file(paths.checkpoints / "busy-saves") == "0");
+        CHECK(eventually([&] { return service.status()["state"] == "asleep"; }));
+        r = replies(talk(*port, resp_command({"AUTH", *password}) + resp_command({"GET", "y"})));
+        REQUIRE(r.size() == 2);
+        CHECK(r[1] == "$(nil)");  // flushed, and still flushed after the sleep
+        fs::remove(paths.checkpoints / "busy-saves");
     }
     // A Lua script can't hold Garnet: stopped after 5 s.
     {

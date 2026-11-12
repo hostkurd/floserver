@@ -366,7 +366,7 @@ AccessNode SettingsWindow::access_node(const Hit& hit) const {
         case Part::RedisCopyAddress:
         case Part::RedisCopyPassword: {
             // Two Copy buttons: each says what it copies (the password is never in a name).
-            const bool can = hit.part == Part::RedisCopyAddress || (connected_ && !redis_busy_);
+            const bool can = hit.part == Part::RedisCopyAddress || (connected_ && !redis_blocked());
             AccessNode n = button_node(access_id(hit),
                                        access_join(lang_, {std::string(text(lang_, Str::DbCopy)),
                                                            std::string(text(lang_, hit.part == Part::RedisCopyAddress
@@ -383,7 +383,7 @@ AccessNode SettingsWindow::access_node(const Hit& hit) const {
             return n;
         }
         case Part::RedisFlush:
-            return button(connected_ && !redis_busy_);
+            return button(connected_ && !redis_blocked());
         case Part::RedisDiscard:
             return button(!redis_changes_.empty() && !redis_saving_);
         case Part::RedisSave:

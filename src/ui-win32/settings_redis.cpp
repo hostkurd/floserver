@@ -148,7 +148,7 @@ void SettingsWindow::install_garnet() {
 }
 
 void SettingsWindow::copy_redis_password() {
-    if (!connected_ || redis_busy_ || !redis_) {
+    if (!connected_ || redis_blocked() || !redis_) {
         return;
     }
     // Asked only now: the answer goes on the clipboard and is wiped.
@@ -159,7 +159,7 @@ void SettingsWindow::copy_redis_password() {
 }
 
 void SettingsWindow::flush_redis() {
-    if (!connected_ || redis_busy_ || !redis_ || asking_) {
+    if (!connected_ || redis_blocked() || !redis_ || asking_) {
         return;
     }
     asking_ = true;
@@ -582,7 +582,7 @@ void SettingsWindow::paint_redis_shapes(Canvas& c) const {
         const Hit copy_address{Part::RedisCopyAddress, -1, -1};
         paint_button(c, rg.server_copy, hover_ == copy_address, is_focused(copy_address), true);
         const Hit copy_password{Part::RedisCopyPassword, -1, -1};
-        const bool can = connected_ && !redis_busy_;
+        const bool can = connected_ && !redis_blocked();
         paint_button(c, rg.password_copy, hover_ == copy_password && can, is_focused(copy_password), can);
 
         c.round_rect(rg.opt_card, pxf(8), p.card, p.card_border, border);
@@ -690,7 +690,7 @@ void SettingsWindow::paint_redis_text(Canvas& c) const {
     c.text(rg.password_value, w(redis_password_mask()), fonts_.mono.get(), p.text, Align::Start, true);
     c.text(rg.password_note, w(text(lang_, Str::RedisPasswordNote)), fonts_.caption.get(), p.text_subtle, Align::Start,
            false);
-    const bool can = connected_ && !redis_busy_;
+    const bool can = connected_ && !redis_blocked();
     c.text(rg.password_copy, w(text(lang_, Str::DbCopy)), fonts_.button.get(), can ? p.text : p.button_disabled_text,
            Align::Center, false);
     c.paragraph(rg.env_note, w(text(lang_, Str::RedisEnvNote)), fonts_.caption.get(), p.text_subtle);

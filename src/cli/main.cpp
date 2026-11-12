@@ -1918,6 +1918,10 @@ int redis(const std::vector<std::string>& args) {
         if (st.contains("error")) {
             std::cout << "  " << printable(st, "error") << "\n";
         }
+        if (st.contains("save_error")) {
+            std::cout << "  Garnet's last save failed, so its data may not come back after it stops: "
+                      << printable(st, "save_error") << "\n";
+        }
         std::cout << "  Not supported by Garnet: streams (XADD, XREAD) and WAIT.\n";
         return 0;
     }

@@ -220,7 +220,8 @@ TEST_CASE("Settings > Redis: \"saving\" before it sleeps, and a failed save kept
     CHECK(redis_save_failed_text(s, Lang::En).find("checkpoint failed") != std::string::npos);
     for (const Lang lang : {Lang::Ar, Lang::Ku}) {
         CHECK(redis_state_text(s, lang) != redis_state_text(s, Lang::En));
-        CHECK(redis_save_failed_text(s, lang).find("checkpoint failed") != std::string::npos);
+        // Garnet's English words stay left to right inside the right-to-left banner.
+        CHECK(redis_save_failed_text(s, lang).find("\xE2\x80\xAA" "checkpoint failed\xE2\x80\xAC") != std::string::npos);
         CHECK(text(lang, Str::RedisFlushConfirm) != text(Lang::En, Str::RedisFlushConfirm));
     }
     const RedisStatus fine = *redis_status_from_reply(status_reply());

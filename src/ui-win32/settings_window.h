@@ -1032,6 +1032,8 @@ private:
     bool redis_loading_ = false;
     bool redis_saving_ = false;
     bool redis_busy_ = false;  // redis.flush or redis.password is on its way
+    // Busy, or Garnet is saving before it stops: nothing is sent meanwhile.
+    [[nodiscard]] bool redis_blocked() const { return redis_busy_ || (redis_ && redis_->saving); }
     RedisChanges redis_changes_;
     std::vector<std::unique_ptr<FieldEdit>> redis_edits_;  // the memory limit; only while the section is shown
     // Settings > Apache: apache.get's answer and the changes not saved yet.

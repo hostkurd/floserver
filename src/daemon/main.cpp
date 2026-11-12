@@ -389,6 +389,7 @@ struct Service {
                         (void)runtimes->remove(r.name, core::path_to_utf8(r.dir.filename()), ignored);
                     }
                 }
+                redis->reload();  // the new install, before the hold lets Garnet start again
             }
             if (name == core::kGarnetRuntime || name == core::kDotnetRuntime || name == core::kPhpRedisRuntime ||
                 name == "php") {

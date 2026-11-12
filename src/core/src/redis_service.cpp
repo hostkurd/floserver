@@ -76,6 +76,22 @@ std::optional<RespReply> read_reply(std::uintptr_t socket, std::string& buffer, 
     }
 }
 
+// SAVE through `once`, again every 200 ms while Garnet's own checkpoint
+// (--checkpoint-freq) is running ("checkpoint already in progress"), until
+// one answers otherwise or `limit` passes.
+template <class Once>
+std::optional<RespReply> save_retrying(Once&& once, std::chrono::milliseconds limit) {
+    const auto deadline = Clock::now() + limit;
+    for (;;) {
+        auto reply = once();
+        const bool busy = reply && reply->type == '-' && reply->text.find("already in progress") != std::string::npos;
+        if (!busy || Clock::now() + 200ms >= deadline) {
+            return reply;
+        }
+        std::this_thread::sleep_for(200ms);
+    }
+}
+
 // AUTH then `args` on a fresh connection to `socket_path`.
 std::optional<RespReply> authed_command(const fs::path& socket_path, const std::string& password,
                                         const std::vector<std::string_view>& args, std::chrono::milliseconds limit) {
@@ -509,8 +525,8 @@ void RedisService::kill_and_note(std::unique_ptr<ChildProcess> process, bool sav
             }
             if (!password.empty()) {
                 try {
-                    const auto saved = authed_command(paths_.socket, password, {"SAVE"}, kSaveLimit);
-                    note_save(saved);
+                    note_save(save_retrying(
+                        [&] { return authed_command(paths_.socket, password, {"SAVE"}, kSaveLimit); }, kSaveLimit));
                 } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): it still stops
                 }
             }
@@ -527,10 +543,14 @@ void RedisService::kill_and_note(std::unique_ptr<ChildProcess> process, bool sav
 
 void RedisService::note_save(const std::optional<RespReply>& saved) {
     const std::lock_guard lock(mutex_);
+    const std::string before = save_error_;
     if (saved && saved->type == '+') {
         save_error_.clear();  // kept until a SAVE works again
     } else {
         save_error_ = clean_error_text(saved ? saved->text : std::string("Garnet didn't answer SAVE"));
+    }
+    if (save_error_ != before) {
+        save_status_locked();
     }
 }
 
@@ -724,7 +744,11 @@ void RedisService::save_status_locked() const {
     std::string ignored;
     std::error_code ec;
     if (fs::is_directory(paths_.dir, ec)) {
-        (void)write_private_file_atomically(paths_.status, json{{"keys", keys_}}.dump(), ignored);
+        json doc = {{"keys", keys_}};
+        if (!save_error_.empty()) {
+            doc["save_error"] = save_error_;  // still said after FloServer restarts
+        }
+        (void)write_private_file_atomically(paths_.status, doc.dump(), ignored);
     }
 }
 
@@ -734,6 +758,10 @@ void RedisService::load_status() {
     if (doc.is_object() && doc.contains("keys") && doc.at("keys").is_number_integer()) {
         const std::lock_guard lock(mutex_);
         keys_ = std::max<std::int64_t>(0, doc.at("keys").get<std::int64_t>());
+    }
+    if (doc.is_object() && doc.contains("save_error") && doc.at("save_error").is_string()) {
+        const std::lock_guard lock(mutex_);
+        save_error_ = clean_error_text(doc.at("save_error").get<std::string>(), 300);
     }
 }
 
@@ -863,7 +891,8 @@ bool RedisService::flush(ServiceRefusal& refusal) {
                                        (reply ? ": " + clean_error_text(reply->text) : std::string())};
         return false;
     }
-    note_save(command({"SAVE"}, kSaveLimit));  // so an older checkpoint doesn't bring them back
+    // So an older checkpoint doesn't bring them back: waits out Garnet's own checkpoint.
+    note_save(save_retrying([this] { return command({"SAVE"}, kSaveLimit); }, kSaveLimit));
     const std::lock_guard lock(mutex_);
     keys_ = 0;
     save_status_locked();

@@ -115,6 +115,7 @@ std::string redis_save_failed_text(const RedisStatus& status, Lang lang) {
     if (!status.installed || status.save_error.empty()) {
         return {};
     }
+    // fill() isolates the value left to right in Arabic and Kurdish: Garnet's words are English.
     return fill(lang, Str::RedisSaveFailed, {status.save_error});
 }
 

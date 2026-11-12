@@ -148,7 +148,16 @@ void serve(int fd) {
                 if (fs::exists(g_dump.parent_path() / "slow-save", ec)) {
                     std::this_thread::sleep_for(std::chrono::seconds(3));
                 }
-                if (fs::exists(g_dump.parent_path() / "fail-save", ec)) {
+                // busy-saves holds N: the next N SAVEs meet Garnet's own checkpoint.
+                const fs::path busy = g_dump.parent_path() / "busy-saves";
+                int left = 0;
+                if (fs::exists(busy, ec)) {
+                    std::ifstream(busy) >> left;
+                }
+                if (left > 0) {
+                    std::ofstream(busy, std::ios::trunc) << (left - 1);
+                    reply = "-ERR checkpoint already in progress\r\n";
+                } else if (fs::exists(g_dump.parent_path() / "fail-save", ec)) {
                     reply = "-ERR checkpoint failed\r\n";
                 } else {
                     save();
