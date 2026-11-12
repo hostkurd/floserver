@@ -264,10 +264,36 @@ TEST_CASE("Mailpit wakes on SMTP and on the inbox, sleeps when idle, and the ser
     REQUIRE(eventually([&] { return mail.status()["state"] == "asleep"; }, 10s));
     CHECK(mail.status()["notice_seq"] == 2);  // inbox requests aren't new email
 
+    // mail.recent (D32, flo mcp): it wakes Mailpit to list them, newest first, cleaned.
+    const auto recent = mail.recent(10, refusal);
+    INFO(refusal.message);
+    REQUIRE(recent);
+    CHECK((*recent)["total"] == 2);
+    REQUIRE((*recent)["messages"].size() == 2);
+    const nlohmann::json& newest = (*recent)["messages"][0];
+    CHECK(newest["subject"].get<std::string>().starts_with("Payfdp.exe ]0;x  zzz"));
+    CHECK(newest["subject"].get<std::string>().find('\x1b') == std::string::npos);
+    CHECK_FALSE(newest["id"].get<std::string>().empty());
+    CHECK_FALSE(newest["time"].get<std::string>().empty());
+    CHECK(newest["read"] == false);
+    CHECK((*recent)["messages"][1]["subject"] == "FloServer test email");
+    CHECK((*recent)["messages"][1]["to"] == "dev@example.com");
+    CHECK(mail.recent(1, refusal)->at("messages").size() == 1);
+    CHECK(mail.recent(500, refusal)->at("messages").size() == 2);
+    CHECK(mail.status()["total"] == 2);
+    CHECK(mail.status()["unread"] == 2);  // listing marks nothing read
+    REQUIRE(eventually([&] { return mail.status()["state"] == "asleep"; }, 10s));
+
     // Clear wakes it and empties the inbox.
     REQUIRE(mail.clear(refusal));
     CHECK(mail.status()["total"] == 0);
     CHECK_FALSE(mail.status().contains("latest"));
+    // With nothing caught, recent doesn't wake it.
+    REQUIRE(eventually([&] { return mail.status()["state"] == "asleep"; }, 10s));
+    const auto none = mail.recent(5, refusal);
+    REQUIRE(none);
+    CHECK((*none)["messages"].empty());
+    CHECK(mail.status()["state"] == "asleep");
 
     // Keep running: up without a connection, past the idle time.
     REQUIRE(eventually([&] { return mail.status()["state"] == "asleep"; }, 10s));

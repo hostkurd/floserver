@@ -117,7 +117,8 @@ std::string SettingsWindow::access_id(const Hit& hit) const {
         "folders/www/open", "folders/data/open", "folders/clear-logs", "folders/leftovers",
         "shared/switch", "shared/change", "shared/open", "shared/field", "shared/copy-env",
         "general/lang", "general/theme", "general/start", "general/start-mode", "general/close", "general/editor",
-        "general/updates", "general/update-notes", "general/update-now", "general/licences", "general/remove"};
+        "general/updates", "general/update-notes", "general/update-now", "general/ai-copy", "general/licences",
+        "general/remove"};
     static_assert(kIds[static_cast<std::size_t>(Part::PhpVersion)] == "php/version" &&
                       kIds[static_cast<std::size_t>(Part::PortsChoice)] == "ports/choice" &&
                       kIds[static_cast<std::size_t>(Part::DbVersion)] == "db/version" &&
@@ -489,6 +490,13 @@ AccessNode SettingsWindow::access_node(const Hit& hit) const {
         }
         case Part::GeneralUpdates:
             return button(can_check_updates());
+        case Part::GeneralAiCopy: {
+            // Three Copy buttons: each says what it copies.
+            AccessNode n = button_node(access_id(hit), access_join(lang_, {std::string(text(lang_, Str::DbCopy)),
+                                                                           std::string(text(lang_, mcp_label(mcp_lines_, row)))}));
+            n.focusable = true;
+            return n;
+        }
         case Part::GeneralUpdateNotes:
         case Part::GeneralUpdateNow:
         case Part::GeneralLicences:
@@ -524,6 +532,7 @@ void SettingsWindow::access_parts(std::vector<PageItem>& items) const {
             card("general/card/close", g.general.close_card);
             card("general/card/editor", g.general.editor_card);
             card("general/card/updates", g.general.updates_card);
+            card("general/card/ai", g.general.ai_card);
             card("general/card/about", g.general.about_card);
             card("general/card/remove", g.general.remove_card);
             return;

@@ -1,6 +1,7 @@
 // Settings > General: the window's language and theme, starting FloServer
 // with Windows, what closing the window does, Updates (Q5: when FloServer
-// last looked, Check now, and a newer version that's ready), and About (the
+// last looked, Check now, and a newer version that's ready), AI coding tools
+// (D32: the lines that set up `flo mcp`, each with Copy), and About (the
 // version, the licences), then Remove FloServer (D21).
 //
 // Opening the section reads the Run entry once; nothing is asked of the
@@ -23,6 +24,7 @@
 #include "floserver/core/build_info.h"
 #include "floserver/core/ipc.h"
 #include "floserver/core/paths.h"
+#include "floserver/core/user_path.h"
 
 #include <shellapi.h>
 
@@ -191,8 +193,23 @@ void SettingsWindow::load_general() {
     if (!error.empty()) {
         show_message(fill(lang_, Str::GeneralStartFailed, {error}), true);
     }
+    load_mcp_lines();
     relayout();
     InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void SettingsWindow::load_mcp_lines() {
+    // flo.exe beside FloServer.exe; "flo" when that's the one a new terminal
+    // finds (the installer puts this folder on the user's Path), else its full path.
+    const std::filesystem::path flo =
+        own_exe_.empty() ? std::filesystem::path() : core::path_from_utf8(own_exe_).parent_path() / L"flo.exe";
+    const auto found = core::first_on_path("flo");
+    const bool on_path = found && !flo.empty() && same_path(core::path_to_utf8(*found), core::path_to_utf8(flo));
+    mcp_lines_ = mcp_lines(flo, on_path || flo.empty());
+}
+
+const std::string& SettingsWindow::mcp_line(std::size_t row) const {
+    return row == 0 ? mcp_lines_.command : row == 1 ? mcp_lines_.claude : row == 2 ? mcp_lines_.json : mcp_lines_.vscode;
 }
 
 bool SettingsWindow::shown_start_tray() const {
@@ -355,6 +372,16 @@ void SettingsWindow::on_general_click(const Hit& hit) {
                 post_pref(PrefChange::UpdateNow, 0);
             }
             return;
+        case Part::GeneralAiCopy:
+            // Nothing secret: a command and where flo is.
+            if (row < geometry_.general.ai_copy.size()) {
+                if (put_text_on_clipboard(hwnd_, mcp_line(row))) {
+                    show_message(std::string(text(lang_, Str::MailCopied)), false);
+                } else {
+                    show_message(fill(lang_, Str::OpenFailed, {"clipboard"}), true);
+                }
+            }
+            break;
         case Part::GeneralLicences:
             open_licences();
             break;
@@ -559,6 +586,36 @@ void SettingsWindow::layout_general(HDC dc, Geometry& g, int x0, int x1, int y) 
     }
     card_end(gg.updates_card, yy);
 
+    // AI coding tools (D32, mockup SettingsGeneralAI): what it is, then three
+    // lines, each with Copy; the JSON in a box. Then, when flo isn't on the
+    // Path, why the lines name it in full, and that nothing runs until a tool starts it.
+    card_top(gg.ai_card, gg.ai_title, yy);
+    {
+        const int ai_note_h = height(text(lang_, Str::GeneralAiNote), fonts_.caption.get(), cx1 - cx0);
+        gg.ai_note = {cx0, yy - px(2), cx1, yy - px(2) + ai_note_h};
+        yy = static_cast<int>(gg.ai_note.bottom) + px(10);
+        const int label_w = std::min(px(170), (cx1 - cx0) / 4);
+        const int copy_w = measure(text(lang_, Str::DbCopy), fonts_.button.get()) + px(24);
+        for (std::size_t i = 0; i < gg.ai_copy.size(); ++i) {
+            gg.ai_labels.at(i) = {cx0, yy, cx0 + label_w, yy + px(kControlH)};
+            gg.ai_copy.at(i) = {std::max(cx0 + label_w, cx1 - copy_w), yy, cx1, yy + px(kControlH)};
+            const int value_end = std::max(cx0 + label_w + px(40), static_cast<int>(gg.ai_copy.at(i).left) - px(kGap));
+            gg.ai_values.at(i) = {cx0 + label_w, yy, value_end, yy + px(kControlH)};
+            yy += px(kControlH) + px(8);
+        }
+        if (mcp_lines_.full_path) {
+            const int path_h = height(text(lang_, Str::GeneralAiFullPath), fonts_.caption.get(), cx1 - cx0);
+            gg.ai_path_note = {cx0, yy, cx1, yy + path_h};
+            yy = static_cast<int>(gg.ai_path_note.bottom) + px(4);
+        } else {
+            gg.ai_path_note = {};
+        }
+        const int footer_h = height(text(lang_, Str::GeneralAiFooter), fonts_.caption.get(), cx1 - cx0);
+        gg.ai_footer = {cx0, yy, cx1, yy + footer_h};
+        yy = static_cast<int>(gg.ai_footer.bottom);
+    }
+    card_end(gg.ai_card, yy);
+
     // About: the version and the licences.
     card_top(gg.about_card, gg.about_title, yy);
     gg.version = {cx0, yy, cx1, yy + px(20)};
@@ -613,6 +670,9 @@ const RECT* SettingsWindow::general_rect_of(const Hit& hit) const {
             return &g.update_notes;
         case Part::GeneralUpdateNow:
             return &g.update_now;
+        case Part::GeneralAiCopy:
+            return hit.row >= 0 && std::cmp_less(hit.row, g.ai_copy.size()) ? &g.ai_copy.at(static_cast<std::size_t>(hit.row))
+                                                                             : nullptr;
         case Part::GeneralLicences:
             return &g.licences;
         case Part::GeneralRemove:
@@ -644,6 +704,9 @@ void SettingsWindow::general_focus_order(std::vector<Hit>& order) const {
     }
     if (!is_empty(geometry_.general.update_now)) {
         order.push_back({Part::GeneralUpdateNow, -1, -1});
+    }
+    for (std::size_t i = 0; i < geometry_.general.ai_copy.size(); ++i) {
+        order.push_back({Part::GeneralAiCopy, -1, static_cast<int>(i)});
     }
     order.push_back({Part::GeneralLicences, -1, -1});
     order.push_back({Part::GeneralRemove, -1, -1});
@@ -681,8 +744,18 @@ void SettingsWindow::paint_general_shapes(Canvas& c) const {
     c.clip(column);
     for (const RECT* card :
          {&gg.lang_card, &gg.theme_card, &gg.start_card, &gg.close_card, &gg.editor_card, &gg.updates_card,
-          &gg.about_card, &gg.remove_card}) {
+          &gg.ai_card, &gg.about_card, &gg.remove_card}) {
         c.round_rect(*card, pxf(8), p.card, p.card_border, border);
+    }
+    // AI coding tools: the JSON's boxes, and the Copy buttons.
+    for (const std::size_t box : {std::size_t{2}, std::size_t{3}}) {
+        if (!is_empty(gg.ai_values.at(box))) {
+            c.round_rect(gg.ai_values.at(box), pxf(4), p.input, p.input_border, border);
+        }
+    }
+    for (std::size_t i = 0; i < gg.ai_copy.size(); ++i) {
+        const Hit copy{Part::GeneralAiCopy, -1, static_cast<int>(i)};
+        paint_button(c, gg.ai_copy.at(i), hover_ == copy, is_focused(copy), true);
     }
     for (std::size_t i = 0; i < kLangChoices.size(); ++i) {
         paint_radio(c, gg.langs.at(i), kLangChoices.at(i) == prefs_.lang, {Part::GeneralLang, -1, static_cast<int>(i)});
@@ -828,6 +901,25 @@ void SettingsWindow::paint_general_text(Canvas& c) const {
                    Align::Center, false);
         }
     }
+
+    title(gg.ai_title, Str::GeneralAiTitle);
+    c.paragraph(gg.ai_note, w(text(lang_, Str::GeneralAiNote)), fonts_.caption.get(), p.text_subtle);
+    for (std::size_t i = 0; i < gg.ai_copy.size(); ++i) {
+        c.text(gg.ai_labels.at(i), w(text(lang_, mcp_label(mcp_lines_, i))), fonts_.caption.get(), p.text_subtle, Align::Start, false);
+        // Commands read left to right in every language (embedded, as paths
+        // are, in Arabic and Kurdish); the boxes' text sits inside their padding.
+        RECT value = gg.ai_values.at(i);
+        if (i >= 2) {
+            value.left += px(8);
+            value.right -= px(8);
+        }
+        c.text(value, w(rtl_ ? isolate_ltr(mcp_line(i)) : mcp_line(i)), fonts_.mono.get(), p.text, Align::Start, true);
+        c.text(gg.ai_copy.at(i), w(text(lang_, Str::DbCopy)), fonts_.button.get(), p.text, Align::Center, false);
+    }
+    if (!is_empty(gg.ai_path_note)) {
+        c.paragraph(gg.ai_path_note, w(text(lang_, Str::GeneralAiFullPath)), fonts_.caption.get(), p.asleep.text);
+    }
+    c.paragraph(gg.ai_footer, w(text(lang_, Str::GeneralAiFooter)), fonts_.caption.get(), p.text_subtle);
 
     title(gg.about_title, Str::GeneralAbout);
     c.text(gg.version, w(fill(lang_, Str::GeneralVersion, {core::kVersion})), fonts_.body.get(), p.text, Align::Start,

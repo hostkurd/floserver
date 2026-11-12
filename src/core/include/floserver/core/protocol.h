@@ -31,6 +31,9 @@
 //   mail.clear       {} -> {"ok": true}        every email deleted (wakes Mailpit)
 //   mail.env         {"name"} -> {"env": [[key, value]...], "env_file"}   the project's mail
 //                    lines alone (databases.login's "env" has them too), for flo env
+//   mail.recent      {"limit"?: 1-20 (default 10)} -> {"messages": [{"id", "subject", "from", "to",
+//                    "time", "read", "size"}], "total", "inbox_url"}   newest first, cleaned
+//                    (flo mcp's recent_mail, D32); read-only, wakes Mailpit unless none is caught
 //   redis.status     {"projects"?: bool} -> {"installed", "version"?, "dotnet_version"?, "state": "not_installed"|
 //                    "asleep"|"starting"|"running"|"saving"|"failed", "error"?, "save_error"? (the last
 //                    SAVE failed; kept until one works), "host": "127.0.0.1", "port",
@@ -47,6 +50,10 @@
 //   jobs.get         {"id": 3} -> runtime_service.h, RuntimeService::job()
 //   jobs.cancel      {"id": 3} -> {"cancelled": bool}
 //   projects.list    {} -> project_service.h, ProjectService::list()
+//   projects.log     {"name", "lines"?: up to 200, "kind"?: "web" (default) | "php"}
+//                    web: {"entries": [{"t", "status", "ms", "method", "uri"}]} (request_log.h);
+//                    php: {"lines", "file", "php", "shared_with"}: the PHP error log of the pool
+//                    the project runs in (named by the service, never the request), or "no_php"
 //   projects.add     {"path": "C:/sites/shop", "name"?: "shop"} -> the project
 //   projects.remove  {"name": "shop", "drop_database"?: bool} -> {} or, with drop_database,
 //                    {"database_dropped": bool} (false: there was none to drop)

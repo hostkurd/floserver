@@ -518,4 +518,40 @@ std::string licences_text(Lang lang, std::string_view version, const json* runti
     return out;
 }
 
+Str mcp_label(const McpLines& lines, std::size_t row) {
+    switch (row) {
+        case 0:
+            return lines.command.starts_with("& ") ? Str::GeneralAiPowerShell : Str::GeneralAiCommand;
+        case 1:
+            return Str::GeneralAiClaude;
+        case 2:
+            return Str::GeneralAiOthers;
+        default:
+            break;
+    }
+    return Str::GeneralAiVsCode;
+}
+
+McpLines mcp_lines(const std::filesystem::path& flo_exe, bool on_path) {
+    McpLines out;
+    std::string program = "flo";
+    if (!on_path && !flo_exe.empty()) {
+        const std::u8string u = flo_exe.u8string();
+        program.assign(u.begin(), u.end());
+        out.full_path = true;
+    }
+    // For a shell: quoted when it has a space (C:\Program Files\...). A
+    // quoted program is run with PowerShell's & (Windows Terminal's default).
+    const bool quote = program.find(' ') != std::string::npos;
+    const std::string shell = quote ? "\"" + program + "\"" : program;
+    out.command = (quote ? "& " : "") + shell + " mcp";
+    out.claude = "claude mcp add floserver -- " + shell + " mcp";
+    // JSON's own escapes for the path's backslashes and quotes.
+    const std::string command =
+        nlohmann::json(program).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+    out.json = R"({ "mcpServers": { "floserver": { "command": )" + command + R"(, "args": ["mcp"] } } })";
+    out.vscode = R"({ "servers": { "floserver": { "type": "stdio", "command": )" + command + R"(, "args": ["mcp"] } } })";
+    return out;
+}
+
 }  // namespace floserver::ui

@@ -497,3 +497,10 @@ TEST_CASE("flo use bun and flo use deno, and the window's JavaScript key, replac
     }
     CHECK_FALSE(set_project_config_value("{}", ConfigKey::Bun, "bun", std::string("fast"), error));
 }
+
+TEST_CASE("a number JSON can't hold is a problem, not an exception (D32 review)") {
+    const ConfigResult r = parse_project_config(R"({"node": 1e999})");
+    CHECK_FALSE(r.config);
+    REQUIRE(r.errors.size() == 1);
+    CHECK(r.errors[0].message.find("JSON") != std::string::npos);
+}

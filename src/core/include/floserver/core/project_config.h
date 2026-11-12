@@ -28,6 +28,9 @@
 
 namespace floserver::core {
 
+// The largest floserver.json read, by the service and by flo mcp alike.
+inline constexpr std::size_t kMaxProjectConfigBytes = std::size_t{64} * 1024;
+
 enum class WebServer : std::uint8_t { Nginx, Apache };
 
 struct DatabaseSpec {

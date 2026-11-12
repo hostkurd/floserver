@@ -199,6 +199,28 @@ bool explore_folder(HWND owner, const std::string& path) {
                          ShellExecuteW(owner, L"explore", folder->c_str(), nullptr, nullptr, SW_SHOWNORMAL)) > 32;
 }
 
+bool put_text_on_clipboard(HWND owner, const std::string& value) {
+    const std::wstring wide = win::widen(value);
+    if (OpenClipboard(owner) == FALSE) {
+        return false;
+    }
+    bool done = false;
+    EmptyClipboard();
+    const std::size_t bytes = (wide.size() + 1) * sizeof(wchar_t);
+    if (HGLOBAL text = GlobalAlloc(GMEM_MOVEABLE, bytes); text != nullptr) {
+        if (void* to = GlobalLock(text); to != nullptr) {
+            std::memcpy(to, wide.c_str(), bytes);
+            GlobalUnlock(text);
+            done = SetClipboardData(CF_UNICODETEXT, text) != nullptr;
+        }
+        if (!done) {
+            GlobalFree(text);
+        }
+    }
+    CloseClipboard();
+    return done;
+}
+
 bool put_secret_on_clipboard(HWND owner, std::string& value) {
     std::wstring wide = win::widen(value);
     SecureZeroMemory(value.data(), value.size());

@@ -15,6 +15,7 @@ add_executable(floserver_tests
     test_redis_service.cpp
     test_mariadb.cpp
     test_mariadb_settings.cpp
+    test_mcp_server.cpp
     test_mysql.cpp
     test_database_service.cpp
     test_data_folder.cpp
@@ -69,8 +70,8 @@ if(NOT WIN32)
     add_dependencies(floserver_tests fake_garnet)
     target_compile_definitions(floserver_tests PRIVATE FLOSERVER_TEST_FAKE_GARNET="$<TARGET_FILE:fake_garnet>")
 endif()
-# test_service.cpp runs the real floserverd.
-add_dependencies(floserver_tests floserverd floserver_shim)
+# test_service.cpp runs the real floserverd; test_mcp_server.cpp the real flo mcp too.
+add_dependencies(floserver_tests floserverd floserver_shim floserver_cli)
 target_compile_definitions(floserver_tests PRIVATE FLOSERVER_TEST_BIN_DIR="$<TARGET_FILE_DIR:floserverd>")
 target_link_libraries(floserver_tests PRIVATE floserver_core floserver_ui_model floserver_setup_model floserver_third_party floserver_monocypher floserver_miniz)
 if(WIN32)

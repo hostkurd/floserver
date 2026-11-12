@@ -10,7 +10,10 @@
 // a line never holds a raw newline. The service keeps each log small by
 // emptying it when it grows past kRequestLogLimit.
 
+#include <nlohmann/json.hpp>
+
 #include <cstdint>
+#include <optional>
 #include <filesystem>
 #include <string>
 #include <string_view>
@@ -47,5 +50,28 @@ inline constexpr std::string_view kRequestLogFormat =
 // The same from the end of `file` (its last 64 KiB). A missing file has no entries.
 [[nodiscard]] std::vector<RequestLogEntry> read_request_log(const std::filesystem::path& file,
                                                             std::size_t max_entries);
+
+// A plain text log (PHP's error log, <web>/logs/<pool>.php-errors.log), for
+// `flo mcp`'s read_log (D32): its last `max_lines` (at most
+// kRequestLogMaxEntries) lines that aren't empty, oldest first. Each is cut
+// to kTextLogLineLimit bytes on a character boundary and cleaned as
+// clean_error_text() does (control characters as spaces; bidi, zero-width
+// and tag characters out). A partial first line (the read started
+// mid-line) is dropped; the last line counts without its newline.
+inline constexpr std::size_t kTextLogLineLimit = 1000;
+[[nodiscard]] std::vector<std::string> parse_text_log(std::string_view text, std::size_t max_lines, bool starts_mid_line);
+// The same from the end of `file` (its last 64 KiB). A missing file has no
+// lines; nor has one that's a link or has another name too (a hard link):
+// only the log itself is read, never a file elsewhere (both readers).
+[[nodiscard]] std::vector<std::string> read_text_log(const std::filesystem::path& file, std::size_t max_lines);
+
+// projects.log {kind: "php"} (D32): the PHP error log of the pool in
+// `web_status` (WebService::status()) whose sites include `project`,
+// <web_dir>/logs/<pool key>.php-errors.log, as {"lines", "file", "php",
+// "shared_with"}. The file is named by the pool's key alone. Nothing when
+// no pool serves the project.
+[[nodiscard]] std::optional<nlohmann::json> pool_php_log(const nlohmann::json& web_status,
+                                                         const std::filesystem::path& web_dir,
+                                                         const std::string& project, std::size_t max_lines);
 
 }  // namespace floserver::core
