@@ -79,7 +79,7 @@ public:
                                                               std::string& error) = 0;
     // The text of <folder>/floserver.json, the folder being one the service
     // named (read_project_json). Nothing when it's missing (`why` empty) or
-    // refused (`why` says why: a link, over 256 KiB...).
+    // refused (`why` says why: a link, over 64 KiB...).
     [[nodiscard]] virtual std::optional<std::string> project_file(const std::filesystem::path& folder,
                                                                   std::string& why) = 0;
 };
@@ -113,7 +113,7 @@ void redact_secrets(nlohmann::json& value);
 
 // <folder>/floserver.json's text for project_info: only the folder's own
 // plain file (plain_file.h: no symbolic or hard link, checked on the open
-// file), at most 256 KiB. Nothing otherwise, with `why` (empty when there's
+// file), at most kMaxProjectConfigBytes (64 KiB, as the service reads it). Nothing otherwise, with `why` (empty when there's
 // none): a floserver.json that leads elsewhere (to ~/.docker/config.json,
 // say) is never read.
 [[nodiscard]] std::optional<std::string> read_project_json(const std::filesystem::path& folder, std::string& why);

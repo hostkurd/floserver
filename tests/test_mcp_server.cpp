@@ -214,7 +214,7 @@ void check_output(const json& schema, const json& value) {
 
 json schema_of(std::string_view tool) {
     for (const json& t : mcp::tool_list(mcp::kModernVersion)) {
-        if (t["name"] == tool) {
+        if (t["name"].get<std::string>() == tool) {
             return t["outputSchema"];
         }
     }
@@ -302,7 +302,8 @@ TEST_CASE("mcp: initialize negotiates a version this server has") {
     // 2024-11-05, the first revision: answered too, without annotations.
     CHECK(ask(server, request(8, "initialize", {{"protocolVersion", "2024-11-05"}}))["result"]["protocolVersion"] ==
           "2024-11-05");
-    for (const json& t : ask(server, request(9, "tools/list"))["result"]["tools"]) {
+    const json old_list = ask(server, request(9, "tools/list"));  // named: a temporary's member would dangle
+    for (const json& t : old_list["result"]["tools"]) {
         CHECK_FALSE(t.contains("annotations"));
         CHECK_FALSE(t.contains("outputSchema"));
     }
@@ -442,6 +443,9 @@ TEST_CASE("mcp: tools/call's protocol errors and tool errors") {
     backend.down = false;
     CHECK(call_tool(server, "list_projects")["isError"] == false);
     // The service refusing: its words.
+    backend.refusals["projects.list"] = "can't read mysql://root:LEAK16@h/x";
+    CHECK(tool_error("list_projects", json::object()).find("LEAK16") == std::string::npos);
+    backend.refusals.erase("projects.list");
     backend.refusals["mail.recent"] = "Mailpit isn't installed: download it in Settings";
     CHECK(tool_error("recent_mail", json::object()).find("Mailpit isn't installed") != std::string::npos);
 }
@@ -643,13 +647,16 @@ TEST_CASE("mcp: a start command never shows, not even in why its server can't st
 TEST_CASE("mcp: the filters' shapes, names and known tokens") {
     const auto blanked = [](std::string_view text) { return mcp::blank_secrets(text); };
     // Names, percent-decoded, and the new words.
-    for (const char* k : {"%74oken", "api%5Fkey", "code", "auth_code", "signature", "X-Amz-Signature", "jwt", "otp",
-                          "sid", "session", "PHPSESSID", "jsessionid", "pat", "sk", "salt", "hmac", "masterkey",
-                          "licenseKey", "client_pin"}) {
+    for (const char* k : {"%74oken", "api%5Fkey", "code", "auth_code", "otp_code", "signature", "X-Amz-Signature", "jwt",
+                          "otp", "sid", "session", "session_id", "sessionid", "PHPSESSID", "jsessionid", "pat", "sk",
+                          "salt", "hmac", "masterkey", "licenseKey", "client_pin", "pass", "db_pass", "passcode",
+                          "passwd", "passphrase", "APP_KEY", "api_key", "apiKey", "signing_key", "key", "keys"}) {
         INFO(k);
         CHECK(mcp::secret_key(k));
     }
-    for (const char* k : {"monkey", "keyboard", "path", "author", "status", "uptime_s", "inbox", "decode_x"}) {
+    for (const char* k : {"monkey", "keyboard", "path", "author", "status", "uptime_s", "inbox", "decode_x", "bypass",
+                          "compass", "footprint", "sort_key", "primary_key", "country_code", "status_code",
+                          "session_lifetime", "session_driver"}) {
         INFO(k);
         CHECK_FALSE(mcp::secret_key(k));
     }
@@ -665,11 +672,29 @@ TEST_CASE("mcp: the filters' shapes, names and known tokens") {
     CHECK(blanked("sent Bearer abcdefgh12345 to it") == "sent Bearer [hidden] to it");
     CHECK(blanked("Basic dXNlcjpwYXNzd29yZA==") == "Basic [hidden]");
     CHECK(blanked("Basic usage of the app") == "Basic usage of the app");
+    CHECK(blanked("CSRF token mismatch.") == "CSRF token mismatch.");
+    CHECK(blanked("bearer authentication") == "bearer authentication");
+    CHECK(blanked("token a1b2c3d4e5") == "token [hidden]");
+    CHECK(blanked("Authorization: Bearer mismatch") == "Authorization: [hidden]");  // the header stays strict
+    CHECK(blanked("SQLSTATE[HY000] [1045] Access denied (code: 1045)") == "SQLSTATE[HY000] [1045] Access denied (code: 1045)");
+    CHECK(blanked("mysql -p'my pw' -h x") == "mysql -p'[hidden]' -h x");
+    CHECK(blanked(R"(mysql -p"pw2" db)") == R"(mysql -p"[hidden]" db)");
+    CHECK(blanked("env('DB_PASSWORD', 'SECRET9')") == "env('DB_PASSWORD', '[hidden]')");
+    CHECK(blanked("env('APP_NAME', 'Shop')") == "env('APP_NAME', 'Shop')");
+    CHECK(blanked("mysql://root:p@ss@localhost/db") == "mysql://root:[hidden]@localhost/db");
+    CHECK(blanked("see https://example.test/a@b") == "see https://example.test/a@b");
+    CHECK(blanked("k=-----BEGIN RSA PRIVATE KEY-----\nMIIEabc\n-----END RSA PRIVATE KEY----- after") ==
+          "k=-----BEGIN RSA PRIVATE KEY-----[hidden] after");
+    CHECK(blanked("-----BEGIN PUBLIC KEY-----\nMIIB\n-----END PUBLIC KEY-----") ==
+          "-----BEGIN PUBLIC KEY-----\nMIIB\n-----END PUBLIC KEY-----");
     CHECK(blanked("x=1&%74oken=abc") == "x=1&%74oken=[hidden]");
     // Known tokens wherever they are.
     for (const char* t : {"ghp_abcdefghijklmnop", "gho_abcdefghij", "github_pat_11ABCDEFG_xyz", "sk_live_abcdef123",
                           "sk_test_abcdef123", "rk_live_abcdef123", "xoxb-1234-5678-abc", "xoxp-1234-5678-abc",
-                          "AKIAIOSFODNN7EXAMPLE", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl"}) {
+                          "AKIAIOSFODNN7EXAMPLE", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl",
+                          "sk-ant-api03-abcdefgh", "sk-proj-abcdefgh12", "glpat-abcdefgh1234", "npm_abcdefgh1234",
+                          "shpat_abcdef123456", "xapp-1-abcdef-12", "AIzaSyA1234567890abcdefghijklmnopqrstuv",
+                          "SG.abcdefghij.klmnopqrstuvwxyz"}) {
         INFO(t);
         CHECK(blanked(std::string("got ") + t + " here") == "got [hidden] here");
     }
@@ -683,20 +708,37 @@ TEST_CASE("mcp: the filters' shapes, names and known tokens") {
     fill_busy(backend);
     backend.results["projects.log"] = {
         {"entries", json::array({{{"t", 0}, {"status", 200}, {"ms", 1}, {"method", "GET"},
-                                  {"uri", "/a;jsessionid=ABC123/b?%74oken=x&api%5Fkey=y&code=z&sig=q&page=2"}}})}};
+                                  {"uri", "/a;jsessionid=ABC123/b?%74oken=x&api%5Fkey=y&code=z&sig=q&page=2"}},
+                                 {{"t", 0}, {"status", 302}, {"ms", 1}, {"method", "GET"},
+                                  {"uri", "/login?next=%2Freset%3Ftoken%3DSECRET1&redirect=https%3A%2F%2Fu%3APW2%40h.test"
+                                          "&twice=%252Fx%253Ftoken%253DSECRET3&page=2"}},
+                                 {{"t", 0}, {"status", 200}, {"ms", 1}, {"method", "GET"},
+                                  {"uri", "/password/reset/9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08?e=me"}}})}};
     mcp::Server server(backend);
     const json r = call_tool(server, "read_log", {{"name", "shop"}});
     CHECK(r["structuredContent"]["lines"][0] ==
           "1970-01-01T00:00:00.000Z 200 1ms GET /a;jsessionid=[hidden]/b?%74oken=[hidden]&api%5Fkey=[hidden]&code=[hidden]&sig=[hidden]&page=2");
+    CHECK(r["structuredContent"]["lines"][1] ==
+          "1970-01-01T00:00:00.000Z 302 1ms GET /login?next=[hidden]&redirect=[hidden]&twice=[hidden]&page=2");
+    CHECK(r["structuredContent"]["lines"][2] == "1970-01-01T00:00:00.000Z 200 1ms GET /password/reset/[hidden]?e=me");
+    // PHP stack frames: quoted arguments left out, the rest as it is.
+    backend.results["projects.log"] = {
+        {"lines", json::array({"#0 /s/app/Auth.php(42): Auth->login('me@example.test', 'hunter2', 3)",
+                               "#1 {main}", "  thrown in /s/app/Auth.php on line 42"})},
+        {"file", "php-8.4.27.php-errors.log"}, {"php", "8.4.27"}, {"shared_with", json::array()}};
+    const json php = call_tool(server, "read_log", {{"name", "shop"}, {"kind", "php"}});
+    CHECK(php["structuredContent"]["lines"] ==
+          json::array({"#0 /s/app/Auth.php(42): Auth->login('\u2026', '\u2026', 3)", "#1 {main}",
+                       "  thrown in /s/app/Auth.php on line 42"}));
 }
 
 TEST_CASE("mcp: floserver.json's settings only as FloServer takes them") {
     FakeBackend backend;
     fill_busy(backend);
     backend.files["/home/me/sites/shop"] = R"({
-        "php": "8.4", "node": "22", "bun": "GITHUB_PAT=ghp_LEAKLEAKLEAK", "deno": "--password LEAK2",
-        "python": "sk_live_LEAK3abcdef", "web": "caddy LEAK4", "root": "../../LEAK5", "redis": "yes LEAK6",
-        "database": {"engine": "mariadb", "jwt": "LEAK7"},
+        "php": "8.4", "node": "22", "bun": "GITHUB_PAT=ghp_LEAKLEAKLEAK", "deno": "LEAKNODE",
+        "python": "hunter2LEAKPY", "web": "caddy LEAK4", "root": "../../LEAK5", "redis": "yes LEAK6",
+        "database": "mariadb-LEAK7",
         "рhp": "LEAK8", "API_TOKEN=LEAK9": 1, "a_very_long_name_that_goes_on_and_on_LEAK10_x": 2,
         "extensions": ["intl", "ghp_LEAK11abcdef", "x=LEAK12"],
         "php_ini": {"user@LEAK13": "1", "memory_limit": "1G"}})";
@@ -715,9 +757,21 @@ TEST_CASE("mcp: floserver.json's settings only as FloServer takes them") {
     CHECK(c["extensions"] == json::array({"intl"}));
     CHECK(c["php_ini_names"] == json::array({"memory_limit"}));
     CHECK(c["hidden_names"] == 5);
+    // A database object, "newest", a known family only.
+    backend.files["/home/me/sites/shop"] =
+        R"({"php": "newest", "node": "SECRETNODE", "database": {"engine": "mariadb", "jwt": "LEAK14"}})";
+    const json more = call_tool(server, "project_info", {{"name", "shop"}});
+    CHECK(more.dump().find("LEAK") == std::string::npos);
+    CHECK(more["structuredContent"]["floserver_json"]["php"] == "newest");
+    CHECK(more["structuredContent"]["floserver_json"]["node"] == "(set, not valid)");
+    CHECK(more["structuredContent"]["floserver_json"]["database"] == "(set, not valid)");
+    backend.files["/home/me/sites/shop"] = R"({"database": "oracle-19", "python": "3.13"})";
+    const json family = call_tool(server, "project_info", {{"name", "shop"}});
+    CHECK(family["structuredContent"]["floserver_json"]["database"] == "(set, not valid)");
+    CHECK(family["structuredContent"]["floserver_json"]["python"] == "3.13");
 
     // Refused by its own read (a link, too big): nothing of it, not even the service's words.
-    backend.refused["/home/me/sites/shop"] = "it's a link (FloServer reads only a plain file)";
+    backend.refused["/home/me/sites/shop"] = "floserver.json is a link; FloServer reads only a plain file";
     backend.results["projects.list"]["projects"][0]["state"] = "problem";
     backend.results["projects.list"]["projects"][0]["problem"] = R"(floserver.json: php "OUTSIDE-SECRET-1" is not a version)";
     const json refused = call_tool(server, "project_info", {{"name", "shop"}});
@@ -725,11 +779,17 @@ TEST_CASE("mcp: floserver.json's settings only as FloServer takes them") {
     CHECK(refused.dump().find("OUTSIDE") == std::string::npos);
     CHECK(refused["structuredContent"]["floserver_json"].is_null());
     CHECK(refused["structuredContent"]["floserver_json_note"] ==
-          "floserver.json was refused: it's a link (FloServer reads only a plain file)");
+          "Refused: floserver.json is a link; FloServer reads only a plain file");
     CHECK_FALSE(refused["structuredContent"]["runtimes"].contains("asked_for"));
     // And list_projects leaves out what a problem quotes.
     const json listed = call_tool(server, "list_projects")["structuredContent"];
     CHECK(listed["projects"][0]["status"] == "problem: floserver.json: php \"…\" is not a version");
+    // FloServer's own examples in a problem stay.
+    backend.results["projects.list"]["projects"][0]["problem"] =
+        R"(floserver.json: php "LEAK15" is not a version such as "8.2" or "8.2.27" (or "newest", or false for no PHP))";
+    const json examples = call_tool(server, "list_projects")["structuredContent"];
+    CHECK(examples["projects"][0]["status"] ==
+          "problem: floserver.json: php \"…\" is not a version such as \"8.2\" or \"8.2.27\" (or \"newest\", or false for no PHP)");
 }
 
 TEST_CASE("plain files: only the file itself, checked on the open file") {
@@ -761,7 +821,7 @@ TEST_CASE("plain files: only the file itself, checked on the open file") {
     fs::create_hard_link(dir.path() / "a.txt", dir.path() / "hard.txt", ec);
     if (!ec) {
         CHECK_FALSE(read_plain_file(dir.path() / "hard.txt", 100, 0, why));
-        CHECK(why == PlainFileRefusal::Link);
+        CHECK(why == PlainFileRefusal::HardLink);
         CHECK_FALSE(read_plain_file(dir.path() / "a.txt", 100, 0, why));  // both names are refused
     }
 }
@@ -774,9 +834,9 @@ TEST_CASE("mcp: floserver.json is read only as the project's own plain file") {
     CHECK(mcp::read_project_json(project, why) == std::optional<std::string>(R"({"php": "8.4"})"));
     CHECK_FALSE(mcp::read_project_json(dir.path() / "missing", why));
     CHECK(why.empty());  // none: not a refusal
-    // Too big.
+    // Too big: over the size the service reads too.
     const fs::path big = dir.path() / "big";
-    test_util::write_file(big / "floserver.json", std::string(std::size_t{300} * 1024, ' '));
+    test_util::write_file(big / "floserver.json", std::string(kMaxProjectConfigBytes + 1, ' '));
     CHECK_FALSE(mcp::read_project_json(big, why));
     CHECK(why.find("larger") != std::string::npos);
     // A link to a file elsewhere (~/.docker/config.json, say) is refused.
@@ -795,7 +855,8 @@ TEST_CASE("mcp: floserver.json is read only as the project's own plain file") {
         const ConfigResult via_link = read_project_config_file(Project{"linked", linked, true, false, {}});
         CHECK_FALSE(via_link.config);
         REQUIRE(via_link.errors.size() == 1);
-        CHECK(via_link.errors[0].message == "floserver.json is a link; FloServer reads only a plain file");
+        CHECK(via_link.errors[0].message ==
+              "floserver.json is a link; FloServer reads only a plain file (copy the file into the project instead)");
         // A project folder that is itself a link is fine: its own file is read.
         fs::create_directory_symlink(project, dir.path() / "shop-link", ec);
         if (!ec) {
@@ -813,6 +874,7 @@ TEST_CASE("mcp: floserver.json is read only as the project's own plain file") {
         CHECK(why.find("link") != std::string::npos);
         const ConfigResult via_hard = read_project_config_file(Project{"hard", hard, true, false, {}});
         CHECK_FALSE(via_hard.config);
+        CHECK(via_hard.errors.at(0).message == "floserver.json has another name (a hard link); FloServer reads only a plain file");
         CHECK(via_hard.errors.at(0).message.find("OUTSIDE") == std::string::npos);
     }
 }

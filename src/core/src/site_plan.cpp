@@ -20,7 +20,6 @@ namespace fs = std::filesystem;
 
 namespace {
 
-constexpr std::size_t kMaxProjectConfigBytes = std::size_t{64} * 1024;
 
 // PHP installs this build can run as a pool: the usual NTS builds.
 bool is_pool_php(const InstalledRuntime& r) {
@@ -111,10 +110,10 @@ ConfigResult read_project_config_file(const Project& project) {
         ConfigResult r;
         if (why == PlainFileRefusal::Missing) {
             r.config = ProjectConfig{};
-        } else if (why == PlainFileRefusal::Link) {
-            r.errors.push_back({"", "floserver.json is a link; FloServer reads only a plain file"});
+        } else if (why == PlainFileRefusal::Link || why == PlainFileRefusal::HardLink) {
+            r.errors.push_back({"", "floserver.json " + plain_file_refusal_text(why, kMaxProjectConfigBytes)});
         } else {
-            r.errors.push_back({"", "floserver.json can't be used: " + plain_file_refusal_text(why, kMaxProjectConfigBytes)});
+            r.errors.push_back({"", "floserver.json " + plain_file_refusal_text(why, kMaxProjectConfigBytes)});
         }
         return r;
     }

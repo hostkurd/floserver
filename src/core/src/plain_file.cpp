@@ -43,14 +43,10 @@ std::optional<PlainFileText> read_plain_file(const std::filesystem::path& file, 
     why = PlainFileRefusal::None;
     PlainFileText out;
 #ifdef _WIN32
-    HANDLE h = CreateFileW(file.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-                           OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
-    if (h == INVALID_HANDLE_VALUE) {
-        const DWORD error = GetLastError();
-        why = error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ? PlainFileRefusal::Missing
-                                                                             : PlainFileRefusal::Unreadable;
-        return std::nullopt;
-    }
+    const auto open = [&file](DWORD flags) {
+        return CreateFileW(file.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                           OPEN_EXISTING, flags, nullptr);
+    };
     struct Close {
         HANDLE h;
         explicit Close(HANDLE handle) : h(handle) {}
@@ -58,18 +54,54 @@ std::optional<PlainFileText> read_plain_file(const std::filesystem::path& file, 
         Close& operator=(const Close&) = delete;
         Close(Close&&) = delete;
         Close& operator=(Close&&) = delete;
-        ~Close() { CloseHandle(h); }
-    } const closer{h};
+        ~Close() {
+            if (h != INVALID_HANDLE_VALUE) {
+                CloseHandle(h);
+            }
+        }
+    };
+    Close first(open(FILE_FLAG_OPEN_REPARSE_POINT));
+    if (first.h == INVALID_HANDLE_VALUE) {
+        const DWORD error = GetLastError();
+        why = error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ? PlainFileRefusal::Missing
+                                                                             : PlainFileRefusal::Unreadable;
+        return std::nullopt;
+    }
     BY_HANDLE_FILE_INFORMATION info{};
-    if (GetFileInformationByHandle(h, &info) == FALSE) {
+    FILE_ATTRIBUTE_TAG_INFO tag{};
+    if (GetFileInformationByHandle(first.h, &info) == FALSE ||
+        GetFileInformationByHandleEx(first.h, FileAttributeTagInfo, &tag, sizeof tag) == FALSE) {
         why = PlainFileRefusal::Unreadable;
         return std::nullopt;
     }
-    if ((info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 || info.nNumberOfLinks != 1) {
-        why = PlainFileRefusal::Link;
+    if ((info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+        why = PlainFileRefusal::NotRegular;
         return std::nullopt;
     }
-    if ((info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 || GetFileType(h) != FILE_TYPE_DISK) {
+    const bool reparse = (tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+    if (reparse && IsReparseTagNameSurrogate(tag.ReparseTag)) {
+        why = PlainFileRefusal::Link;  // a symbolic link, a junction...
+        return std::nullopt;
+    }
+    if (info.nNumberOfLinks != 1) {
+        why = PlainFileRefusal::HardLink;
+        return std::nullopt;
+    }
+    Close data(INVALID_HANDLE_VALUE);
+    HANDLE h = first.h;
+    if (reparse) {
+        // OneDrive, compressed or deduplicated: the data comes through its filter.
+        data.h = open(0);
+        BY_HANDLE_FILE_INFORMATION again{};
+        if (data.h == INVALID_HANDLE_VALUE || GetFileInformationByHandle(data.h, &again) == FALSE ||
+            again.dwVolumeSerialNumber != info.dwVolumeSerialNumber || again.nFileIndexHigh != info.nFileIndexHigh ||
+            again.nFileIndexLow != info.nFileIndexLow) {
+            why = PlainFileRefusal::Unreadable;  // not the file just checked
+            return std::nullopt;
+        }
+        h = data.h;
+    }
+    if (GetFileType(h) != FILE_TYPE_DISK) {
         why = PlainFileRefusal::NotRegular;
         return std::nullopt;
     }
@@ -95,9 +127,10 @@ std::optional<PlainFileText> read_plain_file(const std::filesystem::path& file, 
 #else
     const int fd = ::open(file.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);  // NOLINT(cppcoreguidelines-pro-type-vararg)
     if (fd < 0) {
-        why = errno == ENOENT || errno == ENOTDIR ? PlainFileRefusal::Missing
-              : errno == ELOOP                    ? PlainFileRefusal::Link
-                                                  : PlainFileRefusal::Unreadable;
+        // ELOOP: a link; FreeBSD says EMLINK for O_NOFOLLOW on one.
+        why = errno == ENOENT || errno == ENOTDIR    ? PlainFileRefusal::Missing
+              : errno == ELOOP || errno == EMLINK ? PlainFileRefusal::Link
+                                                     : PlainFileRefusal::Unreadable;
         return std::nullopt;
     }
     struct Close {
@@ -119,7 +152,7 @@ std::optional<PlainFileText> read_plain_file(const std::filesystem::path& file, 
         return std::nullopt;
     }
     if (st.st_nlink != 1) {
-        why = PlainFileRefusal::Link;
+        why = PlainFileRefusal::HardLink;
         return std::nullopt;
     }
     const auto size = static_cast<std::uint64_t>(st.st_size);
@@ -158,17 +191,19 @@ std::string plain_file_refusal_text(PlainFileRefusal why, std::uint64_t max_byte
         case PlainFileRefusal::None:
             return {};
         case PlainFileRefusal::Missing:
-            return "it isn't there";
+            return "isn't there";
         case PlainFileRefusal::Link:
-            return "it's a link (FloServer reads only a plain file)";
+            return "is a link; FloServer reads only a plain file (copy the file into the project instead)";
+        case PlainFileRefusal::HardLink:
+            return "has another name (a hard link); FloServer reads only a plain file";
         case PlainFileRefusal::NotRegular:
-            return "it isn't a plain file";
+            return "isn't a plain file";
         case PlainFileRefusal::TooBig:
-            return "it's larger than " + std::to_string(max_bytes / 1024) + " KB";
+            return "is larger than " + std::to_string(max_bytes / 1024) + " KB";
         case PlainFileRefusal::Unreadable:
             break;
     }
-    return "it can't be read";
+    return "can't be read";
 }
 
 }  // namespace floserver::core
