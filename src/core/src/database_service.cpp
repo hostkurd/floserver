@@ -540,7 +540,7 @@ private:
         if (files_.family == kMySqlFamily) {
             std::error_code ec;
             const bool have_ca = fs::is_regular_file(files_.data_dir / "ca.pem", ec);
-            o.args.push_back(have_ca ? "--ssl-mode=VERIFY_CA" : "--ssl-mode=REQUIRED");
+            o.args.emplace_back(have_ca ? "--ssl-mode=VERIFY_CA" : "--ssl-mode=REQUIRED");
             if (have_ca) {
                 o.args.push_back("--ssl-ca=" + ca);
             }

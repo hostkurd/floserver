@@ -327,7 +327,7 @@ TEST_CASE("a new database server never takes a port another one keeps in its fol
                                          {"license", "x"}, {"sha256", std::string(64, 'a')}}
                               .dump());
     test_util::write_file(data / "data" / "mariadb-10.11" / "port", "3307\n");
-    AppConfig app;
+    const AppConfig app;
     std::string error;
     REQUIRE(save_app_config(app_config_file(data), app, error));
     DatabaseServiceConfig cfg;
