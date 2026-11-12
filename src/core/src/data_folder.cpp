@@ -853,6 +853,9 @@ bool is_uninstall_item(const fs::path& data, const fs::path& path) {
             return true;
         }
     }
+    if (p == (data / "garnet").lexically_normal()) {
+        return true;  // Redis's data (D30)
+    }
     // A database server's folder is named after its family and series:
     // "mariadb-11.4", "mysql-8.4" (D28).
     if (p.parent_path() != (data / "data").lexically_normal()) {
@@ -902,6 +905,7 @@ std::vector<CleanItem> uninstall_items(const fs::path& data, bool runtimes, bool
                 add(p);
             }
         }
+        add(data / "garnet");  // Redis's keys (D30)
     }
     return out;
 }

@@ -12,6 +12,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
+
 #ifndef _WIN32
 #include <array>
 #include <cstdio>
@@ -70,6 +72,25 @@ fs::path add_python(const fs::path& data, const std::string& version) {
     test_util::write_file(dir / "python.exe", "");
 #else
     test_util::write_file(dir / "bin" / "python3", "");
+#endif
+    return dir;
+}
+
+// Bun and Deno (D31): one program each, in the install's top folder (on Windows
+// bun.exe and deno.exe).
+fs::path add_single(const fs::path& data, const std::string& name, const std::string& version,
+                    const std::string& variant = "") {
+    const fs::path dir = runtimes_dir(data) / name / (variant.empty() ? version : version + "-" + variant);
+    fs::create_directories(dir);
+    test_util::write_file(dir / ".floserver-runtime.json",
+                          nlohmann::json{{"schema", 1}, {"name", name}, {"version", version},
+                                         {"platform", std::string(current_platform())}, {"variant", variant},
+                                         {"license", "x"}, {"sha256", std::string(64, 'a')}}
+                              .dump());
+#ifdef _WIN32
+    test_util::write_file(dir / (name + ".exe"), "");
+#else
+    test_util::write_file(dir / name, "");
 #endif
     return dir;
 }
@@ -303,3 +324,79 @@ TEST_CASE("the shim program runs the project's node and php, arguments as given"
 }
 
 #endif
+
+TEST_CASE("bun, bunx and deno run the project's Bun and Deno (D31)") {
+    const test_util::TempDir tmp;
+    const fs::path data = tmp.path() / "data";
+    const fs::path bun13 = add_single(data, "bun", "1.3.14");
+    const fs::path bun12 = add_single(data, "bun", "1.2.9");
+    const fs::path deno29 = add_single(data, "deno", "2.9.8");
+    const fs::path deno28 = add_single(data, "deno", "2.8.1");
+
+    const auto& names = shim_names();
+    for (const char* name : {"bun", "bunx", "deno"}) {
+        CHECK(std::find(names.begin(), names.end(), name) != names.end());
+    }
+
+    const fs::path edge = tmp.path() / "edge";
+    test_util::write_file(edge / "floserver.json", R"({"bun": "1.2"})");
+    fs::create_directories(edge / "src" / "routes");
+    std::string error;
+    auto bun = resolve_shim("bun", edge / "src" / "routes", data, error);
+    REQUIRE_MESSAGE(bun, error);
+    CHECK(bun->program == *bun_program(bun12));
+    CHECK(bun->version == "1.2.9");
+    CHECK(bun->args.empty());
+    auto bunx = resolve_shim("bunx", edge, data, error);
+    REQUIRE(bunx);
+    CHECK(bunx->program == *bun_program(bun12));
+    CHECK(bunx->args == Args{"x"});  // bunx is `bun x`
+
+    const fs::path fresh = tmp.path() / "fresh";
+    test_util::write_file(fresh / "floserver.json", R"({"deno": "2.8"})");
+    const auto deno = resolve_shim("deno", fresh, data, error);
+    REQUIRE(deno);
+    CHECK(deno->program == *deno_program(deno28));
+    CHECK(deno->version == "2.8.1");
+    CHECK(deno->args.empty());
+    // A Bun project that runs deno: the newest Deno, it names none.
+    CHECK(resolve_shim("deno", edge, data, error)->program == *deno_program(deno29));
+
+    // Outside a project: the newest installed.
+    const fs::path elsewhere = tmp.path() / "elsewhere";
+    fs::create_directories(elsewhere);
+    CHECK(resolve_shim("bun", elsewhere, data, error)->program == *bun_program(bun13));
+    CHECK(resolve_shim("bunx", elsewhere, data, error)->program == *bun_program(bun13));
+    CHECK(resolve_shim("deno", elsewhere, data, error)->program == *deno_program(deno29));
+
+    // The baseline build (a CPU without AVX2) is a Bun like the other.
+    const fs::path slow = tmp.path() / "slow-data";
+    const fs::path baseline = add_single(slow, "bun", "1.3.14", "baseline");
+    CHECK(baseline.filename() == "1.3.14-baseline");
+    CHECK(resolve_shim("bun", elsewhere, slow, error)->program == *bun_program(baseline));
+    // Both builds installed: the one that runs on this CPU, whatever the order of versions.
+    const fs::path both_builds = tmp.path() / "both-data";
+    const fs::path regular_dir = add_single(both_builds, "bun", "1.3.14");
+    const fs::path baseline_dir = add_single(both_builds, "bun", "1.3.14", "baseline");
+    CHECK(resolve_shim("bun", elsewhere, both_builds, error, true)->program == *bun_program(regular_dir));
+    CHECK(resolve_shim("bun", elsewhere, both_builds, error, false)->program == *bun_program(baseline_dir));
+    // Only the other build there: still used (it runs, if slowly, or says why not).
+    CHECK(resolve_shim("bun", elsewhere, slow, error, true)->program == *bun_program(baseline));
+
+    // What to install when it isn't there.
+    const fs::path none = tmp.path() / "none-data";
+    fs::create_directories(none);
+    CHECK_FALSE(resolve_shim("bun", edge, none, error));
+    CHECK(error == "this project asks for Bun 1.2, which isn't installed; install it with: flo install bun 1.2");
+    // (inside a project: outside one, a Bun already on PATH is used, and CI machines may have one)
+    CHECK_FALSE(resolve_shim("bunx", edge, none, error));
+    CHECK(error == "this project asks for Bun 1.2, which isn't installed; install it with: flo install bun 1.2");
+    CHECK_FALSE(resolve_shim("deno", fresh, none, error));
+    CHECK(error == "this project asks for Deno 2.8, which isn't installed; install it with: flo install deno 2.8");
+
+    // A project that names two JavaScript runtimes can't say which: floserver.json is refused.
+    const fs::path both = tmp.path() / "both";
+    test_util::write_file(both / "floserver.json", R"({"node": "24", "bun": "1.3"})");
+    CHECK_FALSE(resolve_shim("bun", both, data, error));
+    CHECK(error.find("one JavaScript runtime") != std::string::npos);
+}

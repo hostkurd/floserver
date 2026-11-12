@@ -52,6 +52,19 @@ $files = @(
        OrigAlt = "https://cdn.mysql.com/archives/mysql-8.4/mysql-8.4.11-winx64.zip" },
     # Mailpit publishes no checksum file; the GitHub release download is the original.
     @{ Path = "mailpit/1.33.0/mailpit-windows-amd64.zip";       Orig = "https://github.com/axllent/mailpit/releases/download/v1.33.0/mailpit-windows-amd64.zip" },
+    # Bun (D31): one SHASUMS256.txt per release lists the regular and the baseline build (for a CPU without AVX2).
+    @{ Path = "bun/1.3.14/bun-windows-x64.zip";          Sums = "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/SHASUMS256.txt" },
+    @{ Path = "bun/1.3.14/bun-windows-x64-baseline.zip"; Sums = "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/SHASUMS256.txt" },
+    # Deno (D31): each download has its own .sha256sum (a Get-FileHash print: Algorithm, Hash, Path).
+    @{ Path = "deno/2.9.8/deno-x86_64-pc-windows-msvc.zip"; Sums = "https://github.com/denoland/deno/releases/download/v2.9.8/deno-x86_64-pc-windows-msvc.zip.sha256sum" },
+    # Redis through Garnet (D30). None of the three publishes a SHA-256 list (.NET's releases.json
+    # has SHA-512), so each original download is compared.
+    @{ Path = "garnet/2.2.4/win-x64-based-readytorun.zip";       Orig = "https://github.com/microsoft/garnet/releases/download/v2.2.4/win-x64-based-readytorun.zip" },
+    @{ Path = "dotnet/10.0.14/dotnet-runtime-10.0.14-win-x64.zip"; Orig = "https://builds.dotnet.microsoft.com/dotnet/Runtime/10.0.14/dotnet-runtime-10.0.14-win-x64.zip" },
+    @{ Path = "php-redis/6.3.0/php_redis-6.3.0-8.5-nts-vs17-x64.zip"; Orig = "https://downloads.php.net/~windows/pecl/releases/redis/6.3.0/php_redis-6.3.0-8.5-nts-vs17-x64.zip" },
+    @{ Path = "php-redis/6.3.0/php_redis-6.3.0-8.4-nts-vs17-x64.zip"; Orig = "https://downloads.php.net/~windows/pecl/releases/redis/6.3.0/php_redis-6.3.0-8.4-nts-vs17-x64.zip" },
+    @{ Path = "php-redis/6.3.0/php_redis-6.3.0-8.3-nts-vs16-x64.zip"; Orig = "https://downloads.php.net/~windows/pecl/releases/redis/6.3.0/php_redis-6.3.0-8.3-nts-vs16-x64.zip" },
+    @{ Path = "php-redis/6.3.0/php_redis-6.3.0-8.2-nts-vs16-x64.zip"; Orig = "https://downloads.php.net/~windows/pecl/releases/redis/6.3.0/php_redis-6.3.0-8.2-nts-vs16-x64.zip" },
     @{ Path = "apache/2.4.69/httpd-2.4.69-261002-Win64-VS18.zip"; Orig = "https://www.apachelounge.com/download/VS18/binaries/httpd-2.4.69-261002-Win64-VS18.zip" },
     # FloServer's own installer (the list's "app"): no Sums or Orig, so it says CHECK BY HAND;
     # compare its SHA-256 with the CI artifact's, then build with --accept and --app-notes, e.g.
@@ -90,6 +103,12 @@ function Find-OfficialHash([string]$sumsUrl, [string]$name) {
         if ($line -match "(^|[^\w.-])$escaped([^\w.-]|$)") {
             if ($line -match "\b([0-9a-fA-F]{64})\b") { return $Matches[1].ToLower() }
         }
+    }
+    # Deno's .sha256sum files are PowerShell's Get-FileHash print ("Hash : CBA8...",
+    # "Path : ...\deno-x86_64-pc-windows-msvc.zip"): a Hash line, the file named, one distinct hash in all
+    if ($sumsUrl -like "*.sha256sum" -and $text -match "(?m)^\s*Hash\s*:" -and $text -match "(^|[^\w.-])$escaped([^\w.-]|$)") {
+        $hashes = @([regex]::Matches($text, "\b[0-9a-fA-F]{64}\b") | ForEach-Object { $_.Value.ToLower() } | Sort-Object -Unique)
+        if ($hashes.Count -eq 1) { return $hashes[0] }
     }
     # composer.phar.sha256sum and similar hold just the hash, on one line
     $lines = @($text -split "`r?`n" | Where-Object { $_.Trim() -ne "" })

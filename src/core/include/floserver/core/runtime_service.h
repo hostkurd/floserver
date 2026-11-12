@@ -44,6 +44,10 @@ struct RuntimeServiceConfig {
     std::chrono::milliseconds retry_delay{3000};
     // A list fetched less than this long ago is used without asking again.
     std::chrono::minutes list_max_age{60};
+    // Whether this computer's CPU has AVX2 (D31): Bun's regular build needs
+    // it, and without it the "baseline" build is installed. Empty: ask the
+    // CPU (cpu_has_avx2()); tests replace it.
+    std::function<bool()> has_avx2;
     // The templates used when no signed list with templates can be had
     // (offline, first run): a JSON array, normally kBuiltInTemplatesJson.
     std::string builtin_templates_json = "[]";
@@ -93,9 +97,17 @@ public:
 
     // Queues an install of the newest `name` matching `version` ("8.5",
     // "8.5.12", or empty for the newest). Returns the job id; the same request
-    // while one is still waiting or running returns that job's id.
+    // while one is still waiting or running returns that job's id. A
+    // `variant` picks that variant only (php-redis's "php8-4"); without one
+    // only plain and NTS builds count.
+    //
+    // Dependencies (D30), in the same job: Garnet brings the .NET runtime it
+    // needs (first: without it Garnet can't run, so the job fails) and
+    // phpredis for each installed PHP series that has a build (a missing one
+    // is only noted: those projects use predis); a PHP installed while Garnet
+    // is brings its series' phpredis the same way.
     [[nodiscard]] std::optional<std::int64_t> install(const std::string& name, const std::string& version,
-                                                      ServiceRefusal& refusal);
+                                                      ServiceRefusal& refusal, const std::string& variant = {});
 
     // A job's state, or nothing for an unknown id:
     //   {"id", "kind", "name", "requested", "version", "state", "received", "total", "message"}
@@ -137,6 +149,10 @@ private:
     [[nodiscard]] std::filesystem::path runtimes_root() const;
     void worker();
     void run(Job& job);
+    // Downloads and installs one entry for `job`, its progress counted from
+    // `base`. False with `error` (empty when cancelled: the job says so).
+    bool fetch_install(Job& job, const RuntimeFile& entry, std::uint64_t base, std::string& error,
+                       std::filesystem::path* dir = nullptr);
     void set_state(Job& job, const char* state, std::string message = {});
     [[nodiscard]] static nlohmann::json describe(const Job& job);
 

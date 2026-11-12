@@ -376,3 +376,55 @@ TEST_CASE("the installer's path, its notes and a second installer are checked") 
     }
     CHECK(has_error_with(build_manifest(report.dump(), o), "a second FloServer installer"));
 }
+
+TEST_CASE("Garnet, its .NET runtime and phpredis per PHP series are listed (D30)") {
+    const auto file = [](const std::string& path, const char* sha) {
+        return json{{"path", path}, {"size", 1000}, {"sha256", sha}, {"result", "ok"}};
+    };
+    json report = real_report();
+    const char* a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const char* b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const char* c = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    const char* d = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    report["files"].push_back(file("garnet/2.2.4/win-x64-based-readytorun.zip", a));
+    report["files"].push_back(file("garnet/2.2.4/linux-x64-based-readytorun.tar.xz", a));
+    report["files"].push_back(file("dotnet/10.0.3/dotnet-runtime-10.0.3-win-x64.zip", b));
+    report["files"].push_back(file("php-redis/6.3.0/php_redis-6.3.0-8.4-nts-vs17-x64.zip", c));
+    report["files"].push_back(file("php-redis/6.3.0/php_redis-6.3.0-8.3-nts-vs16-x64.zip", d));
+    report["files"].push_back(file("php-redis/6.3.0/php_redis-6.3.0-8.4-ts-vs17-x64.zip", d));
+    const BuildResult r = build_manifest(report.dump(), options());
+    INFO(r.errors.size());
+    for (const auto& e : r.errors) {
+        INFO(e);
+    }
+    REQUIRE(r.manifest_json);
+    const json list = json::parse(*r.manifest_json);
+    std::map<std::string, json> by;
+    for (const json& e : list["runtimes"]) {
+        by[e["name"].get<std::string>() + "/" + e.value("variant", std::string())] = e;
+    }
+    REQUIRE(by.contains("garnet/"));
+    CHECK(by["garnet/"]["license"] == "MIT");
+    CHECK(by["garnet/"]["urls"][1] ==
+          "https://github.com/microsoft/garnet/releases/download/v2.2.4/win-x64-based-readytorun.zip");
+    REQUIRE(by.contains("dotnet/"));
+    CHECK(by["dotnet/"]["urls"][1] ==
+          "https://builds.dotnet.microsoft.com/dotnet/Runtime/10.0.3/dotnet-runtime-10.0.3-win-x64.zip");
+    REQUIRE(by.contains("php-redis/php8-4"));
+    REQUIRE(by.contains("php-redis/php8-3"));
+    CHECK(by["php-redis/php8-4"]["urls"][1] ==
+          "https://downloads.php.net/~windows/pecl/releases/redis/6.3.0/php_redis-6.3.0-8.4-nts-vs17-x64.zip");
+    CHECK(by["php-redis/php8-4"]["license"] == "PHP-3.01");
+    // The other builds are left out with a note.
+    CHECK(r.notes.size() >= 2);
+
+    // A series with the wrong Visual Studio is refused.
+    json wrong = real_report();
+    wrong["files"].push_back(file("php-redis/6.3.0/php_redis-6.3.0-8.3-nts-vs17-x64.zip", c));
+    const BuildResult w = build_manifest(wrong.dump(), options());
+    CHECK_FALSE(w.manifest_json);
+    CHECK(has_error_with(w, "Visual Studio"));
+    const CdnPath p = describe_cdn_path("php-redis/6.3.0/php_redis-6.3.0-8.5-nts-vs17-x64.zip");
+    CHECK(p.listable);
+    CHECK(p.variant == "php8-5");
+}

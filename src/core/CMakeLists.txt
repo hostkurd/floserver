@@ -25,11 +25,14 @@ add_library(floserver_core STATIC
     src/builtin.cpp
     src/der.cpp
     src/child_process.cpp
+    src/cpu_features.cpp
     src/php_pool.cpp
     src/php_settings.cpp
     src/phpmyadmin.cpp
     src/mailpit.cpp
     src/mail_service.cpp
+    src/garnet.cpp
+    src/redis_service.cpp
     src/app_runner.cpp
     src/apache_config.cpp
     src/apache_settings.cpp

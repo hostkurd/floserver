@@ -87,8 +87,9 @@ ProjectRow row_from(const json& p, Lang lang) {
     if (state == "ready") {
         if (run == "failed") {
             row.state = RowState::Problem;
-            const bool own_server =
-                !text_of(p, "node").empty() || !text_of(p, "python").empty() || text_of(p, "web") == "apache";
+            const bool own_server = !text_of(p, "node").empty() || !text_of(p, "bun").empty() ||
+                                    !text_of(p, "deno").empty() || !text_of(p, "python").empty() ||
+                                    text_of(p, "web") == "apache";
             row.detail = std::string(text(lang, own_server ? Str::ServerCantStart : Str::PhpCantStart));
         } else if (run == "starting") {
             row.state = RowState::Waking;
@@ -128,6 +129,14 @@ ProjectRow row_from(const json& p, Lang lang) {
     if (!node.empty()) {
         row.chips.push_back("Node " + node);
     }
+    const std::string bun = text_of(p, "bun");
+    if (!bun.empty()) {
+        row.chips.push_back("Bun " + bun);
+    }
+    const std::string deno = text_of(p, "deno");
+    if (!deno.empty()) {
+        row.chips.push_back("Deno " + deno);
+    }
     const std::string database = text_of(p, "database");
     if (!database.empty()) {
         row.chips.push_back(database_chip(database));
@@ -142,8 +151,11 @@ ProjectRow row_from(const json& p, Lang lang) {
     row.path = path;
     row.php = php;
     row.node = node;
+    row.bun = bun;
+    row.deno = deno;
     row.python = python;
     row.database = database;
+    row.packages_missing = text_of(p, "packages_missing");
     row.database_name = text_of(p, "database_name");
     if (p.contains("wants") && p["wants"].is_object()) {
         const json& want = p["wants"];
@@ -151,6 +163,8 @@ ProjectRow row_from(const json& p, Lang lang) {
         row.wants.php = text_of(want, "php");
         row.wants.php_off = want.contains("php") && want.at("php").is_boolean() && !want.at("php").get<bool>();
         row.wants.node = text_of(want, "node");
+        row.wants.bun = text_of(want, "bun");
+        row.wants.deno = text_of(want, "deno");
         row.wants.python = text_of(want, "python");
         row.wants.database = text_of(want, "database");
         row.wants.web = text_of(want, "web") == "apache" ? "apache" : "nginx";
@@ -168,11 +182,16 @@ ProjectRow row_from(const json& p, Lang lang) {
                 }
             }
         }
+        row.wants.redis = flag_of(want, "redis");
     }
     row.static_site = flag_of(p, "static");
     row.php_files = flag_of(p, "php_files");
     if (row.static_site) {
         row.chips.emplace_back("Static");  // the mockup's "Static · nginx"
+    }
+    // Redis (D30) before the web server, as in the mockup.
+    if (row.wants.redis) {
+        row.chips.emplace_back("Redis");
     }
     // The web server last, as in the mockup. nginx only when floserver.json
     // could be read (it serves every project that isn't Apache's).
@@ -394,6 +413,8 @@ bool newer(const std::string& a, const std::string& b) {
     return false;
 }
 
+bool has_javascript(const Wants& w) { return !w.node.empty() || !w.bun.empty() || !w.deno.empty(); }
+
 // One choice per installed series, newest first; the series is the value.
 std::vector<std::string> series_of(const Installed& installed, const std::string& runtime) {
     std::vector<std::string> out;
@@ -444,6 +465,13 @@ Installed installed_from_list(const json& result) {
         if (!name.empty() && !version.empty()) {
             out[name].push_back(version);
         }
+        // phpredis is one install per PHP series: "php8-4" is 8.4 (D30).
+        const std::string variant = text_of(r, "variant");
+        if (name == "php-redis" && variant.size() > 3 && variant.starts_with("php")) {
+            std::string series = variant.substr(3);
+            std::replace(series.begin(), series.end(), '-', '.');
+            out[std::string(kInstalledPhpRedisSeries)].push_back(series);
+        }
     }
     for (auto& [name, versions] : out) {
         std::stable_sort(versions.begin(), versions.end(), newer);
@@ -487,7 +515,7 @@ std::vector<VersionField> fields_of(const ProjectRow& row, const Installed& inst
         php.choices.push_back({std::string(text(lang, Str::ChoiceNewest)), std::string(kPhpNewest)});
         const bool absent = w.php.empty() && !w.php_off;
         if (absent) {
-            const bool none = !w.node.empty() || !w.python.empty() || row.static_site;
+            const bool none = has_javascript(w) || !w.python.empty() || row.static_site;
             php.current = none ? 0U : 1U;
             php.implicit = true;
         } else {
@@ -498,7 +526,7 @@ std::vector<VersionField> fields_of(const ProjectRow& row, const Installed& inst
     } else {
         // Without the key, a PHP project gets the newest installed; a Node
         // or Python project gets none.
-        const bool own_server = w.php.empty() && (!w.node.empty() || !w.python.empty() || row.static_site);
+        const bool own_server = w.php.empty() && (has_javascript(w) || !w.python.empty() || row.static_site);
         php.choices.push_back({std::string(text(lang, own_server ? Str::ChoiceNone : Str::ChoiceNewest)), std::nullopt});
         add_series(php, installed, "php", w.php, "", "", lang);
     }
@@ -526,10 +554,13 @@ std::vector<VersionField> fields_of(const ProjectRow& row, const Installed& inst
                      w.web == "apache" ? 1U : 0U};
     out.push_back(std::move(web));
 
-    VersionField node{Field::Node, "node", std::string(text(lang, Str::FieldNode)), {}, 0};
-    node.choices.push_back({std::string(text(lang, Str::ChoiceNone)), std::nullopt});
-    add_series(node, installed, "node", w.node, "", "", lang);
-    out.push_back(std::move(node));
+    // One JavaScript runtime per project: None, Node, Bun or Deno (D31).
+    VersionField js{Field::Javascript, "javascript", std::string(text(lang, Str::FieldJavascript)), {}, 0};
+    js.choices.push_back({std::string(text(lang, Str::ChoiceNone)), std::nullopt});
+    add_series(js, installed, "node", w.node, "node-", "Node ", lang);
+    add_series(js, installed, "bun", w.bun, "bun-", "Bun ", lang);
+    add_series(js, installed, "deno", w.deno, "deno-", "Deno ", lang);
+    out.push_back(std::move(js));
 
     if (!w.python.empty() || installed.contains("python")) {
         VersionField python{Field::Python, "python", std::string(text(lang, Str::FieldPython)), {}, 0};
@@ -561,6 +592,13 @@ bool server_is(const json& server, std::string_view family, const std::string& s
 }
 
 }  // namespace
+
+std::string field_note(const ProjectRow& row, Lang lang) {
+    if (std::string note = php_off_note(row, lang); !note.empty()) {
+        return note;
+    }
+    return row.packages_missing.empty() ? std::string() : std::string(text(lang, Str::BunPackagesNote));
+}
 
 std::uint16_t database_port(const json& databases, std::string_view database) {
     const std::size_t dash = database.find('-');
@@ -715,6 +753,12 @@ std::string runtime_label(std::string_view name) {
     if (name == "node") {
         return "Node.js";
     }
+    if (name == "bun") {
+        return "Bun";
+    }
+    if (name == "deno") {
+        return "Deno";
+    }
     if (name == "python") {
         return "Python";
     }
@@ -726,6 +770,9 @@ std::string runtime_label(std::string_view name) {
     }
     if (name == "phpmyadmin") {
         return "phpMyAdmin";
+    }
+    if (name == "garnet") {
+        return "Garnet (Redis)";
     }
     if (name == "mailpit") {
         return "Mailpit";
@@ -818,6 +865,8 @@ std::vector<TemplateCard> cards_from_list(const json& result, Lang lang) {
             c.config.known = true;
             c.config.php = text_of(cfg, "php");
             c.config.node = text_of(cfg, "node");
+            c.config.bun = text_of(cfg, "bun");
+            c.config.deno = text_of(cfg, "deno");
             c.config.python = text_of(cfg, "python");
             c.config.database = text_of(cfg, "database");
             c.config.web = text_of(cfg, "web") == "apache" ? "apache" : "nginx";
@@ -841,6 +890,37 @@ std::string database_family_of(const std::optional<std::string>& value) {
     return {};
 }
 
+// The runtime a picker's current choice is about, and the prefix its values
+// have ("mariadb-", "bun-"). False for pickers with none to prefer (the web
+// server, a JavaScript picker at None).
+bool field_runtime(const VersionField& f, std::string& runtime, std::string& prefix) {
+    prefix.clear();
+    switch (f.field) {
+        case Field::Php: runtime = "php"; return true;
+        // The template's own family: one tried with MariaDB isn't moved to MySQL.
+        case Field::Database: {
+            runtime = database_family_of(f.current < f.choices.size() ? f.choices[f.current].value : std::nullopt);
+            prefix = runtime + "-";
+            return !runtime.empty();
+        }
+        case Field::Python: runtime = "python"; return true;
+        case Field::Javascript: {
+            const std::optional<std::string>& value = f.current < f.choices.size() ? f.choices[f.current].value : std::nullopt;
+            for (const char* name : {"node", "bun", "deno"}) {
+                const std::string p = std::string(name) + "-";
+                if (value && value->starts_with(p)) {
+                    runtime = name;
+                    prefix = p;
+                    return true;
+                }
+            }
+            return false;
+        }
+        case Field::Web: break;
+    }
+    return false;
+}
+
 // A template's versions are the ones it was tried with, not a requirement:
 // WordPress runs on any MariaDB from 10.6 and any PHP 8. When the named
 // series isn't installed but the same or a newer one is, that one is picked
@@ -853,19 +933,11 @@ void prefer_installed(VersionField& f, const Installed& installed) {
     if (f.current >= f.choices.size()) {
         return;
     }
-    switch (f.field) {
-        case Field::Php: runtime = "php"; break;
-        // The template's own family: one tried with MariaDB isn't moved to MySQL.
-        case Field::Database:
-            runtime = database_family_of(f.choices[f.current].value);
-            prefix = runtime + "-";
-            break;
-        case Field::Node: runtime = "node"; break;
-        case Field::Python: runtime = "python"; break;
-        default: return;
-    }
     const std::optional<std::string>& value = f.choices[f.current].value;
-    if (!value || !value->starts_with(prefix) || runtime.empty()) {
+    if (!field_runtime(f, runtime, prefix)) {
+        return;
+    }
+    if (!value || !value->starts_with(prefix)) {
         return;  // "none", or a database that isn't MariaDB or MySQL
     }
     const std::string wanted = value->substr(prefix.size());
@@ -892,18 +964,8 @@ void prefer_installed(VersionField& f, const Installed& installed) {
 void prefer_default(VersionField& f, const std::string& named, const Installed& installed, const Defaults& defaults) {
     std::string runtime;
     std::string prefix;
-    if (f.current >= f.choices.size()) {
+    if (!field_runtime(f, runtime, prefix)) {
         return;
-    }
-    switch (f.field) {
-        case Field::Php: runtime = "php"; break;
-        case Field::Database:
-            runtime = database_family_of(f.choices[f.current].value);
-            prefix = runtime + "-";
-            break;
-        case Field::Node: runtime = "node"; break;
-        case Field::Python: runtime = "python"; break;
-        default: return;
     }
     const auto it = defaults.find(runtime);
     if (runtime.empty() || it == defaults.end()) {
@@ -954,7 +1016,8 @@ std::vector<VersionField> template_fields(const TemplateCard& card, const Instal
         const bool keep = (f.field == Field::Php && card.uses_php) ||
                           (f.field == Field::Database && (card.uses_php || !card.config.database.empty())) ||
                           (f.field == Field::Web && card.uses_php) ||
-                          (f.field == Field::Node && !card.config.node.empty()) ||
+                          (f.field == Field::Javascript && (!card.config.node.empty() || !card.config.bun.empty() ||
+                                                            !card.config.deno.empty())) ||
                           (f.field == Field::Python && !card.config.python.empty());
         if (keep) {
             prefer_installed(f, installed);
@@ -963,8 +1026,11 @@ std::vector<VersionField> template_fields(const TemplateCard& card, const Instal
             const bool known_db = db.starts_with("mariadb-") || db.starts_with("mysql-");
             const std::string named = f.field == Field::Php        ? card.config.php
                                       : f.field == Field::Database ? (known_db ? db.substr(dash + 1) : std::string())
-                                      : f.field == Field::Node     ? card.config.node
-                                                                   : card.config.python;
+                                      : f.field == Field::Javascript
+                                          ? (!card.config.node.empty() ? card.config.node
+                                             : !card.config.bun.empty() ? card.config.bun
+                                                                        : card.config.deno)
+                                          : card.config.python;
             prefer_default(f, named, installed, defaults);
             out.push_back(std::move(f));
         }

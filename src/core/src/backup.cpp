@@ -250,7 +250,7 @@ json backup_versions(const fs::path& dir) {
     if (!j.is_object()) {
         return out;
     }
-    for (const char* key : {"php", "node", "python", "database", "web"}) {
+    for (const char* key : {"php", "node", "bun", "deno", "python", "database", "web"}) {
         if (j.contains(key) && j.at(key).is_string()) {
             out[key] = j.at(key);
         } else if (std::string_view(key) == "php" && j.contains(key) && j.at(key).is_boolean() &&

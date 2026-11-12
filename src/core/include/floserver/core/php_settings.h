@@ -100,6 +100,9 @@ struct PhpIniSettings {
     std::map<std::string, std::string> series_ini;
     std::string custom_ini;                          // the series' custom.ini text
     std::map<std::string, std::string> project_ini;
+    // phpredis (D30, garnet.h's php_redis_extension()): the DLL a project
+    // with Redis on loads, by full path; empty for none.
+    std::filesystem::path redis_extension;
 
     bool operator==(const PhpIniSettings&) const = default;
 };
@@ -112,7 +115,7 @@ struct PhpIniSettings {
                                                     std::string custom_ini, const ProjectConfig* project);
 
 // The part of a pool's key after "php-<version>": "+gd+intl" for the extra
-// extensions, then "-<8 hex digits>" (a hash of the rest) when anything else
+// extensions ("+redis" for phpredis), then "-<8 hex digits>" (a hash of the rest) when anything else
 // differs from the defaults. The same settings always give the same text, so
 // a pool keeps its key (and its port) until its settings change.
 [[nodiscard]] std::string php_settings_key(const PhpIniSettings& settings);

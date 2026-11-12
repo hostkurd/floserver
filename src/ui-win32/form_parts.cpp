@@ -418,6 +418,10 @@ bool ask_delete_mails(HWND owner, Lang lang, const std::string& question) {
     return ask_two_buttons(owner, lang, question, Str::MailDeleteConfirm, nullptr, nullptr);
 }
 
+bool ask_flush_redis(HWND owner, Lang lang, const std::string& question) {
+    return ask_two_buttons(owner, lang, question, Str::RedisFlushConfirm, nullptr, nullptr);
+}
+
 bool ask_remove_mailpit(HWND owner, Lang lang, const std::string& question, bool& emails) {
     const Str box = Str::MailRemoveEmails;
     return ask_two_buttons(owner, lang, question, Str::SettingsRemove, &box, &emails);

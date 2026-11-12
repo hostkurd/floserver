@@ -104,6 +104,8 @@ std::string MainWindow::access_id(const Hit& hit) const {
             return panel + "phpmyadmin";
         case Part::PanelKeep:
             return panel + "keep";
+        case Part::PanelRedis:
+            return panel + "redis";
         case Part::PanelRemove:
             return panel + "remove";
         case Part::PanelPhpSettings:
@@ -519,8 +521,16 @@ void MainWindow::add_panel_access(AccessTree& t) const {
         picker.target = target(Part::PanelField, index);
         add(std::move(picker), g.fields[i].second);
     }
-    words("php-note", php_off_note(*row, lang_), g.php_note);
+    words("php-note", field_note(*row, lang_), g.php_note);
     words("saved-in", fill(lang_, Str::SavedIn, {core::kProjectConfigFileName}), g.saved_in);
+    if (shown(g.redis_switch)) {
+        AccessNode sw = switch_node(access_id({Part::PanelRedis, -1, p}), std::string(text(lang_, Str::PanelRedis)),
+                                    redis_value(*row), connected && !leaving(p), lang_);
+        sw.help = access_text(redis_panel_note(*row, snap_.installed, lang_));
+        sw.focusable = true;
+        sw.target = target(Part::PanelRedis, -1);
+        add(std::move(sw), g.redis_switch);
+    }
     if (shown(g.keep_switch)) {
         const bool keep = keep_value(*row);
         AccessNode sw = switch_node(access_id({Part::PanelKeep, -1, p}), std::string(text(lang_, Str::KeepRunning)),
@@ -1190,6 +1200,9 @@ void MainWindow::run_access(const AccessNode& n, AccessAction action) {
             return;
         case Part::PanelKeep:
             toggle_keep_running_for(hit.project);
+            return;
+        case Part::PanelRedis:
+            toggle_redis_for(hit.project);
             return;
         case Part::SharedSwitch:
         case Part::SharedEnd:

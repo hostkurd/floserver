@@ -102,6 +102,31 @@ void read_version(const json& doc, const char* key, std::optional<std::string>& 
     out = version->to_string();  // "08.2" is stored as "8.2"
 }
 
+// One JavaScript runtime per project (D31): naming two is an error, shown
+// against the second one in the order node, bun, deno (not the file's:
+// the parsed config doesn't keep it).
+void read_one_js_runtime(const ProjectConfig& config, ConfigResult& result) {
+    std::vector<std::string> named;
+    if (config.node) {
+        named.emplace_back("node");
+    }
+    if (config.bun) {
+        named.emplace_back("bun");
+    }
+    if (config.deno) {
+        named.emplace_back("deno");
+    }
+    if (named.size() > 1) {
+        std::string list;
+        for (std::size_t i = 0; i < named.size(); ++i) {
+            list += (i == 0 ? "" : (i + 1 == named.size() ? " and " : ", ")) + named[i];
+        }
+        result.errors.push_back({named[1], "is named together with \"" + named[0] +
+                                               "\", but a project runs on one JavaScript runtime: keep one of " +
+                                               list + " in floserver.json"});
+    }
+}
+
 // "php": a version, false (never PHP) or "newest" (always PHP, the newest).
 void read_php(const json& doc, ProjectConfig& config, ConfigResult& result) {
     const auto it = doc.find("php");
@@ -337,9 +362,9 @@ ConfigResult parse_project_config(std::string_view json_text) {
         return result;
     }
 
-    static const std::set<std::string, std::less<>> known = {"php",     "node",  "python", "database",
-                                                             "mariadb", "mysql", "web",    "root",
-                                                             "extensions", "command", "php_ini"};
+    static const std::set<std::string, std::less<>> known = {
+        "php", "node", "bun", "deno", "python", "database", "mariadb", "mysql", "web", "root", "extensions", "command",
+        "php_ini", "redis"};
     for (const auto& item : doc.items()) {
         if (!known.contains(item.key())) {
             result.warnings.push_back({item.key(), "is not a FloServer setting and is ignored"});
@@ -349,6 +374,9 @@ ConfigResult parse_project_config(std::string_view json_text) {
     ProjectConfig config;
     read_php(doc, config, result);
     read_version(doc, "node", config.node, result);
+    read_version(doc, "bun", config.bun, result);
+    read_version(doc, "deno", config.deno, result);
+    read_one_js_runtime(config, result);
     read_version(doc, "python", config.python, result);
     read_database(doc, config, result);
     read_web(doc, config, result);
@@ -356,6 +384,13 @@ ConfigResult parse_project_config(std::string_view json_text) {
     read_extensions(doc, config, result);
     read_php_ini(doc, config, result);
     read_command(doc, config, result);
+    if (const auto it = doc.find("redis"); it != doc.end() && !it->is_null()) {
+        if (it->is_boolean()) {
+            config.redis = it->get<bool>();
+        } else {
+            result.errors.push_back({"redis", "must be true or false"});
+        }
+    }
 
     if (result.errors.empty()) {
         result.config = std::move(config);
@@ -374,6 +409,12 @@ std::string write_project_config(const ProjectConfig& config) {
     }
     if (config.node) {
         doc["node"] = *config.node;
+    }
+    if (config.bun) {
+        doc["bun"] = *config.bun;
+    }
+    if (config.deno) {
+        doc["deno"] = *config.deno;
     }
     if (config.python) {
         doc["python"] = *config.python;
@@ -399,6 +440,9 @@ std::string write_project_config(const ProjectConfig& config) {
     }
     if (config.command) {
         doc["command"] = *config.command;
+    }
+    if (config.redis) {
+        doc["redis"] = true;
     }
     return doc.dump(2) + "\n";
 }
@@ -430,6 +474,15 @@ std::optional<ConfigKey> parse_config_key(std::string_view name) {
     if (name == "node") {
         return ConfigKey::Node;
     }
+    if (name == "bun") {
+        return ConfigKey::Bun;
+    }
+    if (name == "deno") {
+        return ConfigKey::Deno;
+    }
+    if (name == "javascript") {
+        return ConfigKey::Javascript;
+    }
     if (name == "python") {
         return ConfigKey::Python;
     }
@@ -438,6 +491,9 @@ std::optional<ConfigKey> parse_config_key(std::string_view name) {
     }
     if (name == "web") {
         return ConfigKey::Web;
+    }
+    if (name == "redis") {
+        return ConfigKey::Redis;
     }
     return std::nullopt;
 }
@@ -450,10 +506,18 @@ const char* config_key_name(ConfigKey key) {
             return "php";
         case ConfigKey::Node:
             return "node";
+        case ConfigKey::Bun:
+            return "bun";
+        case ConfigKey::Deno:
+            return "deno";
+        case ConfigKey::Javascript:
+            return "javascript";
         case ConfigKey::Python:
             return "python";
         case ConfigKey::Database:
             return "database";
+        case ConfigKey::Redis:
+            return "redis";
         case ConfigKey::Web:
             break;
     }
@@ -472,9 +536,26 @@ std::optional<std::string> set_project_config_value(std::string_view text, Confi
             return std::nullopt;
         }
     }
-    const char* const name = config_key_name(key);
+    const char* name = config_key_name(key);
     std::optional<nlohmann::ordered_json> stored;
     switch (key) {
+        case ConfigKey::Javascript: {
+            // "node-24", "bun-1.3", "deno-2.9"; nothing removes the project's own.
+            if (!value) {
+                break;
+            }
+            const std::size_t dash = value->find('-');
+            const std::string runtime = value->substr(0, dash);
+            const auto v = dash == std::string::npos ? std::nullopt : Version::parse(value->substr(dash + 1));
+            const auto chosen = parse_config_key(runtime);
+            if (!v || !chosen || (*chosen != ConfigKey::Node && *chosen != ConfigKey::Bun && *chosen != ConfigKey::Deno)) {
+                error = "\"" + *value + "\" is not node-, bun- or deno- and a version, such as bun-1.3";
+                return std::nullopt;
+            }
+            name = config_key_name(*chosen);
+            stored = v->to_string();
+            break;
+        }
         case ConfigKey::Php:
             if (value && *value == kPhpNone) {
                 stored = nlohmann::ordered_json(false);
@@ -494,6 +575,8 @@ std::optional<std::string> set_project_config_value(std::string_view text, Confi
             }
             break;
         case ConfigKey::Node:
+        case ConfigKey::Bun:
+        case ConfigKey::Deno:
         case ConfigKey::Python:
             if (value) {
                 const auto v = Version::parse(*value);
@@ -532,8 +615,42 @@ std::optional<std::string> set_project_config_value(std::string_view text, Confi
                 return std::nullopt;
             }
             break;
+        case ConfigKey::Redis:
+            if (value && (*value == "on" || *value == "true")) {
+                stored = true;
+            } else if (value && *value != "off" && *value != "false") {
+                error = "Redis is on or off, not \"" + *value + "\"";
+                return std::nullopt;
+            }
+            break;
     }
-    if (stored) {
+    // A project has one JavaScript runtime: choosing one replaces the others;
+    // "javascript" with no value takes them all out.
+    const bool javascript = key == ConfigKey::Javascript || key == ConfigKey::Node || key == ConfigKey::Bun ||
+                            key == ConfigKey::Deno;
+    if (javascript && stored) {
+        // The new one takes the place of the first one there was.
+        nlohmann::ordered_json rebuilt = nlohmann::ordered_json::object();
+        bool placed = false;
+        for (const auto& [member, member_value] : doc.items()) {
+            if (member == "node" || member == "bun" || member == "deno") {
+                if (!placed) {
+                    rebuilt[name] = *stored;
+                    placed = true;
+                }
+                continue;
+            }
+            rebuilt[member] = member_value;
+        }
+        if (!placed) {
+            rebuilt[name] = *stored;
+        }
+        doc = std::move(rebuilt);
+    } else if (javascript && key == ConfigKey::Javascript) {
+        for (const char* other : {"node", "bun", "deno"}) {
+            doc.erase(other);
+        }
+    } else if (stored) {
         doc[name] = *stored;
     } else {
         doc.erase(name);
