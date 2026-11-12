@@ -426,10 +426,11 @@ TEST_CASE("mail: first run offers Mailpit, ticked, beside Composer") {
 }
 
 TEST_CASE("mail: Settings' sidebar has Mail after Database; every new string is in every language") {
-    REQUIRE(kSettingsSidebar.size() == 9);
+    REQUIRE(kSettingsSidebar.size() == 10);
     CHECK(kSettingsSidebar[4] == Str::SettingsDatabase);
     CHECK(kSettingsSidebar[5] == Str::SettingsMail);
-    CHECK(kSettingsSidebar[6] == Str::SettingsApache);
+    CHECK(kSettingsSidebar[6] == Str::SettingsRedis);  // D30
+    CHECK(kSettingsSidebar[7] == Str::SettingsApache);
     CHECK(text(Lang::En, Str::SettingsMail) == "Mail");
     for (int i = static_cast<int>(Str::SettingsMail); i < static_cast<int>(Str::Count_); ++i) {
         const auto key = static_cast<Str>(i);

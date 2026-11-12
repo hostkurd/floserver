@@ -804,6 +804,28 @@ TEST_CASE("remove FloServer: the runtimes box takes the runtimes and caches, the
     CHECK(uninstall_items(f.d, true, true, later()).empty());
 }
 
+TEST_CASE("Redis's data (D30): never a clean-up's, gone with Remove FloServer's databases box") {
+    const FakeData f;
+    write_file(f.d / "garnet" / "checkpoints" / "Store" / "x.dat", "keys");
+    write_file(f.d / "garnet" / "garnet.conf", "{}");
+    write_file(f.d / "garnet" / "old.log", "a log name, but Garnet's own folder");
+    for (const CleanItem& i : leftovers(f.d, false, false, later())) {
+        CHECK(i.path.native().find((f.d / "garnet").native()) == std::string::npos);
+    }
+    for (const CleanItem& i : log_files(f.d)) {
+        CHECK(i.path.native().find((f.d / "garnet").native()) == std::string::npos);
+    }
+    CHECK_FALSE(is_leftover(f.d, f.d / "garnet"));
+    CHECK_FALSE(is_log_file(f.d, f.d / "garnet" / "old.log"));
+    CHECK(is_uninstall_item(f.d, f.d / "garnet"));
+    const auto databases = uninstall_items(f.d, false, true, later());
+    CHECK(listed(databases, f.d / "garnet"));
+    CHECK_FALSE(listed(uninstall_items(f.d, true, false, later()), f.d / "garnet"));
+    const CleanResult done = remove_uninstall_items(f.d, databases);
+    CHECK(done.skipped_items.empty());
+    CHECK_FALSE(fs::exists(f.d / "garnet"));
+}
+
 TEST_CASE("remove FloServer: only its own places, never a protected folder, never through a link") {
     const FakeData f;
     // Whatever a list says: not one of its places.

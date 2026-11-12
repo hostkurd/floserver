@@ -1,5 +1,7 @@
 #include "floserver/core/shim.h"
 
+#include "floserver/core/garnet.h"
+
 #include "floserver/core/app_runner.h"
 #include "floserver/core/mailpit.h"
 #include "floserver/core/paths.h"
@@ -120,8 +122,13 @@ std::optional<ShimTarget> php_target(const InstalledRuntime& php, const ProjectC
     PhpIniSettings settings = effective_php_settings(series, found != all.end() ? &found->second : nullptr,
                                                      read_php_custom_ini(data_dir, series), &project);
     // PHP's mail() to Mailpit, as in the pools (D27).
+    const auto installed = list_installed(runtimes_dir(data_dir));
     if (app) {
-        settings.mail_ini = mail_php_ini(*app, list_installed(runtimes_dir(data_dir)));
+        settings.mail_ini = mail_php_ini(*app, installed);
+    }
+    // phpredis for a project with Redis on, as in its pool (D30).
+    if (project.redis) {
+        settings.redis_extension = php_redis_extension(installed, php.version);
     }
     const std::string key =
         php.version + (php.variant.empty() ? std::string() : "-" + php.variant) + php_settings_key(settings);

@@ -283,6 +283,26 @@ bool MainWindow::keep_value(const ProjectRow& row) const {
     return it != pending_keep_.end() ? it->second : row.keep_running;
 }
 
+bool MainWindow::redis_value(const ProjectRow& row) const {
+    const auto it = pending_use_.find(ServiceWorker::use_key(row.name, "redis"));
+    return it != pending_use_.end() ? it->second == redis_switch_value(true) : row.wants.redis;
+}
+
+void MainWindow::toggle_redis_for(const std::string& project) {
+    const auto found = std::find_if(snap_.rows.begin(), snap_.rows.end(),
+                                    [&](const ProjectRow& r) { return r.name == project; });
+    if (found == snap_.rows.end() || !worker_ || snap_.link != Link::Connected || leaving(project)) {
+        return;
+    }
+    const std::string value = redis_switch_value(!redis_value(*found));
+    const std::string key = ServiceWorker::use_key(project, "redis");
+    pending_use_[key] = value;
+    ++outstanding_[key];
+    dismiss_error();
+    worker_->use(project, "redis", value);  // floserver.json's "redis": true, or no key
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
 // The choice shown: the user's pick while it's on its way, else the file's.
 std::size_t MainWindow::field_value(const VersionField& field) const {
     const auto it = pending_use_.find(ServiceWorker::use_key(selected_, field.key));
@@ -443,6 +463,19 @@ MainWindow::PanelGeometry MainWindow::panel_geometry(HDC dc) const {
         g.saved_in = {x0, y + px(6), x1, y + px(6) + px(16)};
         y = g.saved_in.bottom + px(kPanelGap);
 
+        // Redis (D30): the shared server, a switch; under it where the keys go
+        // and which client Copy .env lines names (a line each).
+        {
+            const std::string note = redis_panel_note(*row, snap_.installed, lang_);
+            const int note_lines = 1 + static_cast<int>(std::count(note.begin(), note.end(), '\n'));
+            const int redis_mid = y + px(18);
+            g.redis_switch = {x1 - px(kSwitchW), redis_mid - px(kSwitchH) / 2, x1,
+                              redis_mid - px(kSwitchH) / 2 + px(kSwitchH)};
+            g.redis_title = {x0, y, g.redis_switch.left - px(12), y + px(18)};
+            g.redis_detail = {x0, y + px(18), g.redis_switch.left - px(12), y + px(18) + note_lines * px(32)};
+            y = g.redis_detail.bottom + px(kPanelGap);
+        }
+
         const int keep_mid = y + px(18);
         g.keep_switch = {x1 - px(kSwitchW), keep_mid - px(kSwitchH) / 2, x1,
                          keep_mid - px(kSwitchH) / 2 + px(kSwitchH)};
@@ -542,6 +575,8 @@ RECT MainWindow::panel_rect_of(const Hit& hit) const {
             return g.pma;
         case Part::PanelKeep:
             return {g.keep_title.left, g.keep_title.top, g.keep_switch.right, g.keep_detail.bottom};
+        case Part::PanelRedis:
+            return {g.redis_title.left, g.redis_title.top, g.redis_switch.right, g.redis_detail.bottom};
         case Part::PanelRemove:
             return g.remove;
         case Part::PanelPhpSettings:
@@ -620,6 +655,9 @@ MainWindow::Hit MainWindow::panel_hit_test(int x, int y) const {
     if (contains(g.keep_switch, x, y)) {
         return hit(Part::PanelKeep, -1);
     }
+    if (contains(g.redis_switch, x, y)) {
+        return hit(Part::PanelRedis, -1);
+    }
     if (contains(g.remove, x, y)) {
         return hit(Part::PanelRemove, -1);
     }
@@ -655,6 +693,9 @@ std::vector<MainWindow::Hit> MainWindow::panel_focus_order() const {
     }
     if (g.pma.right > g.pma.left) {
         order.push_back({Part::PanelPhpMyAdmin, -1, g.project});
+    }
+    if (g.redis_switch.right > g.redis_switch.left) {
+        order.push_back({Part::PanelRedis, -1, g.project});
     }
     if (g.keep_switch.right > g.keep_switch.left) {
         order.push_back({Part::PanelKeep, -1, g.project});
@@ -717,6 +758,9 @@ void MainWindow::on_panel_click(const Hit& hit) {
             break;
         case Part::PanelKeep:
             toggle_keep_running();
+            break;
+        case Part::PanelRedis:
+            toggle_redis_for(selected_);
             break;
         case Part::PanelRemove:
             ask_remove(selected_);
@@ -1342,6 +1386,14 @@ void MainWindow::paint_panel(Canvas& c, HDC dc, bool text_pass) const {
             paint_button(c, g.pma, hovered(Part::PanelPhpMyAdmin, -1) && phpmyadmin_installed(snap_.installed),
                          focused(Part::PanelPhpMyAdmin, -1));
         }
+        if (g.redis_switch.right > g.redis_switch.left) {
+            paint_switch(c, g.redis_switch, redis_value(*row), hovered(Part::PanelRedis, -1));
+            if (focused(Part::PanelRedis, -1)) {
+                RECT ring = g.redis_switch;
+                InflateRect(&ring, px(3), px(3));
+                c.round_outline(ring, static_cast<float>(height_of(ring)) / 2.0F, p.focus, pxf(2));
+            }
+        }
         if (g.keep_switch.right > g.keep_switch.left) {
             paint_switch(c, g.keep_switch, keep_value(*row), hovered(Part::PanelKeep, -1));
             if (focused(Part::PanelKeep, -1)) {
@@ -1439,6 +1491,11 @@ void MainWindow::paint_panel(Canvas& c, HDC dc, bool text_pass) const {
         }
     }
 
+    if (g.redis_switch.right > g.redis_switch.left) {
+        c.text(g.redis_title, w(text(lang_, Str::PanelRedis)), fonts_.button_bold.get(), p.text, Align::Start, false);
+        c.paragraph(g.redis_detail, w(redis_panel_note(*row, snap_.installed, lang_)), fonts_.caption.get(),
+                    p.text_subtle);
+    }
     if (g.keep_switch.right > g.keep_switch.left) {
         const bool keep = keep_value(*row);
         c.text(g.keep_title, w(text(lang_, Str::KeepRunning)), fonts_.button_bold.get(), p.text, Align::Start, false);

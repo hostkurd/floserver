@@ -45,6 +45,8 @@ constexpr std::array kOffers{
     OfferSpec{"node", "24", Str::FirstRunWhatNode, true, false},
     OfferSpec{"composer", "", Str::FirstRunWhatComposer, true, false},
     OfferSpec{"mailpit", "", Str::FirstRunWhatMailpit, true, false},
+    // D30: offered, not ticked; its .NET runtime and phpredis come with it.
+    OfferSpec{"garnet", "", Str::FirstRunWhatGarnet, false, false},
     OfferSpec{"python", "3.13", Str::FirstRunWhatPython, false, false},
     OfferSpec{"bun", "", Str::FirstRunWhatBun, false, false},
     OfferSpec{"deno", "", Str::FirstRunWhatDeno, false, false},
@@ -67,7 +69,7 @@ std::string shown_series(std::string_view name, std::string_view series, std::st
     if (name == "composer") {
         return std::string(version.substr(0, version.find('.')));
     }
-    if (name == "mailpit") {
+    if (name == "mailpit" || name == "garnet") {
         return std::string(version);  // "Mailpit 1.27.3": it has no series people name it by
     }
     return version_series(name, version);

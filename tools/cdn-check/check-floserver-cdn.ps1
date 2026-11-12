@@ -52,6 +52,14 @@ $files = @(
     @{ Path = "bun/1.3.14/bun-windows-x64-baseline.zip"; Sums = "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/SHASUMS256.txt" },
     # Deno (D31): each download has its own .sha256sum (a Get-FileHash print: Algorithm, Hash, Path).
     @{ Path = "deno/2.9.8/deno-x86_64-pc-windows-msvc.zip"; Sums = "https://github.com/denoland/deno/releases/download/v2.9.8/deno-x86_64-pc-windows-msvc.zip.sha256sum" },
+    # Redis through Garnet (D30). None of the three publishes a SHA-256 list (.NET's releases.json
+    # has SHA-512), so each original download is compared.
+    @{ Path = "garnet/2.2.4/win-x64-based-readytorun.zip";       Orig = "https://github.com/microsoft/garnet/releases/download/v2.2.4/win-x64-based-readytorun.zip" },
+    @{ Path = "dotnet/10.0.14/dotnet-runtime-10.0.14-win-x64.zip"; Orig = "https://builds.dotnet.microsoft.com/dotnet/Runtime/10.0.14/dotnet-runtime-10.0.14-win-x64.zip" },
+    @{ Path = "php-redis/6.3.0/php_redis-6.3.0-8.5-nts-vs17-x64.zip"; Orig = "https://downloads.php.net/~windows/pecl/releases/redis/6.3.0/php_redis-6.3.0-8.5-nts-vs17-x64.zip" },
+    @{ Path = "php-redis/6.3.0/php_redis-6.3.0-8.4-nts-vs17-x64.zip"; Orig = "https://downloads.php.net/~windows/pecl/releases/redis/6.3.0/php_redis-6.3.0-8.4-nts-vs17-x64.zip" },
+    @{ Path = "php-redis/6.3.0/php_redis-6.3.0-8.3-nts-vs16-x64.zip"; Orig = "https://downloads.php.net/~windows/pecl/releases/redis/6.3.0/php_redis-6.3.0-8.3-nts-vs16-x64.zip" },
+    @{ Path = "php-redis/6.3.0/php_redis-6.3.0-8.2-nts-vs16-x64.zip"; Orig = "https://downloads.php.net/~windows/pecl/releases/redis/6.3.0/php_redis-6.3.0-8.2-nts-vs16-x64.zip" },
     @{ Path = "apache/2.4.69/httpd-2.4.69-261002-Win64-VS18.zip"; Orig = "https://www.apachelounge.com/download/VS18/binaries/httpd-2.4.69-261002-Win64-VS18.zip" },
     # FloServer's own installer (the list's "app"): no Sums or Orig, so it says CHECK BY HAND;
     # compare its SHA-256 with the CI artifact's, then build with --accept and --app-notes, e.g.

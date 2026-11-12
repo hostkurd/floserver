@@ -82,7 +82,8 @@ struct PublishFile {
                                                        std::vector<std::string>& notes);
 
 // "PHP 8.5.13" for php/8.5.13/..., "FloServer 1.2.0" for app/1.2.0/...; a
-// variant other than PHP's "nts" is added ("Bun 1.3.14 baseline").
+// variant other than PHP's "nts" is added ("Bun 1.3.14 baseline"), and
+// php-redis says its PHP series ("phpredis 6.3.0 for PHP 8.4").
 [[nodiscard]] std::string runtime_title(std::string_view runtime, std::string_view version,
                                         std::string_view variant = {});
 

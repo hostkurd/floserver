@@ -1,5 +1,7 @@
 #include "floserver/core/site_plan.h"
 
+#include "floserver/core/garnet.h"
+
 #include "floserver/core/apache_settings.h"
 
 #include "floserver/core/nginx_config.h"
@@ -150,7 +152,8 @@ class PhpSettingsSource {
 public:
     PhpSettingsSource(const AppConfig& config, const CustomIniReader& custom_ini,
                       const std::vector<InstalledRuntime>& installed)
-        : series_(read_php_settings(config)), custom_ini_(&custom_ini), mail_(mail_php_ini(config, installed)) {}
+        : series_(read_php_settings(config)), custom_ini_(&custom_ini), mail_(mail_php_ini(config, installed)),
+          installed_(&installed) {}
 
     PhpIniSettings operator()(const InstalledRuntime& php, const ProjectConfig* project) {
         const std::string series = php_series_of(php.version).value_or(php.version);
@@ -162,6 +165,9 @@ public:
         PhpIniSettings out =
             effective_php_settings(series, found != series_.end() ? &found->second : nullptr, text->second, project);
         out.mail_ini = mail_;
+        if (project != nullptr && project->redis) {
+            out.redis_extension = php_redis_extension(*installed_, php.version);  // D30
+        }
         return out;
     }
 
@@ -169,6 +175,7 @@ private:
     PhpSettings series_;
     const CustomIniReader* custom_ini_;
     std::vector<std::pair<std::string, std::string>> mail_;  // PHP's mail() to Mailpit (D27)
+    const std::vector<InstalledRuntime>* installed_;
     std::map<std::string, std::string> custom_;
 };
 

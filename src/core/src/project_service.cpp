@@ -131,6 +131,9 @@ json site_json(const Project& project, const PlannedSite& site, const WebPlan& p
         if (!c.php_ini.empty()) {
             wants["php_ini"] = c.php_ini;
         }
+        if (c.redis) {
+            wants["redis"] = true;  // D30: the shared Redis
+        }
         out["wants"] = std::move(wants);
     }
     return out;
@@ -702,7 +705,7 @@ std::optional<json> ProjectService::use(const std::string& name, const std::stri
     }
     const auto parsed_key = parse_config_key(key);
     if (!parsed_key || key == "mariadb") {
-        refusal = {"bad_params", "the key is php, node, bun, deno, javascript, python, database or web"};
+        refusal = {"bad_params", "the key is php, node, bun, deno, javascript, python, database, web or redis"};
         return std::nullopt;
     }
     const Project* project = find_project(*config, name);

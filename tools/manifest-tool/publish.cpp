@@ -1,5 +1,7 @@
 #include "publish.h"
 
+#include "floserver/core/garnet.h"
+
 #include "build.h"
 #include "templates_json.h"
 #include "floserver/core/encoding.h"
@@ -220,7 +222,7 @@ LiveResult fetch_live_list(HttpTransport& http, std::string_view cdn,
 }
 
 std::string runtime_title(std::string_view runtime, std::string_view version, std::string_view variant) {
-    static constexpr std::array<std::pair<std::string_view, std::string_view>, 13> kNames = {{
+    static constexpr std::array<std::pair<std::string_view, std::string_view>, 16> kNames = {{
         {"php", "PHP"},
         {"mariadb", "MariaDB"},
         {"node", "Node.js"},
@@ -231,6 +233,9 @@ std::string runtime_title(std::string_view runtime, std::string_view version, st
         {"python", "Python"},
         {"phpmyadmin", "phpMyAdmin"},
         {"mailpit", "Mailpit"},
+        {"garnet", "Garnet"},
+        {"dotnet", ".NET runtime"},
+        {"php-redis", "phpredis"},
         {"bun", "Bun"},
         {"deno", "Deno"},
         {kAppFolder, "FloServer"},
@@ -242,6 +247,13 @@ std::string runtime_title(std::string_view runtime, std::string_view version, st
         }
     }
     name += " " + std::string(version);
+    if (runtime == core::kPhpRedisRuntime) {
+        // phpredis says its PHP series: one file per series (D30).
+        if (const auto series = core::php_redis_series_of_variant(variant)) {
+            name += " for PHP " + *series;
+        }
+        return name;
+    }
     // PHP's "nts" is the usual build and isn't said; Bun's "baseline" build
     // (a CPU without AVX2) is its own file in the list, so it has its own title.
     if (!variant.empty() && variant != "nts") {
@@ -409,6 +421,19 @@ OfficialSource official_source(std::string_view path) {
         // its release workflow), so the GitHub download itself is compared.
         s.kind = Kind::Original;
         s.urls = {"https://github.com/axllent/mailpit/releases/download/v" + v + "/" + p.file};
+    } else if (p.runtime == "garnet") {
+        // Garnet's releases publish no checksum file: the GitHub download is compared (D30).
+        s.kind = Kind::Original;
+        s.urls = {"https://github.com/microsoft/garnet/releases/download/v" + v + "/" + p.file};
+    } else if (p.runtime == "dotnet") {
+        // Microsoft's own download, compared byte for byte (releases.json's
+        // hash is SHA-512, which this check doesn't compute).
+        s.kind = Kind::Original;
+        s.urls = {"https://builds.dotnet.microsoft.com/dotnet/Runtime/" + v + "/" + p.file};
+    } else if (p.runtime == "php-redis") {
+        // PECL's Windows builds publish no checksum list either.
+        s.kind = Kind::Original;
+        s.urls = {core::php_redis_upstream(v, p.file)};
     } else if (p.runtime == "bun") {
         // One SHASUMS256.txt per release lists every build, the baseline too.
         s.kind = Kind::Sums;

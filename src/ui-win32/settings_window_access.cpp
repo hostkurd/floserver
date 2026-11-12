@@ -109,6 +109,8 @@ std::string SettingsWindow::access_id(const Hit& hit) const {
         "db/discard", "db/save", "db/phpmyadmin",
         "mail/install", "mail/inbox-link", "mail/copy-inbox", "mail/open-inbox", "mail/copy-smtp", "mail/switch",
         "mail/max", "mail/test", "mail/delete", "mail/discard", "mail/save",
+        "redis/install", "redis/copy-address", "redis/copy-password", "redis/keep", "redis/memory", "redis/flush",
+        "redis/discard", "redis/save",
         "apache/version", "apache/runtimes", "apache/find", "apache/module", "apache/more", "apache/final-conf",
         "apache/edit-conf", "apache/discard", "apache/save",
         "folders/projects/change", "folders/projects/open", "folders/projects/default", "folders/www/change",
@@ -120,6 +122,7 @@ std::string SettingsWindow::access_id(const Hit& hit) const {
                       kIds[static_cast<std::size_t>(Part::PortsChoice)] == "ports/choice" &&
                       kIds[static_cast<std::size_t>(Part::DbVersion)] == "db/version" &&
                       kIds[static_cast<std::size_t>(Part::MailInstall)] == "mail/install" &&
+                      kIds[static_cast<std::size_t>(Part::RedisInstall)] == "redis/install" &&
                       kIds[static_cast<std::size_t>(Part::ApacheVersion)] == "apache/version" &&
                       kIds[static_cast<std::size_t>(Part::FoldersProjectsChange)] == "folders/projects/change" &&
                       kIds[static_cast<std::size_t>(Part::SharedSwitch)] == "shared/switch" &&
@@ -357,6 +360,35 @@ AccessNode SettingsWindow::access_node(const Hit& hit) const {
         case Part::MailSave:
             return button(!mail_changes_.empty() && !mail_saving_ && connected_ && !mail_max_bad(mail_changes_));
 
+        // Settings > Redis (D30).
+        case Part::RedisInstall:
+            return button(connected_ && !garnet_installing());
+        case Part::RedisCopyAddress:
+        case Part::RedisCopyPassword: {
+            // Two Copy buttons: each says what it copies (the password is never in a name).
+            const bool can = hit.part == Part::RedisCopyAddress || (connected_ && !redis_blocked());
+            AccessNode n = button_node(access_id(hit),
+                                       access_join(lang_, {std::string(text(lang_, Str::DbCopy)),
+                                                           std::string(text(lang_, hit.part == Part::RedisCopyAddress
+                                                                                       ? Str::RedisServer
+                                                                                       : Str::RedisPassword))}),
+                                       can);
+            n.focusable = true;
+            return n;
+        }
+        case Part::RedisKeep: {
+            AccessNode n = switch_node(access_id(hit), {}, redis_ && redis_keep_running(*redis_, redis_changes_),
+                                       connected_ && !redis_saving_, lang_);
+            n.focusable = true;
+            return n;
+        }
+        case Part::RedisFlush:
+            return button(connected_ && !redis_blocked());
+        case Part::RedisDiscard:
+            return button(!redis_changes_.empty() && !redis_saving_);
+        case Part::RedisSave:
+            return button(!redis_changes_.empty() && !redis_saving_ && connected_ && !redis_memory_bad(redis_changes_));
+
         // Settings > Apache.
         case Part::ApacheVersion:
             return combo_node(access_id(hit),
@@ -505,6 +537,13 @@ void SettingsWindow::access_parts(std::vector<PageItem>& items) const {
                 card("mail/card/addresses", g.mail.addr_card);
                 card("mail/card/options", g.mail.opt_card);
                 card("mail/card/emails", g.mail.emails_card);
+            }
+            return;
+        case Section::Redis:
+            if (redis_ && redis_->installed) {
+                card("redis/card/address", g.redis.addr_card);
+                card("redis/card/options", g.redis.opt_card);
+                card("redis/card/data", g.redis.data_card);
             }
             return;
         case Section::Apache:

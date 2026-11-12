@@ -31,6 +31,8 @@ add_library(floserver_core STATIC
     src/phpmyadmin.cpp
     src/mailpit.cpp
     src/mail_service.cpp
+    src/garnet.cpp
+    src/redis_service.cpp
     src/app_runner.cpp
     src/apache_config.cpp
     src/apache_settings.cpp

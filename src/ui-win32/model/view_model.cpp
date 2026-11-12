@@ -182,11 +182,16 @@ ProjectRow row_from(const json& p, Lang lang) {
                 }
             }
         }
+        row.wants.redis = flag_of(want, "redis");
     }
     row.static_site = flag_of(p, "static");
     row.php_files = flag_of(p, "php_files");
     if (row.static_site) {
         row.chips.emplace_back("Static");  // the mockup's "Static · nginx"
+    }
+    // Redis (D30) before the web server, as in the mockup.
+    if (row.wants.redis) {
+        row.chips.emplace_back("Redis");
     }
     // The web server last, as in the mockup. nginx only when floserver.json
     // could be read (it serves every project that isn't Apache's).
@@ -459,6 +464,13 @@ Installed installed_from_list(const json& result) {
         const std::string version = text_of(r, "version");
         if (!name.empty() && !version.empty()) {
             out[name].push_back(version);
+        }
+        // phpredis is one install per PHP series: "php8-4" is 8.4 (D30).
+        const std::string variant = text_of(r, "variant");
+        if (name == "php-redis" && variant.size() > 3 && variant.starts_with("php")) {
+            std::string series = variant.substr(3);
+            std::replace(series.begin(), series.end(), '-', '.');
+            out[std::string(kInstalledPhpRedisSeries)].push_back(series);
         }
     }
     for (auto& [name, versions] : out) {
@@ -735,6 +747,9 @@ std::string runtime_label(std::string_view name) {
     }
     if (name == "phpmyadmin") {
         return "phpMyAdmin";
+    }
+    if (name == "garnet") {
+        return "Garnet (Redis)";
     }
     if (name == "mailpit") {
         return "Mailpit";

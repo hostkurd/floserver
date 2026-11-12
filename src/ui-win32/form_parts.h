@@ -179,6 +179,9 @@ enum class SaveChoice : std::uint8_t { Save, DontSave, Cancel };
 // default). True for Delete.
 [[nodiscard]] bool ask_delete_mails(HWND owner, Lang lang, const std::string& question);
 
+// Redis's Flush all… (D30): Flush all and Cancel (the default). True for Flush all.
+[[nodiscard]] bool ask_flush_redis(HWND owner, Lang lang, const std::string& question);
+
 // "Remove Mailpit 1.27.3?": Remove and Cancel (the default), and the box
 // "Also delete the caught emails", unticked. True for Remove; `emails` is the box.
 [[nodiscard]] bool ask_remove_mailpit(HWND owner, Lang lang, const std::string& question, bool& emails);

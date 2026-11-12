@@ -852,6 +852,9 @@ bool is_uninstall_item(const fs::path& data, const fs::path& path) {
             return true;
         }
     }
+    if (p == (data / "garnet").lexically_normal()) {
+        return true;  // Redis's data (D30)
+    }
     // A MariaDB's folder is named after its series: "mariadb-11.4".
     return p.parent_path() == (data / "data").lexically_normal() && starts_with(p.filename(), "mariadb-") &&
            p.filename() != "mariadb-";
@@ -896,6 +899,7 @@ std::vector<CleanItem> uninstall_items(const fs::path& data, bool runtimes, bool
                 add(p);
             }
         }
+        add(data / "garnet");  // Redis's keys (D30)
     }
     return out;
 }

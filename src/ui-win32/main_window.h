@@ -13,6 +13,7 @@
 #include "model/first_run.h"
 #include "model/main_access.h"
 #include "model/mail_page.h"
+#include "model/redis_page.h"
 #include "model/php_page.h"
 #include "model/project_menu.h"
 #include "model/toast.h"
@@ -97,6 +98,7 @@ private:
         PanelCopyEnv,
         PanelPhpMyAdmin,  // Open in phpMyAdmin (the project's own login)
         PanelKeep,
+        PanelRedis,    // the Redis switch (D30)
         PanelRemove,   // Remove from FloServer…
         // The panel's PHP tab (D20); `row` is the field's index.
         PanelPhpSettings,
@@ -217,6 +219,9 @@ private:
         RECT keep_title{};
         RECT keep_detail{};
         RECT keep_switch{};
+        RECT redis_title{};   // Redis (D30): the switch, and where the keys go
+        RECT redis_detail{};
+        RECT redis_switch{};
         RECT remove{};  // Remove from FloServer…, at the General tab's end
         RECT log_label{};
         RECT log_box{};
@@ -551,6 +556,9 @@ private:
     [[nodiscard]] std::vector<Hit> panel_focus_order() const;
     [[nodiscard]] Hit panel_hit_test(int x, int y) const;
     [[nodiscard]] bool keep_value(const ProjectRow& row) const;
+    // Redis's switch (D30): the user's pick while it's on its way, else floserver.json's.
+    [[nodiscard]] bool redis_value(const ProjectRow& row) const;
+    void toggle_redis_for(const std::string& project);
     [[nodiscard]] std::size_t field_value(const VersionField& field) const;
     void select(const std::string& project);
     void close_panel();

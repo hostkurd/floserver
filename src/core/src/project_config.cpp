@@ -332,7 +332,7 @@ ConfigResult parse_project_config(std::string_view json_text) {
     }
 
     static const std::set<std::string, std::less<>> known = {"php",  "node", "bun",     "deno",    "python", "database",
-                                                             "web",  "root", "extensions", "command", "php_ini"};
+                                                             "web",  "root", "extensions", "command", "php_ini", "redis"};
     for (const auto& item : doc.items()) {
         if (!known.contains(item.key())) {
             result.warnings.push_back({item.key(), "is not a FloServer setting and is ignored"});
@@ -352,6 +352,13 @@ ConfigResult parse_project_config(std::string_view json_text) {
     read_extensions(doc, config, result);
     read_php_ini(doc, config, result);
     read_command(doc, config, result);
+    if (const auto it = doc.find("redis"); it != doc.end() && !it->is_null()) {
+        if (it->is_boolean()) {
+            config.redis = it->get<bool>();
+        } else {
+            result.errors.push_back({"redis", "must be true or false"});
+        }
+    }
 
     if (result.errors.empty()) {
         result.config = std::move(config);
@@ -402,6 +409,9 @@ std::string write_project_config(const ProjectConfig& config) {
     if (config.command) {
         doc["command"] = *config.command;
     }
+    if (config.redis) {
+        doc["redis"] = true;
+    }
     return doc.dump(2) + "\n";
 }
 
@@ -450,6 +460,9 @@ std::optional<ConfigKey> parse_config_key(std::string_view name) {
     if (name == "web") {
         return ConfigKey::Web;
     }
+    if (name == "redis") {
+        return ConfigKey::Redis;
+    }
     return std::nullopt;
 }
 
@@ -471,6 +484,8 @@ const char* config_key_name(ConfigKey key) {
             return "python";
         case ConfigKey::Database:
             return "database";
+        case ConfigKey::Redis:
+            return "redis";
         case ConfigKey::Web:
             break;
     }
@@ -560,6 +575,14 @@ std::optional<std::string> set_project_config_value(std::string_view text, Confi
                 stored = "apache";
             } else if (value && *value != "nginx") {
                 error = "the web server is nginx or apache, not \"" + *value + "\"";
+                return std::nullopt;
+            }
+            break;
+        case ConfigKey::Redis:
+            if (value && (*value == "on" || *value == "true")) {
+                stored = true;
+            } else if (value && *value != "off" && *value != "false") {
+                error = "Redis is on or off, not \"" + *value + "\"";
                 return std::nullopt;
             }
             break;
