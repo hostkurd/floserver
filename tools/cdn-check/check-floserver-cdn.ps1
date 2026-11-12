@@ -2,13 +2,13 @@
 # Checks every runtime file on cdn.floserver.org:
 #   1. the CDN serves it (HTTP 200, from the R2 bucket floserver-cdn through Cloudflare)
 #   2. its SHA-256 matches the checksum the official project publishes
-#      (nginx and Apache publish none, so their originals are downloaded and compared)
+#      (nginx, Apache and MySQL publish none, so their originals are downloaded and compared)
 # Then checks that Cloudflare doesn't cache manifest.json (the cache rule).
 #
 # Run in PowerShell:
 #   powershell -ExecutionPolicy Bypass -File .\check-floserver-cdn.ps1
 #
-# It downloads about 800 MB into a temporary folder and deletes it at the end.
+# It downloads about 1.1 GB into a temporary folder and deletes it at the end.
 # Two reports are saved next to this script:
 #   floserver-cdn-report.txt   to read
 #   floserver-cdn-report.json  for: floserver-manifest build floserver-cdn-report.json --sequence N
@@ -28,6 +28,7 @@ $ProgressPreference = "SilentlyContinue"   # Invoke-WebRequest is very slow with
 # Each file: path on the CDN, and how to find its official SHA-256.
 #   Sums  = URL of the official checksum list (the line naming the file is used)
 #   Orig  = URL of the original file, downloaded and hashed when there is no list
+#   OrigAlt = another address of the original, tried when Orig fails (MySQL's archive)
 $files = @(
     @{ Path = "php/8.5.12/php-8.5.12-1-nts-Win32-vs17-x64.zip"; Sums = "https://downloads.php.net/~windows/releases/sha256sum.txt" },
     @{ Path = "php/8.4.27/php-8.4.27-1-nts-Win32-vs17-x64.zip"; Sums = "https://downloads.php.net/~windows/releases/sha256sum.txt" },
@@ -45,6 +46,10 @@ $files = @(
     @{ Path = "nginx/1.30.6/nginx-1.30.6.zip";                  Orig = "https://nginx.org/download/nginx-1.30.6.zip" },
     @{ Path = "wordpress/7.1.4/wordpress-7.1.4.zip";            Orig = "https://wordpress.org/wordpress-7.1.4.zip" },
     @{ Path = "wordpress/7.0.8/wordpress-7.0.8.zip";            Orig = "https://wordpress.org/wordpress-7.0.8.zip" },
+    # Oracle publishes MD5 sums and signatures for MySQL, not SHA-256: the original is downloaded and compared.
+    # Downloads/ keeps only the current release; an older one is in archives/.
+    @{ Path = "mysql/8.4.11/mysql-8.4.11-winx64.zip";           Orig = "https://cdn.mysql.com/Downloads/MySQL-8.4/mysql-8.4.11-winx64.zip";
+       OrigAlt = "https://cdn.mysql.com/archives/mysql-8.4/mysql-8.4.11-winx64.zip" },
     # Mailpit publishes no checksum file; the GitHub release download is the original.
     @{ Path = "mailpit/1.33.0/mailpit-windows-amd64.zip";       Orig = "https://github.com/axllent/mailpit/releases/download/v1.33.0/mailpit-windows-amd64.zip" },
     # Bun (D31): one SHASUMS256.txt per release lists the regular and the baseline build (for a CPU without AVX2).
@@ -144,12 +149,15 @@ foreach ($f in $files) {
         $source = "checksum list"
     } elseif ($f.Orig) {
         $orig = Join-Path $temp ("original-" + $name)
-        try {
-            Invoke-WebRequest -Uri $f.Orig -UseBasicParsing -OutFile $orig -TimeoutSec 900
-            $official = (Get-FileHash -Algorithm SHA256 -Path $orig).Hash.ToLower()
-            $source = "original download"
-            Remove-Item $orig -Force
-        } catch { $official = $null }
+        foreach ($url in @($f.Orig, $f.OrigAlt)) {
+            if (-not $url -or $null -ne $official) { continue }
+            try {
+                Invoke-WebRequest -Uri $url -UseBasicParsing -OutFile $orig -TimeoutSec 900
+                $official = (Get-FileHash -Algorithm SHA256 -Path $orig).Hash.ToLower()
+                $source = "original download"
+                Remove-Item $orig -Force
+            } catch { $official = $null }
+        }
     }
 
     if ($null -eq $official) {

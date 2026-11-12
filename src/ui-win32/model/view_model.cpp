@@ -532,14 +532,18 @@ std::vector<VersionField> fields_of(const ProjectRow& row, const Installed& inst
     }
     out.push_back(std::move(php));
 
+    // None, then MariaDB's series and MySQL's (D28), each installed one.
     VersionField db{Field::Database, "database", std::string(text(lang, Str::FieldDatabase)), {}, 0};
     db.choices.push_back({std::string(text(lang, Str::ChoiceNone)), std::nullopt});
-    std::string wanted_db;
-    if (w.database.starts_with("mariadb-")) {
-        wanted_db = w.database.substr(8);
+    bool known_db = false;
+    for (const char* family : {"mariadb", "mysql"}) {
+        const std::string prefix = std::string(family) + "-";
+        const bool this_one = w.database.starts_with(prefix);
+        known_db = known_db || this_one;
+        add_series(db, installed, family, this_one ? w.database.substr(prefix.size()) : std::string(), prefix,
+                   runtime_label(family) + " ", lang);
     }
-    add_series(db, installed, "mariadb", wanted_db, "mariadb-", "MariaDB ", lang);
-    if (!w.database.empty() && wanted_db.empty()) {
+    if (!w.database.empty() && !known_db) {
         // Another family (a newer FloServer's): shown, not offered.
         db.choices.push_back({database_chip(w.database), w.database});
         db.current = db.choices.size() - 1;
@@ -577,6 +581,18 @@ std::string php_off_note(const ProjectRow& row, Lang lang) {
     return row.wants.php_off && row.php_files ? std::string(text(lang, Str::PhpOffNote)) : std::string();
 }
 
+namespace {
+
+// A server of databases.list is the one "mysql-8.4" names: its family (MariaDB
+// when it says none, as before D28) and series.
+bool server_is(const json& server, std::string_view family, const std::string& series) {
+    const std::string own = server.is_object() && server.contains("family") ? text_of(server, "family") : "mariadb";
+    return own == family && (version_series(family, text_of(server, "series")) == series ||
+                             version_series(family, text_of(server, "version")) == series);
+}
+
+}  // namespace
+
 std::string field_note(const ProjectRow& row, Lang lang) {
     if (std::string note = php_off_note(row, lang); !note.empty()) {
         return note;
@@ -590,10 +606,10 @@ std::uint16_t database_port(const json& databases, std::string_view database) {
         !databases["servers"].is_array()) {
         return 0;
     }
-    const std::string series = version_series(database.substr(0, dash), database.substr(dash + 1));
+    const std::string family = lower_ascii(database.substr(0, dash));
+    const std::string series = version_series(family, database.substr(dash + 1));
     for (const json& server : databases["servers"]) {
-        if (version_series("mariadb", text_of(server, "series")) == series ||
-            version_series("mariadb", text_of(server, "version")) == series) {
+        if (server_is(server, family, series)) {
             const auto port = count_of(server, "port");
             if (port && *port > 0 && *port <= 65535) {
                 return static_cast<std::uint16_t>(*port);
@@ -609,14 +625,18 @@ DatabaseServerState database_server(const json& databases, std::string_view data
         !databases["servers"].is_array()) {
         return {};
     }
-    const std::string series = version_series(database.substr(0, dash), database.substr(dash + 1));
+    const std::string family = lower_ascii(database.substr(0, dash));
+    const std::string series = version_series(family, database.substr(dash + 1));
     for (const json& server : databases["servers"]) {
-        if (version_series("mariadb", text_of(server, "series")) == series ||
-            version_series("mariadb", text_of(server, "version")) == series) {
-            return {text_of(server, "series"), text_of(server, "state")};
+        if (server_is(server, family, series)) {
+            return {text_of(server, "series"), text_of(server, "state"), family};
         }
     }
     return {};
+}
+
+std::string database_server_title(const DatabaseServerState& server) {
+    return server.series.empty() ? std::string() : runtime_label(server.family) + " " + server.series;
 }
 
 std::vector<LogLine> log_lines(const json& result, const std::function<void(std::int64_t, int&, int&, int&)>& local) {
@@ -726,6 +746,9 @@ std::string runtime_label(std::string_view name) {
     }
     if (name == "mariadb") {
         return "MariaDB";
+    }
+    if (name == "mysql") {
+        return "MySQL";
     }
     if (name == "node") {
         return "Node.js";
@@ -857,6 +880,16 @@ std::vector<TemplateCard> cards_from_list(const json& result, Lang lang) {
 
 namespace {
 
+// The family of a Database choice's value ("mysql-8.4" -> "mysql"), or empty.
+std::string database_family_of(const std::optional<std::string>& value) {
+    for (const char* family : {"mariadb", "mysql"}) {
+        if (value && value->starts_with(std::string(family) + "-")) {
+            return family;
+        }
+    }
+    return {};
+}
+
 // The runtime a picker's current choice is about, and the prefix its values
 // have ("mariadb-", "bun-"). False for pickers with none to prefer (the web
 // server, a JavaScript picker at None).
@@ -864,7 +897,12 @@ bool field_runtime(const VersionField& f, std::string& runtime, std::string& pre
     prefix.clear();
     switch (f.field) {
         case Field::Php: runtime = "php"; return true;
-        case Field::Database: runtime = "mariadb"; prefix = "mariadb-"; return true;
+        // The template's own family: one tried with MariaDB isn't moved to MySQL.
+        case Field::Database: {
+            runtime = database_family_of(f.current < f.choices.size() ? f.choices[f.current].value : std::nullopt);
+            prefix = runtime + "-";
+            return !runtime.empty();
+        }
         case Field::Python: runtime = "python"; return true;
         case Field::Javascript: {
             const std::optional<std::string>& value = f.current < f.choices.size() ? f.choices[f.current].value : std::nullopt;
@@ -900,7 +938,7 @@ void prefer_installed(VersionField& f, const Installed& installed) {
         return;
     }
     if (!value || !value->starts_with(prefix)) {
-        return;  // "none", or a database that isn't MariaDB
+        return;  // "none", or a database that isn't MariaDB or MySQL
     }
     const std::string wanted = value->substr(prefix.size());
     const std::vector<std::string> have = series_of(installed, runtime);
@@ -930,7 +968,7 @@ void prefer_default(VersionField& f, const std::string& named, const Installed& 
         return;
     }
     const auto it = defaults.find(runtime);
-    if (it == defaults.end() || f.current >= f.choices.size()) {
+    if (runtime.empty() || it == defaults.end()) {
         return;
     }
     // A template without a database (or with another kind) isn't given one;
@@ -984,8 +1022,10 @@ std::vector<VersionField> template_fields(const TemplateCard& card, const Instal
         if (keep) {
             prefer_installed(f, installed);
             const std::string& db = card.config.database;
+            const std::size_t dash = db.find('-');
+            const bool known_db = db.starts_with("mariadb-") || db.starts_with("mysql-");
             const std::string named = f.field == Field::Php        ? card.config.php
-                                      : f.field == Field::Database ? (db.starts_with("mariadb-") ? db.substr(8) : std::string())
+                                      : f.field == Field::Database ? (known_db ? db.substr(dash + 1) : std::string())
                                       : f.field == Field::Javascript
                                           ? (!card.config.node.empty() ? card.config.node
                                              : !card.config.bun.empty() ? card.config.bun

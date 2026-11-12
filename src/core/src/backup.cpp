@@ -258,6 +258,12 @@ json backup_versions(const fs::path& dir) {
             out[key] = std::string(kPhpNone);
         }
     }
+    // "mysql": "8.4" (or "mariadb": "11.4") written by hand: the same as "database" (D28).
+    for (const char* family : {"mariadb", "mysql"}) {
+        if (!out.contains("database") && j.contains(family) && j.at(family).is_string()) {
+            out["database"] = std::string(family) + "-" + j.at(family).get<std::string>();
+        }
+    }
     return out;
 }
 

@@ -671,7 +671,7 @@ void SettingsWindow::on_snapshot(const Snapshot& snap) {
     }
     // The server's state, from the main window's poll: nothing is asked for it.
     if (!db_series_.empty()) {
-        db_server_ = db_server_from_list(databases_, db_series_);
+        db_server_ = db_server_from_list(databases_, db_series_, db_family_);
     }
     // Shared sites, from the main window's poll: nothing is asked for them.
     on_shared_answers(snap);
@@ -913,7 +913,7 @@ SettingsWindow::Geometry SettingsWindow::layout(HDC dc) const {
         return px(kHeadH) + static_cast<int>(group.rows.size()) * px(kRowH);
     };
 
-    // PHP, MariaDB, Web servers and Tools take the full width; Node.js and
+    // PHP, MariaDB, MySQL, Web servers and Tools take the full width; Node.js and
     // Python share a row of cards (never more than two in a row).
     std::vector<std::size_t> grid;
     for (std::size_t i = 0; i < page_.groups.size(); ++i) {

@@ -1,5 +1,6 @@
 #include "floserver/core/site_plan.h"
 
+#include "floserver/core/database_engine.h"
 #include "floserver/core/garnet.h"
 
 #include "floserver/core/apache_settings.h"
@@ -615,9 +616,10 @@ std::map<std::string, std::vector<std::string>> runtime_users(const AppConfig& c
                 use("python", r->dir, who);
             }
         }
-        if (pc.database && pc.database->family == "mariadb") {
-            if (const InstalledRuntime* r = best_installed(installed, "mariadb", pc.database->version)) {
-                use("mariadb", r->dir, who);
+        // The family is the runtime's kind: "mariadb", "mysql" (D28).
+        if (pc.database && known_database_family(pc.database->family)) {
+            if (const InstalledRuntime* r = best_installed(installed, pc.database->family, pc.database->version)) {
+                use(pc.database->family, r->dir, who);
             }
         }
         if (pc.web == WebServer::Apache) {

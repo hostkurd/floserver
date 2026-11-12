@@ -9,7 +9,8 @@ namespace floserver::ui {
 
 namespace {
 
-bool is_mariadb(const std::string& database) { return database.starts_with("mariadb"); }
+// A database FloServer makes for the project: MariaDB's, or MySQL's (D28).
+bool is_mariadb(const std::string& database) { return database.starts_with("mariadb") || database.starts_with("mysql"); }
 
 }  // namespace
 
@@ -94,6 +95,23 @@ std::string row_database_name(const ProjectRow& row) {
 
 namespace {
 
+std::string row_family(const ProjectRow& row) {
+    const std::string& database = !row.database.empty() ? row.database : row.wants.database;
+    return database.substr(0, database.find('-'));
+}
+
+}  // namespace
+
+std::string row_server_database(const ProjectRow& row) {
+    return core::server_database_name(row_database_name(row), row_family(row));
+}
+
+std::string row_database_user(const ProjectRow& row) {
+    return core::project_database_user(row_server_database(row), row_family(row));
+}
+
+namespace {
+
 // What's wrong with `name` as the project's new name, or nothing. The
 // service's own rules (project_registry.h); it checks them again.
 std::optional<std::string> rename_problem(const ProjectRow& row, std::string_view name,
@@ -163,7 +181,7 @@ RemoveQuestion remove_question(const ProjectRow& row, Lang lang, FolderOffer off
     q.cancel = std::string(text(lang, Str::WizardCancel));
     if (row_has_database(row)) {
         // The name the service gives it; the service works it out again itself.
-        q.drop = fill(lang, Str::RemoveDropDatabase, {row_database_name(row)});
+        q.drop = fill(lang, Str::RemoveDropDatabase, {row_server_database(row)});  // MySQL's may be cut
     }
     if (offer == FolderOffer::Offer && !row.path.empty()) {
         q.trash = std::string(text(lang, Str::RemoveTrashFolder));

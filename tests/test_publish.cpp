@@ -379,6 +379,55 @@ TEST_CASE("publisher: Mailpit is compared with its GitHub download and listed fo
     CHECK(floserver::core::runtimes_for(*opened.manifest, "mailpit", "windows-x64").size() == 1);
 }
 
+TEST_CASE("publisher: MySQL 8.4 is compared with Oracle's download and listed for Windows (D28)") {
+    FakeCdn cdn;
+    const std::string path = "mysql/8.4.11/mysql-8.4.11-winx64.zip";
+    const std::string body = "mysql zip";
+    cdn.http.serve(kTestCdn + "/" + path, {200, body});
+
+    // Oracle publishes MD5 sums and signatures, no SHA-256: the original is compared.
+    const OfficialSource source = official_source(path);
+    CHECK(source.kind == OfficialSource::Kind::Original);
+    // Downloads/ keeps only the current release: the archive's address comes next.
+    CHECK(source.urls == std::vector<std::string>{"https://cdn.mysql.com/Downloads/MySQL-8.4/mysql-8.4.11-winx64.zip",
+                                                  "https://cdn.mysql.com/archives/mysql-8.4/mysql-8.4.11-winx64.zip"});
+    const AddResult added = new_file(kTestCdn + "/" + path, kTestCdn, cdn.files);
+    REQUIRE_MESSAGE(added.file, added.error);
+    CHECK(added.file->title == "MySQL 8.4.11");
+    CheckContext ctx{cdn.http, kTestCdn};
+    // An older release: only the archive has it.
+    cdn.http.serve(source.urls.back(), {200, body});
+    PublishFile archived = *added.file;
+    check_file(ctx, archived);
+    CHECK(archived.state == CheckState::Ok);
+    cdn.http.serve(source.urls.front(), {200, body});
+    PublishFile f = *added.file;
+    check_file(ctx, f);
+    CHECK(f.state == CheckState::Ok);
+
+    // 8.4 LTS only; the MSI and the debug build aren't listed.
+    CHECK(describe_cdn_path(path).listable);
+    CHECK_FALSE(describe_cdn_path("mysql/9.5.0/mysql-9.5.0-winx64.zip").listable);
+    CHECK(describe_cdn_path("mysql/9.5.0/mysql-9.5.0-winx64.zip").problem.find("8.4 LTS only") != std::string::npos);
+    CHECK_FALSE(describe_cdn_path("mysql/8.0.44/mysql-8.0.44-winx64.zip").listable);
+    CHECK(describe_cdn_path("mysql/8.4.11/mysql-8.4.11-winx64.msi").problem.find("another build") != std::string::npos);
+    CHECK(describe_cdn_path("mysql/8.4.11/mysql-8.4.11-winx64-debug-test.zip").problem.find("another build") !=
+          std::string::npos);
+
+    cdn.files.push_back(f);
+    const auto now = at("2026-11-11T12:00:00Z");
+    const BuiltList built = build_next_list(kTestCdn, cdn.files, 6, now);
+    REQUIRE_MESSAGE(built.manifest_json, (built.errors.empty() ? "" : built.errors.front()));
+    const auto doc = nlohmann::json::parse(*built.manifest_json);
+    const auto entry = std::find_if(doc.at("runtimes").begin(), doc.at("runtimes").end(),
+                                    [](const nlohmann::json& r) { return r.at("name").get<std::string>() == "mysql"; });
+    REQUIRE(entry != doc.at("runtimes").end());
+    CHECK(entry->at("version").get<std::string>() == "8.4.11");
+    CHECK(entry->at("platform").get<std::string>() == "windows-x64");
+    CHECK(entry->at("license").get<std::string>() == "GPL-2.0");
+    CHECK(entry->at("urls") == nlohmann::json::array({kTestCdn + "/" + path, source.urls.front()}));
+}
+
 TEST_CASE("publisher: Bun's regular and baseline builds are both listed, checked against SHASUMS256.txt (D31)") {
     FakeCdn cdn;
     const std::string regular = "bun/1.3.14/bun-windows-x64.zip";

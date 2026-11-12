@@ -203,7 +203,7 @@ private:
         PortsOpenCert,
         // Settings > Database; `row` is the field's index.
         DbVersion,
-        DbRuntimes,   // "Go to Runtimes" when no MariaDB is installed
+        DbRuntimes,   // "Go to Runtimes" when none of the tab's engine is installed
         DbStart,
         DbStop,
         DbRestart,
@@ -220,6 +220,7 @@ private:
         DbDiscard,
         DbSave,
         DbPhpMyAdmin,   // Open phpMyAdmin (as root, this series)
+        DbEngine,       // an engine's tab (D28): row = its place in db_engines()
         // Settings > Mail (D27).
         MailInstall,
         MailInboxLink,   // the address, a link
@@ -369,6 +370,9 @@ private:
         RECT open{};
     };
     struct DbGeometry {
+        std::vector<RECT> engines;  // one tab per db_engines()
+        RECT engines_line{};        // the line under the tabs
+        RECT engine_note{};         // MySQL's: 8.4 LTS only
         RECT version_label{};
         RECT version{};
         RECT note{};       // Loading…, or no MariaDB installed
@@ -731,9 +735,16 @@ private:
     void paint_php_text(Canvas& c) const;
 
     // --- Settings > Database (settings_database.cpp) ---
+    // `series` goes with AfterSave::Version, a family with AfterSave::Engine.
     [[nodiscard]] bool settle_db_changes(AfterSave then, const std::string& series = {});
+    // The shown engine's installed series.
     [[nodiscard]] std::vector<std::pair<std::string, std::string>> db_versions() const;
     void load_db(const std::string& series);
+    // Shows an engine's tab (D28): its newest series, or that none is installed.
+    void show_db_engine(const std::string& family);
+    void select_db_engine(const std::string& family);
+    // "MySQL 8.4", for the words.
+    [[nodiscard]] std::string db_title() const;
     // True when a Save chosen on the way out is done and the window should close.
     [[nodiscard]] bool on_db_answers(const Snapshot& snap);
     void make_db_edits();
@@ -751,7 +762,7 @@ private:
     void set_root_password();
     void paint_db_shapes(Canvas& c) const;
     void paint_db_text(Canvas& c) const;
-    [[nodiscard]] static bool is_db_part(Part part) { return part >= Part::DbVersion && part <= Part::DbPhpMyAdmin; }
+    [[nodiscard]] static bool is_db_part(Part part) { return part >= Part::DbVersion && part <= Part::DbEngine; }
 
     // --- Settings > Mail (settings_mail.cpp) ---
     [[nodiscard]] bool settle_mail_changes(AfterSave then);
@@ -1001,8 +1012,10 @@ private:
     // Where a Save chosen on the way to another section goes once it's done.
     Section after_save_section_ = Section::Runtimes;
 
-    // Settings > Database: the series shown, its database.get answer, the
-    // server's state from the 2 s snapshot, and the changes not saved yet.
+    // Settings > Database: the engine's tab (its family, D28) and the series
+    // shown, its database.get answer, the server's state from the 2 s
+    // snapshot, and the changes not saved yet.
+    std::string db_family_ = "mariadb";
     std::string db_series_;
     std::optional<DbSeries> db_;
     DbServer db_server_;

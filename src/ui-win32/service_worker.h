@@ -130,6 +130,7 @@ struct Snapshot {
         std::string purpose;  // what the window asked it for ("show" or "copy" root's password)
         std::optional<nlohmann::json> reply;
         std::string error;    // the service's reason, or the connection's
+        std::string family;   // the family asked about (D28); empty: MariaDB
     };
     std::vector<DbAnswer> db;
     std::string custom_ini;        // php.custom_ini's (or php.final_ini's) path, to open in Notepad

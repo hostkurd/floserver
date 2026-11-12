@@ -56,8 +56,10 @@ struct Spec {
     bool picker;
 };
 // The groups in order; Web servers (nginx and Apache) go in after the wide ones.
-constexpr std::array kGroups{Spec{"php", true, true},   Spec{"mariadb", true, true}, Spec{"node", false, false},
-                             Spec{"bun", false, false}, Spec{"deno", false, false},  Spec{"python", false, false}};
+// MySQL (D28) has one series (8.4 LTS), so no default to pick.
+constexpr std::array kGroups{Spec{"php", true, true},   Spec{"mariadb", true, true}, Spec{"mysql", true, false},
+                             Spec{"node", false, false}, Spec{"bun", false, false},   Spec{"deno", false, false},
+                             Spec{"python", false, false}};
 
 // "3 projects · Shared sites" and who they are, from a used_by list.
 void describe_users(const json& used_by, RuntimeRow& row, Lang lang) {
@@ -93,10 +95,11 @@ void describe_users(const json& used_by, RuntimeRow& row, Lang lang) {
     }
 }
 
-// MariaDB: the port of the server running this exact version.
-std::string port_text(const json& databases, const std::string& version, Lang lang) {
+// MariaDB, MySQL: the port of the server of `family` running this exact version.
+std::string port_text(const json& databases, const std::string& family, const std::string& version, Lang lang) {
     for (const json& server : array_of(databases, "servers")) {
-        if (text_of(server, "version") != version) {
+        const std::string own = server.is_object() && server.contains("family") ? text_of(server, "family") : "mariadb";
+        if (own != family || text_of(server, "version") != version) {
             continue;
         }
         const std::uint64_t port = count_of(server, "port");
@@ -161,11 +164,11 @@ bool phpmyadmin_installed(const Installed& installed) {
     return it != installed.end() && !it->second.empty();
 }
 
-std::string phpmyadmin_busy_text(std::string_view series, std::string_view state, Lang lang) {
-    if (series.empty() || state == "running") {
+std::string phpmyadmin_busy_text(std::string_view server, std::string_view state, Lang lang) {
+    if (server.empty() || state == "running") {
         return std::string(text(lang, Str::PmaOpening));
     }
-    return fill(lang, Str::PmaStarting, {std::string(series)});
+    return fill(lang, Str::PmaStarting, {std::string(server)});
 }
 
 std::optional<RuntimeJob> runtime_job(const json& job) {
@@ -225,8 +228,8 @@ RuntimesPage runtimes_page(const json& reply, const Installed* installed, const 
         const std::string variant = text_of(r, "variant");
         row.label = usual_variant(variant) ? row.version : row.version + " " + variant;
         describe_users(array_of(r, "used_by"), row, lang);
-        if (row.name == "mariadb") {
-            if (const std::string port = port_text(databases, row.version, lang); !port.empty()) {
+        if (row.name == "mariadb" || row.name == "mysql") {
+            if (const std::string port = port_text(databases, row.name, row.version, lang); !port.empty()) {
                 row.usage += (row.usage.empty() ? "" : " · ") + port;
             }
         }
@@ -358,7 +361,7 @@ RuntimesPage runtimes_page(const json& reply, const Installed* installed, const 
         row.label = "Apache " + row.label;
         web.rows.push_back(std::move(row));
     }
-    // Full width after PHP and MariaDB (the user's layout, 31 Oct), so its
+    // Full width after PHP, MariaDB and MySQL (the user's layout, 31 Oct), so its
     // rows have room for sizes and who uses them; Node.js and Python share
     // the row of cards below.
     if (!web.rows.empty()) {

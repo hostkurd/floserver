@@ -35,6 +35,9 @@ const char* runtime_title(const std::string& name) {
     if (name == "mariadb") {
         return "MariaDB";
     }
+    if (name == "mysql") {
+        return "MySQL";
+    }
     if (name == "node") {
         return "Node.js";
     }

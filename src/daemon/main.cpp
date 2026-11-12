@@ -525,9 +525,9 @@ struct Service {
                                                     "; give them another version first");
                 }
             }
-            // Every installed MariaDB has a server (asleep, or woken by
-            // phpMyAdmin): one running from this install lets go of its
-            // files first. The hold ends with `hold`, whatever happens.
+            // Every installed MariaDB and MySQL has a server (asleep, or
+            // woken by phpMyAdmin): one running from this install lets go of
+            // its files first. The hold ends with `hold`, whatever happens.
             const std::string name = string_param(r.params, "name");
             const std::string version = string_param(r.params, "version");
             // Mailpit (D27): "keep_emails" (default true) keeps mailpit.db for a later install.
@@ -545,8 +545,9 @@ struct Service {
                 return protocol::make_error(r.id, "in_use", "Garnet (Redis) needs the .NET runtime; remove Garnet instead");
             }
             const floserver::core::DatabaseService::RemovalHold hold =
-                name == "mariadb" && databases ? databases->hold_for_removal(version)
-                                               : floserver::core::DatabaseService::RemovalHold();
+                floserver::core::mysql_protocol_family(name) && databases
+                    ? databases->hold_for_removal(version, name)
+                    : floserver::core::DatabaseService::RemovalHold();
             // Garnet saves and stops first (D30): its program is in use while it runs.
             const bool is_garnet = name == floserver::core::kGarnetRuntime && redis;
             floserver::core::RedisService::RemovalHold redis_hold =
@@ -1031,8 +1032,8 @@ struct Service {
         return out;
     }
 
-    // The MariaDB servers phpMyAdmin offers: every installed series' (asleep
-    // ones wake on phpMyAdmin's connection).
+    // The MariaDB and MySQL servers phpMyAdmin offers: every installed
+    // series' (asleep ones wake on phpMyAdmin's connection).
     [[nodiscard]] std::vector<floserver::core::PhpMyAdminServer> phpmyadmin_servers() const {
         std::vector<floserver::core::PhpMyAdminServer> out;
         if (!databases) {
@@ -1046,13 +1047,16 @@ struct Service {
             if (s.is_object() && s.contains("series") && s.at("series").is_string() && s.contains("port") &&
                 s.at("port").is_number_unsigned() && s.at("port").get<std::uint64_t>() < 65536) {
                 out.push_back({s.at("series").get<std::string>(),
-                               static_cast<floserver::core::Port>(s.at("port").get<std::uint64_t>())});
+                               static_cast<floserver::core::Port>(s.at("port").get<std::uint64_t>()),
+                               s.contains("family") && s.at("family").is_string()
+                                   ? s.at("family").get<std::string>()
+                                   : std::string(floserver::core::kMariaDbFamily)});
             }
         }
         return out;
     }
 
-    // phpmyadmin.login {"series": "11.4"} (as root) or {"project": "shop"}
+    // phpmyadmin.login {"series": "11.4", "family"?: "mysql"} (as root) or {"project": "shop"}
     // (the project's own user, its database only), "lang"?: the window's
     // language -> {"url"}: a one-click login link that works once, for 60 s.
     // The login waits in a private file; nothing secret is in the link.
@@ -1086,6 +1090,7 @@ struct Service {
         }
         core::PhpMyAdminLoginRequest ask;
         ask.series = string_param(r.params, "series");
+        ask.family = string_param(r.params, "family");
         ask.project = string_param(r.params, "project");
         ask.lang = string_param(r.params, "lang");
         // This may wait for MariaDB to start: the window asks on a connection
@@ -1353,7 +1358,8 @@ struct Service {
         return protocol::make_result(r.id, {{"env", env}, {"env_file", core::path_to_utf8(p->dir / ".env")}});
     }
 
-    // Settings → Database (MariaDB), per series ("11.4"):
+    // Settings → Database, per series ("11.4") and family ("family": "mariadb"
+    // when left out, or "mysql" since D28; every method below takes it):
     //   database.get {series}: ProjectService::database_get() with "server"
     //     and "databases" from DatabaseService::series_status();
     //   database.set {series, ini?, port?, keep_running?}: the same reply, and
@@ -1369,39 +1375,46 @@ struct Service {
         }
         core::ServiceRefusal refusal;
         const std::string text = string_param(r.params, "series");
+        std::string family;
+        if (!core::request_database_family(string_param(r.params, "family"), family)) {
+            return protocol::make_error(r.id, "bad_params", R"("family" is "mariadb" or "mysql")");
+        }
         const auto series = core::mariadb_request_series(text);
         if (!series) {
-            return protocol::make_error(r.id, "bad_params", "\"" + text + "\" isn't a MariaDB series such as 11.4");
+            return protocol::make_error(r.id, "bad_params", "\"" + text + "\" isn't a " +
+                                                                core::database_family_title(family) +
+                                                                " series such as " +
+                                                                (family == core::kMySqlFamily ? "8.4" : "11.4"));
         }
         const auto with_status = [&](json reply) {
-            json status = databases->series_status(*series);
+            json status = databases->series_status(*series, family);
             reply["server"] = status["server"];
             reply["databases"] = status["databases"];
             return reply;
         };
         if (r.method == "database.custom_ini" || r.method == "database.final_ini") {
-            const auto path = r.method == "database.custom_ini" ? projects->database_custom_ini(*series, refusal)
-                                                                : databases->final_ini(*series, refusal);
+            const auto path = r.method == "database.custom_ini" ? projects->database_custom_ini(*series, refusal, family)
+                                                                : databases->final_ini(*series, refusal, family);
             return path ? protocol::make_result(r.id, {{"path", core::path_to_utf8(*path)}})
                         : protocol::make_error(r.id, refusal.code, refusal.message);
         }
         if (r.method == "database.root") {
-            const auto password = databases->root_password(*series, refusal);
+            const auto password = databases->root_password(*series, refusal, family);
             return password ? protocol::make_result(r.id, {{"password", *password}})
                             : protocol::make_error(r.id, refusal.code, refusal.message);
         }
         if (r.method == "database.root_set") {
-            return databases->set_root_password(*series, string_param(r.params, "password"), refusal)
+            return databases->set_root_password(*series, string_param(r.params, "password"), refusal, family)
                        ? protocol::make_result(r.id, json::object())
                        : protocol::make_error(r.id, refusal.code, refusal.message);
         }
         if (r.method == "database.server") {
-            return databases->server_action(*series, string_param(r.params, "action"), refusal)
-                       ? protocol::make_result(r.id, databases->series_status(*series))
+            return databases->server_action(*series, string_param(r.params, "action"), refusal, family)
+                       ? protocol::make_result(r.id, databases->series_status(*series, family))
                        : protocol::make_error(r.id, refusal.code, refusal.message);
         }
         if (r.method == "database.get") {
-            const auto result = projects->database_get(*series, refusal);
+            const auto result = projects->database_get(*series, refusal, family);
             return result ? protocol::make_result(r.id, with_status(*result))
                           : protocol::make_error(r.id, refusal.code, refusal.message);
         }
@@ -1412,12 +1425,13 @@ struct Service {
         const json keep = params.contains("keep_running") ? params.at("keep_running") : json();
         bool changed_ini = false;
         auto result = projects->database_set(*series, params.value("ini", none), params.contains("port") ? &port : nullptr,
-                                             params.contains("keep_running") ? &keep : nullptr, changed_ini, refusal);
+                                             params.contains("keep_running") ? &keep : nullptr, changed_ini, refusal,
+                                             family);
         if (!result) {
             return protocol::make_error(r.id, refusal.code, refusal.message);
         }
         (void)databases->reload();  // a new port or "keep running" now
-        (*result)["restarting"] = changed_ini && databases->restart_if_running(*series);
+        (*result)["restarting"] = changed_ini && databases->restart_if_running(*series, family);
         return protocol::make_result(r.id, with_status(*result));
     }
 
@@ -1690,7 +1704,10 @@ struct Service {
             }
             json database = nullptr;
             if (plan->database) {
-                database = {{"name", plan->database_name},
+                // As its server names it (MySQL's may be cut to fit, D28).
+                const core::ConfigResult cfg = core::read_project_config_file(core::Project{plan->name, plan->dir, true, false, {}});
+                const std::string family = cfg.config && cfg.config->database ? cfg.config->database->family : std::string();
+                database = {{"name", core::server_database_name(plan->database_name, family)},
                             {"bytes", databases ? databases->project_database_bytes(plan->name).value_or(0) : 0}};
             }
             const auto file = default_file(plan->name);

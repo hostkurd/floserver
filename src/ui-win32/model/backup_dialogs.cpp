@@ -125,6 +125,8 @@ std::string backup_versions_text(const json& versions) {
     const std::string database = text_of(versions, "database");
     if (database.starts_with("mariadb-")) {
         add("MariaDB " + database.substr(8));
+    } else if (database.starts_with("mysql-")) {
+        add("MySQL " + database.substr(6));
     } else if (database == "mariadb") {
         add("MariaDB");
     }

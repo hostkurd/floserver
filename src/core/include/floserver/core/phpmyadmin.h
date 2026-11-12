@@ -31,6 +31,7 @@
 // signon session and redirects to phpMyAdmin. Passwords never go into a URL,
 // a log or a command line.
 
+#include "floserver/core/database_engine.h"
 #include "floserver/core/ports.h"
 #include "floserver/core/secret_store.h"
 
@@ -80,14 +81,16 @@ struct PhpMyAdminPaths {
 // Sorani, also from "ku"); "en" for anything else.
 [[nodiscard]] std::string phpmyadmin_lang(std::string_view code);
 
-// One MariaDB server phpMyAdmin offers.
+// One MariaDB or MySQL server phpMyAdmin offers (D28: both).
 struct PhpMyAdminServer {
     std::string series;  // "11.4"
     Port port = 0;
+    std::string family{kMariaDbFamily};  // "mariadb", "mysql"
 };
 
-// The signon session's cookie name for a series: "FloServerSignon_11_4".
-[[nodiscard]] std::string signon_session_name(std::string_view series);
+// The signon session's cookie name for a series: "FloServerSignon_11_4"
+// for MariaDB's (as before D28), "FloServerSignon_mysql_8_4" for MySQL's.
+[[nodiscard]] std::string signon_session_name(std::string_view series, std::string_view family = kMariaDbFamily);
 
 struct PhpMyAdminConfigSpec {
     std::string blowfish_hex;               // 64 hex digits (32 bytes)
@@ -96,8 +99,9 @@ struct PhpMyAdminConfigSpec {
     std::string lang = "en";                // phpmyadmin_lang()
 };
 
-// The servers in the order config.inc.php lists them (by series, oldest
-// first, one per series); phpMyAdmin's server N is element N-1.
+// The servers in the order config.inc.php lists them (MariaDB's, then
+// MySQL's; by series, oldest first, one per series); phpMyAdmin's server N is
+// element N-1.
 [[nodiscard]] std::vector<PhpMyAdminServer> phpmyadmin_servers(std::vector<PhpMyAdminServer> servers);
 
 // config.inc.php's text, or nothing (with `error`) when an input can't be
@@ -121,6 +125,7 @@ struct PhpMyAdminConfigSpec {
 struct SignonLogin {
     std::size_t server = 1;              // phpMyAdmin's server number
     std::string series;                  // its series: the signon session's name
+    std::string family{kMariaDbFamily};  // and its family
     std::string user;
     std::string password;
     std::string host = "127.0.0.1";
@@ -143,7 +148,7 @@ void remove_expired_signon_tokens(const std::filesystem::path& tokens_dir);
 
 // Keeps <data>/phpmyadmin/config.inc.php in line with its inputs: the secret
 // (made once, kept in the secure store as "phpmyadmin/blowfish"), the
-// MariaDB servers and FloServer's language. The file is written only when
+// MariaDB and MySQL servers and FloServer's language. The file is written only when
 // its text changes. Safe from any thread.
 class PhpMyAdminConfigWriter {
 public:
@@ -173,10 +178,12 @@ private:
 class DatabaseService;
 struct ServiceRefusal;
 
-// phpmyadmin.login: what was asked. `series` ("11.4", as root) or `project`
-// (its own user, its database only); `lang` is the window's.
+// phpmyadmin.login: what was asked. `series` ("11.4", as root; of `family`,
+// MariaDB when empty) or `project` (its own user, its database only); `lang`
+// is the window's.
 struct PhpMyAdminLoginRequest {
     std::string series;
+    std::string family;
     std::string project;
     std::string lang;
 };

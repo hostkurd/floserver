@@ -222,7 +222,7 @@ LiveResult fetch_live_list(HttpTransport& http, std::string_view cdn,
 }
 
 std::string runtime_title(std::string_view runtime, std::string_view version, std::string_view variant) {
-    static constexpr std::array<std::pair<std::string_view, std::string_view>, 16> kNames = {{
+    static constexpr std::array<std::pair<std::string_view, std::string_view>, 17> kNames = {{
         {"php", "PHP"},
         {"mariadb", "MariaDB"},
         {"node", "Node.js"},
@@ -233,6 +233,7 @@ std::string runtime_title(std::string_view runtime, std::string_view version, st
         {"python", "Python"},
         {"phpmyadmin", "phpMyAdmin"},
         {"mailpit", "Mailpit"},
+        {"mysql", "MySQL"},
         {"garnet", "Garnet"},
         {"dotnet", ".NET runtime"},
         {"php-redis", "phpredis"},
@@ -401,6 +402,13 @@ OfficialSource official_source(std::string_view path) {
     } else if (p.runtime == "nginx") {
         s.kind = Kind::Original;
         s.urls = {"https://nginx.org/download/" + p.file};
+    } else if (p.runtime == "mysql") {
+        // Oracle publishes MD5 sums and GPG signatures, no SHA-256: the
+        // download itself is compared (D28, 8.4 LTS only). Downloads/ keeps
+        // only the current release; an older one is under archives/.
+        s.kind = Kind::Original;
+        s.urls = {"https://cdn.mysql.com/Downloads/MySQL-8.4/" + p.file,
+                  "https://cdn.mysql.com/archives/mysql-8.4/" + p.file};
     } else if (p.runtime == "wordpress") {
         s.kind = Kind::Original;
         s.urls = {"https://wordpress.org/" + p.file};
@@ -610,16 +618,24 @@ void check_file(CheckContext& ctx, PublishFile& file) {
                           : "Can't read the official checksum list: " + fetch_error;
         }
     } else if (source.kind == OfficialSource::Kind::Original) {
-        const Download orig = download_and_hash(ctx, source.urls.front());
-        if (cancelled(ctx.cancel)) {
-            file.detail = "Stopped";
-            return;
+        // Each address in turn (MySQL's archive after its current downloads).
+        for (const std::string& original : source.urls) {
+            const Download orig = download_and_hash(ctx, original);
+            if (cancelled(ctx.cancel)) {
+                file.detail = "Stopped";
+                return;
+            }
+            if (orig.reply.status == 200 && !orig.reply.stopped && !orig.too_big) {
+                official = orig.sha256;
+                from = "the original from " + host_of(original);
+                break;
+            }
+            if (why_not.empty()) {
+                why_not = "Can't download the original to compare with (" + describe_failure(orig.reply) + ")";
+            }
         }
-        if (orig.reply.status == 200 && !orig.reply.stopped && !orig.too_big) {
-            official = orig.sha256;
-            from = "the original from " + host_of(source.urls.front());
-        } else {
-            why_not = "Can't download the original to compare with (" + describe_failure(orig.reply) + ")";
+        if (official) {
+            why_not.clear();
         }
     }
 

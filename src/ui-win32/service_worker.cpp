@@ -261,7 +261,8 @@ void ServiceWorker::start_side_call(const std::string& method, const nlohmann::j
     }
     std::thread([box = side_, window = window_, message = message_, method, params, purpose,
                  lost = std::string(text(lang_, Str::ConnectionLost))] {
-        Snapshot::DbAnswer answer{method, string_field(params, "series"), purpose, std::nullopt, {}};
+        Snapshot::DbAnswer answer{method, string_field(params, "series"), purpose, std::nullopt, {},
+                                  string_field(params, "family")};
         try {
             std::string error;
             const std::string instance = core::ipc::default_instance();
@@ -901,7 +902,8 @@ void ServiceWorker::run(const std::stop_token& stop) {
                     }
                     break;
                 case Command::Kind::DatabaseCall: {
-                    Snapshot::DbAnswer answer{c.key, string_field(c.params, "series"), c.project, std::nullopt, {}};
+                    Snapshot::DbAnswer answer{c.key, string_field(c.params, "series"), c.project, std::nullopt, {},
+                                              string_field(c.params, "family")};
                     if (!client) {
                         answer.error = lost;
                     } else if (auto got = client->call(c.key, c.params); !got) {

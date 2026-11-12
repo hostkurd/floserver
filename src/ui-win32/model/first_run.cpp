@@ -48,6 +48,8 @@ constexpr std::array kOffers{
     // D30: offered, not ticked; its .NET runtime and phpredis come with it.
     OfferSpec{"garnet", "", Str::FirstRunWhatGarnet, false, false},
     OfferSpec{"python", "3.13", Str::FirstRunWhatPython, false, false},
+    // MySQL 8.4 LTS (D28): offered, not ticked; MariaDB is the usual database.
+    OfferSpec{"mysql", "8.4", Str::FirstRunWhatMysql, false, false},
     OfferSpec{"bun", "", Str::FirstRunWhatBun, false, false},
     OfferSpec{"deno", "", Str::FirstRunWhatDeno, false, false},
     OfferSpec{"phpmyadmin", "5.2", Str::FirstRunWhatPma, false, false},

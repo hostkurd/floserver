@@ -213,6 +213,8 @@ void SettingsWindow::open_section(Section section, const std::string& series) {
     }
     if (section == Section::Database) {
         make_db_edits();
+        // The engine's tab shown before, unless another has the installs (D28).
+        db_family_ = db_family_to_show(db_family_, has_installed_, installed_, reply_);
         const auto versions = db_versions();
         const bool still =
             std::any_of(versions.begin(), versions.end(), [&](const auto& v) { return v.first == db_series_; });
@@ -220,6 +222,8 @@ void SettingsWindow::open_section(Section section, const std::string& series) {
         // Each time the section opens: one database.get, nothing else.
         if (!pick.empty()) {
             load_db(pick);
+        } else {
+            show_db_engine(db_family_);  // its tab says none is installed
         }
     }
     if (section == Section::Apache) {
