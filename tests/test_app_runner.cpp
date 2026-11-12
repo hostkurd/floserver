@@ -755,7 +755,7 @@ TEST_CASE("an app that can't start answers why, and Keep running starts it witho
     const Pump pump(runner);
 
     const std::string page = get(app.port);
-    CHECK(page.starts_with("502 FloServer: web's server isn't running."));
+    CHECK_MESSAGE(page.starts_with("502 FloServer: web's server isn't running."), page);
     CHECK(page.find("ended (exit 3)") != std::string::npos);
     CHECK(page.find("cannot find module express") != std::string::npos);  // the log's end
     CHECK(runner->state() == AppState::Failed);
