@@ -137,6 +137,26 @@ enum class ListenerOwner : std::uint8_t {
     Unknown,  // can't tell here (no such listener seen, or not this system)
 };
 
+#ifdef __linux__
+// The parts of ChildProcess::listener_owner on Linux, apart for tests.
+struct ProcListener {
+    std::uint64_t inode = 0;
+    std::uint32_t uid = 0;  // the user who made the socket
+};
+// The listening sockets in /proc/net/tcp and /proc/net/tcp6 (their text)
+// that a connection to 127.0.0.1:port ([::1]:port with `ipv6`) reaches: the
+// most specific address first (127.0.0.1 or ::1), else any address; for
+// IPv4 an IPv6 socket on [::] or ::ffff:127.0.0.1 when no IPv4 one listens.
+[[nodiscard]] std::vector<ProcListener> proc_net_listeners(std::string_view tcp, std::string_view tcp6, Port port,
+                                                           bool ipv6);
+// Child only when every listener is this user's and in the child's unit
+// (`ours`: the socket inodes its processes hold). Another user's listener
+// is Other however unreadable the unit is: only a listener of this user can
+// hide behind a process whose descriptors can't be read (`unreadable`).
+[[nodiscard]] ListenerOwner judge_listeners(const std::vector<ProcListener>& listeners, std::uint32_t self_uid,
+                                            const std::vector<std::uint64_t>& ours, bool unreadable);
+#endif
+
 class ChildProcess {
 public:
     [[nodiscard]] static std::unique_ptr<ChildProcess> start(const ChildOptions& options, std::string& error);
