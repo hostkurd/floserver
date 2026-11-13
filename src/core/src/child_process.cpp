@@ -6,6 +6,10 @@
 #include <fstream>
 #include <sstream>
 #include <array>
+#include <cstdlib>
+#include <cstring>
+#include <charconv>
+#include <iterator>
 #include <thread>
 
 #ifdef _WIN32
@@ -894,6 +898,93 @@ void ChildProcess::kill() {
     (void)wait(std::chrono::seconds(10));
 }
 
+namespace {
+
+// The system's listening TCP sockets of one family with their programs, as
+// GetExtendedTcpTable gives them; empty when it can't.
+std::vector<std::uint8_t> listener_table(ULONG family) {
+    std::vector<std::uint8_t> buf;
+    for (int tries = 0; tries < 4; ++tries) {
+        DWORD size = static_cast<DWORD>(buf.size());
+        const DWORD rc = GetExtendedTcpTable(buf.empty() ? nullptr : buf.data(), &size, FALSE, family,
+                                             TCP_TABLE_OWNER_PID_LISTENER, 0);
+        if (rc == NO_ERROR && !buf.empty()) {
+            return buf;
+        }
+        if (rc != ERROR_INSUFFICIENT_BUFFER) {
+            break;
+        }
+        buf.assign(size + 1024, 0);  // a little more, in case one opens meanwhile
+    }
+    return {};
+}
+
+}  // namespace
+
+ListenerOwner ChildProcess::listener_owner(Port port, bool ipv6) const {
+    // The programs whose listeners a connection to loopback reaches, the
+    // most specific address first: 127.0.0.1 (or ::1), then any address.
+    const DWORD wanted = htons(port);
+    std::vector<DWORD> exact;
+    std::vector<DWORD> any;
+    if (!ipv6) {
+        const auto buf = listener_table(AF_INET);
+        if (!buf.empty()) {
+            const auto* table = reinterpret_cast<const MIB_TCPTABLE_OWNER_PID*>(buf.data());
+            for (DWORD i = 0; i < table->dwNumEntries; ++i) {
+                const MIB_TCPROW_OWNER_PID& row = table->table[i];
+                if (static_cast<WORD>(row.dwLocalPort) == wanted) {
+                    (row.dwLocalAddr == htonl(INADDR_LOOPBACK) ? exact : any).push_back(row.dwOwningPid);
+                }
+            }
+        }
+    }
+    if (exact.empty() && any.empty()) {
+        // [::1] for IPv6; [::] also takes IPv4 unless it's IPv6-only.
+        const auto buf = listener_table(AF_INET6);
+        if (!buf.empty()) {
+            const auto* table = reinterpret_cast<const MIB_TCP6TABLE_OWNER_PID*>(buf.data());
+            for (DWORD i = 0; i < table->dwNumEntries; ++i) {
+                const MIB_TCP6ROW_OWNER_PID& row = table->table[i];
+                if (static_cast<WORD>(row.dwLocalPort) != wanted) {
+                    continue;
+                }
+                const auto* addr = std::begin(row.ucLocalAddr);
+                const bool zeros = std::all_of(addr, addr + 15, [](UCHAR b) { return b == 0; });
+                const bool loopback = zeros && addr[15] == 1;
+                const bool unspecified = zeros && addr[15] == 0;
+                if (loopback && ipv6) {
+                    exact.push_back(row.dwOwningPid);
+                } else if (unspecified) {
+                    any.push_back(row.dwOwningPid);
+                }
+            }
+        }
+    }
+    const std::vector<DWORD>& owners = exact.empty() ? any : exact;
+    if (owners.empty()) {
+        return ListenerOwner::Unknown;
+    }
+    // Everything the child started is in its job (nothing breaks away).
+    std::vector<std::uint8_t> buf(sizeof(JOBOBJECT_BASIC_PROCESS_ID_LIST) + 1024 * sizeof(ULONG_PTR));
+    auto* list = reinterpret_cast<JOBOBJECT_BASIC_PROCESS_ID_LIST*>(buf.data());
+    if (QueryInformationJobObject(native_->job, JobObjectBasicProcessIdList, list, static_cast<DWORD>(buf.size()),
+                                  nullptr) == FALSE &&
+        GetLastError() != ERROR_MORE_DATA) {
+        return ListenerOwner::Unknown;
+    }
+    const auto in_job = [list](DWORD pid) {
+        return std::any_of(list->ProcessIdList, list->ProcessIdList + list->NumberOfProcessIdsInList,
+                           [pid](ULONG_PTR member) { return member == pid; });
+    };
+    if (list->NumberOfProcessIdsInList < list->NumberOfAssignedProcesses) {
+        // More than a thousand processes: the list is cut short, so a
+        // missing one proves nothing.
+        return std::all_of(owners.begin(), owners.end(), in_job) ? ListenerOwner::Child : ListenerOwner::Unknown;
+    }
+    return std::all_of(owners.begin(), owners.end(), in_job) ? ListenerOwner::Child : ListenerOwner::Other;
+}
+
 #else
 
 struct ChildProcess::Native {
@@ -1041,6 +1132,234 @@ void ChildProcess::kill() {
         }
     }
 }
+
+#ifdef __linux__
+
+namespace {
+
+std::optional<std::uint64_t> hex_number(std::string_view text) {
+    std::uint64_t value = 0;
+    const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), value, 16);
+    if (ec != std::errc() || end != text.data() + text.size() || text.empty()) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+std::optional<std::uint64_t> decimal_number(std::string_view text) {
+    std::uint64_t value = 0;
+    const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (ec != std::errc() || end != text.data() + text.size() || text.empty()) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+constexpr std::uint32_t kNoUser = 0xFFFFFFFF;  // (uid_t)-1: no user has it
+
+// An address as /proc/net/tcp(6) shows it: each 32-bit word of the address
+// as the machine holds it, in hex (0100007F is 127.0.0.1 on x86).
+std::optional<in6_addr> proc_address(std::string_view hex) {
+    if (hex.size() != 8 && hex.size() != 32) {
+        return std::nullopt;
+    }
+    in6_addr addr{};  // an IPv4 address goes in the first 4 bytes
+    for (std::size_t word = 0; word * 8 < hex.size(); ++word) {
+        const auto value = hex_number(hex.substr(word * 8, 8));
+        if (!value) {
+            return std::nullopt;
+        }
+        const auto raw = static_cast<std::uint32_t>(*value);
+        std::memcpy(addr.s6_addr + word * 4, &raw, sizeof raw);
+    }
+    return addr;
+}
+
+bool same_address(const in6_addr& a, const in6_addr& b) { return std::memcmp(&a, &b, sizeof a) == 0; }
+
+in6_addr ipv4_address(std::uint32_t network_order) {
+    in6_addr addr{};
+    std::memcpy(addr.s6_addr, &network_order, sizeof network_order);
+    return addr;
+}
+
+std::string whole_file(const char* path) {
+    const std::ifstream in(path);
+    std::ostringstream text;
+    text << in.rdbuf();
+    return text.str();
+}
+
+// The state letter in /proc/<pid>/stat ("pid (comm) S ppid ..."), or
+// nothing when it can't be read; comm can hold spaces and ')'.
+std::optional<char> process_state(const std::string& stat_text) {
+    const auto paren = stat_text.rfind(')');
+    if (paren == std::string::npos || paren + 2 >= stat_text.size()) {
+        return std::nullopt;
+    }
+    return stat_text[paren + 2];
+}
+
+// The process has exited: a zombie, dead, or gone from /proc.
+bool has_ended(long pid) {
+    const auto state = process_state(whole_file(("/proc/" + std::to_string(pid) + "/stat").c_str()));
+    return !state || *state == 'Z' || *state == 'X';
+}
+
+}  // namespace
+
+// Rows after the header:
+//   sl  local_address rem_address   st tx:rx tr:when retrnsmt uid timeout inode
+//   0:  0100007F:2390 00000000:0000 0A ...
+// (0A is listening).
+std::vector<ProcListener> proc_net_listeners(std::string_view tcp, std::string_view tcp6, Port port, bool ipv6) {
+    std::vector<ProcListener> exact;
+    std::vector<ProcListener> any;
+    const auto scan = [port, &exact, &any](std::string_view table, const in6_addr& loopback, const in6_addr& all) {
+        std::istringstream in{std::string(table)};
+        std::string line;
+        std::getline(in, line);  // header
+        while (std::getline(in, line)) {
+            std::istringstream fields(line);
+            std::array<std::string, 10> f;
+            for (std::string& field : f) {
+                fields >> field;
+            }
+            const auto colon = f[1].rfind(':');
+            if (!fields || f[3] != "0A" || colon == std::string::npos) {
+                continue;
+            }
+            const std::string_view local(f[1]);
+            const auto addr = proc_address(local.substr(0, colon));
+            if (hex_number(local.substr(colon + 1)) != port || !addr) {
+                continue;
+            }
+            // A row that can't be read counts as nobody's: never ours.
+            const auto uid = decimal_number(f[7]);
+            const auto inode = decimal_number(f[9]);
+            const ProcListener listener{inode.value_or(0),
+                                        uid && inode && *uid < kNoUser ? static_cast<std::uint32_t>(*uid) : kNoUser};
+            if (same_address(*addr, loopback)) {
+                exact.push_back(listener);
+            } else if (same_address(*addr, all)) {
+                any.push_back(listener);
+            }
+        }
+    };
+    if (ipv6) {
+        scan(tcp6, in6addr_loopback, in6addr_any);
+    } else {
+        scan(tcp, ipv4_address(htonl(INADDR_LOOPBACK)), ipv4_address(htonl(INADDR_ANY)));
+        if (exact.empty() && any.empty()) {
+            in6_addr mapped{};  // ::ffff:127.0.0.1
+            mapped.s6_addr[10] = 0xff;
+            mapped.s6_addr[11] = 0xff;
+            const std::uint32_t loopback = htonl(INADDR_LOOPBACK);
+            std::memcpy(mapped.s6_addr + 12, &loopback, sizeof loopback);
+            scan(tcp6, mapped, in6addr_any);
+        }
+    }
+    return exact.empty() ? any : exact;
+}
+
+ListenerOwner judge_listeners(const std::vector<ProcListener>& listeners, std::uint32_t self_uid,
+                              const std::vector<std::uint64_t>& ours, bool unreadable) {
+    if (listeners.empty()) {
+        return ListenerOwner::Unknown;
+    }
+    if (std::any_of(listeners.begin(), listeners.end(), [self_uid](const ProcListener& l) { return l.uid != self_uid; })) {
+        return ListenerOwner::Other;
+    }
+    if (std::all_of(listeners.begin(), listeners.end(), [&ours](const ProcListener& l) {
+            return std::find(ours.begin(), ours.end(), l.inode) != ours.end();
+        })) {
+        return ListenerOwner::Child;
+    }
+    return unreadable ? ListenerOwner::Unknown : ListenerOwner::Other;
+}
+
+ListenerOwner ChildProcess::listener_owner(Port port, bool ipv6) const {
+    const auto listeners = proc_net_listeners(whole_file("/proc/net/tcp"), whole_file("/proc/net/tcp6"), port, ipv6);
+    const auto self = static_cast<std::uint32_t>(geteuid());
+    // Nobody listens, or another user does: that's Other whatever the
+    // child's processes hold, so there's no need to look.
+    if (listeners.empty()) {
+        return ListenerOwner::Unknown;
+    }
+    if (judge_listeners(listeners, self, {}, true) == ListenerOwner::Other) {
+        return ListenerOwner::Other;
+    }
+    // The child's unit: its process group (what kill() ends), and anything
+    // those processes started that left the group.
+    std::vector<std::pair<long, long>> parents;  // pid, parent
+    std::vector<long> unit;
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator("/proc", ec)) {
+        const std::string name = entry.path().filename().string();
+        if (name.empty() || !std::all_of(name.begin(), name.end(), [](char c) { return c >= '0' && c <= '9'; })) {
+            continue;
+        }
+        // pid (comm) state ppid pgrp ...; comm can hold spaces and ')'.
+        const std::string text = whole_file((entry.path() / "stat").c_str());  // comm may even hold a newline
+        const auto paren = text.rfind(')');
+        std::istringstream rest(paren == std::string::npos ? std::string() : text.substr(paren + 1));
+        std::string state;
+        long ppid = 0;
+        long pgrp = 0;
+        if (!(rest >> state >> ppid >> pgrp)) {
+            continue;
+        }
+        const long pid = std::stol(name);
+        if (pgrp == static_cast<long>(pid_) || pid == static_cast<long>(pid_)) {
+            unit.push_back(pid);
+        }
+        parents.emplace_back(pid, ppid);
+    }
+    for (std::size_t grew = 1; grew != 0;) {
+        grew = 0;
+        for (const auto& [pid, ppid] : parents) {
+            if (std::find(unit.begin(), unit.end(), ppid) != unit.end() &&
+                std::find(unit.begin(), unit.end(), pid) == unit.end()) {
+                unit.push_back(pid);
+                ++grew;
+            }
+        }
+    }
+    // The socket inodes the unit holds ("socket:[12345]").
+    std::vector<std::uint64_t> ours;
+    bool unreadable = false;
+    for (const long pid : unit) {
+        std::error_code fd_ec;
+        for (const auto& fd : std::filesystem::directory_iterator("/proc/" + std::to_string(pid) + "/fd", fd_ec)) {
+            std::error_code link_ec;
+            const std::string target = std::filesystem::read_symlink(fd.path(), link_ec).string();
+            if (link_ec || !target.starts_with("socket:[") || !target.ends_with("]")) {
+                continue;
+            }
+            const std::string_view digits = std::string_view(target).substr(8, target.size() - 9);
+            std::uint64_t inode = 0;
+            if (const auto [p, from_ec] = std::from_chars(digits.data(), digits.data() + digits.size(), inode);
+                from_ec == std::errc() && p == digits.data() + digits.size()) {
+                ours.push_back(inode);
+            }
+        }
+        // An exited process (a zombie not yet reaped, or gone) holds no
+        // descriptors; its /proc files belong to root, so to anyone else
+        // its fd folder can't be read. Only a live one counts as hidden.
+        unreadable = unreadable || (fd_ec == std::errc::permission_denied && !has_ended(pid));
+    }
+    return judge_listeners(listeners, self, ours, unreadable);
+}
+
+#else
+
+ListenerOwner ChildProcess::listener_owner(Port port, bool ipv6) const {
+    (void)port;  // macOS comes with its own stage (D3)
+    (void)ipv6;
+    return ListenerOwner::Unknown;
+}
+
+#endif
 
 #endif
 

@@ -202,6 +202,7 @@ TEST_CASE("projects run with real nginx and php-cgi, sleep when idle and wake on
     REQUIRE(ports);
     CertStore certs(data);
     WebServiceConfig config;
+    config.first_app_internal_port = test_util::app_port_base();
     config.data_dir = data;
     config.fixed_ports = WebPorts{static_cast<Port>(ports->http + 20000), static_cast<Port>(ports->https + 20000), true};
     config.idle_after = 2s;
@@ -378,6 +379,7 @@ TEST_CASE("PHP settings (D20): a series' value, its custom.ini and the project's
     REQUIRE(ports);
     CertStore certs(data);
     WebServiceConfig config;
+    config.first_app_internal_port = test_util::app_port_base();
     config.data_dir = data;
     config.fixed_ports = WebPorts{static_cast<Port>(ports->http + 21000), static_cast<Port>(ports->https + 21000), true};
     config.reload_every = 1s;
@@ -452,6 +454,7 @@ TEST_CASE("a Node project is forwarded to its own server, WebSockets included, a
     REQUIRE(ports);
     CertStore certs(data);
     WebServiceConfig config;
+    config.first_app_internal_port = test_util::app_port_base();
     config.data_dir = data;
     config.fixed_ports = WebPorts{static_cast<Port>(ports->http + 21000), static_cast<Port>(ports->https + 21000), true};
     config.idle_after = 2s;
@@ -588,6 +591,7 @@ TEST_CASE("an Apache project is served by the shared Apache behind nginx, .htacc
     REQUIRE(ports);
     CertStore certs(data);
     WebServiceConfig config;
+    config.first_app_internal_port = test_util::app_port_base();
     config.data_dir = data;
     config.fixed_ports = WebPorts{static_cast<Port>(ports->http + 22000), static_cast<Port>(ports->https + 22000), true};
     config.idle_after = 2s;
@@ -709,6 +713,7 @@ TEST_CASE("Settings > Apache: a module turned on reaches .htaccess; custom.conf 
     REQUIRE(ports);
     CertStore certs(data);
     WebServiceConfig config;
+    config.first_app_internal_port = test_util::app_port_base();
     config.data_dir = data;
     config.fixed_ports = WebPorts{static_cast<Port>(ports->http + 23000), static_cast<Port>(ports->https + 23000), true};
     config.reload_every = 1s;
@@ -861,6 +866,7 @@ TEST_CASE("shared sites: the www folder at localhost/<folder>/ and <folder>.loca
         REQUIRE(ports);
         CertStore certs(data);
         WebServiceConfig config;
+        config.first_app_internal_port = test_util::app_port_base();
         config.data_dir = data;
         config.fixed_ports =
             WebPorts{static_cast<Port>(ports->http + 23000), static_cast<Port>(ports->https + 23000), true};
@@ -984,6 +990,7 @@ TEST_CASE("Settings > Ports & HTTPS with real nginx: the ports asked for, http t
     REQUIRE(save_app_config(app_config_file(data), app, error));
 
     WebServiceConfig config;
+    config.first_app_internal_port = test_util::app_port_base();
     config.data_dir = data;
     config.reload_every = 1s;
     WebService service(config, certs);
@@ -1111,6 +1118,7 @@ TEST_CASE("Settings > Ports & HTTPS with real nginx: a refused config keeps the 
 
     CertStore certs(data);
     WebServiceConfig config;
+    config.first_app_internal_port = test_util::app_port_base();
     config.data_dir = data;
     config.reload_every = 1h;  // reloads only when the test asks
     WebService service(config, certs);
@@ -1201,6 +1209,7 @@ TEST_CASE("Settings > Ports & HTTPS: custom ports taken, a fallback sharing the 
 
     std::atomic<bool> wanted_taken{true};
     WebServiceConfig config;
+    config.first_app_internal_port = test_util::app_port_base();
     config.data_dir = data;
     config.reload_every = 1h;  // reloads only when the test asks
     // 80/443 and 8080-8088 are someone else's; the wanted port too, until
@@ -1307,6 +1316,7 @@ echo $server['auth_type'], ' ', $s['PMA_single_signon_user'] ?? '-', ' ', $s['PM
     REQUIRE(ports);
     CertStore certs(data);
     WebServiceConfig config;
+    config.first_app_internal_port = test_util::app_port_base();
     config.data_dir = data;
     config.fixed_ports = WebPorts{static_cast<Port>(ports->http + 23000), static_cast<Port>(ports->https + 23000), true};
     config.reload_every = 1s;

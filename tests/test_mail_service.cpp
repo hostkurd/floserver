@@ -354,6 +354,7 @@ TEST_CASE("mail.localhost through the real nginx: the inbox's password added, no
     const auto ports = pick_web_ports([](Port p) { return p > 1024 && can_listen_on_loopback(p); });
     REQUIRE(ports);
     WebServiceConfig config;
+    config.first_app_internal_port = test_util::app_port_base();
     config.data_dir = data;
     config.fixed_ports = WebPorts{static_cast<Port>(ports->http + 21000), static_cast<Port>(ports->https + 21000), true};
     config.idle_after = 2s;

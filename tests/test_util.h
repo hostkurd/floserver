@@ -11,6 +11,7 @@
 #include <nlohmann/json.hpp>
 
 #include <array>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -23,6 +24,23 @@
 namespace test_util {
 
 namespace fs = std::filesystem;
+
+// The ports this test program's project servers use (test_app_runner.cpp,
+// test_web_service.cpp): from a base picked at random per process, one of
+// 60 blocks of 200 between 20000 and 32000 (below the ephemeral ports).
+// Internal ports (AppRunnerConfig::first_internal_port) start at the base;
+// tests that set up other programs' listeners use base+50 to base+99, and the
+// projects' own ports in test_app_runner.cpp come from base+100 up. Two test
+// programs running side by side get the same block 1 time in 60; even then
+// every port is checked free before it's used, and a runner passes over an
+// internal port another program took meanwhile.
+inline std::uint16_t app_port_base() {
+    static const std::uint16_t base = [] {
+        std::random_device rd;
+        return static_cast<std::uint16_t>(20000 + (rd() % 60) * 200);
+    }();
+    return base;
+}
 
 class TempDir {
 public:
