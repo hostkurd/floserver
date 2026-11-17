@@ -45,7 +45,7 @@ struct NginxSite {
     // D33: the project's MCP server path (checked: is_mcp_path); non-empty
     // also opens http://127.0.0.1/mcp/<name>, passed on to it, as tools
     // outside a browser can't look up <name>.localhost on Windows.
-    std::string mcp_path = {};
+    std::string mcp_path{};  // NOLINT(readability-redundant-member-init): GCC's -Wmissing-field-initializers wants it for {..} initialisations that stop short
 };
 
 // Shared sites (D19), on the http port: the www folder at localhost/<folder>/

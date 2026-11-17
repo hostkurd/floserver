@@ -306,6 +306,13 @@ private:
                  // minutes) and the start.
                  << "            proxy_read_timeout 900s;\n"
                  << "            proxy_send_timeout 900s;\n";
+            // Served on both ports (D33): Apache's own redirects say https
+            // (its ServerName); one on the http port stays on http.
+            if (site.http_too) {
+                out_ << "            proxy_redirect default;\n"
+                     << "            proxy_redirect \"~^https://[a-z0-9-]+\\.localhost(:[0-9]+)?(?<floserver_rest>/.*)?$\" "
+                        "$scheme://$http_host$floserver_rest;\n";
+            }
             // Apache projects: every request counts for their PHP pool's idle time.
             if (!site.php_access_log.empty()) {
                 const auto idle = path(site.php_access_log);
