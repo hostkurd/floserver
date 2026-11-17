@@ -288,6 +288,7 @@ private:
         // cards' height in it, unscrolled; the cards are placed scrolled.
         RECT cards_area{};
         int cards_h = 0;
+        int cards_scroll = 0;  // the scroll the cards were placed with
     };
     struct WizardState {
         bool open = false;
@@ -665,6 +666,8 @@ private:
     // card `index` brought into view.
     void wizard_cards_scroll_to(int target);
     void wizard_card_into_view(int index);
+    // wizard_geometry_ made again now, so the cards' places follow their scroll.
+    void wizard_relayout();
     void make_name_edit();
     // After the window was made again: the name box back, with `name` in it.
     void remake_wizard_edit(const std::string& name);

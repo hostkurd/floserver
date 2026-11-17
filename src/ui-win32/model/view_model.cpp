@@ -381,6 +381,13 @@ std::string_view project_mcp_line(const ProjectMcpLines& lines, std::size_t inde
     return {};
 }
 
+Str project_mcp_note(const ProjectRow& row, bool served) {
+    if (served) {
+        return Str::PanelMcpNote;
+    }
+    return row.on ? Str::PanelMcpWaiting : Str::PanelMcpOff;
+}
+
 Str project_mcp_label(std::size_t index) {
     switch (index) {
         case 0:

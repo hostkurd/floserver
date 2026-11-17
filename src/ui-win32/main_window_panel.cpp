@@ -1537,7 +1537,7 @@ void MainWindow::paint_panel(Canvas& c, HDC dc, bool text_pass) const {
     if (g.mcp_title.right > g.mcp_title.left) {
         const auto lines = project_mcp_lines(*row, snap_.footer);
         c.text(g.mcp_title, w(text(lang_, Str::PanelMcpTitle)), fonts_.button_bold.get(), p.text, Align::Start, false);
-        c.paragraph(g.mcp_detail, w(text(lang_, lines ? Str::PanelMcpNote : Str::PanelMcpOff)), fonts_.caption.get(),
+        c.paragraph(g.mcp_detail, w(text(lang_, project_mcp_note(*row, lines.has_value()))), fonts_.caption.get(),
                     p.text_subtle);
         for (std::size_t i = 0; lines && i < g.mcp_copy.size(); ++i) {
             c.text(g.mcp_labels[i], w(text(lang_, project_mcp_label(i))), fonts_.caption.get(), p.text_subtle,

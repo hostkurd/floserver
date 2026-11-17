@@ -1743,6 +1743,10 @@ constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
     Entry{Str::PanelMcpOff, "Turn the project on to connect AI tools to it.",
           "شغّل المشروع لتوصل أدوات الذكاء الاصطناعي به.",
           "پڕۆژەکە هەڵبکە بۆ ئەوەی ئامرازەکانی زیرەکیی دەستکردی پێوە ببەستیت."},
+    Entry{Str::PanelMcpWaiting, "The lines for AI tools show here once FloServer serves the project.",
+          "تظهر هنا أسطر أدوات الذكاء الاصطناعي عندما يخدم " FLO_LRI "FloServer" FLO_PDI " المشروع.",
+          "هێڵەکانی ئامرازەکانی زیرەکیی دەستکرد لێرە دەردەکەون کاتێک " FLO_LRI "FloServer" FLO_PDI
+          " پڕۆژەکە پێشکەش دەکات."},
     Entry{Str::PanelMcpAddress, "Address", "العنوان", "ناونیشان"},
     Entry{Str::PanelMcpCursor, "Cursor", FLO_LRI "Cursor" FLO_PDI, FLO_LRI "Cursor" FLO_PDI},
     Entry{Str::PanelMcpDesktop, "Claude Desktop (needs Node.js)",

@@ -565,7 +565,11 @@ void WebService::reload_locked() {
         for (const PlannedSite& p : plan.sites) {
             if (p.state == SiteState::Ready && p.apache) {
                 // No pool: PHP is off ("php": false), so Apache sends files as they are.
-                as.sites.push_back({p.name, p.doc_root, p.pool ? plan.pools.at(*p.pool).ports : std::vector<Port>{}, tls});
+                // An MCP server project is served on http too (D33): Apache's own
+                // redirects mustn't name https then.
+                const bool https = tls && !(p.config && p.config->mcp);
+                as.sites.push_back(
+                    {p.name, p.doc_root, p.pool ? plan.pools.at(*p.pool).ports : std::vector<Port>{}, https});
                 const Project* project = find_project(*app, p.name);
                 keep = keep || (project != nullptr && project->keep_running);
             }

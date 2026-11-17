@@ -536,7 +536,7 @@ void MainWindow::add_panel_access(AccessTree& t) const {
     if (shown(g.mcp_title)) {
         const auto lines = project_mcp_lines(*row, snap_.footer);
         words("mcp-title", std::string(text(lang_, Str::PanelMcpTitle)), g.mcp_title);
-        words("mcp-detail", std::string(text(lang_, lines ? Str::PanelMcpNote : Str::PanelMcpOff)), g.mcp_detail);
+        words("mcp-detail", std::string(text(lang_, project_mcp_note(*row, lines.has_value()))), g.mcp_detail);
         for (std::size_t i = 0; lines && i < g.mcp_copy.size(); ++i) {
             const int index = static_cast<int>(i);
             const std::string label(text(lang_, project_mcp_label(i)));

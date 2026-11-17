@@ -858,7 +858,8 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     // An MCP server project's panel section (D33).
     PanelMcpTitle,
     PanelMcpNote,      // under the title while it's served
-    PanelMcpOff,       // under the title when it isn't
+    PanelMcpOff,       // under the title when it's off
+    PanelMcpWaiting,   // under the title when it's on but not served (yet)
     PanelMcpAddress,   // the first line's label
     PanelMcpCursor,
     PanelMcpDesktop,   // Claude Desktop, through npx mcp-remote

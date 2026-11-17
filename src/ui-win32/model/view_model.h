@@ -132,6 +132,9 @@ inline constexpr std::size_t kProjectMcpLines = 5;
 [[nodiscard]] std::optional<ProjectMcpLines> project_mcp_lines(const ProjectRow& row, const FooterText& footer);
 // Line `index` (0 url ... 4 desktop), empty past the end.
 [[nodiscard]] std::string_view project_mcp_line(const ProjectMcpLines& lines, std::size_t index);
+// The note under the section's title: where to add tools while it's served,
+// "turn it on" while it's off, else that the lines come once it's served.
+[[nodiscard]] Str project_mcp_note(const ProjectRow& row, bool served);
 // Its label: Address, Claude Code, Cursor, VS Code, Claude Desktop (needs Node.js).
 [[nodiscard]] Str project_mcp_label(std::size_t index);
 

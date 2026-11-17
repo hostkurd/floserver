@@ -1420,6 +1420,9 @@ TEST_CASE("an MCP server project's Copy lines name it and its http address (D33)
     CHECK(project_mcp_lines(rows[0], footer)->url == "http://tools.localhost/mcp");
     CHECK_FALSE(project_mcp_lines(rows[1], footer));  // not an MCP server
     CHECK_FALSE(project_mcp_lines(rows[2], footer));  // not served
+    CHECK(project_mcp_note(rows[0], true) == Str::PanelMcpNote);
+    CHECK(project_mcp_note(rows[0], false) == Str::PanelMcpWaiting);  // on, not served yet
+    CHECK(project_mcp_note(rows[2], false) == Str::PanelMcpOff);
     ProjectRow odd = rows[0];
     odd.wants.mcp = "/a b";
     CHECK_FALSE(project_mcp_lines(odd, footer));

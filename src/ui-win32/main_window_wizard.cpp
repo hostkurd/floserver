@@ -521,8 +521,24 @@ void MainWindow::wizard_cards_scroll_to(int target) {
     const int value = std::clamp(target, 0, std::max(0, g.cards_h - height_of(g.cards_area)));
     if (value != wizard_.card_scroll) {
         wizard_.card_scroll = value;
+        // Placed again at once: a second key or a click before the next
+        // paint works from where the cards are now, not where they were.
+        wizard_relayout();
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
+}
+
+void MainWindow::wizard_relayout() {
+    if (!wizard_open()) {
+        return;
+    }
+    const HDC dc = GetDC(hwnd_);
+    if (dc == nullptr) {
+        return;
+    }
+    wizard_geometry_ = wizard_geometry(dc);
+    ReleaseDC(hwnd_, dc);
+    place_scroll_bars();
 }
 
 void MainWindow::wizard_card_into_view(int index) {
@@ -533,9 +549,9 @@ void MainWindow::wizard_card_into_view(int index) {
     const RECT& r = g.cards[static_cast<std::size_t>(index)];
     const int pad = px(4);
     if (r.top < g.cards_area.top + pad) {
-        wizard_cards_scroll_to(wizard_.card_scroll - static_cast<int>(g.cards_area.top + pad - r.top));
+        wizard_cards_scroll_to(g.cards_scroll - static_cast<int>(g.cards_area.top + pad - r.top));
     } else if (r.bottom > g.cards_area.bottom - pad) {
-        wizard_cards_scroll_to(wizard_.card_scroll + static_cast<int>(r.bottom - (g.cards_area.bottom - pad)));
+        wizard_cards_scroll_to(g.cards_scroll + static_cast<int>(r.bottom - (g.cards_area.bottom - pad)));
     }
 }
 
@@ -709,6 +725,7 @@ MainWindow::WizardGeometry MainWindow::wizard_geometry(HDC dc) const {
             g.columns = cols;
             g.cards_h = height(cols);
             const int scroll = std::clamp(wizard_.card_scroll, 0, std::max(0, g.cards_h - height_of(g.cards_area)));
+            g.cards_scroll = scroll;
             const int card_w = (cards_end - x0 - (cols - 1) * px(kCardGap)) / cols;
             for (int i = 0; i < count; ++i) {
                 const int cx = x0 + (i % cols) * (card_w + px(kCardGap));
