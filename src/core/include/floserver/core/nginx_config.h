@@ -42,6 +42,10 @@ struct NginxSite {
     // With `tls`: the http port serves the site too instead of redirecting
     // (D33: an MCP server project, whose AI tools may not trust FloServer's CA).
     bool http_too = false;
+    // D33: the project's MCP server path (checked: is_mcp_path); non-empty
+    // also opens http://127.0.0.1/mcp/<name>, passed on to it, as tools
+    // outside a browser can't look up <name>.localhost on Windows.
+    std::string mcp_path = {};
 };
 
 // Shared sites (D19), on the http port: the www folder at localhost/<folder>/

@@ -3,6 +3,7 @@
 #include "floserver/core/mailpit.h"
 #include "floserver/core/project_registry.h"
 #include "floserver/core/phpmyadmin.h"
+#include "floserver/core/project_config.h"
 #include "floserver/core/request_log.h"
 #include "floserver/core/shared_sites.h"
 
@@ -155,6 +156,25 @@ public:
         if (!spec_.config_id.empty()) {
             out_ << "        location = /.floserver/config-id {\n"
                  << "            return 200 \"" << spec_.config_id << "\";\n"
+                 << "        }\n";
+        }
+        // MCP server projects at 127.0.0.1/mcp/<name> (D33): passed back in
+        // to the project by its own name.
+        for (const NginxSite& site : spec_.sites) {
+            if (site.mcp_path.empty()) {
+                continue;
+            }
+            if (!is_mcp_path(site.mcp_path) || project_name_problem(site.name)) {
+                error_ = "the MCP path of " + site.name + " can't be used";
+                return std::nullopt;
+            }
+            out_ << "        location = /mcp/" << site.name << " {\n"
+                 << "            proxy_pass http://127.0.0.1:" << spec_.ports.http << site.mcp_path << ";\n"
+                 << "            proxy_http_version 1.1;\n"
+                 << "            proxy_set_header Host " << site.name << ".localhost;\n"
+                 << "            proxy_set_header Connection \"\";\n"
+                 << "            proxy_buffering off;\n"
+                 << "            proxy_read_timeout 900s;\n"
                  << "        }\n";
         }
         out_ << "        location / {\n"

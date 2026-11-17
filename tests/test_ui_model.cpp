@@ -1405,19 +1405,19 @@ TEST_CASE("an MCP server project's Copy lines name it and its http address (D33)
     footer.tls = true;
     const auto lines = project_mcp_lines(rows[0], footer);
     REQUIRE(lines);
-    CHECK(lines->url == "http://tools.localhost:8080/mcp");  // http even with https on
-    CHECK(lines->claude == "claude mcp add --transport http tools http://tools.localhost:8080/mcp");
-    CHECK(lines->cursor == R"({ "mcpServers": { "tools": { "url": "http://tools.localhost:8080/mcp" } } })");
+    CHECK(lines->url == "http://127.0.0.1:8080/mcp/tools");  // http even with https on
+    CHECK(lines->claude == "claude mcp add --transport http tools http://127.0.0.1:8080/mcp/tools");
+    CHECK(lines->cursor == R"({ "mcpServers": { "tools": { "url": "http://127.0.0.1:8080/mcp/tools" } } })");
     CHECK(lines->vscode ==
-          R"({ "servers": { "tools": { "type": "http", "url": "http://tools.localhost:8080/mcp" } } })");
+          R"({ "servers": { "tools": { "type": "http", "url": "http://127.0.0.1:8080/mcp/tools" } } })");
     CHECK(lines->desktop == R"({ "mcpServers": { "tools": { "command": "npx", "args": ["-y", "mcp-remote", )"
-                            R"("http://tools.localhost:8080/mcp", "--allow-http"] } } })");
+                            R"("http://127.0.0.1:8080/mcp/tools", "--allow-http"] } } })");
     for (std::size_t i = 0; i < kProjectMcpLines; ++i) {
         CHECK_FALSE(project_mcp_line(*lines, i).empty());
     }
     CHECK(project_mcp_line(*lines, kProjectMcpLines).empty());
     footer.http_port = 80;
-    CHECK(project_mcp_lines(rows[0], footer)->url == "http://tools.localhost/mcp");
+    CHECK(project_mcp_lines(rows[0], footer)->url == "http://127.0.0.1/mcp/tools");
     CHECK_FALSE(project_mcp_lines(rows[1], footer));  // not an MCP server
     CHECK_FALSE(project_mcp_lines(rows[2], footer));  // not served
     CHECK(project_mcp_note(rows[0], true) == Str::PanelMcpNote);

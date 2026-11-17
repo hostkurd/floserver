@@ -350,8 +350,8 @@ std::optional<ProjectMcpLines> project_mcp_lines(const ProjectRow& row, const Fo
         return std::nullopt;
     }
     ProjectMcpLines out;
-    out.url = "http://" + row.name + ".localhost" +
-              (footer.http_port == 80 ? std::string() : ":" + std::to_string(footer.http_port)) + row.wants.mcp;
+    out.url = "http://127.0.0.1" + (footer.http_port == 80 ? std::string() : ":" + std::to_string(footer.http_port)) +
+              "/mcp/" + row.name;
     const auto quoted = [](const std::string& s) { return json(s).dump(); };
     const std::string name = quoted(row.name);
     const std::string url = quoted(out.url);

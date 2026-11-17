@@ -116,11 +116,12 @@ struct FooterText {
 [[nodiscard]] std::string new_project_address(const std::string& name, const FooterText& footer);
 
 // An MCP server project's lines (D33) for its panel's Copy buttons: the
-// address AI tools connect to, always http:// (nginx serves such a project
-// on the http port too, as Node-based AI tools don't trust FloServer's CA),
-// and each tool's config with the project's name as the server's name.
+// address AI tools connect to, http://127.0.0.1/mcp/<name> (nginx passes it
+// on to the project: tools outside a browser can't look up <name>.localhost
+// on Windows, and Node-based ones don't trust FloServer's CA), and each
+// tool's config with the project's name as the server's name.
 struct ProjectMcpLines {
-    std::string url;      // http://shop.localhost:8080/mcp
+    std::string url;      // http://127.0.0.1:8080/mcp/shop
     std::string claude;   // claude mcp add --transport http shop http://...
     std::string cursor;   // { "mcpServers": { "shop": { "url": "http://..." } } }
     std::string vscode;   // { "servers": { "shop": { "type": "http", "url": "http://..." } } }
