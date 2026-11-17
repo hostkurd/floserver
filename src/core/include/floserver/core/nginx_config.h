@@ -39,6 +39,9 @@ struct NginxSite {
     std::optional<NginxTls> tls;
     std::optional<Port> app_port;       // set: everything goes to this server instead
     std::filesystem::path request_log;  // every request, for the window's Log box; empty for none
+    // With `tls`: the http port serves the site too instead of redirecting
+    // (D33: an MCP server project, whose AI tools may not trust FloServer's CA).
+    bool http_too = false;
 };
 
 // Shared sites (D19), on the http port: the www folder at localhost/<folder>/

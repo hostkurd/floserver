@@ -855,6 +855,14 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     RedisSaving,
     RedisSaveFailed,
     RedisFlushConfirm,
+    // An MCP server project's panel section (D33).
+    PanelMcpTitle,
+    PanelMcpNote,      // under the title while it's served
+    PanelMcpOff,       // under the title when it isn't
+    PanelMcpAddress,   // the first line's label
+    PanelMcpCursor,
+    PanelMcpDesktop,   // Claude Desktop, through npx mcp-remote
+    PanelMcpCopied,    // "{0} is on the clipboard": the line's label
     Count_,
 };
 

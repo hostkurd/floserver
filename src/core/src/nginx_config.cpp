@@ -242,7 +242,7 @@ private:
         const std::string host = site.name + ".localhost";
 
         out_ << "\n    # Project " << site.name << "\n";
-        if (site.tls) {
+        if (site.tls && !site.http_too) {
             out_ << "    server {\n";
             listen(spec_.ports.http, "");
             out_ << "        server_name " << host << ";\n"
@@ -251,6 +251,9 @@ private:
         }
         out_ << "    server {\n";
         if (site.tls) {
+            if (site.http_too) {
+                listen(spec_.ports.http, "");
+            }
             listen(spec_.ports.https, spec_.http2_directive ? " ssl" : " ssl http2");
             out_ << (spec_.http2_directive ? "        http2 on;\n" : "")
                  << "        ssl_certificate " << *cert << ";\n"
@@ -319,7 +322,8 @@ private:
                  << "            try_files $uri $uri/ /index.php$is_args$args;\n"
                  << "        }\n"
 ;
-            write_php_location(site.php_ports, site.tls.has_value(), idle_log, request_log);
+            // Served on both ports: the fastcgi_params file's HTTPS line ($https) says which.
+            write_php_location(site.php_ports, site.tls.has_value() && !site.http_too, idle_log, request_log);
         }
         out_ << "    }\n";
         return true;

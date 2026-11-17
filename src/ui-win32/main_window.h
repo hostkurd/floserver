@@ -99,6 +99,7 @@ private:
         PanelPhpMyAdmin,  // Open in phpMyAdmin (the project's own login)
         PanelKeep,
         PanelRedis,    // the Redis switch (D30)
+        PanelMcpCopy,  // an MCP server project's Copy buttons (D33); `row`: the line's index
         PanelRemove,   // Remove from FloServer…
         // The panel's PHP tab (D20); `row` is the field's index.
         PanelPhpSettings,
@@ -153,7 +154,7 @@ private:
         return part == Part::PanelClose || part == Part::PanelAddress || part == Part::PanelTab ||
                part == Part::PanelButton || part == Part::PanelField || part == Part::PanelCopyEnv ||
                part == Part::PanelPhpMyAdmin || part == Part::PanelKeep || part == Part::PanelRemove ||
-               is_php_part(part);
+               part == Part::PanelMcpCopy || is_php_part(part);
     }
     [[nodiscard]] static constexpr bool is_update_part(Part part) {
         return part == Part::UpdateNotes || part == Part::UpdateCancel || part == Part::UpdateLater ||
@@ -222,6 +223,13 @@ private:
         RECT redis_title{};   // Redis (D30): the switch, and where the keys go
         RECT redis_detail{};
         RECT redis_switch{};
+        // An MCP server project (D33): the title, a note, then per line its
+        // label above the text and a Copy button; empty when it isn't one.
+        RECT mcp_title{};
+        RECT mcp_detail{};
+        std::vector<RECT> mcp_labels;
+        std::vector<RECT> mcp_values;
+        std::vector<RECT> mcp_copy;
         RECT remove{};  // Remove from FloServer…, at the General tab's end
         RECT log_label{};
         RECT log_box{};
@@ -276,11 +284,16 @@ private:
         std::vector<std::pair<RECT, RECT>> fields;  // label, box
         RECT log_box{};
         int columns = 1;  // of the cards, for the arrow keys
+        // The cards' scrolling part (D33: more templates than fit) and the
+        // cards' height in it, unscrolled; the cards are placed scrolled.
+        RECT cards_area{};
+        int cards_h = 0;
     };
     struct WizardState {
         bool open = false;
         int step = 0;  // 0 template, 1 name and folder, 2 versions, 3 making it
         std::size_t card = 0;
+        int card_scroll = 0;  // the cards' scroll (D33)
         std::string name;
         std::string parent;
         std::vector<VersionField> fields;
@@ -492,6 +505,8 @@ private:
     // The Recycle Bin moves that finished: what became of each folder, said.
     void on_recycled();
     void copy_address(const std::string& address);
+    // An MCP server project's line `index` (D33) to the clipboard, with a notice.
+    void copy_mcp_line(std::size_t index);
     [[nodiscard]] bool is_settled(const std::string& key) const;
     void settle(const std::vector<std::string>& keys);
     // A toast (model/toast.h): information goes by itself, an error stays until closed.
@@ -646,6 +661,10 @@ private:
     [[nodiscard]] Hit wizard_hit_test(int x, int y) const;
     [[nodiscard]] std::vector<RECT> card_chips(HDC dc, const RECT& card, const TemplateCard& t) const;
     void open_wizard();
+    // The New project cards' scroll (D33), kept inside the cards; and the
+    // card `index` brought into view.
+    void wizard_cards_scroll_to(int target);
+    void wizard_card_into_view(int index);
     void make_name_edit();
     // After the window was made again: the name box back, with `name` in it.
     void remake_wizard_edit(const std::string& name);
@@ -1019,6 +1038,7 @@ private:
     static constexpr UINT_PTR kListScrollTimer = 3;
     static constexpr UINT_PTR kPanelScrollTimer = 4;
     static constexpr UINT_PTR kFirstRunScrollTimer = 5;
+    static constexpr UINT_PTR kWizardScrollTimer = 6;
     // Posted after certs.ensure_ca's answer: Windows' question is asked outside on_snapshot.
     static constexpr UINT kFirstRunTrustMessage = WM_APP + 8;
     static constexpr UINT kRecycledMessage = WM_APP + 9;  // a folder's move to the Recycle Bin finished
@@ -1028,6 +1048,7 @@ private:
     ScrollBar list_bar_{kListScrollTimer, [this](int offset) { scroll_to(offset); }};
     ScrollBar panel_bar_{kPanelScrollTimer, [this](int offset) { panel_scroll_to(offset); }};
     ScrollBar first_run_bar_{kFirstRunScrollTimer, [this](int offset) { first_run_scroll_to(offset); }};
+    ScrollBar wizard_bar_{kWizardScrollTimer, [this](int offset) { wizard_cards_scroll_to(offset); }};
     Hit hover_;
     Hit pressed_;
     int focus_ = -1;  // keyboard focus in the list

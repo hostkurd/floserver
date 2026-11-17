@@ -460,6 +460,21 @@ TEST_CASE("the nginx config serves PHP and static sites on loopback") {
         CHECK(t->find("return 302 https://shop.localhost:8443$request_uri;") != std::string::npos);
         CHECK(t->find("[::1]") == std::string::npos);
     }
+    SUBCASE("an MCP server project answers on http too, not with a redirect (D33)") {
+        spec.sites[0].http_too = true;
+        const auto t = make_nginx_config(spec, error);
+        REQUIRE(t);
+        CHECK(t->find("return 302 https://shop.localhost") == std::string::npos);
+        const auto shop = t->find("# Project shop");
+        REQUIRE(shop != std::string::npos);
+        const auto http = t->find("listen 127.0.0.1:80;", shop);
+        const auto https = t->find("listen 127.0.0.1:443 ssl;", shop);
+        REQUIRE(http != std::string::npos);
+        REQUIRE(https != std::string::npos);
+        CHECK(t->find("server {", http) > https);  // one server block holds both
+        // HTTPS comes from the fastcgi_params file's $https, right for either port.
+        CHECK(t->find("fastcgi_param HTTPS on;") == std::string::npos);
+    }
     SUBCASE("an unsafe path or name refuses the whole config") {
         spec.sites[1].doc_root = kBase / "projects" / "$docs";
         CHECK_FALSE(make_nginx_config(spec, error));

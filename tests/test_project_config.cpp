@@ -236,6 +236,32 @@ TEST_CASE("a start command is one line of text") {
     CHECK_FALSE(parse_project_config(R"({"command": ")" + std::string(1001, 'x') + R"("})").config.has_value());
 }
 
+TEST_CASE("mcp is the path of the project's MCP server (D33)") {
+    const auto ok = parse_project_config(R"({"python": "3.13", "mcp": "/mcp"})");
+    REQUIRE(ok.config.has_value());
+    CHECK(ok.config->mcp == "/mcp");
+    CHECK(ok.warnings.empty());
+    CHECK_FALSE(parse_project_config("{}").config->mcp.has_value());
+    for (const char* good : {"/", "/mcp/", "/api/v1/mcp", "/a-b_c.d~e"}) {
+        CAPTURE(good);
+        CHECK(is_mcp_path(good));
+    }
+    for (const char* bad : {"", "mcp", "//mcp", "/a//b", "/../x", "/a/./b", "/a b", "/mcp?x=1", "/mcp#x", "/ü",
+                            "http://x/mcp", "/a\\b"}) {
+        CAPTURE(bad);
+        CHECK_FALSE(is_mcp_path(bad));
+    }
+    CHECK_FALSE(is_mcp_path("/" + std::string(kMaxMcpPathLength, 'a')));
+    CHECK(is_mcp_path("/" + std::string(kMaxMcpPathLength - 1, 'a')));
+    for (const char* bad : {R"({"mcp": true})", R"({"mcp": "mcp"})", R"({"mcp": ["/mcp"]})"}) {
+        CAPTURE(bad);
+        const auto r = parse_project_config(bad);
+        CHECK_FALSE(r.config.has_value());
+        REQUIRE(r.errors.size() == 1);
+        CHECK(r.errors[0].key == "mcp");
+    }
+}
+
 TEST_CASE("writing and reading back gives the same config") {
     ProjectConfig c;
     c.php = "8.4";
@@ -245,6 +271,7 @@ TEST_CASE("writing and reading back gives the same config") {
     c.extensions = {"intl", "pdo_mysql"};
     c.command = "php -S 127.0.0.1:{port}";
     c.python = "3.13";
+    c.mcp = "/mcp";
     const std::string text = write_project_config(c);
     CHECK(text.find("\"php\": \"8.4\"") != std::string::npos);
     CHECK(text.find("node") == std::string::npos);  // unset keys are left out

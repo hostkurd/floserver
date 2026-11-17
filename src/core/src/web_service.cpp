@@ -725,6 +725,7 @@ void WebService::reload_locked() {
                 ns.php_access_log = pools.at(pool->key)->access_log();
             }
             ns.tls = site_tls;
+            ns.http_too = p.config && p.config->mcp;  // D33
             site.app = true;
             site.app_kind = "apache";
             site.app_name = spec->name;
@@ -746,6 +747,7 @@ void WebService::reload_locked() {
             ns.doc_root = p.doc_root;
             ns.app_port = spec.port;
             ns.tls = site_tls;
+            ns.http_too = p.config && p.config->mcp;  // D33
             site.app = true;
             site.app_kind = app_runtime_name(spec.kind);
             site.app_name = spec.name;
@@ -760,6 +762,7 @@ void WebService::reload_locked() {
             ns.name = p.name;
             ns.doc_root = p.doc_root;
             ns.tls = site_tls;
+            ns.http_too = p.config && p.config->mcp;  // D33
             site.static_site = true;
             site.address = ns.tls ? "https" : "http";
             serve.push_back(std::move(ns));
@@ -780,6 +783,7 @@ void WebService::reload_locked() {
         ns.php_ports = pool.ports;
         ns.php_access_log = runner->access_log();
         ns.tls = site_tls;
+        ns.http_too = p.config && p.config->mcp;  // D33
         site.pool_key = pool.key;
         site.address = ns.tls ? "https" : "http";  // filled in with the port below
         serve.push_back(std::move(ns));

@@ -134,6 +134,9 @@ json site_json(const Project& project, const PlannedSite& site, const WebPlan& p
         if (c.redis) {
             wants["redis"] = true;  // D30: the shared Redis
         }
+        if (c.mcp) {
+            wants["mcp"] = *c.mcp;  // D33: an MCP server at this path
+        }
         out["wants"] = std::move(wants);
     }
     return out;

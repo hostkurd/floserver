@@ -277,10 +277,11 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             list_bar_.cancel(hwnd_);
             panel_bar_.cancel(hwnd_);
             first_run_bar_.cancel(hwnd_);
+            wizard_bar_.cancel(hwnd_);
             break;
         case WM_MOUSELEAVE:
             tracking_mouse_ = false;
-            if (list_bar_.leave() || panel_bar_.leave() || first_run_bar_.leave()) {
+            if (list_bar_.leave() || panel_bar_.leave() || first_run_bar_.leave() || wizard_bar_.leave()) {
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
             if (hover_.part != Part::None) {
@@ -357,7 +358,11 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
                 return 0;
             }
             if (wizard_open()) {
-                return 0;  // the list under the page stays put
+                // The cards scroll (D33); the list under the page stays put.
+                if (wizard_.step == 0) {
+                    wizard_cards_scroll_to(wizard_.card_scroll - GET_WHEEL_DELTA_WPARAM(wparam) * px(48) / WHEEL_DELTA);
+                }
+                return 0;
             }
             // The panel's content scrolls under the mouse (also from a PHP
             // box, which hands the wheel on to this window).
@@ -393,7 +398,8 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wparam, LPARAM lparam) {
             }
             break;
         case WM_TIMER:
-            if (list_bar_.tick(hwnd_, wparam) || panel_bar_.tick(hwnd_, wparam) || first_run_bar_.tick(hwnd_, wparam)) {
+            if (list_bar_.tick(hwnd_, wparam) || panel_bar_.tick(hwnd_, wparam) || first_run_bar_.tick(hwnd_, wparam) ||
+                wizard_bar_.tick(hwnd_, wparam)) {
                 return 0;
             }
             if (wparam == kToastTimer) {
@@ -602,6 +608,7 @@ void MainWindow::on_destroy() {
     list_bar_.cancel(hwnd_);
     panel_bar_.cancel(hwnd_);
     first_run_bar_.cancel(hwnd_);
+    wizard_bar_.cancel(hwnd_);
     if (tray_added_) {
         NOTIFYICONDATAW nid{};
         nid.cbSize = sizeof nid;
@@ -1321,6 +1328,9 @@ void MainWindow::place_scroll_bars() {
                      dpi_);
     first_run_bar_.place(first_run_open() ? first_run_geometry_.content : RECT{}, first_run_geometry_.content_h,
                          first_run_.scroll, dpi_);
+    const bool cards = wizard_open() && !first_run_open() && wizard_.step == 0;
+    wizard_bar_.place(cards ? wizard_geometry_.cards_area : RECT{}, wizard_geometry_.cards_h, wizard_.card_scroll,
+                      dpi_);
 }
 
 bool MainWindow::scroll_bar_mouse(UINT msg, int x, int y) {
@@ -1329,13 +1339,15 @@ bool MainWindow::scroll_bar_mouse(UINT msg, int x, int y) {
     const bool in_panel = panel_open() && contains(panel_geometry_.panel, x, y);
     switch (msg) {
         case WM_LBUTTONDOWN:
-            return first_run_bar_.press(hwnd_, x, y) || panel_bar_.press(hwnd_, x, y) ||
+            return first_run_bar_.press(hwnd_, x, y) || wizard_bar_.press(hwnd_, x, y) || panel_bar_.press(hwnd_, x, y) ||
                    (!in_panel && list_bar_.press(hwnd_, x, y));
         case WM_LBUTTONUP:
-            return first_run_bar_.release(hwnd_) || panel_bar_.release(hwnd_) || list_bar_.release(hwnd_);
+            return first_run_bar_.release(hwnd_) || wizard_bar_.release(hwnd_) || panel_bar_.release(hwnd_) ||
+                   list_bar_.release(hwnd_);
         case WM_MOUSEMOVE: {
-            const bool held = list_bar_.active() || panel_bar_.active() || first_run_bar_.active();
+            const bool held = list_bar_.active() || panel_bar_.active() || first_run_bar_.active() || wizard_bar_.active();
             bool changed = first_run_bar_.move(hwnd_, x, y);
+            changed = wizard_bar_.move(hwnd_, x, y) || changed;
             changed = panel_bar_.move(hwnd_, x, y) || changed;
             if (!panel_bar_.active()) {
                 changed = list_bar_.move(hwnd_, in_panel ? -1 : x, in_panel ? -1 : y) || changed;
@@ -1542,6 +1554,7 @@ void MainWindow::on_click(const Hit& clicked) {
         case Part::PanelPhpMyAdmin:
         case Part::PanelKeep:
         case Part::PanelRedis:
+        case Part::PanelMcpCopy:
         case Part::PanelRemove:
             on_panel_click(hit);
             break;
@@ -2294,6 +2307,11 @@ void MainWindow::on_paint() {
             update_panel_geometry(mem.get());
             place_panel_tips();
             wizard_geometry_ = wizard_open() ? wizard_geometry(mem.get()) : WizardGeometry{};
+            // The cards' scroll kept inside them (fewer cards, a taller window).
+            if (const int most = std::max(0, wizard_geometry_.cards_h - height_of(wizard_geometry_.cards_area));
+                wizard_open() && wizard_.card_scroll > most) {
+                wizard_.card_scroll = most;
+            }
             shared_geometry_ = !wizard_open() && !first_run_open() ? shared_geometry(mem.get()) : SharedGeometry{};
             update_geometry_ = update_geometry(mem.get());
             first_run_geometry_ = FirstRunGeometry{};

@@ -1388,6 +1388,43 @@ TEST_CASE("the new project wizard's address follows nginx's ports and scheme") {
     CHECK(new_project_address("shop", footer) == "https://shop.localhost");
 }
 
+TEST_CASE("an MCP server project's Copy lines name it and its http address (D33)") {
+    const json reply = json::parse(R"({"projects": [
+        {"name": "tools", "on": true, "state": "ready", "address": "https://tools.localhost:8443",
+         "path": "C:/p/tools", "wants": {"python": "3.13", "mcp": "/mcp"}},
+        {"name": "shop", "on": true, "state": "ready", "address": "https://shop.localhost:8443",
+         "path": "C:/p/shop", "wants": {"php": "8.5"}},
+        {"name": "off", "on": false, "state": "off", "path": "C:/p/off", "wants": {"mcp": "/mcp"}}]})");
+    const auto rows = rows_from_list(reply, Lang::En);
+    REQUIRE(rows.size() == 3);
+    CHECK(rows[0].wants.mcp == "/mcp");
+    FooterText footer;
+    CHECK_FALSE(project_mcp_lines(rows[0], footer));  // nginx's port not known yet
+    footer.http_port = 8080;
+    footer.https_port = 8443;
+    footer.tls = true;
+    const auto lines = project_mcp_lines(rows[0], footer);
+    REQUIRE(lines);
+    CHECK(lines->url == "http://tools.localhost:8080/mcp");  // http even with https on
+    CHECK(lines->claude == "claude mcp add --transport http tools http://tools.localhost:8080/mcp");
+    CHECK(lines->cursor == R"({ "mcpServers": { "tools": { "url": "http://tools.localhost:8080/mcp" } } })");
+    CHECK(lines->vscode ==
+          R"({ "servers": { "tools": { "type": "http", "url": "http://tools.localhost:8080/mcp" } } })");
+    CHECK(lines->desktop == R"({ "mcpServers": { "tools": { "command": "npx", "args": ["-y", "mcp-remote", )"
+                            R"("http://tools.localhost:8080/mcp", "--allow-http"] } } })");
+    for (std::size_t i = 0; i < kProjectMcpLines; ++i) {
+        CHECK_FALSE(project_mcp_line(*lines, i).empty());
+    }
+    CHECK(project_mcp_line(*lines, kProjectMcpLines).empty());
+    footer.http_port = 80;
+    CHECK(project_mcp_lines(rows[0], footer)->url == "http://tools.localhost/mcp");
+    CHECK_FALSE(project_mcp_lines(rows[1], footer));  // not an MCP server
+    CHECK_FALSE(project_mcp_lines(rows[2], footer));  // not served
+    ProjectRow odd = rows[0];
+    odd.wants.mcp = "/a b";
+    CHECK_FALSE(project_mcp_lines(odd, footer));
+}
+
 TEST_CASE("Settings > Apache: modules with what they need, locked ones, what Save sends, the footer") {
     const json reply = json::parse(R"({
         "version": "2.4.69", "chosen": null, "versions": ["2.4.69", "2.4.66"],
