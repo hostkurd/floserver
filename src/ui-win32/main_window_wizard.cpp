@@ -27,6 +27,7 @@ constexpr int kWizardPad = 28;
 constexpr int kCardH = 140;
 constexpr int kCardChipH = 18;
 constexpr int kCardGap = 12;
+constexpr int kWizardBarRoom = 14;  // the cards' scroll bar's strip, when they scroll (D33)
 constexpr int kWizardFooterH = 64;
 constexpr int kButtonH = 32;
 constexpr int kLogLineH = 17;
@@ -344,6 +345,7 @@ void MainWindow::on_wizard_click(const Hit& hit) {
         case Part::WizCard:
             if (hit.row >= 0) {
                 wizard_.card = static_cast<std::size_t>(hit.row);
+                wizard_card_into_view(hit.row);  // half under the part's edge, or a screen reader's choice
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
             break;
@@ -443,6 +445,7 @@ void MainWindow::on_wizard_key(WPARAM key) {
                 wizard_.card = static_cast<std::size_t>(i);
                 wizard_.focus = {Part::WizCard, i, {}};
                 show_focus_ = true;
+                wizard_card_into_view(i);
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
             break;
@@ -513,10 +516,50 @@ MainWindow::Hit MainWindow::wizard_focus() const {
     }
 }
 
+void MainWindow::wizard_cards_scroll_to(int target) {
+    const WizardGeometry& g = wizard_geometry_;
+    const int value = std::clamp(target, 0, std::max(0, g.cards_h - height_of(g.cards_area)));
+    if (value != wizard_.card_scroll) {
+        wizard_.card_scroll = value;
+        // Placed again at once: a second key or a click before the next
+        // paint works from where the cards are now, not where they were.
+        wizard_relayout();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+}
+
+void MainWindow::wizard_relayout() {
+    if (!wizard_open()) {
+        return;
+    }
+    const HDC dc = GetDC(hwnd_);
+    if (dc == nullptr) {
+        return;
+    }
+    wizard_geometry_ = wizard_geometry(dc);
+    ReleaseDC(hwnd_, dc);
+    place_scroll_bars();
+}
+
+void MainWindow::wizard_card_into_view(int index) {
+    const WizardGeometry& g = wizard_geometry_;
+    if (index < 0 || std::cmp_greater_equal(index, g.cards.size())) {
+        return;
+    }
+    const RECT& r = g.cards[static_cast<std::size_t>(index)];
+    const int pad = px(4);
+    if (r.top < g.cards_area.top + pad) {
+        wizard_cards_scroll_to(g.cards_scroll - static_cast<int>(g.cards_area.top + pad - r.top));
+    } else if (r.bottom > g.cards_area.bottom - pad) {
+        wizard_cards_scroll_to(g.cards_scroll + static_cast<int>(r.bottom - (g.cards_area.bottom - pad)));
+    }
+}
+
 void MainWindow::wizard_focus_to(const Hit& hit, bool keyboard) {
     wizard_.focus = hit;
     if (hit.part == Part::WizCard && hit.row >= 0) {
         wizard_.card = static_cast<std::size_t>(hit.row);
+        wizard_card_into_view(hit.row);
     }
     if (hit.part == Part::WizName && name_edit_ != nullptr) {
         SetFocus(name_edit_);
@@ -661,17 +704,32 @@ MainWindow::WizardGeometry MainWindow::wizard_geometry(HDC dc) const {
     const int bottom = g.footer.top - px(12);
     switch (wizard_.step) {
         case 0: {
-            const int cols = std::max(1, std::min(4, (x1 - x0 + px(kCardGap)) / (px(180) + px(kCardGap))));
+            // The cards scroll when there are more than fit (D33). The part
+            // reaches a little past them, so the focus ring isn't cut.
+            const int pad = px(4);
+            g.cards_area = {x0 - pad, y - pad, x1 + pad, std::max(y, bottom)};
+            const int count = static_cast<int>(snap_.templates.size());
+            const auto columns = [&](int end) {
+                return std::max(1, std::min(4, (end - x0 + px(kCardGap)) / (px(180) + px(kCardGap))));
+            };
+            const auto height = [&](int cols) {
+                const int lines = (count + cols - 1) / cols;
+                return lines > 0 ? 2 * pad + lines * px(kCardH) + (lines - 1) * px(kCardGap) : 0;
+            };
+            int cards_end = x1;
+            int cols = columns(cards_end);
+            if (height(cols) > height_of(g.cards_area)) {
+                cards_end = x1 - px(kWizardBarRoom);  // room for the scroll bar at the part's end
+                cols = columns(cards_end);
+            }
             g.columns = cols;
-            const int card_w = (x1 - x0 - (cols - 1) * px(kCardGap)) / cols;
-            for (std::size_t i = 0; i < snap_.templates.size(); ++i) {
-                const int col = static_cast<int>(i) % cols;
-                const int line = static_cast<int>(i) / cols;
-                const int cx = x0 + col * (card_w + px(kCardGap));
-                const int cy = y + line * (px(kCardH) + px(kCardGap));
-                if (cy + px(kCardH) > bottom) {
-                    break;  // no room above the footer (a small window): the arrow keys stop here too
-                }
+            g.cards_h = height(cols);
+            const int scroll = std::clamp(wizard_.card_scroll, 0, std::max(0, g.cards_h - height_of(g.cards_area)));
+            g.cards_scroll = scroll;
+            const int card_w = (cards_end - x0 - (cols - 1) * px(kCardGap)) / cols;
+            for (int i = 0; i < count; ++i) {
+                const int cx = x0 + (i % cols) * (card_w + px(kCardGap));
+                const int cy = y + (i / cols) * (px(kCardH) + px(kCardGap)) - scroll;
                 g.cards.push_back({cx, cy, cx + card_w, cy + px(kCardH)});
             }
             g.message = {x0, y, x1, bottom};
@@ -720,7 +778,8 @@ MainWindow::WizardGeometry MainWindow::wizard_geometry(HDC dc) const {
 
 MainWindow::Hit MainWindow::wizard_hit_test(int x, int y) const {
     const WizardGeometry& g = wizard_geometry_;
-    for (std::size_t i = 0; i < g.cards.size(); ++i) {
+    // A card scrolled out of the part, or under its scroll bar, can't be clicked.
+    for (std::size_t i = 0; i < g.cards.size() && contains(g.cards_area, x, y) && !wizard_bar_.over(x, y); ++i) {
         if (contains(g.cards[i], x, y)) {
             return {Part::WizCard, static_cast<int>(i), {}};
         }
@@ -776,6 +835,9 @@ void MainWindow::paint_wizard(Canvas& c, HDC dc, bool text_pass) const {
     if (!text_pass) {
         c.round_rect(g.area, pxf(8), p.card, p.card_border, border);
         c.fill({g.footer.left, g.footer.top, g.footer.right, g.footer.top + static_cast<int>(border)}, p.divider);
+        if (!g.cards.empty()) {
+            c.clip(g.cards_area);
+        }
         for (std::size_t i = 0; i < g.cards.size(); ++i) {
             const int index = static_cast<int>(i);
             const bool chosen = i == wizard_.card;
@@ -794,6 +856,10 @@ void MainWindow::paint_wizard(Canvas& c, HDC dc, bool text_pass) const {
             for (const RECT& chip : card_chips(dc, r, card)) {
                 c.round_rect(chip, pxf(9), p.chip);
             }
+        }
+        if (!g.cards.empty()) {
+            wizard_bar_.paint(c, p);
+            c.unclip();
         }
         for (std::size_t i = 0; i < g.fields.size(); ++i) {
             const RECT& box = g.fields[i].second;
@@ -855,6 +921,7 @@ void MainWindow::paint_wizard(Canvas& c, HDC dc, bool text_pass) const {
                                                 : fill_pattern(text(lang_, Str::WizardNoTemplates), false, {"-"});
                 c.paragraph(g.message, w(message), fonts_.body.get(), p.text_subtle);
             }
+            c.clip_text(g.cards_area);
             for (std::size_t i = 0; i < g.cards.size() && i < snap_.templates.size(); ++i) {
                 const RECT& r = g.cards[i];
                 const TemplateCard& t = snap_.templates[i];
@@ -869,6 +936,7 @@ void MainWindow::paint_wizard(Canvas& c, HDC dc, bool text_pass) const {
                     c.text(chips[k], w(t.chips[k]), fonts_.caption.get(), p.chip_text, Align::Center, true);
                 }
             }
+            c.clip_text(g.area);
             break;
         case 1: {
             c.text(g.name_label, w(text(lang_, Str::WizardName)), fonts_.button_bold.get(), p.text, Align::Start, false);

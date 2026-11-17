@@ -37,6 +37,7 @@ struct Wants {
     std::vector<std::string> extensions;
     std::map<std::string, std::string> php_ini;
     bool redis = false;  // "redis": true (D30)
+    std::string mcp;     // "mcp": "/mcp" (D33): the project is an MCP server at that path
 };
 
 struct ProjectRow {
@@ -113,6 +114,30 @@ struct FooterText {
 // The address a new project called `name` will have, with the ports and
 // scheme nginx uses now; "https://<name>.localhost" while that isn't known.
 [[nodiscard]] std::string new_project_address(const std::string& name, const FooterText& footer);
+
+// An MCP server project's lines (D33) for its panel's Copy buttons: the
+// address AI tools connect to, http://127.0.0.1/mcp/<name> (nginx passes it
+// on to the project: tools outside a browser can't look up <name>.localhost
+// on Windows, and Node-based ones don't trust FloServer's CA), and each
+// tool's config with the project's name as the server's name.
+struct ProjectMcpLines {
+    std::string url;      // http://127.0.0.1:8080/mcp/shop
+    std::string claude;   // claude mcp add --transport http shop http://...
+    std::string cursor;   // { "mcpServers": { "shop": { "url": "http://..." } } }
+    std::string vscode;   // { "servers": { "shop": { "type": "http", "url": "http://..." } } }
+    std::string desktop;  // Claude Desktop: npx mcp-remote <url> --allow-http
+};
+inline constexpr std::size_t kProjectMcpLines = 5;
+// Nothing unless the row is an MCP server project that's served now and
+// nginx's http port is known.
+[[nodiscard]] std::optional<ProjectMcpLines> project_mcp_lines(const ProjectRow& row, const FooterText& footer);
+// Line `index` (0 url ... 4 desktop), empty past the end.
+[[nodiscard]] std::string_view project_mcp_line(const ProjectMcpLines& lines, std::size_t index);
+// The note under the section's title: where to add tools while it's served,
+// "turn it on" while it's off, else that the lines come once it's served.
+[[nodiscard]] Str project_mcp_note(const ProjectRow& row, bool served);
+// Its label: Address, Claude Code, Cursor, VS Code, Claude Desktop (needs Node.js).
+[[nodiscard]] Str project_mcp_label(std::size_t index);
 
 [[nodiscard]] FooterText footer_text(const std::vector<ProjectRow>& rows, const nlohmann::json* status,
                                      const nlohmann::json* web, Lang lang);

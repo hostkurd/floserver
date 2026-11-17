@@ -106,6 +106,8 @@ std::string MainWindow::access_id(const Hit& hit) const {
             return panel + "keep";
         case Part::PanelRedis:
             return panel + "redis";
+        case Part::PanelMcpCopy:
+            return panel + "mcp/" + std::to_string(index);
         case Part::PanelRemove:
             return panel + "remove";
         case Part::PanelPhpSettings:
@@ -531,6 +533,22 @@ void MainWindow::add_panel_access(AccessTree& t) const {
         sw.target = target(Part::PanelRedis, -1);
         add(std::move(sw), g.redis_switch);
     }
+    if (shown(g.mcp_title)) {
+        const auto lines = project_mcp_lines(*row, snap_.footer);
+        words("mcp-title", std::string(text(lang_, Str::PanelMcpTitle)), g.mcp_title);
+        words("mcp-detail", std::string(text(lang_, project_mcp_note(*row, lines.has_value()))), g.mcp_detail);
+        for (std::size_t i = 0; lines && i < g.mcp_copy.size(); ++i) {
+            const int index = static_cast<int>(i);
+            const std::string label(text(lang_, project_mcp_label(i)));
+            words("mcp-line/" + std::to_string(i), label + ": " + std::string(project_mcp_line(*lines, i)),
+                  g.mcp_values[i]);
+            AccessNode copy = button_node(access_id({Part::PanelMcpCopy, index, p}),
+                                          std::string(text(lang_, Str::DbCopy)) + " " + label, true);
+            copy.focusable = true;
+            copy.target = target(Part::PanelMcpCopy, index);
+            add(std::move(copy), g.mcp_copy[i]);
+        }
+    }
     if (shown(g.keep_switch)) {
         const bool keep = keep_value(*row);
         AccessNode sw = switch_node(access_id({Part::PanelKeep, -1, p}), std::string(text(lang_, Str::KeepRunning)),
@@ -742,23 +760,24 @@ void MainWindow::add_wizard_access(AccessTree& t) const {
                 add(pane, text_node("wizard/message", message), g.message);
                 break;
             }
-            // The cards that fit: one list, the chosen one selected.
+            // The cards: one list, the chosen one selected; those scrolled
+            // out of the cards' part (D33) are off screen.
             AccessNode list;
             list.id = "wizard/cards";
             list.role = AccessRole::List;
             list.name = std::string(text(lang_, Str::AccessTemplates));
-            RECT all{};
-            for (const RECT& r : g.cards) {
-                UnionRect(&all, &all, &r);
-            }
-            const int cards = add(pane, std::move(list), all);
+            const int cards = add(pane, std::move(list), g.cards_area);
+            const AccessRect clip = ar(g.cards_area);
             const int count = static_cast<int>(std::min(g.cards.size(), snap_.templates.size()));
             for (int i = 0; i < count; ++i) {
                 const auto at = static_cast<std::size_t>(i);
                 AccessNode card = template_card_node(snap_.templates[at], at == wizard_.card, i + 1, count, lang_);
                 card.keys = "Enter";
                 card.target = target(Part::WizCard, i);
-                add(cards, std::move(card), g.cards[at]);
+                const AccessRect cut = clip_rect(ar(g.cards[at]), clip);
+                card.offscreen = cut.empty();
+                card.bounds = card.offscreen ? ar(g.cards[at]) : cut;
+                t.add(cards, std::move(card));
             }
             break;
         }

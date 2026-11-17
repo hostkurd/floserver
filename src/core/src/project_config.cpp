@@ -346,7 +346,46 @@ void read_command(const json& doc, ProjectConfig& config, ConfigResult& result) 
     config.command = it->get_ref<const std::string&>();
 }
 
+void read_mcp(const json& doc, ProjectConfig& config, ConfigResult& result) {
+    const auto it = doc.find("mcp");
+    if (it == doc.end() || it->is_null()) {
+        return;
+    }
+    if (!it->is_string() || !is_mcp_path(it->get_ref<const std::string&>())) {
+        result.errors.push_back({"mcp", R"(must be the server's path, such as "/mcp")"});
+        return;
+    }
+    config.mcp = it->get_ref<const std::string&>();
+}
+
 }  // namespace
+
+bool is_mcp_path(std::string_view path) {
+    if (path.empty() || path.front() != '/' || path.size() > kMaxMcpPathLength) {
+        return false;
+    }
+    std::size_t start = 1;
+    while (start <= path.size()) {
+        const std::size_t end = std::min(path.find('/', start), path.size());
+        const std::string_view part = path.substr(start, end - start);
+        // A trailing "/" is fine ("/mcp/"); an empty part elsewhere is "//".
+        if (part.empty() && end != path.size()) {
+            return false;
+        }
+        if (part == "." || part == "..") {
+            return false;
+        }
+        for (const char c : part) {
+            const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' ||
+                            c == '.' || c == '_' || c == '~';
+            if (!ok) {
+                return false;
+            }
+        }
+        start = end + 1;
+    }
+    return true;
+}
 
 ConfigResult parse_project_config(std::string_view json_text) {
     ConfigResult result;
@@ -368,7 +407,7 @@ ConfigResult parse_project_config(std::string_view json_text) {
 
     static const std::set<std::string, std::less<>> known = {
         "php", "node", "bun", "deno", "python", "database", "mariadb", "mysql", "web", "root", "extensions", "command",
-        "php_ini", "redis"};
+        "php_ini", "redis", "mcp"};
     for (const auto& item : doc.items()) {
         if (!known.contains(item.key())) {
             result.warnings.push_back({item.key(), "is not a FloServer setting and is ignored"});
@@ -395,6 +434,7 @@ ConfigResult parse_project_config(std::string_view json_text) {
             result.errors.push_back({"redis", "must be true or false"});
         }
     }
+    read_mcp(doc, config, result);
 
     if (result.errors.empty()) {
         result.config = std::move(config);
@@ -447,6 +487,9 @@ std::string write_project_config(const ProjectConfig& config) {
     }
     if (config.redis) {
         doc["redis"] = true;
+    }
+    if (config.mcp) {
+        doc["mcp"] = *config.mcp;
     }
     return doc.dump(2) + "\n";
 }

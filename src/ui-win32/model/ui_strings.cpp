@@ -1734,6 +1734,25 @@ constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
           "فشل آخر حفظ لـ " FLO_LRI "Garnet" FLO_PDI "، لذا قد لا تعود بياناته بعد توقفه: {0}",
           "دوایین پاشەکەوتکردنی " FLO_LRI "Garnet" FLO_PDI " سەرکەوتوو نەبوو، بۆیە لەوانەیە داتاکانی دوای وەستان نەگەڕێنەوە: {0}"},
     Entry{Str::RedisFlushConfirm, "Flush all", "مسح الكل", "سڕینەوەی هەموو"},
+    Entry{Str::PanelMcpTitle, "MCP server", "خادم " FLO_LRI "MCP" FLO_PDI, "سێرڤەری " FLO_LRI "MCP" FLO_PDI},
+    Entry{Str::PanelMcpNote, "AI tools connect at this address. The project's README.md shows how to add tools.",
+          "تتصل أدوات الذكاء الاصطناعي بهذا العنوان. يشرح ملف " FLO_LRI "README.md" FLO_PDI
+          " في المشروع كيف تضيف أدوات.",
+          "ئامرازەکانی زیرەکیی دەستکرد بەم ناونیشانە پەیوەندی دەکەن. فایلی " FLO_LRI "README.md" FLO_PDI
+          "ی پڕۆژەکە پیشان دەدات چۆن ئامراز زیاد بکەیت."},
+    Entry{Str::PanelMcpOff, "Turn the project on to connect AI tools to it.",
+          "شغّل المشروع لتوصل أدوات الذكاء الاصطناعي به.",
+          "پڕۆژەکە هەڵبکە بۆ ئەوەی ئامرازەکانی زیرەکیی دەستکردی پێوە ببەستیت."},
+    Entry{Str::PanelMcpWaiting, "The lines for AI tools show here once FloServer serves the project.",
+          "تظهر هنا أسطر أدوات الذكاء الاصطناعي عندما يخدم " FLO_LRI "FloServer" FLO_PDI " المشروع.",
+          "هێڵەکانی ئامرازەکانی زیرەکیی دەستکرد لێرە دەردەکەون کاتێک " FLO_LRI "FloServer" FLO_PDI
+          " پڕۆژەکە پێشکەش دەکات."},
+    Entry{Str::PanelMcpAddress, "Address", "العنوان", "ناونیشان"},
+    Entry{Str::PanelMcpCursor, "Cursor", FLO_LRI "Cursor" FLO_PDI, FLO_LRI "Cursor" FLO_PDI},
+    Entry{Str::PanelMcpDesktop, "Claude Desktop (needs Node.js)",
+          FLO_LRI "Claude Desktop" FLO_PDI " (يحتاج " FLO_LRI "Node.js" FLO_PDI ")",
+          FLO_LRI "Claude Desktop" FLO_PDI " (پێویستی بە " FLO_LRI "Node.js" FLO_PDI " هەیە)"},
+    Entry{Str::PanelMcpCopied, "{0}: copied to the clipboard", "{0}: نُسخ إلى الحافظة", "{0}: کۆپی کرا بۆ کلیپبۆرد"},
 }};
 
 #undef FLO_LRI

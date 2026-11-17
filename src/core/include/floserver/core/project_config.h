@@ -12,7 +12,8 @@
 //     "extensions": ["intl", "gd", "-exif"],
 //     "php_ini": {"memory_limit": "1024M"},
 //     "command": "npm run serve -- --port {port}",
-//     "redis": true                  // D30: the shared Redis (Garnet), keys prefixed <name>_
+//     "redis": true,                 // D30: the shared Redis (Garnet), keys prefixed <name>_
+//     "mcp": "/mcp"                  // D33: the project is an MCP server at this path
 //   }
 //
 // Every key is optional. Unknown keys are kept as warnings, not errors, so a
@@ -72,6 +73,9 @@ struct ProjectConfig {
     // Redis (D30): the project uses the shared Garnet server; its .env lines
     // get REDIS_* and its PHP loads phpredis where there's a build for it.
     bool redis = false;
+    // D33: the project is an MCP server and AI tools reach it at its
+    // address + this path ("/mcp"); the panel offers their config lines.
+    std::optional<std::string> mcp;
 
     bool operator==(const ProjectConfig&) const = default;
 };
@@ -80,6 +84,11 @@ struct ProjectConfig {
 [[nodiscard]] inline bool php_off(const ProjectConfig& c) { return !c.php && c.php_choice == PhpChoice::Off; }
 // PHP is asked for: a version or "newest".
 [[nodiscard]] inline bool php_asked(const ProjectConfig& c) { return c.php || c.php_choice == PhpChoice::Newest; }
+
+// "mcp"'s rules (D33): "/" then at most 128 letters, digits and - . _ ~ /,
+// with no "//" and no "." or ".." part.
+inline constexpr std::size_t kMaxMcpPathLength = 128;
+[[nodiscard]] bool is_mcp_path(std::string_view path);
 
 // The project's JavaScript runtime, when it names one (D31).
 struct JsRuntime {

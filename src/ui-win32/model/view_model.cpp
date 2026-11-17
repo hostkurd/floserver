@@ -1,5 +1,8 @@
 #include "model/view_model.h"
 
+#include "floserver/core/project_config.h"
+#include "floserver/core/project_registry.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
@@ -183,6 +186,7 @@ ProjectRow row_from(const json& p, Lang lang) {
             }
         }
         row.wants.redis = flag_of(want, "redis");
+        row.wants.mcp = text_of(want, "mcp");
     }
     row.static_site = flag_of(p, "static");
     row.php_files = flag_of(p, "php_files");
@@ -338,6 +342,66 @@ std::string new_project_address(const std::string& name, const FooterText& foote
     const std::uint64_t usual = footer.tls ? 443 : 80;
     return (footer.tls ? "https://" : "http://") + name + ".localhost" +
            (port == usual ? std::string() : ":" + std::to_string(port));
+}
+
+std::optional<ProjectMcpLines> project_mcp_lines(const ProjectRow& row, const FooterText& footer) {
+    if (row.wants.mcp.empty() || !core::is_mcp_path(row.wants.mcp) || row.address.empty() || footer.http_port == 0 ||
+        core::project_name_problem(row.name)) {
+        return std::nullopt;
+    }
+    ProjectMcpLines out;
+    out.url = "http://127.0.0.1" + (footer.http_port == 80 ? std::string() : ":" + std::to_string(footer.http_port)) +
+              "/mcp/" + row.name;
+    const auto quoted = [](const std::string& s) { return json(s).dump(); };
+    const std::string name = quoted(row.name);
+    const std::string url = quoted(out.url);
+    out.claude = "claude mcp add --transport http " + row.name + " " + out.url;
+    out.cursor = R"({ "mcpServers": { )" + name + R"(: { "url": )" + url + " } } }";
+    out.vscode = R"({ "servers": { )" + name + R"(: { "type": "http", "url": )" + url + " } } }";
+    out.desktop = R"({ "mcpServers": { )" + name + R"(: { "command": "npx", "args": ["-y", "mcp-remote", )" + url +
+                  R"(, "--allow-http"] } } })";
+    return out;
+}
+
+std::string_view project_mcp_line(const ProjectMcpLines& lines, std::size_t index) {
+    switch (index) {
+        case 0:
+            return lines.url;
+        case 1:
+            return lines.claude;
+        case 2:
+            return lines.cursor;
+        case 3:
+            return lines.vscode;
+        case 4:
+            return lines.desktop;
+        default:
+            break;
+    }
+    return {};
+}
+
+Str project_mcp_note(const ProjectRow& row, bool served) {
+    if (served) {
+        return Str::PanelMcpNote;
+    }
+    return row.on ? Str::PanelMcpWaiting : Str::PanelMcpOff;
+}
+
+Str project_mcp_label(std::size_t index) {
+    switch (index) {
+        case 0:
+            return Str::PanelMcpAddress;
+        case 1:
+            return Str::GeneralAiClaude;
+        case 2:
+            return Str::PanelMcpCursor;
+        case 3:
+            return Str::GeneralAiVsCode;
+        default:
+            break;
+    }
+    return Str::PanelMcpDesktop;
 }
 
 FooterText footer_text(const std::vector<ProjectRow>& rows, const json* status, const json* web, Lang lang) {

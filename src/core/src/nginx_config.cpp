@@ -3,6 +3,7 @@
 #include "floserver/core/mailpit.h"
 #include "floserver/core/project_registry.h"
 #include "floserver/core/phpmyadmin.h"
+#include "floserver/core/project_config.h"
 #include "floserver/core/request_log.h"
 #include "floserver/core/shared_sites.h"
 
@@ -157,6 +158,25 @@ public:
                  << "            return 200 \"" << spec_.config_id << "\";\n"
                  << "        }\n";
         }
+        // MCP server projects at 127.0.0.1/mcp/<name> (D33): passed back in
+        // to the project by its own name.
+        for (const NginxSite& site : spec_.sites) {
+            if (site.mcp_path.empty()) {
+                continue;
+            }
+            if (!is_mcp_path(site.mcp_path) || project_name_problem(site.name)) {
+                error_ = "the MCP path of " + site.name + " can't be used";
+                return std::nullopt;
+            }
+            out_ << "        location = /mcp/" << site.name << " {\n"
+                 << "            proxy_pass http://127.0.0.1:" << spec_.ports.http << site.mcp_path << ";\n"
+                 << "            proxy_http_version 1.1;\n"
+                 << "            proxy_set_header Host " << site.name << ".localhost;\n"
+                 << "            proxy_set_header Connection \"\";\n"
+                 << "            proxy_buffering off;\n"
+                 << "            proxy_read_timeout 900s;\n"
+                 << "        }\n";
+        }
         out_ << "        location / {\n"
              << "            return 404 \"There's no FloServer project at this address.\\n\";\n"
              << "        }\n"
@@ -242,7 +262,7 @@ private:
         const std::string host = site.name + ".localhost";
 
         out_ << "\n    # Project " << site.name << "\n";
-        if (site.tls) {
+        if (site.tls && !site.http_too) {
             out_ << "    server {\n";
             listen(spec_.ports.http, "");
             out_ << "        server_name " << host << ";\n"
@@ -251,6 +271,9 @@ private:
         }
         out_ << "    server {\n";
         if (site.tls) {
+            if (site.http_too) {
+                listen(spec_.ports.http, "");
+            }
             listen(spec_.ports.https, spec_.http2_directive ? " ssl" : " ssl http2");
             out_ << (spec_.http2_directive ? "        http2 on;\n" : "")
                  << "        ssl_certificate " << *cert << ";\n"
@@ -283,6 +306,13 @@ private:
                  // minutes) and the start.
                  << "            proxy_read_timeout 900s;\n"
                  << "            proxy_send_timeout 900s;\n";
+            // Served on both ports (D33): Apache's own redirects say https
+            // (its ServerName); one on the http port stays on http.
+            if (site.http_too) {
+                out_ << "            proxy_redirect default;\n"
+                     << "            proxy_redirect \"~^https://[a-z0-9-]+\\.localhost(:[0-9]+)?(?<floserver_rest>/.*)?$\" "
+                        "$scheme://$http_host$floserver_rest;\n";
+            }
             // Apache projects: every request counts for their PHP pool's idle time.
             if (!site.php_access_log.empty()) {
                 const auto idle = path(site.php_access_log);
@@ -319,7 +349,8 @@ private:
                  << "            try_files $uri $uri/ /index.php$is_args$args;\n"
                  << "        }\n"
 ;
-            write_php_location(site.php_ports, site.tls.has_value(), idle_log, request_log);
+            // Served on both ports: the fastcgi_params file's HTTPS line ($https) says which.
+            write_php_location(site.php_ports, site.tls.has_value() && !site.http_too, idle_log, request_log);
         }
         out_ << "    }\n";
         return true;

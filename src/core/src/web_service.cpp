@@ -565,6 +565,8 @@ void WebService::reload_locked() {
         for (const PlannedSite& p : plan.sites) {
             if (p.state == SiteState::Ready && p.apache) {
                 // No pool: PHP is off ("php": false), so Apache sends files as they are.
+                // An MCP server project is served on http too (D33): nginx turns
+                // Apache's https redirects back into the request's own scheme.
                 as.sites.push_back({p.name, p.doc_root, p.pool ? plan.pools.at(*p.pool).ports : std::vector<Port>{}, tls});
                 const Project* project = find_project(*app, p.name);
                 keep = keep || (project != nullptr && project->keep_running);
@@ -725,6 +727,8 @@ void WebService::reload_locked() {
                 ns.php_access_log = pools.at(pool->key)->access_log();
             }
             ns.tls = site_tls;
+            ns.http_too = p.config && p.config->mcp;  // D33
+            ns.mcp_path = ns.http_too ? *p.config->mcp : std::string();
             site.app = true;
             site.app_kind = "apache";
             site.app_name = spec->name;
@@ -746,6 +750,8 @@ void WebService::reload_locked() {
             ns.doc_root = p.doc_root;
             ns.app_port = spec.port;
             ns.tls = site_tls;
+            ns.http_too = p.config && p.config->mcp;  // D33
+            ns.mcp_path = ns.http_too ? *p.config->mcp : std::string();
             site.app = true;
             site.app_kind = app_runtime_name(spec.kind);
             site.app_name = spec.name;
@@ -760,6 +766,8 @@ void WebService::reload_locked() {
             ns.name = p.name;
             ns.doc_root = p.doc_root;
             ns.tls = site_tls;
+            ns.http_too = p.config && p.config->mcp;  // D33
+            ns.mcp_path = ns.http_too ? *p.config->mcp : std::string();
             site.static_site = true;
             site.address = ns.tls ? "https" : "http";
             serve.push_back(std::move(ns));
@@ -780,6 +788,8 @@ void WebService::reload_locked() {
         ns.php_ports = pool.ports;
         ns.php_access_log = runner->access_log();
         ns.tls = site_tls;
+        ns.http_too = p.config && p.config->mcp;  // D33
+        ns.mcp_path = ns.http_too ? *p.config->mcp : std::string();
         site.pool_key = pool.key;
         site.address = ns.tls ? "https" : "http";  // filled in with the port below
         serve.push_back(std::move(ns));

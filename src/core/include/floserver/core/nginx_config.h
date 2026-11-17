@@ -39,6 +39,13 @@ struct NginxSite {
     std::optional<NginxTls> tls;
     std::optional<Port> app_port;       // set: everything goes to this server instead
     std::filesystem::path request_log;  // every request, for the window's Log box; empty for none
+    // With `tls`: the http port serves the site too instead of redirecting
+    // (D33: an MCP server project, whose AI tools may not trust FloServer's CA).
+    bool http_too = false;
+    // D33: the project's MCP server path (checked: is_mcp_path); non-empty
+    // also opens http://127.0.0.1/mcp/<name>, passed on to it, as tools
+    // outside a browser can't look up <name>.localhost on Windows.
+    std::string mcp_path{};  // NOLINT(readability-redundant-member-init): GCC's -Wmissing-field-initializers wants it for {..} initialisations that stop short
 };
 
 // Shared sites (D19), on the http port: the www folder at localhost/<folder>/

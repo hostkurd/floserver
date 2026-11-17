@@ -460,6 +460,32 @@ TEST_CASE("the nginx config serves PHP and static sites on loopback") {
         CHECK(t->find("return 302 https://shop.localhost:8443$request_uri;") != std::string::npos);
         CHECK(t->find("[::1]") == std::string::npos);
     }
+    SUBCASE("an MCP server project answers on http too, not with a redirect (D33)") {
+        spec.sites[0].http_too = true;
+        const auto t = make_nginx_config(spec, error);
+        REQUIRE(t);
+        CHECK(t->find("return 302 https://shop.localhost") == std::string::npos);
+        const auto shop = t->find("# Project shop");
+        REQUIRE(shop != std::string::npos);
+        const auto http = t->find("listen 127.0.0.1:80;", shop);
+        const auto https = t->find("listen 127.0.0.1:443 ssl;", shop);
+        REQUIRE(http != std::string::npos);
+        REQUIRE(https != std::string::npos);
+        CHECK(t->find("server {", http) > https);  // one server block holds both
+        // HTTPS comes from the fastcgi_params file's $https, right for either port.
+        CHECK(t->find("fastcgi_param HTTPS on;") == std::string::npos);
+        CHECK(t->find("location = /mcp/shop") == std::string::npos);  // no path: no 127.0.0.1 route
+        spec.sites[0].mcp_path = "/mcp";
+        const auto routed = make_nginx_config(spec, error);
+        REQUIRE(routed);
+        const auto at = routed->find("location = /mcp/shop {");
+        REQUIRE(at != std::string::npos);
+        CHECK(at < routed->find("# Project shop"));  // in the default server: 127.0.0.1 lands there
+        CHECK(routed->find("proxy_pass http://127.0.0.1:80/mcp;", at) != std::string::npos);
+        CHECK(routed->find("proxy_set_header Host shop.localhost;", at) != std::string::npos);
+        spec.sites[0].mcp_path = "/../x";
+        CHECK_FALSE(make_nginx_config(spec, error));
+    }
     SUBCASE("an unsafe path or name refuses the whole config") {
         spec.sites[1].doc_root = kBase / "projects" / "$docs";
         CHECK_FALSE(make_nginx_config(spec, error));

@@ -476,6 +476,27 @@ MainWindow::PanelGeometry MainWindow::panel_geometry(HDC dc) const {
             y = g.redis_detail.bottom + px(kPanelGap);
         }
 
+        // An MCP server project (D33): where AI tools connect and each tool's
+        // config line, a label above the line and its Copy button beside it.
+        if (!row->wants.mcp.empty()) {
+            g.mcp_title = {x0, y, x1, y + px(18)};
+            g.mcp_detail = {x0, y + px(18), x1, y + px(18) + px(32)};  // two lines at most
+            y = g.mcp_detail.bottom + px(6);
+            if (project_mcp_lines(*row, snap_.footer)) {
+                const int cw = Canvas::measure(dc, w(text(lang_, Str::DbCopy)), fonts_.caption.get(), rtl_) + px(24);
+                for (std::size_t i = 0; i < kProjectMcpLines; ++i) {
+                    g.mcp_labels.push_back({x0, y, x1, y + px(16)});
+                    y += px(16) + px(2);
+                    // The window mirrors itself in Arabic and Kurdish: Copy ends up on the left there.
+                    const RECT copy{x1 - cw, y, x1, y + px(28)};
+                    g.mcp_copy.push_back(copy);
+                    g.mcp_values.push_back(RECT{x0, y, copy.left - px(8), y + px(28)});
+                    y += px(28) + px(8);
+                }
+            }
+            y += px(kPanelGap) - px(6);
+        }
+
         const int keep_mid = y + px(18);
         g.keep_switch = {x1 - px(kSwitchW), keep_mid - px(kSwitchH) / 2, x1,
                          keep_mid - px(kSwitchH) / 2 + px(kSwitchH)};
@@ -577,6 +598,11 @@ RECT MainWindow::panel_rect_of(const Hit& hit) const {
             return {g.keep_title.left, g.keep_title.top, g.keep_switch.right, g.keep_detail.bottom};
         case Part::PanelRedis:
             return {g.redis_title.left, g.redis_title.top, g.redis_switch.right, g.redis_detail.bottom};
+        case Part::PanelMcpCopy: {
+            const RECT label = at(g.mcp_labels, hit.row);
+            const RECT copy = at(g.mcp_copy, hit.row);
+            return {label.left, label.top, label.right, copy.bottom};
+        }
         case Part::PanelRemove:
             return g.remove;
         case Part::PanelPhpSettings:
@@ -658,6 +684,11 @@ MainWindow::Hit MainWindow::panel_hit_test(int x, int y) const {
     if (contains(g.redis_switch, x, y)) {
         return hit(Part::PanelRedis, -1);
     }
+    for (std::size_t i = 0; i < g.mcp_copy.size(); ++i) {
+        if (contains(g.mcp_copy[i], x, y)) {
+            return hit(Part::PanelMcpCopy, static_cast<int>(i));
+        }
+    }
     if (contains(g.remove, x, y)) {
         return hit(Part::PanelRemove, -1);
     }
@@ -696,6 +727,9 @@ std::vector<MainWindow::Hit> MainWindow::panel_focus_order() const {
     }
     if (g.redis_switch.right > g.redis_switch.left) {
         order.push_back({Part::PanelRedis, -1, g.project});
+    }
+    for (std::size_t i = 0; i < g.mcp_copy.size(); ++i) {
+        order.push_back({Part::PanelMcpCopy, static_cast<int>(i), g.project});
     }
     if (g.keep_switch.right > g.keep_switch.left) {
         order.push_back({Part::PanelKeep, -1, g.project});
@@ -761,6 +795,11 @@ void MainWindow::on_panel_click(const Hit& hit) {
             break;
         case Part::PanelRedis:
             toggle_redis_for(selected_);
+            break;
+        case Part::PanelMcpCopy:
+            if (hit.row >= 0) {
+                copy_mcp_line(static_cast<std::size_t>(hit.row));
+            }
             break;
         case Part::PanelRemove:
             ask_remove(selected_);
@@ -1394,6 +1433,10 @@ void MainWindow::paint_panel(Canvas& c, HDC dc, bool text_pass) const {
                 c.round_outline(ring, static_cast<float>(height_of(ring)) / 2.0F, p.focus, pxf(2));
             }
         }
+        for (std::size_t i = 0; i < g.mcp_copy.size(); ++i) {
+            const int index = static_cast<int>(i);
+            paint_button(c, g.mcp_copy[i], hovered(Part::PanelMcpCopy, index), focused(Part::PanelMcpCopy, index));
+        }
         if (g.keep_switch.right > g.keep_switch.left) {
             paint_switch(c, g.keep_switch, keep_value(*row), hovered(Part::PanelKeep, -1));
             if (focused(Part::PanelKeep, -1)) {
@@ -1491,6 +1534,20 @@ void MainWindow::paint_panel(Canvas& c, HDC dc, bool text_pass) const {
         }
     }
 
+    if (g.mcp_title.right > g.mcp_title.left) {
+        const auto lines = project_mcp_lines(*row, snap_.footer);
+        c.text(g.mcp_title, w(text(lang_, Str::PanelMcpTitle)), fonts_.button_bold.get(), p.text, Align::Start, false);
+        c.paragraph(g.mcp_detail, w(text(lang_, project_mcp_note(*row, lines.has_value()))), fonts_.caption.get(),
+                    p.text_subtle);
+        for (std::size_t i = 0; lines && i < g.mcp_copy.size(); ++i) {
+            c.text(g.mcp_labels[i], w(text(lang_, project_mcp_label(i))), fonts_.caption.get(), p.text_subtle,
+                   Align::Start, false);
+            const std::string line(project_mcp_line(*lines, i));
+            c.text(g.mcp_values[i], w(rtl_ ? isolate_ltr(line) : line), fonts_.mono.get(), p.text, Align::Start,
+                   true);
+            c.text(g.mcp_copy[i], w(text(lang_, Str::DbCopy)), fonts_.caption.get(), p.text, Align::Center, false);
+        }
+    }
     if (g.redis_switch.right > g.redis_switch.left) {
         c.text(g.redis_title, w(text(lang_, Str::PanelRedis)), fonts_.button_bold.get(), p.text, Align::Start, false);
         c.paragraph(g.redis_detail, w(redis_panel_note(*row, snap_.installed, lang_)), fonts_.caption.get(),

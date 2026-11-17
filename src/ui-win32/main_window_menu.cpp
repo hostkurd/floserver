@@ -323,6 +323,19 @@ void MainWindow::copy_address(const std::string& address) {
     show_notice(done ? std::string(text(lang_, Str::AddressCopied)) : fill(lang_, Str::OpenFailed, {"clipboard"}), !done);
 }
 
+void MainWindow::copy_mcp_line(std::size_t index) {
+    const ProjectRow* row = selected_row();
+    const auto lines = row != nullptr ? project_mcp_lines(*row, snap_.footer) : std::nullopt;
+    const std::string_view line = lines ? project_mcp_line(*lines, index) : std::string_view();
+    if (line.empty()) {
+        return;  // it stopped being served under the click
+    }
+    const bool done = put_text_on_clipboard(hwnd_, std::string(line));
+    show_notice(done ? fill(lang_, Str::PanelMcpCopied, {text(lang_, project_mcp_label(index))})
+                     : fill(lang_, Str::OpenFailed, {"clipboard"}),
+                !done);
+}
+
 void MainWindow::ask_remove(const std::string& project) {
     // Not while Remove FloServer runs: its own move of the projects folder
     // mustn't race a project's.
