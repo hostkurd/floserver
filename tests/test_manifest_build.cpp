@@ -277,9 +277,9 @@ TEST_CASE("the built-in templates go into the list, and their runtimes must be t
     const auto r = build_manifest(report.dump(), o);
     INFO((r.errors.empty() ? std::string() : r.errors.front()));
     REQUIRE(r.manifest_json);
-    CHECK(r.template_count == 8);
+    CHECK(r.template_count == 10);
     const json doc = json::parse(*r.manifest_json);
-    REQUIRE(doc["templates"].size() == 8);
+    REQUIRE(doc["templates"].size() == 10);
     CHECK(doc["templates"][0]["id"] == "php-app");
     // WordPress is listed for every platform, from the CDN with wordpress.org behind it.
     bool wordpress = false;

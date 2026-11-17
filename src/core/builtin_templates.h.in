@@ -9,6 +9,7 @@
 
 namespace floserver::core {
 
-inline constexpr std::string_view kBuiltInTemplatesJson = R"FLOTPL(@FLOSERVER_TEMPLATES_JSON@)FLOTPL";
+inline constexpr std::string_view kBuiltInTemplatesJson =
+    @FLOSERVER_TEMPLATES_LITERAL@;
 
 }  // namespace floserver::core

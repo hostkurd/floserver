@@ -81,7 +81,7 @@ TEST_CASE("publisher: read the live list, add a new PHP, check, build and sign t
     CHECK(live.list->sequence == 3);
     CHECK_FALSE(live.list->expired);
     CHECK(live.list->runtimes.size() == 8);
-    CHECK(live.list->template_count == 8);
+    CHECK(live.list->template_count == 10);
 
     std::vector<std::string> notes;
     std::vector<PublishFile> files = files_from_live(*live.list, kTestCdn, notes);
@@ -123,7 +123,7 @@ TEST_CASE("publisher: read the live list, add a new PHP, check, build and sign t
     const BuiltList next = build_next_list(kTestCdn, files, live.list->sequence + 1, now);
     REQUIRE_MESSAGE(next.manifest_json, (next.errors.empty() ? "" : next.errors.front()));
     CHECK(next.runtime_count == 9);
-    CHECK(next.template_count == 8);
+    CHECK(next.template_count == 10);
     CHECK(next.sequence == 4);
     CHECK(next.expires == now + std::chrono::days{90});
 

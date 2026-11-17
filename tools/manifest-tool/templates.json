@@ -282,5 +282,112 @@
       }
     ],
     "env": true
+  },
+  {
+    "id": "mcp-python",
+    "order": 90,
+    "title": {
+      "en": "MCP server (Python)",
+      "ar": "خادم MCP (Python)",
+      "ku": "سێرڤەری MCP (Python)"
+    },
+    "description": {
+      "en": "An MCP server for AI tools: FastAPI and the official SDK",
+      "ar": "خادم MCP لأدوات الذكاء الاصطناعي: FastAPI و SDK الرسمي",
+      "ku": "سێرڤەرێکی MCP بۆ ئامرازەکانی زیرەکیی دەستکرد: FastAPI و SDKی فەرمی"
+    },
+    "mark": "MCP",
+    "mark_bg": "#E0F2F1",
+    "mark_fg": "#00695C",
+    "chips": [
+      "Python",
+      "pip",
+      "MCP"
+    ],
+    "config": {
+      "python": "3.13",
+      "mcp": "/mcp"
+    },
+    "files": [
+      {
+        "path": "requirements.txt",
+        "text": "fastapi\nuvicorn[standard]\nmcp>=2.3,<3\n"
+      },
+      {
+        "path": "main.py",
+        "text": "# Your new MCP server (Python). FloServer makes .venv, installs\n# requirements.txt and runs it with uvicorn behind the project's address.\n# AI tools connect to that address + /mcp. See README.md.\nimport contextlib\nimport re\nfrom html import escape\nfrom pathlib import Path\n\nfrom fastapi import FastAPI, Request\nfrom fastapi.responses import HTMLResponse, PlainTextResponse\nfrom mcp.server.mcpserver import MCPServer\nfrom mcp.server.transport_security import TransportSecuritySettings\n\nHERE = Path(__file__).resolve().parent\n\nmcp = MCPServer(HERE.name)\n\n\n# What the server offers AI tools. Add a function with @mcp.tool(); its\n# docstring is what the AI reads about it, its type hints are its inputs.\n@mcp.tool()\ndef add(a: float, b: float) -> float:\n    \"\"\"Adds two numbers.\"\"\"\n    return a + b\n\n\n@mcp.resource(\"project://readme\", mime_type=\"text/markdown\")\ndef readme() -> str:\n    \"\"\"This project's README.md.\"\"\"\n    return (HERE / \"README.md\").read_text(encoding=\"utf-8\")\n\n\n# The MCP endpoint at /mcp. Host and Origin are checked below instead, so\n# the project's own <name>.localhost address is allowed.\nmcp_app = mcp.streamable_http_app(\n    streamable_http_path=\"/mcp\",\n    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),\n)\n\n\n@contextlib.asynccontextmanager\nasync def lifespan(app: FastAPI):\n    async with mcp.session_manager.run():\n        yield\n\n\napp = FastAPI(lifespan=lifespan)\n\n# Only this computer: localhost, 127.0.0.1 or a <name>.localhost address.\nLOCAL = re.compile(r\"^([a-z0-9-]+\\.localhost|localhost|127\\.0\\.0\\.1|\\[::1\\])(:\\d+)?$\", re.IGNORECASE)\n\n\n@app.middleware(\"http\")\nasync def only_this_computer(request: Request, call_next):\n    host = request.headers.get(\"host\", \"\")\n    origin = request.headers.get(\"origin\")\n    if not LOCAL.match(host) or (origin is not None and not LOCAL.match(origin.split(\"://\", 1)[-1])):\n        return PlainTextResponse(\"Only this computer can use this server.\", status_code=403)\n    return await call_next(request)\n\n\n@app.get(\"/\", response_class=HTMLResponse)\ndef home() -> str:\n    return f\"\"\"<!doctype html>\n<html lang=\"en\">\n<head><meta charset=\"utf-8\"><title>{escape(HERE.name)}</title></head>\n<body style=\"font-family: system-ui, sans-serif; margin: 3rem; max-width: 40rem\">\n<h1>{escape(HERE.name)}</h1>\n<p>This is an MCP server. FloServer's panel for this project has its address\nand the lines to paste into Claude Code, Cursor, VS Code and Claude Desktop.\nAdd tools in <code>main.py</code>; <code>README.md</code> shows how.</p>\n</body>\n</html>\n\"\"\"\n\n\n# Everything else, /mcp included, goes to the MCP server.\napp.mount(\"/\", mcp_app)\n\n\nif __name__ == \"__main__\":\n    # `.venv\\Scripts\\python main.py` speaks MCP over stdin and stdout instead.\n    mcp.run()\n"
+      },
+      {
+        "path": "README.md",
+        "text": "# MCP server (Python)\n\nThis project is an MCP server: AI tools (Claude Code, Cursor, VS Code, Claude Desktop) connect to it and use the tools it offers. FloServer runs it with uvicorn behind the project's address. AI tools connect at `http://127.0.0.1/mcp/<name>` (with FloServer's port, such as `:8080`), which FloServer passes on to this project's `/mcp`.\n\n## Connect an AI tool\n\nOpen the project in FloServer: its panel has an **MCP server** section with a Copy button for each AI tool. Paste the line:\n\n- **Claude Code:** run the copied `claude mcp add ...` command in a terminal.\n- **Cursor:** add the copied JSON to `.cursor/mcp.json` (one project) or `~/.cursor/mcp.json` (all).\n- **VS Code:** add the copied JSON to `.vscode/mcp.json`.\n- **Claude Desktop:** add the copied JSON to `claude_desktop_config.json`. It reaches the server through `npx mcp-remote`, so it needs Node.js.\n\nUse that address rather than `<name>.localhost/mcp`: on Windows only browsers can look up `*.localhost` names, and AI tools built on Node.js don't trust FloServer's local certificates. Clients that run in a browser can also use `http://<name>.localhost/mcp`.\n\n## Add a tool\n\nTools are Python functions in `main.py` marked with `@mcp.tool()`. The docstring is what the AI reads about the tool, and the type hints are its inputs:\n\n```python\n@mcp.tool()\ndef greet(name: str) -> str:\n    \"\"\"Says hello to someone.\"\"\"\n    return f\"Hello, {name}!\"\n```\n\nSave the file: uvicorn reloads it. AI tools see the new tool the next time they connect (in Claude Code, `/mcp` reconnects).\n\nResources (read-only data the AI can open) use `@mcp.resource(\"scheme://name\")`, like the `README.md` example in `main.py`.\n\nTo use more packages, add them to `requirements.txt`; FloServer installs them on the next start.\n\n## Try it without an AI tool\n\n```\nnpx @modelcontextprotocol/inspector\n```\n\nopens the MCP Inspector in your browser. Choose **Streamable HTTP** and enter the `http://127.0.0.1/mcp/<name>` address.\n\n## Over stdin and stdout\n\nSome AI tools only start a command. The same server runs that way too:\n\n```\n.venv\\Scripts\\python main.py\n```\n\n## Before you put it on a server\n\nHere it only answers this computer, including pages of your other local projects in the browser (`localhost`, `127.0.0.1` and `*.localhost`). On a public server, anyone could call its tools: add a login first, such as a token checked in the middleware in `main.py`, or OAuth (see the [Python SDK's documentation](https://py.sdk.modelcontextprotocol.io/)).\n"
+      }
+    ]
+  },
+  {
+    "id": "mcp-php",
+    "order": 91,
+    "title": {
+      "en": "MCP server (PHP)",
+      "ar": "خادم MCP (PHP)",
+      "ku": "سێرڤەری MCP (PHP)"
+    },
+    "description": {
+      "en": "An MCP server for AI tools with the official PHP SDK",
+      "ar": "خادم MCP لأدوات الذكاء الاصطناعي مع SDK الرسمي لـ PHP",
+      "ku": "سێرڤەرێکی MCP بۆ ئامرازەکانی زیرەکیی دەستکرد بە SDKی فەرمیی PHP"
+    },
+    "mark": "MCP",
+    "mark_bg": "#E0F2F1",
+    "mark_fg": "#00695C",
+    "chips": [
+      "PHP",
+      "Composer",
+      "MCP"
+    ],
+    "config": {
+      "php": "8.5",
+      "root": "public",
+      "mcp": "/mcp"
+    },
+    "needs": [
+      "composer"
+    ],
+    "files": [
+      {
+        "path": "composer.json",
+        "text": "{\n    \"name\": \"app/mcp-server\",\n    \"description\": \"An MCP server made with FloServer\",\n    \"type\": \"project\",\n    \"license\": \"proprietary\",\n    \"require\": {\n        \"php\": \">=8.2\",\n        \"mcp/sdk\": \"^0.9\",\n        \"php-http/discovery\": \"^1.20\",\n        \"nyholm/psr7\": \"^1.8\",\n        \"laminas/laminas-httphandlerrunner\": \"^2.10\"\n    },\n    \"autoload\": {\n        \"psr-4\": {\n            \"App\\\\\": \"src/\"\n        }\n    },\n    \"config\": {\n        \"allow-plugins\": {\n            \"php-http/discovery\": false\n        }\n    }\n}\n"
+      },
+      {
+        "path": "public/index.php",
+        "text": "<?php\n// Your new MCP server (PHP). AI tools connect to this project's address\n// + /mcp; the tools are in src/Tools.php. See README.md.\n\nrequire dirname(__DIR__) . '/vendor/autoload.php';\n\nuse App\\McpServer;\nuse Laminas\\HttpHandlerRunner\\Emitter\\SapiEmitter;\nuse Mcp\\Server\\Transport\\Http\\Middleware\\CorsMiddleware;\nuse Mcp\\Server\\Transport\\Http\\Middleware\\DnsRebindingProtectionMiddleware;\nuse Mcp\\Server\\Transport\\StdioTransport;\nuse Http\\Discovery\\Psr17Factory;\nuse Mcp\\Server\\Transport\\StreamableHttpTransport;\n\n// `php public/index.php` speaks MCP over stdin and stdout instead.\nif (PHP_SAPI === 'cli') {\n    exit(McpServer::build()->run(new StdioTransport()));\n}\n\n$path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH);\n\nif (rtrim((string) $path, '/') === '/mcp') {\n    $factory = new Psr17Factory();\n    $request = $factory->createServerRequestFromGlobals();\n    // Only this computer: localhost, 127.0.0.1, or the *.localhost name it was\n    // reached by (a DNS-rebinding page can't send a *.localhost Host).\n    $hosts = ['localhost', '127.0.0.1', '[::1]'];\n    $host = strtolower(explode(':', $request->getHeaderLine('Host'), 2)[0]);\n    if (preg_match('/^[a-z0-9-]+\\.localhost$/', $host) === 1) {\n        $hosts[] = $host;\n    }\n    $transport = new StreamableHttpTransport($request, $factory, $factory, middleware: [\n        new CorsMiddleware(),\n        new DnsRebindingProtectionMiddleware($hosts),\n    ]);\n    (new SapiEmitter())->emit(McpServer::build()->run($transport));\n    exit;\n}\n\n$name = basename(dirname(__DIR__));\n?><!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<title><?= htmlspecialchars($name) ?></title>\n</head>\n<body style=\"font-family: system-ui, sans-serif; margin: 3rem; max-width: 40rem\">\n<h1><?= htmlspecialchars($name) ?></h1>\n<p>This is an MCP server. FloServer's panel for this project has its address\nand the lines to paste into Claude Code, Cursor, VS Code and Claude Desktop.\nAdd tools in <code>src/Tools.php</code>; <code>README.md</code> shows how.</p>\n</body>\n</html>\n"
+      },
+      {
+        "path": "src/Tools.php",
+        "text": "<?php\n\nnamespace App;\n\n/**\n * What the server offers AI tools. Add a public method here and list it in\n * src/McpServer.php; its docblock is what the AI reads about it.\n */\nfinal class Tools\n{\n    /**\n     * Adds two numbers.\n     */\n    public function add(float $a, float $b): float\n    {\n        return $a + $b;\n    }\n\n    /**\n     * This project's README.md.\n     */\n    public function readme(): string\n    {\n        return (string) file_get_contents(dirname(__DIR__) . '/README.md');\n    }\n}\n"
+      },
+      {
+        "path": "src/McpServer.php",
+        "text": "<?php\n\nnamespace App;\n\nuse Mcp\\Server;\nuse Mcp\\Server\\Session\\FileSessionStore;\n\nfinal class McpServer\n{\n    public static function build(): Server\n    {\n        return Server::builder()\n            ->setServerInfo(basename(dirname(__DIR__)), '1.0.0')\n            // Each request is its own PHP run, so sessions are kept in files.\n            ->setSession(new FileSessionStore(dirname(__DIR__) . '/storage/mcp-sessions'))\n            ->addTool([Tools::class, 'add'], 'add')\n            ->addResource([Tools::class, 'readme'], 'project://readme', 'readme', mimeType: 'text/markdown')\n            ->build();\n    }\n}\n"
+      },
+      {
+        "path": "storage/mcp-sessions/.gitignore",
+        "text": "*\n!.gitignore\n"
+      },
+      {
+        "path": "README.md",
+        "text": "# MCP server (PHP)\n\nThis project is an MCP server: AI tools (Claude Code, Cursor, VS Code, Claude Desktop) connect to it and use the tools it offers. It uses the official PHP SDK (`mcp/sdk`). AI tools connect at `http://127.0.0.1/mcp/<name>` (with FloServer's port, such as `:8080`), which FloServer passes on to this project's `/mcp`.\n\n## Connect an AI tool\n\nOpen the project in FloServer: its panel has an **MCP server** section with a Copy button for each AI tool. Paste the line:\n\n- **Claude Code:** run the copied `claude mcp add ...` command in a terminal.\n- **Cursor:** add the copied JSON to `.cursor/mcp.json` (one project) or `~/.cursor/mcp.json` (all).\n- **VS Code:** add the copied JSON to `.vscode/mcp.json`.\n- **Claude Desktop:** add the copied JSON to `claude_desktop_config.json`. It reaches the server through `npx mcp-remote`, so it needs Node.js.\n\nUse that address rather than `<name>.localhost/mcp`: on Windows only browsers can look up `*.localhost` names, and AI tools built on Node.js don't trust FloServer's local certificates. Clients that run in a browser can also use `http://<name>.localhost/mcp`.\n\n## Add a tool\n\n1. Add a public method to `src/Tools.php`. Its docblock is what the AI reads about the tool, and its parameter types are its inputs:\n\n   ```php\n   /**\n    * Says hello to someone.\n    */\n   public function greet(string $name): string\n   {\n       return \"Hello, {$name}!\";\n   }\n   ```\n\n2. List it in `src/McpServer.php`:\n\n   ```php\n   ->addTool([Tools::class, 'greet'], 'greet')\n   ```\n\nEach request runs the code fresh, so there's nothing to restart. AI tools see the new tool the next time they connect (in Claude Code, `/mcp` reconnects).\n\nResources (read-only data the AI can open) are added with `addResource()`, like the `README.md` example.\n\n## Try it without an AI tool\n\n```\nnpx @modelcontextprotocol/inspector\n```\n\nopens the MCP Inspector in your browser. Choose **Streamable HTTP** and enter the `http://127.0.0.1/mcp/<name>` address.\n\n## Over stdin and stdout\n\nSome AI tools only start a command. The same server runs that way too:\n\n```\nphp public/index.php\n```\n\n## Notes\n\n- Answers are plain JSON, not a stream: each request is its own PHP run behind php-cgi.\n- Sessions of older AI tools are kept in `storage/mcp-sessions`.\n\n- Browser pages on other addresses can't call it (no CORS origins allowed). In the MCP Inspector, keep the default **Via Proxy** connection.\n\n## Before you put it on a server\n\nHere it only answers this computer (`localhost`, `127.0.0.1` and its own `*.localhost` address). On a public server, such as cPanel hosting, anyone could call its tools: add a login first, such as a token checked in `public/index.php` before the request reaches the server, or OAuth (see the [PHP SDK's documentation](https://php.sdk.modelcontextprotocol.io/)). Point the domain's document root at `public/`.\n"
+      }
+    ],
+    "steps": [
+      {
+        "tool": "composer",
+        "args": [
+          "install",
+          "--no-interaction",
+          "--prefer-dist",
+          "--no-progress"
+        ]
+      }
+    ]
   }
 ]
