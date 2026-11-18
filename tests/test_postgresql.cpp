@@ -78,6 +78,28 @@ TEST_CASE("PostgreSQL's files, set-up and server arguments (D29)") {
     CHECK(hba.find("trust") == std::string::npos);
 }
 
+TEST_CASE("PostgreSQL on Windows: ASCII paths keep each file in its own folder (D29)") {
+    // A shortened path keeps its last name (as Windows' 8.3 names of ASCII names do).
+    const ShortPathFunction shorten = [](const fs::path& p) -> fs::path {
+        return fs::path("C:/SHORT~1") / p.parent_path().filename() / p.filename();
+    };
+    MariaDbFiles f = postgresql_files(path_from_utf8("C:/Users/\xD9\x86/rt/postgresql/18.1"), "18.1",
+                                      path_from_utf8("C:/Users/\xD9\x86/data"));
+    fs::path bad;
+    bool missing = false;
+    REQUIRE(ascii_mysql_files(f, shorten, bad, missing));
+    // initdb's data folder must stay empty: the password file is beside it, the
+    // hba file inside it (where hba_file=data/pg_hba.conf points), the log beside it.
+    CHECK(f.init_file.parent_path() == f.folder);
+    CHECK(f.config.parent_path() == f.data_dir);
+    CHECK(f.error_log.parent_path() == f.folder);
+    CHECK(f.pid_file.parent_path() == f.data_dir);
+    CHECK(f.installed_marker.parent_path() == f.folder);
+    CHECK(f.data_dir.filename() == "data");
+    CHECK(f.config.filename() == "pg_hba.conf");
+    CHECK(f.init_file.filename() == "pwfile");
+}
+
 TEST_CASE("PostgreSQL's SQL, password file and client environment (D29)") {
     CHECK(pg_identifier("my_shop") == "\"my_shop\"");
     CHECK(pg_identifier("a\"b") == "\"a\"\"b\"");

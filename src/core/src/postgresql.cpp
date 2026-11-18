@@ -65,7 +65,10 @@ std::vector<std::string> postgresql_server_args(const MariaDbFiles& files, Port 
             "-c",
             "hba_file=" + path_to_utf8(files.data_dir.filename() / files.config.filename()),
             "-c",
-            "password_encryption=scram-sha-256"};
+            "password_encryption=scram-sha-256",
+            // A failed statement (ALTER ROLE ... PASSWORD) isn't logged with its text.
+            "-c",
+            "log_min_error_statement=panic"};
 }
 
 std::string postgresql_hba() {
@@ -119,6 +122,8 @@ std::string pg_project_database_sql(const std::string& database, const std::stri
     sql += "ALTER DATABASE " + d + " OWNER TO " + r + ";\n";
     sql += "REVOKE CONNECT, TEMPORARY ON DATABASE " + d + " FROM PUBLIC;\n";
     sql += "GRANT CONNECT, TEMPORARY ON DATABASE " + d + " TO " + r + ";\n";
+    // The server's own databases are the superuser's only (every time: it's cheap).
+    sql += "REVOKE CONNECT, TEMPORARY ON DATABASE postgres, template1 FROM PUBLIC;\n";
     return sql;
 }
 

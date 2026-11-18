@@ -49,8 +49,10 @@ inline constexpr Port kFirstPostgreSqlPort = 5432;
 
 // What postgres gets on its command line, so no setting in a file can change
 // it: the data folder, the internal `port` on 127.0.0.1 only, no Unix socket,
-// no SSL (127.0.0.1 only), FloServer's pg_hba.conf, a small shared_buffers
-// (a development server), and scram-sha-256 for new passwords.
+// no SSL (127.0.0.1 only), FloServer's pg_hba.conf, scram-sha-256 for new
+// passwords, and no failed statement's text in the log (it may hold a
+// password). shared_buffers and max_connections are in postgresql.conf
+// (set_up), so a custom.conf can change them.
 [[nodiscard]] std::vector<std::string> postgresql_server_args(const MariaDbFiles& files, Port port);
 
 // pg_hba.conf: password logins (scram-sha-256) over TCP from 127.0.0.1 only;

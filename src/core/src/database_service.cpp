@@ -574,10 +574,13 @@ private:
                 o.output_log = files_.folder / "pg_ctl.log";
                 o.restricted_token = true;
                 std::string ignored;
+                bool stopping = false;
                 if (auto child = ChildProcess::start(o, ignored)) {
-                    (void)child->wait(40s);
+                    stopping = child->wait(40s) == 0;
                 }
-                (void)process.wait(30s);
+                // pg_ctl fails at once when there's no postmaster.pid yet (a
+                // start that failed early): no point waiting for it then.
+                (void)process.wait(stopping ? 30s : 2s);
             }
             process.kill();
             return;
@@ -750,13 +753,10 @@ private:
             error = path_problem_;
             return nullptr;
         }
-        if (pg()) {
-            return start_postgres(reset_root, wrong_root, error);
-        }
 #ifdef _WIN32
         // Checked again at each start: a folder may have gone, or been made
         // again with another short name, since the server was made.
-        if (files_.family == kMySqlFamily) {
+        if (files_.family == kMySqlFamily || pg()) {
             MariaDbFiles fresh = database_files(install_dir_, version_, data_dir_, files_.family);
             if (std::string problem = ascii_files_problem(fresh); !problem.empty()) {
                 error = std::move(problem);
@@ -768,6 +768,9 @@ private:
             }
         }
 #endif
+        if (pg()) {
+            return start_postgres(reset_root, wrong_root, error);
+        }
         std::error_code ec;
         fs::create_directories(files_.folder, ec);
 #ifndef _WIN32
@@ -1170,7 +1173,7 @@ private:
         const std::string text = read_small_file(conf, std::size_t{1024} * 1024).value_or("");
         if (!write_file_atomically(conf,
                                    text + "\n# FloServer's defaults for a development server (D29)\n"
-                                          "shared_buffers = 64MB\nmax_connections = 50\n",
+                                          "shared_buffers = 64MB\nmax_connections = 100\n",
                                    error)) {
             return false;
         }
@@ -1188,21 +1191,26 @@ private:
         }
         ChildOptions o;
         o.program = files_.server;
-        o.args = {"--single", "-D", path_to_utf8(files_.data_dir.filename()), std::string(kPostgreSqlSuperuser)};
+        // A failed statement isn't written to the log with its text (the password).
+        o.args = {"--single", "-D", path_to_utf8(files_.data_dir.filename()), "-c", "log_min_error_statement=panic",
+                  std::string(kPostgreSqlSuperuser)};
         o.working_dir = files_.folder;
         o.stdin_file = sql;
         o.output_log = files_.folder / "reset.log";
         o.restricted_token = true;
+        const AtExit log_gone([&o] { remove_secret_file(o.output_log); });
         auto child = ChildProcess::start(o, error);
         if (!child) {
             return false;
         }
         const auto code = child->wait(60s);
-        if (code != 0) {
-            if (!code) {
-                child->kill();
-            }
-            error = "the postgres user's password couldn't be set: " + tail(o.output_log, 600);
+        if (!code) {
+            child->kill();
+        }
+        // Single-user mode exits 0 even when the statement failed: its output says.
+        const std::string said = tail(o.output_log, 600);
+        if (code != 0 || said.find("ERROR:") != std::string::npos || said.find("FATAL:") != std::string::npos) {
+            error = "the postgres user's password couldn't be set: " + said;
             return false;
         }
         return true;

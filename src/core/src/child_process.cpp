@@ -7,6 +7,7 @@
 #include <sstream>
 #include <array>
 #include <cstdlib>
+#include <cstddef>
 #include <cstring>
 #include <charconv>
 #include <iterator>
@@ -23,6 +24,8 @@
 #include <iphlpapi.h>
 
 #include <windows.h>
+
+#include <aclapi.h>
 #else
 #include <arpa/inet.h>
 #include <cerrno>
@@ -59,6 +62,49 @@ std::optional<std::string> http_body_if_ok(const std::string& response) {
 #ifdef _WIN32
 
 namespace {
+
+// pg_ctl's AddUserToTokenDacl: an elevated token's default DACL grants only
+// Administrators and SYSTEM, so with Administrators deny-only a restricted
+// postgres and its backends couldn't open each other's processes and shared
+// memory. The user is given full access in it too.
+bool add_user_to_default_dacl(HANDLE token) {
+    DWORD size = 0;
+    (void)GetTokenInformation(token, TokenDefaultDacl, nullptr, 0, &size);
+    if (size == 0) {
+        return false;
+    }
+    std::vector<std::byte> dacl(size);
+    if (GetTokenInformation(token, TokenDefaultDacl, dacl.data(), size, &size) == FALSE) {
+        return false;
+    }
+    DWORD user_size = 0;
+    (void)GetTokenInformation(token, TokenUser, nullptr, 0, &user_size);
+    if (user_size == 0) {
+        return false;
+    }
+    std::vector<std::byte> user(user_size);
+    if (GetTokenInformation(token, TokenUser, user.data(), user_size, &user_size) == FALSE) {
+        return false;
+    }
+    const auto* current = reinterpret_cast<const TOKEN_DEFAULT_DACL*>(dacl.data());  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+    const auto* owner = reinterpret_cast<const TOKEN_USER*>(user.data());  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+    EXPLICIT_ACCESS_W access{};
+    access.grfAccessPermissions = GENERIC_ALL;
+    access.grfAccessMode = GRANT_ACCESS;
+    access.grfInheritance = NO_INHERITANCE;
+    access.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    access.Trustee.TrusteeType = TRUSTEE_IS_USER;
+    access.Trustee.ptstrName = static_cast<LPWSTR>(owner->User.Sid);
+    PACL updated = nullptr;
+    if (SetEntriesInAclW(1, &access, current->DefaultDacl, &updated) != ERROR_SUCCESS) {
+        return false;
+    }
+    TOKEN_DEFAULT_DACL next{};
+    next.DefaultDacl = updated;
+    const BOOL ok = SetTokenInformation(token, TokenDefaultDacl, &next, sizeof(next));
+    LocalFree(updated);
+    return ok != FALSE;
+}
 
 bool winsock_started() {
     static const bool ok = [] {
@@ -863,7 +909,12 @@ std::unique_ptr<ChildProcess> ChildProcess::start(const ChildOptions& o, std::st
             disable[0].Sid = admins;
             disable[1].Sid = power;
             ok = CreateRestrictedToken(own, DISABLE_MAX_PRIVILEGE, static_cast<DWORD>(disable.size()), disable.data(), 0,
-                                       nullptr, 0, nullptr, &restricted) != FALSE;
+                                       nullptr, 0, nullptr, &restricted) != FALSE &&
+                 add_user_to_default_dacl(restricted);
+            if (!ok && restricted != nullptr) {
+                CloseHandle(restricted);
+                restricted = nullptr;
+            }
         }
         if (power != nullptr) {
             FreeSid(power);
