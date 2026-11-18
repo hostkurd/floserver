@@ -129,20 +129,20 @@ bool ascii_mysql_files(MariaDbFiles& files, const ShortPathFunction& shorten, fs
     // The files in them follow, each under the folder it was in (MySQL keeps
     // its pid in the data folder, PostgreSQL its password file beside it):
     // their own names are FloServer's, ASCII.
-    const auto follow = [&](fs::path& file) {
-        if (file.empty()) {
-            return;
-        }
-        const fs::path parent = file.parent_path();
-        if (parent == old_data) {
-            file = files.data_dir / file.filename();
-        } else if (parent == old_folder) {
-            file = files.folder / file.filename();
-        }
-    };
     for (fs::path* f : {&files.config, &files.installed_marker, &files.error_log, &files.pid_file, &files.init_file,
                         &files.socket}) {
-        follow(*f);
+        if (f->empty()) {
+            continue;
+        }
+        const fs::path parent = f->parent_path();
+        if (parent == old_data) {
+            *f = files.data_dir / f->filename();
+        } else if (parent == old_folder) {
+            *f = files.folder / f->filename();
+        } else {
+            bad = *f;  // a layout this doesn't know: refused rather than left non-ASCII
+            return false;
+        }
     }
     return true;
 }

@@ -1208,9 +1208,10 @@ private:
             child->kill();
         }
         // Single-user mode exits 0 even when the statement failed: its output says.
-        const std::string said = tail(o.output_log, 600);
+        // The whole output (it's small): checkpoint lines may follow the error.
+        const std::string said = read_small_file(o.output_log, std::size_t{1024} * 1024).value_or("");
         if (code != 0 || said.find("ERROR:") != std::string::npos || said.find("FATAL:") != std::string::npos) {
-            error = "the postgres user's password couldn't be set: " + said;
+            error = "the postgres user's password couldn't be set: " + tail(o.output_log, 600);
             return false;
         }
         return true;
