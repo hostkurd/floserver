@@ -355,7 +355,9 @@ std::optional<ProjectMcpLines> project_mcp_lines(const ProjectRow& row, const Fo
     const auto quoted = [](const std::string& s) { return json(s).dump(); };
     const std::string name = quoted(row.name);
     const std::string url = quoted(out.url);
-    out.claude = "claude mcp add --transport http " + row.name + " " + out.url;
+    // --scope user: every folder, not only the one the terminal is in.
+    out.claude = "claude mcp add --scope user --transport http " + row.name + " " + out.url;
+    out.claude_file = R"({ "mcpServers": { )" + name + R"(: { "type": "http", "url": )" + url + " } } }";
     out.cursor = R"({ "mcpServers": { )" + name + R"(: { "url": )" + url + " } } }";
     out.vscode = R"({ "servers": { )" + name + R"(: { "type": "http", "url": )" + url + " } } }";
     out.desktop = R"({ "mcpServers": { )" + name + R"(: { "command": "npx", "args": ["-y", "mcp-remote", )" + url +
@@ -370,10 +372,12 @@ std::string_view project_mcp_line(const ProjectMcpLines& lines, std::size_t inde
         case 1:
             return lines.claude;
         case 2:
-            return lines.cursor;
+            return lines.claude_file;
         case 3:
-            return lines.vscode;
+            return lines.cursor;
         case 4:
+            return lines.vscode;
+        case 5:
             return lines.desktop;
         default:
             break;
@@ -393,10 +397,12 @@ Str project_mcp_label(std::size_t index) {
         case 0:
             return Str::PanelMcpAddress;
         case 1:
-            return Str::GeneralAiClaude;
+            return Str::PanelMcpClaudeTerminal;
         case 2:
-            return Str::PanelMcpCursor;
+            return Str::PanelMcpClaudeFile;
         case 3:
+            return Str::PanelMcpCursor;
+        case 4:
             return Str::GeneralAiVsCode;
         default:
             break;

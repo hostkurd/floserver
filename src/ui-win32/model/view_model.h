@@ -121,22 +121,24 @@ struct FooterText {
 // on Windows, and Node-based ones don't trust FloServer's CA), and each
 // tool's config with the project's name as the server's name.
 struct ProjectMcpLines {
-    std::string url;      // http://127.0.0.1:8080/mcp/shop
-    std::string claude;   // claude mcp add --transport http shop http://...
+    std::string url;          // http://127.0.0.1:8080/mcp/shop
+    std::string claude;       // claude mcp add --scope user --transport http shop http://... (a terminal)
+    std::string claude_file;  // { "mcpServers": { "shop": { "type": "http", "url": ... } } } (.mcp.json)
     std::string cursor;   // { "mcpServers": { "shop": { "url": "http://..." } } }
     std::string vscode;   // { "servers": { "shop": { "type": "http", "url": "http://..." } } }
     std::string desktop;  // Claude Desktop: npx mcp-remote <url> --allow-http
 };
-inline constexpr std::size_t kProjectMcpLines = 5;
+inline constexpr std::size_t kProjectMcpLines = 6;
 // Nothing unless the row is an MCP server project that's served now and
 // nginx's http port is known.
 [[nodiscard]] std::optional<ProjectMcpLines> project_mcp_lines(const ProjectRow& row, const FooterText& footer);
-// Line `index` (0 url ... 4 desktop), empty past the end.
+// Line `index` (0 url, 1 claude, 2 claude_file, 3 cursor, 4 vscode, 5 desktop), empty past the end.
 [[nodiscard]] std::string_view project_mcp_line(const ProjectMcpLines& lines, std::size_t index);
 // The note under the section's title: where to add tools while it's served,
 // "turn it on" while it's off, else that the lines come once it's served.
 [[nodiscard]] Str project_mcp_note(const ProjectRow& row, bool served);
-// Its label: Address, Claude Code, Cursor, VS Code, Claude Desktop (needs Node.js).
+// Its label: Address, Claude Code (terminal), Claude Code (.mcp.json), Cursor, VS Code,
+// Claude Desktop (needs Node.js).
 [[nodiscard]] Str project_mcp_label(std::size_t index);
 
 [[nodiscard]] FooterText footer_text(const std::vector<ProjectRow>& rows, const nlohmann::json* status,
