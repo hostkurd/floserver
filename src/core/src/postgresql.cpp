@@ -63,7 +63,8 @@ std::vector<std::string> postgresql_server_args(const MariaDbFiles& files, Port 
             "-c",
             "ssl=off",
             "-c",
-            "hba_file=" + path_to_utf8(files.data_dir.filename() / files.config.filename()),
+            // "/" on Windows too (postgres takes it; one form in the tests).
+            "hba_file=" + path_to_utf8(files.data_dir.filename()) + "/" + path_to_utf8(files.config.filename()),
             "-c",
             "password_encryption=scram-sha-256",
             // A failed statement (ALTER ROLE ... PASSWORD) isn't logged with its text.
