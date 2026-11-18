@@ -1406,7 +1406,12 @@ TEST_CASE("an MCP server project's Copy lines name it and its http address (D33)
     const auto lines = project_mcp_lines(rows[0], footer);
     REQUIRE(lines);
     CHECK(lines->url == "http://127.0.0.1:8080/mcp/tools");  // http even with https on
-    CHECK(lines->claude == "claude mcp add --transport http tools http://127.0.0.1:8080/mcp/tools");
+    CHECK(lines->claude == "claude mcp add --scope user --transport http tools http://127.0.0.1:8080/mcp/tools");
+    CHECK(lines->claude_file ==
+          R"({ "mcpServers": { "tools": { "type": "http", "url": "http://127.0.0.1:8080/mcp/tools" } } })");
+    CHECK(project_mcp_label(1) == Str::PanelMcpClaudeTerminal);
+    CHECK(project_mcp_label(2) == Str::PanelMcpClaudeFile);
+    CHECK(project_mcp_label(5) == Str::PanelMcpDesktop);
     CHECK(lines->cursor == R"({ "mcpServers": { "tools": { "url": "http://127.0.0.1:8080/mcp/tools" } } })");
     CHECK(lines->vscode ==
           R"({ "servers": { "tools": { "type": "http", "url": "http://127.0.0.1:8080/mcp/tools" } } })");

@@ -1753,6 +1753,11 @@ constexpr std::array<Entry, static_cast<std::size_t>(Str::Count_)> kTable{{
           FLO_LRI "Claude Desktop" FLO_PDI " (يحتاج " FLO_LRI "Node.js" FLO_PDI ")",
           FLO_LRI "Claude Desktop" FLO_PDI " (پێویستی بە " FLO_LRI "Node.js" FLO_PDI " هەیە)"},
     Entry{Str::PanelMcpCopied, "{0}: copied to the clipboard", "{0}: نُسخ إلى الحافظة", "{0}: کۆپی کرا بۆ کلیپبۆرد"},
+    Entry{Str::PanelMcpClaudeTerminal, "Claude Code (in a terminal)",
+          FLO_LRI "Claude Code" FLO_PDI " (في الطرفية)", FLO_LRI "Claude Code" FLO_PDI " (لە تێرمیناڵ)"},
+    Entry{Str::PanelMcpClaudeFile, "Claude Code (a project's .mcp.json file)",
+          FLO_LRI "Claude Code" FLO_PDI " (ملف " FLO_LRI ".mcp.json" FLO_PDI " في المشروع)",
+          FLO_LRI "Claude Code" FLO_PDI " (فایلی " FLO_LRI ".mcp.json" FLO_PDI "ی پڕۆژە)"},
 }};
 
 #undef FLO_LRI

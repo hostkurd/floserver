@@ -864,6 +864,8 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     PanelMcpCursor,
     PanelMcpDesktop,   // Claude Desktop, through npx mcp-remote
     PanelMcpCopied,    // "{0} is on the clipboard": the line's label
+    PanelMcpClaudeTerminal,  // Claude Code's line for a terminal (claude mcp add)
+    PanelMcpClaudeFile,      // Claude Code's line for a project's .mcp.json
     Count_,
 };
 
