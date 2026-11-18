@@ -24,12 +24,21 @@
 using namespace floserver::core;
 namespace fs = std::filesystem;
 
-TEST_CASE("database families: MariaDB and MySQL, named by family and series") {
+TEST_CASE("database families: MariaDB, MySQL and PostgreSQL, named by family and series") {
     CHECK(known_database_family("mariadb"));
     CHECK(known_database_family("mysql"));
-    CHECK_FALSE(known_database_family("postgresql"));  // D29
+    CHECK(known_database_family("postgresql"));  // D29
     CHECK_FALSE(known_database_family("MySQL"));
-    CHECK(database_families() == std::vector<std::string>{"mariadb", "mysql"});
+    CHECK(database_families() == std::vector<std::string>{"mariadb", "mysql", "postgresql"});
+    CHECK_FALSE(mysql_protocol_family("postgresql"));
+    CHECK(database_service_family("postgresql"));
+    CHECK(database_service_family("mysql"));
+    CHECK_FALSE(database_service_family("oracle"));
+    CHECK(database_family_title("postgresql") == "PostgreSQL");
+    CHECK(database_series("postgresql", "18.6") == "18");
+    CHECK(database_series("postgresql", "17") == "17");
+    CHECK(database_series("postgresql", "x") == "");
+    CHECK(database_series("mysql", "8.4.11") == "8.4");
     CHECK(mysql_protocol_family("mysql"));
     CHECK(mysql_protocol_family("mariadb"));
     CHECK(database_family_title("mysql") == "MySQL");

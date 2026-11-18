@@ -1047,11 +1047,12 @@ std::optional<fs::path> project_folder_for(const fs::path& here) {
 int use(const std::vector<std::string>& args) {
     const bool redis_word = args.size() == 3 && args[1] == "redis" && (args[2] == "on" || args[2] == "off");
     if (args.size() != 3 || (args[1] != "php" && args[1] != "node" && args[1] != "bun" && args[1] != "deno" &&
-                             args[1] != "python" && args[1] != "mariadb" && args[1] != "mysql" && !redis_word)) {
-        std::cerr << "Usage: flo use <php|node|bun|deno|python|mariadb|mysql> <version>   for example: flo use php 8.4\n"
+                             args[1] != "python" && args[1] != "mariadb" && args[1] != "mysql" &&
+                             args[1] != "postgresql" && !redis_word)) {
+        std::cerr << "Usage: flo use <php|node|bun|deno|python|mariadb|mysql|postgresql> <version>   for example: flo use php 8.4\n"
                   << "       flo use php <none|newest|auto>   no PHP, always the newest PHP, or as the folder says\n"
                   << "       (a project has one JavaScript runtime: flo use bun 1.3 replaces its node or deno)\n"
-                  << "       (and one database: flo use mysql 8.4 replaces its mariadb, and the other way round)\n"
+                  << "       (and one database: flo use postgresql 18 replaces its mariadb or mysql, and so on)\n"
                   << "       flo use redis <on|off>   the shared Redis server (Garnet) for this project\n";
         return 2;
     }

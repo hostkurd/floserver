@@ -110,8 +110,13 @@ std::optional<fs::path> ascii_path(const fs::path& path, const ShortPathFunction
 
 bool ascii_mysql_files(MariaDbFiles& files, const ShortPathFunction& shorten, fs::path& bad, bool& missing) {
     missing = false;
+    const fs::path old_folder = files.folder;
+    const fs::path old_data = files.data_dir;
     for (fs::path* p : {&files.base_dir, &files.server, &files.install_db, &files.admin, &files.client, &files.dump,
                         &files.folder, &files.data_dir}) {
+        if (p->empty()) {
+            continue;
+        }
         auto safe = ascii_path(*p, shorten);
         if (!safe) {
             bad = *p;
@@ -121,14 +126,23 @@ bool ascii_mysql_files(MariaDbFiles& files, const ShortPathFunction& shorten, fs
         }
         *p = std::move(*safe);
     }
-    // The files in them follow (their own names are FloServer's, ASCII).
-    files.config = files.folder / files.config.filename();
-    files.installed_marker = files.folder / files.installed_marker.filename();
-    files.error_log = files.data_dir / files.error_log.filename();
-    files.pid_file = files.data_dir / files.pid_file.filename();
-    files.init_file = files.data_dir / files.init_file.filename();
-    if (!files.socket.empty()) {
-        files.socket = files.data_dir / files.socket.filename();
+    // The files in them follow, each under the folder it was in (MySQL keeps
+    // its pid in the data folder, PostgreSQL its password file beside it):
+    // their own names are FloServer's, ASCII.
+    for (fs::path* f : {&files.config, &files.installed_marker, &files.error_log, &files.pid_file, &files.init_file,
+                        &files.socket}) {
+        if (f->empty()) {
+            continue;
+        }
+        const fs::path parent = f->parent_path();
+        if (parent == old_data) {
+            *f = files.data_dir / f->filename();
+        } else if (parent == old_folder) {
+            *f = files.folder / f->filename();
+        } else {
+            bad = *f;  // a layout this doesn't know: refused rather than left non-ASCII
+            return false;
+        }
     }
     return true;
 }
@@ -509,7 +523,7 @@ EnvStyle env_style(const fs::path& project_dir) {
 
 std::vector<std::pair<std::string, std::string>> env_values(EnvStyle style, const DatabaseLogin& login) {
     const bool laravel = style == EnvStyle::Laravel;
-    return {{laravel ? "DB_CONNECTION" : "DB_TYPE", "mysql"},
+    return {{laravel ? "DB_CONNECTION" : "DB_TYPE", login.family == kPostgreSqlFamily ? "pgsql" : "mysql"},
             {"DB_HOST", "127.0.0.1"},
             {"DB_PORT", std::to_string(login.port)},
             {laravel ? "DB_DATABASE" : "DB_NAME", login.database},
@@ -534,7 +548,10 @@ std::string database_url(const DatabaseLogin& login, bool django) {
         }
         return out;
     };
-    return std::string(django ? "mysql://" : "mysql+pymysql://") + encode(login.user) + ":" + encode(login.password) + "@127.0.0.1:" +
+    const char* scheme = login.family == kPostgreSqlFamily ? "postgresql://"
+                         : django                          ? "mysql://"
+                                                           : "mysql+pymysql://";
+    return std::string(scheme) + encode(login.user) + ":" + encode(login.password) + "@127.0.0.1:" +
            std::to_string(login.port) + "/" + encode(login.database);
 }
 

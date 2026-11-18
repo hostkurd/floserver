@@ -222,15 +222,19 @@ struct DatabaseLogin {
     std::string database;
     std::string user;
     std::string password;
+    // Which engine: the .env lines and the URL follow it (D29).
+    std::string family{kMariaDbFamily};  // NOLINT(readability-redundant-member-init): GCC's -Wmissing-field-initializers wants it for {..} initialisations that stop short
 };
 
-// The .env lines for a project's database, in order.
+// The .env lines for a project's database, in order: DB_CONNECTION (Laravel)
+// or DB_TYPE (FloCMS) "mysql", or "pgsql" for PostgreSQL (D29).
 [[nodiscard]] std::vector<std::pair<std::string, std::string>> env_values(EnvStyle style, const DatabaseLogin& login);
 
 // The database as one URL, for Python projects (D17): SQLAlchemy and most
 // frameworks read DATABASE_URL. "mysql+pymysql://user:password@127.0.0.1:3306/db"
 // (SQLAlchemy's form), or "mysql://..." for Django, whose dj-database-url
-// knows only that one; the user and password percent-encoded.
+// knows only that one; the user and password percent-encoded. PostgreSQL's
+// (D29): "postgresql://...", which SQLAlchemy and dj-database-url both read.
 [[nodiscard]] std::string database_url(const DatabaseLogin& login, bool django = false);
 
 // A .env text with `values` set: a key's first line is replaced, later

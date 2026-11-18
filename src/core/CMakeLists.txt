@@ -42,6 +42,7 @@ add_library(floserver_core STATIC
     src/manifest.cpp
     src/database_engine.cpp
     src/mariadb.cpp
+    src/postgresql.cpp
     src/mariadb_settings.cpp
     src/mcp_server.cpp
     src/database_service.cpp

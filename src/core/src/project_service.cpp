@@ -1433,12 +1433,10 @@ std::optional<json> ProjectService::database_set(const std::string& series_text,
                     refusal = {"bad_params", "port " + std::to_string(*wanted) + " is one FloServer uses inside (33100-33199)"};
                     return std::nullopt;
                 }
-                // Every family's servers: MariaDB's and MySQL's share one set of ports (D28).
+                // Every family's servers share one set of ports (D28, D29).
                 std::set<std::string> chosen_keys;
-                for (const std::string& f : database_families()) {
-                    if (!mysql_protocol_family(f)) {
-                        continue;
-                    }
+                const std::vector<std::string>& families = database_families();
+                for (const std::string& f : families) {
                     for (const auto& [other, s] : read_mariadb_settings(*config, nullptr, f)) {
                         const std::string key = database_server_key(f, other);
                         chosen_keys.insert(key);
@@ -1454,7 +1452,8 @@ std::optional<json> ProjectService::database_set(const std::string& series_text,
                 for (fs::directory_iterator it(data, ec), end; !ec && it != end; it.increment(ec)) {
                     const std::string name = path_to_utf8(it->path().filename());
                     const auto dash = name.find('-');
-                    if (dash == std::string::npos || !mysql_protocol_family(std::string_view(name).substr(0, dash)) ||
+                    if (dash == std::string::npos ||
+                        std::find(families.begin(), families.end(), name.substr(0, dash)) == families.end() ||
                         name == own_key || chosen_keys.contains(name)) {
                         continue;
                     }
