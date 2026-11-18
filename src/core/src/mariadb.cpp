@@ -509,7 +509,7 @@ EnvStyle env_style(const fs::path& project_dir) {
 
 std::vector<std::pair<std::string, std::string>> env_values(EnvStyle style, const DatabaseLogin& login) {
     const bool laravel = style == EnvStyle::Laravel;
-    return {{laravel ? "DB_CONNECTION" : "DB_TYPE", "mysql"},
+    return {{laravel ? "DB_CONNECTION" : "DB_TYPE", login.family == kPostgreSqlFamily ? "pgsql" : "mysql"},
             {"DB_HOST", "127.0.0.1"},
             {"DB_PORT", std::to_string(login.port)},
             {laravel ? "DB_DATABASE" : "DB_NAME", login.database},
@@ -534,7 +534,10 @@ std::string database_url(const DatabaseLogin& login, bool django) {
         }
         return out;
     };
-    return std::string(django ? "mysql://" : "mysql+pymysql://") + encode(login.user) + ":" + encode(login.password) + "@127.0.0.1:" +
+    const char* scheme = login.family == kPostgreSqlFamily ? "postgresql://"
+                         : django                          ? "mysql://"
+                                                           : "mysql+pymysql://";
+    return std::string(scheme) + encode(login.user) + ":" + encode(login.password) + "@127.0.0.1:" +
            std::to_string(login.port) + "/" + encode(login.database);
 }
 

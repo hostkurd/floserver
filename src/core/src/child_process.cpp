@@ -845,12 +845,55 @@ std::unique_ptr<ChildProcess> ChildProcess::start(const ChildOptions& o, std::st
     std::wstring env = environment_block(o.env, o.remove_env);
     const std::wstring dir = o.working_dir.empty() ? o.program.parent_path().wstring() : o.working_dir.wstring();
     PROCESS_INFORMATION pi{};
+    // A restricted token (pg_ctl's way): this user without the
+    // Administrators and Power Users groups (deny-only) and its privileges.
+    HANDLE restricted = nullptr;
+    if (o.restricted_token) {
+        HANDLE own = nullptr;
+        SID_IDENTIFIER_AUTHORITY nt = SECURITY_NT_AUTHORITY;
+        PSID admins = nullptr;
+        PSID power = nullptr;
+        bool ok = OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &own) != FALSE &&
+                  AllocateAndInitializeSid(&nt, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0,
+                                           0, &admins) != FALSE &&
+                  AllocateAndInitializeSid(&nt, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_POWER_USERS, 0, 0, 0,
+                                           0, 0, 0, &power) != FALSE;
+        if (ok) {
+            std::array<SID_AND_ATTRIBUTES, 2> disable{};
+            disable[0].Sid = admins;
+            disable[1].Sid = power;
+            ok = CreateRestrictedToken(own, DISABLE_MAX_PRIVILEGE, static_cast<DWORD>(disable.size()), disable.data(), 0,
+                                       nullptr, 0, nullptr, &restricted) != FALSE;
+        }
+        if (power != nullptr) {
+            FreeSid(power);
+        }
+        if (admins != nullptr) {
+            FreeSid(admins);
+        }
+        if (own != nullptr) {
+            CloseHandle(own);
+        }
+        if (!ok) {
+            DeleteProcThreadAttributeList(attrs);
+            error = "can't make a restricted token for " + path_to_utf8(o.program.filename()) + " (Windows error " +
+                    std::to_string(GetLastError()) + ")";
+            return nullptr;
+        }
+    }
     // Suspended until it's in the job, so nothing it starts escapes it.
-    const BOOL created = CreateProcessW(
-        o.program.c_str(), command.data(), nullptr, nullptr, inherit.empty() ? FALSE : TRUE,
-        CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
-        env.data(), dir.c_str(), &si.StartupInfo, &pi);
+    constexpr DWORD kFlags =
+        CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT;
+    const BOOL created =
+        restricted != nullptr
+            ? CreateProcessAsUserW(restricted, o.program.c_str(), command.data(), nullptr, nullptr,
+                                   inherit.empty() ? FALSE : TRUE, kFlags, env.data(), dir.c_str(), &si.StartupInfo, &pi)
+            : CreateProcessW(o.program.c_str(), command.data(), nullptr, nullptr, inherit.empty() ? FALSE : TRUE, kFlags,
+                             env.data(), dir.c_str(), &si.StartupInfo, &pi);
     const DWORD create_error = GetLastError();
+    if (restricted != nullptr) {
+        CloseHandle(restricted);
+    }
     DeleteProcThreadAttributeList(attrs);
     if (created == FALSE) {
         error = "can't start " + path_to_utf8(o.program.filename()) + " (Windows error " + std::to_string(create_error) + ")";

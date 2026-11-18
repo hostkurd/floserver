@@ -136,7 +136,16 @@ TEST_CASE("MySQL is a database family beside MariaDB (D28); one engine per proje
     CHECK(has_error(parse_project_config(R"({"mysql": 8.4})"), "mysql"));
     const auto other = parse_project_config(R"({"database": "oracle-23"})");
     REQUIRE(has_error(other, "database"));
-    CHECK(other.errors[0].message.find("MariaDB or MySQL") != std::string::npos);
+    CHECK(other.errors[0].message.find("MariaDB, MySQL or PostgreSQL") != std::string::npos);
+    // PostgreSQL (D29): by its major version.
+    const auto pg = parse_project_config(R"({"database": "postgresql-18"})");
+    REQUIRE(pg.config);
+    CHECK(pg.config->database == DatabaseSpec{"postgresql", "18"});
+    const auto pg2 = parse_project_config(R"({"postgresql": "17"})");
+    REQUIRE(pg2.config);
+    CHECK(pg2.config->database == DatabaseSpec{"postgresql", "17"});
+    CHECK(pg2.warnings.empty());
+    CHECK(has_error(parse_project_config(R"({"postgresql": "17", "mysql": "8.4"})"), "postgresql"));
 }
 
 TEST_CASE("flo use mysql 8.4 writes the database key and drops the other engine (D28)") {

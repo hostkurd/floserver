@@ -159,11 +159,12 @@ void read_php(const json& doc, ProjectConfig& config, ConfigResult& result) {
     config.php = version->to_string();
 }
 
-// "database": "mariadb-11.4" or "mysql-8.4" (D28); also written as
-// "mariadb": "11.4" or "mysql": "8.4". A project has one database engine.
+// "database": "mariadb-11.4", "mysql-8.4" (D28) or "postgresql-18" (D29); also
+// written as "mariadb": "11.4", "mysql": "8.4" or "postgresql": "18". A
+// project has one database engine.
 void read_database(const json& doc, ProjectConfig& config, ConfigResult& result) {
     std::vector<std::string> named;
-    for (const char* key : {"database", "mariadb", "mysql"}) {
+    for (const char* key : {"database", "mariadb", "mysql", "postgresql"}) {
         if (doc.contains(key) && !doc.at(key).is_null()) {
             named.emplace_back(key);
         }
@@ -187,7 +188,10 @@ void read_database(const json& doc, ProjectConfig& config, ConfigResult& result)
         const auto version = value.is_string() ? Version::parse(value.get_ref<const std::string&>()) : std::nullopt;
         if (!version) {
             result.errors.push_back({key, R"(must be a version in quotes such as ")" +
-                                              std::string(key == "mysql" ? "8.4" : "11.4") + "\""});
+                                              std::string(key == "mysql"        ? "8.4"
+                                                          : key == "postgresql" ? "18"
+                                                                                : "11.4") +
+                                              "\""});
             return;
         }
         config.database = DatabaseSpec{key, version->to_string()};
@@ -205,18 +209,24 @@ void read_database(const json& doc, ProjectConfig& config, ConfigResult& result)
     });
     if (!known_database_family(family)) {
         result.errors.push_back({"database", "\"" + text +
-                                                 R"(" isn't available; use MariaDB or MySQL, such as "mariadb-11.4" or "mysql-8.4")"});
+                                                 R"(" isn't available; use MariaDB, MySQL or PostgreSQL, such as "mariadb-11.4", "mysql-8.4" or "postgresql-18")"});
         return;
     }
     if (dash == std::string::npos) {
         result.errors.push_back({"database", "\"" + text + "\" needs a version, such as \"" + family +
-                                                 (family == kMySqlFamily ? "-8.4" : "-11.4") + "\""});
+                                                 (family == kMySqlFamily        ? "-8.4"
+                                                  : family == kPostgreSqlFamily ? "-18"
+                                                                                : "-11.4") +
+                                                 "\""});
         return;
     }
     const auto version = Version::parse(std::string_view(text).substr(dash + 1));
     if (!version) {
         result.errors.push_back({"database", "\"" + text.substr(dash + 1) + "\" is not a version such as \"" +
-                                                 (family == kMySqlFamily ? "8.4" : "11.4") + "\""});
+                                                 (family == kMySqlFamily        ? "8.4"
+                                                  : family == kPostgreSqlFamily ? "18"
+                                                                                : "11.4") +
+                                                 "\""});
         return;
     }
     DatabaseSpec spec{family, version->to_string()};
@@ -406,8 +416,8 @@ ConfigResult parse_project_config(std::string_view json_text) {
     }
 
     static const std::set<std::string, std::less<>> known = {
-        "php", "node", "bun", "deno", "python", "database", "mariadb", "mysql", "web", "root", "extensions", "command",
-        "php_ini", "redis", "mcp"};
+        "php", "node", "bun", "deno", "python", "database", "mariadb", "mysql", "postgresql", "web", "root",
+        "extensions", "command", "php_ini", "redis", "mcp"};
     for (const auto& item : doc.items()) {
         if (!known.contains(item.key())) {
             result.warnings.push_back({item.key(), "is not a FloServer setting and is ignored"});
@@ -533,7 +543,7 @@ std::optional<ConfigKey> parse_config_key(std::string_view name) {
     if (name == "python") {
         return ConfigKey::Python;
     }
-    if (name == "database" || name == "mariadb" || name == "mysql") {
+    if (name == "database" || name == "mariadb" || name == "mysql" || name == "postgresql") {
         return ConfigKey::Database;
     }
     if (name == "web") {
@@ -639,13 +649,16 @@ std::optional<std::string> set_project_config_value(std::string_view text, Confi
             // written by hand go, the "database" key takes their place.
             doc.erase("mariadb");
             doc.erase("mysql");
+            doc.erase("postgresql");
             if (value) {
                 // `flo use mariadb 11.4`, `flo use mysql 8.4` give the version alone.
-                if (key_name == "mariadb" || key_name == "mysql") {
+                if (key_name == "mariadb" || key_name == "mysql" || key_name == "postgresql") {
                     const auto v = Version::parse(*value);
                     if (!v) {
                         error = "\"" + *value + "\" is not a version such as " +
-                                (key_name == "mysql" ? "8.4" : "11.4");
+                                (key_name == "mysql"        ? "8.4"
+                                 : key_name == "postgresql" ? "18"
+                                                            : "11.4");
                         return std::nullopt;
                     }
                     stored = std::string(key_name) + "-" + v->to_string();

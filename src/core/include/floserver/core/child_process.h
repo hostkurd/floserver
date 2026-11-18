@@ -120,6 +120,11 @@ struct ChildOptions {
     // Windows the handles are INVALID_HANDLE_VALUE, which php-cgi needs to
     // see before it runs as a FastCGI server).
     std::filesystem::path output_log;
+    // Windows: started with a restricted token, without the Administrators
+    // and Power Users groups and without privileges, as pg_ctl starts
+    // PostgreSQL (D29), which refuses to run with administrator rights.
+    // Elsewhere nothing changes.
+    bool restricted_token = false;
 };
 
 // True when process `pid` exists and runs `program` (compared by the file

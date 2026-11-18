@@ -4,6 +4,7 @@
 
 #include "floserver/core/mariadb_settings.h"
 #include "floserver/core/paths.h"
+#include "floserver/core/postgresql.h"
 #include "floserver/core/process.h"
 #include "floserver/core/project_registry.h"
 #include "floserver/core/runtime_store.h"
@@ -34,6 +35,23 @@ constexpr int kMaxConnections = 256;
 // First in every SQL FloServer runs as root.
 constexpr std::string_view kPlainSqlMode = "SET SESSION sql_mode='';\n";
 constexpr auto kFailedRetry = 30s;
+
+// A server's files, by its family (D29: PostgreSQL's are its own).
+MariaDbFiles database_files(const fs::path& install_dir, const std::string& version, const fs::path& data,
+                            std::string_view family) {
+    return family == kPostgreSqlFamily ? postgresql_files(install_dir, version, data)
+                                       : mariadb_files(install_dir, version, data, family);
+}
+
+// The superuser FloServer keeps the password of ("root" on MariaDB and MySQL).
+std::string root_user(std::string_view family) {
+    return std::string(family == kPostgreSqlFamily ? kPostgreSqlSuperuser : "root");
+}
+
+// Where a family's public ports start: 3306 (MariaDB and MySQL share it), 5432.
+Port first_public_port(std::string_view family) {
+    return family == kPostgreSqlFamily ? kFirstPostgreSqlPort : kFirstDatabasePort;
+}
 
 bool running_as_root() {
 #ifdef _WIN32
@@ -112,7 +130,7 @@ std::set<Port> ports_kept_by_others(const fs::path& data_dir, const fs::path& ow
     for (fs::directory_iterator it(data_dir / "data", ec), end; !ec && it != end; it.increment(ec)) {
         const std::string name = path_to_utf8(it->path().filename());
         const auto dash = name.find('-');
-        if (dash == std::string::npos || !mysql_protocol_family(std::string_view(name).substr(0, dash)) ||
+        if (dash == std::string::npos || !database_service_family(std::string_view(name).substr(0, dash)) ||
             it->path().filename() == own.filename()) {
             continue;
         }
@@ -142,9 +160,11 @@ std::optional<std::string> project_with_server_database(const AppConfig& app, co
 }
 
 #ifdef _WIN32
-// MySQL on Windows: `files` with ASCII paths (ascii_mysql_files()), or why
-// they can't have them. The data folder is made first (a short form needs it).
+// MySQL and PostgreSQL on Windows (both read paths in the ANSI code page):
+// `files` with ASCII paths (ascii_mysql_files()), or why they can't have
+// them. The data folder is made first (a short form needs it).
 std::string ascii_files_problem(MariaDbFiles& files) {
+    const std::string title = database_family_title(files.family);
     std::error_code ec;
     fs::create_directories(files.data_dir, ec);
     fs::path bad;
@@ -153,9 +173,10 @@ std::string ascii_files_problem(MariaDbFiles& files) {
         return {};
     }
     if (missing) {
-        return "MySQL can't start: " + path_to_utf8(bad) + " is missing (download MySQL again in Settings → Runtimes)";
+        return title + " can't start: " + path_to_utf8(bad) + " is missing (download " + title +
+               " again in Settings → Runtimes)";
     }
-    return "MySQL can't use " + path_to_utf8(bad) +
+    return title + " can't use " + path_to_utf8(bad) +
            ": the path has letters outside English, and Windows keeps no short (8.3) name for it. Use MariaDB on this "
            "computer, or a Windows user whose folder name has English letters only.";
 }
@@ -196,7 +217,7 @@ ServiceRefusal no_server_yet(std::string_view family, const std::string& series)
 // The database a project's floserver.json names, when the service runs its
 // family; else nothing.
 const DatabaseSpec* served(const ConfigResult& cfg) {
-    if (!cfg.config || !cfg.config->database || !mysql_protocol_family(cfg.config->database->family)) {
+    if (!cfg.config || !cfg.config->database || !database_service_family(cfg.config->database->family)) {
         return nullptr;
     }
     return &*cfg.config->database;
@@ -399,7 +420,7 @@ public:
             error = "can't keep the new password: " + error;
             return false;
         }
-        if (!run_sql(root_password_sql(password, files_.family), error)) {
+        if (!run_sql(pg() ? pg_superuser_password_sql(password) : root_password_sql(password, files_.family), error)) {
             (void)secrets_.remove(pending);
             return false;
         }
@@ -415,6 +436,9 @@ public:
     // The my.ini this server writes when it starts (`first`: with the init
     // file), from Settings > Database as config.json has it now.
     [[nodiscard]] std::string config_text(bool first) const {
+        if (pg()) {
+            return postgresql_hba();  // its settings are in the data folder's postgresql.conf
+        }
         std::string error;
         const auto app = load_app_config(app_config_file(data_dir_), error);
         const MariaDbSettings all = app ? read_mariadb_settings(*app, nullptr, files_.family) : MariaDbSettings{};
@@ -434,10 +458,10 @@ public:
         const fs::path file = files_.folder / ("query-" + random_suffix() + ".sql");
         // FloServer's quoting (sql_string) whatever sql_mode my.ini sets
         // (NO_BACKSLASH_ESCAPES would read a password's \ differently).
-        if (!write_private_file_atomically(file, std::string(kPlainSqlMode) + sql, error)) {
+        if (!write_private_file_atomically(file, (pg() ? std::string() : std::string(kPlainSqlMode)) + sql, error)) {
             return false;
         }
-        const bool ok = run_tool(files_.client, {"--batch"}, *root, file, 60s, error);
+        const bool ok = run_tool(files_.client, sql_client_args(), *root, file, 60s, error);
         remove_secret_file(file);
         return ok;
     }
@@ -525,6 +549,7 @@ public:
     }
 
     [[nodiscard]] std::string root_name() const { return key() + "/root"; }
+    [[nodiscard]] bool pg() const { return files_.family == kPostgreSqlFamily; }
 
     // MySQL on Windows: a path it can't be given (ascii_mysql_files()). Set
     // once, before the server is shared.
@@ -538,6 +563,25 @@ private:
     void shut_down(ChildProcess& process) const {
         // Not while root's password is being changed: the saved one would be refused.
         const std::lock_guard admin(admin_mutex_);
+        if (pg()) {
+            // pg_ctl stop -m fast: ends the connections and shuts down cleanly
+            // (no password: it signals the server named in postmaster.pid).
+            if (process.running()) {
+                ChildOptions o;
+                o.program = files_.admin;
+                o.args = {"stop", "-D", path_to_utf8(files_.data_dir.filename()), "-m", "fast", "-w", "-t", "30"};
+                o.working_dir = files_.folder;
+                o.output_log = files_.folder / "pg_ctl.log";
+                o.restricted_token = true;
+                std::string ignored;
+                if (auto child = ChildProcess::start(o, ignored)) {
+                    (void)child->wait(40s);
+                }
+                (void)process.wait(30s);
+            }
+            process.kill();
+            return;
+        }
         if (process.running()) {
             if (const auto root = secrets_.read(root_name())) {
                 std::string ignored;
@@ -558,7 +602,8 @@ private:
             // ones a backup left in backups/job-* go with that folder when
             // the backup service starts.
             if ((name.ends_with(".sql") && (name.starts_with("query-") || name.starts_with("probe"))) ||
-                (name.starts_with("client-") && name.find(".cnf") != std::string::npos)) {
+                (name.starts_with("client-") &&
+                 (name.find(".cnf") != std::string::npos || name.find(".pgpass") != std::string::npos))) {
                 remove_secret_file(it->path());
             }
         }
@@ -575,6 +620,22 @@ private:
     // first never sees root's password.
     bool client_options(ChildOptions& o, const fs::path& program, const std::string& user, const std::string& password,
                         const fs::path& dir, const std::string& ca, fs::path& cnf, std::string& error) const {
+        if (pg()) {
+            // libpq's password file (PGPASSFILE), owner-only, deleted after
+            // the run; only scram-sha-256 is accepted, so a program that took
+            // the internal port can't ask for the password in clear.
+            cnf = dir / ("client-" + random_suffix() + ".pgpass");
+            if (!write_private_file_atomically(cnf, pg_password_file(internal_, user, password), error)) {
+                return false;
+            }
+            o.program = program;
+            o.args = {"--host=127.0.0.1", "--port=" + std::to_string(internal_.load()), "--username=" + user,
+                      "--no-password"};
+            o.working_dir = dir;
+            o.env = pg_client_env(cnf, dir);
+            o.remove_env = pg_client_env_removed();
+            return true;
+        }
         cnf = dir / ("client-" + random_suffix() + ".cnf");
         if (!write_private_file_atomically(cnf, client_password_option_file(password), error)) {
             return false;
@@ -605,7 +666,7 @@ private:
         fs::path cnf;
         // The CA relative to the folder it runs in: a plain name.
         const std::string ca = path_to_utf8(files_.data_dir.filename() / "ca.pem");
-        if (!client_options(o, program, "root", password, files_.folder, ca, cnf, error)) {
+        if (!client_options(o, program, root_user(files_.family), password, files_.folder, ca, cnf, error)) {
             return false;
         }
         o.args.insert(o.args.end(), extra.begin(), extra.end());
@@ -689,17 +750,20 @@ private:
             error = path_problem_;
             return nullptr;
         }
+        if (pg()) {
+            return start_postgres(reset_root, wrong_root, error);
+        }
 #ifdef _WIN32
         // Checked again at each start: a folder may have gone, or been made
         // again with another short name, since the server was made.
         if (files_.family == kMySqlFamily) {
-            MariaDbFiles fresh = mariadb_files(install_dir_, version_, data_dir_, files_.family);
+            MariaDbFiles fresh = database_files(install_dir_, version_, data_dir_, files_.family);
             if (std::string problem = ascii_files_problem(fresh); !problem.empty()) {
                 error = std::move(problem);
                 return nullptr;
             }
             if (fresh.server != files_.server || fresh.data_dir != files_.data_dir || fresh.folder != files_.folder) {
-                error = "MySQL's folders have other short (8.3) names than when FloServer started: restart FloServer";
+                error = title() + "'s folders have other short (8.3) names than when FloServer started: restart FloServer";
                 return nullptr;
             }
         }
@@ -893,11 +957,22 @@ private:
             const auto end = fresh.find('\n', pos);
             const std::string line = fresh.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
             pos = end == std::string::npos ? fresh.size() : end + 1;
-            if (line.find("[ERROR]") != std::string::npos && line.find("Aborting") == std::string::npos) {
+            if (error_line(line)) {
                 errors.append(errors.empty() ? "" : "\n").append(line);
             }
         }
         return errors.size() > 1500 ? errors.substr(0, 1500) + "..." : errors;
+    }
+
+    // A line of the error log that says what went wrong: MariaDB's and
+    // MySQL's [ERROR] lines (not the last "Aborting"), PostgreSQL's FATAL,
+    // PANIC and ERROR ones.
+    [[nodiscard]] bool error_line(const std::string& line) const {
+        if (pg()) {
+            return line.find("FATAL:") != std::string::npos || line.find("PANIC:") != std::string::npos ||
+                   line.find("ERROR:") != std::string::npos;
+        }
+        return line.find("[ERROR]") != std::string::npos && line.find("Aborting") == std::string::npos;
     }
 
     // How long the error log is now (0 when it's not there or can't be read).
@@ -930,7 +1005,7 @@ private:
             const auto end = fresh.find('\n', pos);
             const std::string line = fresh.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
             pos = end == std::string::npos ? fresh.size() : end + 1;
-            if (line.find("[ERROR]") != std::string::npos && line.find("Aborting") == std::string::npos) {
+            if (error_line(line)) {
                 errors.append(errors.empty() ? "" : "\n").append(line);
             }
         }
@@ -938,6 +1013,199 @@ private:
             return fresh.empty() ? tail(output_log, 800) : tail(files_.error_log, 800);
         }
         return errors.size() > 1500 ? errors.substr(0, 1500) + "..." : errors;
+    }
+
+    // How FloServer runs SQL as root with the server's client: MariaDB's and
+    // MySQL's in batch mode, psql on the postgres database, stopping at the
+    // first error.
+    [[nodiscard]] std::vector<std::string> sql_client_args() const {
+        if (pg()) {
+            return {"--dbname=postgres", "--no-psqlrc", "--set=ON_ERROR_STOP=1", "--quiet"};
+        }
+        return {"--batch"};
+    }
+
+    // PostgreSQL (D29): the data folder set up the first time (initdb, with
+    // the superuser's password from a file), a superuser password put right
+    // when the saved one is gone or refused (single-user mode, nothing
+    // listening), FloServer's pg_hba.conf, then postgres, waiting until the
+    // superuser can log in. postgres refuses to run with administrator
+    // rights: it gets a restricted token on Windows, as pg_ctl gives it.
+    std::unique_ptr<ChildProcess> start_postgres(bool reset_root, bool& wrong_root, std::string& error) {
+        std::error_code ec;
+        fs::create_directories(files_.folder, ec);
+#ifndef _WIN32
+        fs::permissions(files_.folder, fs::perms::owner_all, fs::perm_options::replace, ec);
+#endif
+        if (!fs::is_regular_file(files_.server, ec)) {
+            error = path_to_utf8(files_.server.filename()) + " is missing from " + path_to_utf8(files_.base_dir);
+            return nullptr;
+        }
+        auto root = reset_root ? std::nullopt : secrets_.read(root_name());
+        bool new_root = false;
+        if (!root) {
+            root = generate_password();
+            if (!root || !secrets_.save(root_name(), *root, error)) {
+                error = "can't keep the postgres user's password: " + error;
+                return nullptr;
+            }
+            new_root = true;
+        }
+        if (!postgresql_initialized(files_)) {
+            if (!set_up_postgres(*root, error)) {
+                return nullptr;
+            }
+        } else if (new_root && !reset_postgres_superuser(*root, error)) {
+            return nullptr;
+        }
+        if (!probe_(internal_)) {
+            const auto port = internal_ports_->pick(internal_.load(), port_, probe_);
+            if (!port) {
+                error = "no free port for " + title();
+                return nullptr;
+            }
+            internal_ = *port;
+        }
+        if (!write_file_atomically(files_.config, postgresql_hba(), error)) {
+            return nullptr;
+        }
+        const std::uintmax_t log_from = log_size();
+        ChildOptions o;
+        o.program = files_.server;
+        o.args = postgresql_server_args(files_, internal_);
+        o.working_dir = files_.folder;
+        o.output_log = files_.error_log;
+        o.restricted_token = true;
+        auto process = ChildProcess::start(o, error);
+        if (!process) {
+            return nullptr;
+        }
+        const fs::path probe = files_.folder / ("probe-" + random_suffix() + ".sql");
+        if (!write_private_file_atomically(probe, "SELECT 1;\n", error)) {
+            shut_down(*process);
+            return nullptr;
+        }
+        const auto deadline = Clock::now() + start_limit_;
+        bool ready = false;
+        std::string login_error;
+        while (Clock::now() < deadline && process->running()) {
+            // Ready: its postmaster.pid names our process (not another server
+            // that took the port meanwhile) and the superuser can log in.
+            const auto pid = read_small_file(files_.pid_file, 256);
+            if (pid && std::to_string(process->pid()) == std::string(pid->substr(0, pid->find_first_of("\r\n")))) {
+                if (const auto sock = connect_loopback(internal_)) {
+                    close_socket(*sock);
+                    login_error.clear();
+                    if (run_tool(files_.client, sql_client_args(), *root, probe, 30s, login_error)) {
+                        ready = true;
+                        break;
+                    }
+                    // A wrong password won't put itself right; "starting up" will.
+                    if (login_error.find("password authentication failed") != std::string::npos) {
+                        if (!new_root) {
+                            wrong_root = true;
+                        }
+                        break;
+                    }
+                }
+            }
+            std::this_thread::sleep_for(200ms);
+        }
+        fs::remove(probe, ec);
+        if (!ready) {
+            if (!login_error.empty() && process->running()) {
+                error = "the postgres user can't log in to " + title() + ": " + login_error;
+            } else {
+                error = "postgres didn't start: " + start_errors(log_from, o.output_log);
+            }
+            shut_down(*process);
+            return nullptr;
+        }
+        return process;
+    }
+
+    // initdb, once, with the superuser's password in an owner-only file
+    // (deleted on every way out). A data folder left half-way is moved aside,
+    // never deleted: it may hold someone's databases. FloServer's defaults for
+    // a development server go at the end of its postgresql.conf, where the
+    // user's own settings (Settings > Database) can follow them.
+    bool set_up_postgres(const std::string& root, std::string& error) {
+        std::error_code ec;
+        fs::remove(files_.installed_marker, ec);
+        if (fs::exists(files_.data_dir, ec) && !(fs::is_directory(files_.data_dir, ec) && fs::is_empty(files_.data_dir, ec))) {
+            fs::path aside = files_.data_dir;
+            aside += ".failed-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+            fs::rename(files_.data_dir, aside, ec);
+            if (ec) {
+                error = "can't move the unfinished data folder aside: " + error_text(ec);
+                return false;
+            }
+        }
+        const AtExit gone([this] { remove_secret_file(files_.init_file); });
+        if (!write_private_file_atomically(files_.init_file, root + "\n", error)) {
+            return false;
+        }
+        const auto major = Version::parse(files_.series);
+        ChildOptions o;
+        o.program = files_.install_db;
+        o.args = postgresql_initdb_args(major && !major->parts().empty() ? static_cast<int>(major->parts().front()) : 0,
+                                        path_to_utf8(files_.init_file.filename()));
+        o.working_dir = files_.folder;
+        o.output_log = files_.folder / "install.log";
+        // initdb gives itself a restricted token on Windows.
+        auto child = ChildProcess::start(o, error);
+        if (!child) {
+            return false;
+        }
+        const auto code = child->wait(start_limit_);
+        if (!code) {
+            child->kill();
+        }
+        if (code != 0 || !fs::is_regular_file(files_.data_dir / "PG_VERSION", ec)) {
+            child.reset();
+            error = "setting up " + title() + " failed: " + tail(o.output_log, 800);
+            return false;
+        }
+        const fs::path conf = files_.data_dir / "postgresql.conf";
+        const std::string text = read_small_file(conf, std::size_t{1024} * 1024).value_or("");
+        if (!write_file_atomically(conf,
+                                   text + "\n# FloServer's defaults for a development server (D29)\n"
+                                          "shared_buffers = 64MB\nmax_connections = 50\n",
+                                   error)) {
+            return false;
+        }
+        return write_file_atomically(files_.installed_marker, "1\n", error);
+    }
+
+    // A new password for the superuser while the server is down: postgres in
+    // single-user mode (no network at all) runs ALTER ROLE from an
+    // owner-only file on its input.
+    bool reset_postgres_superuser(const std::string& root, std::string& error) {
+        const fs::path sql = files_.folder / ("query-" + random_suffix() + ".sql");
+        const AtExit gone([&sql] { remove_secret_file(sql); });
+        if (!write_private_file_atomically(sql, pg_superuser_password_sql(root), error)) {
+            return false;
+        }
+        ChildOptions o;
+        o.program = files_.server;
+        o.args = {"--single", "-D", path_to_utf8(files_.data_dir.filename()), std::string(kPostgreSqlSuperuser)};
+        o.working_dir = files_.folder;
+        o.stdin_file = sql;
+        o.output_log = files_.folder / "reset.log";
+        o.restricted_token = true;
+        auto child = ChildProcess::start(o, error);
+        if (!child) {
+            return false;
+        }
+        const auto code = child->wait(60s);
+        if (code != 0) {
+            if (!code) {
+                child->kill();
+            }
+            error = "the postgres user's password couldn't be set: " + tail(o.output_log, 600);
+            return false;
+        }
+        return true;
     }
 
     // mariadb-install-db (MySQL: mysqld --initialize-insecure), once. A
@@ -1223,7 +1491,7 @@ void DatabaseService::reload_locked() {
     // By server: "mariadb-11.4", "mysql-8.4" (D28).
     std::map<std::string, Want> wanted;
     const auto want_of = [&wanted](const InstalledRuntime* r) -> Want& {
-        Want& w = wanted[database_server_key(r->name, mariadb_series(r->version))];
+        Want& w = wanted[database_server_key(r->name, database_series(r->name, r->version))];
         if (w.runtime == nullptr || Version::parse(r->version) > Version::parse(w.runtime->version)) {
             w.runtime = r;
         }
@@ -1231,7 +1499,7 @@ void DatabaseService::reload_locked() {
         return w;
     };
     for (const PlannedSite& site : plan.sites) {
-        if (site.state != SiteState::Ready || !site.database || !mysql_protocol_family(site.database->family)) {
+        if (site.state != SiteState::Ready || !site.database || !database_service_family(site.database->family)) {
             continue;
         }
         const InstalledRuntime* r = best_server(installed, site.database->family, site.database->version);
@@ -1274,15 +1542,15 @@ void DatabaseService::reload_locked() {
     // other clients reach any installed MariaDB or MySQL, which then sleeps
     // when idle.
     for (const InstalledRuntime& one : installed) {
-        if (!mysql_protocol_family(one.name)) {
+        if (!database_service_family(one.name)) {
             continue;
         }
-        const std::string series = mariadb_series(one.version);
+        const std::string series = database_series(one.name, one.version);
         if (wanted.contains(database_server_key(one.name, series))) {
             continue;
         }
         if (const InstalledRuntime* r = best_server(installed, one.name, series);
-            r != nullptr && mariadb_series(r->version) == series) {
+            r != nullptr && database_series(r->name, r->version) == series) {
             (void)want_of(r);
         }
     }
@@ -1339,7 +1607,7 @@ void DatabaseService::reload_locked() {
         if (retiring_keys.contains(key)) {
             continue;  // its old server still uses the data folder: next time
         }
-        MariaDbFiles files = mariadb_files(want.runtime->dir, want.runtime->version, config_.data_dir, want.family);
+        MariaDbFiles files = database_files(want.runtime->dir, want.runtime->version, config_.data_dir, want.family);
         // The series keeps its port (.env files have it). D12: the first
         // time 3306 when free, else 3307, 3308... never another stack's.
         // A port chosen in Settings comes first.
@@ -1375,7 +1643,7 @@ void DatabaseService::reload_locked() {
             }
             const std::set<Port> kept = ports_kept_by_others(config_.data_dir, files.folder);
             avoid.insert(kept.begin(), kept.end());
-            port = pick_port_from(kFirstDatabasePort, avoid, config_.probe);
+            port = pick_port_from(first_public_port(want.family), avoid, config_.probe);
             if (!port) {
                 continue;
             }
@@ -1395,8 +1663,9 @@ void DatabaseService::reload_locked() {
         std::string path_problem;
 #ifdef _WIN32
         const fs::path install_dir = files.base_dir;
-        // Oracle's mysqld.exe reads paths in the ANSI code page: ASCII (8.3) forms.
-        if (want.family == kMySqlFamily) {
+        // Oracle's mysqld.exe and postgres.exe read paths in the ANSI code
+        // page: ASCII (8.3) forms.
+        if (want.family == kMySqlFamily || want.family == kPostgreSqlFamily) {
             path_problem = ascii_files_problem(files);
         }
 #endif
@@ -1525,7 +1794,7 @@ std::optional<DatabaseLogin> DatabaseService::project_login(const std::string& p
             return std::nullopt;
         }
     }
-    if (reserved_database_name(own_name)) {
+    if (reserved_database_name(own_name) || (family == kPostgreSqlFamily && pg_reserved_name(login.database))) {
         // MariaDB's own name follows a rename; shared sites' is kept by one,
         // so only a project under another name gets a database of its own.
         refusal = {"reserved_name", "\"" + login.database + "\" is one of " + database_family_title(family) +
@@ -1547,9 +1816,9 @@ std::optional<DatabaseLogin> DatabaseService::project_login(const std::string& p
             refusal = not_installed(family, spec->version);
             return std::nullopt;
         }
-        server = server_of(family, mariadb_series(r->version));
+        server = server_of(family, database_series(family, r->version));
         if (!server) {
-            refusal = no_server_yet(family, mariadb_series(r->version));
+            refusal = no_server_yet(family, database_series(family, r->version));
             return std::nullopt;
         }
     }
@@ -1571,6 +1840,7 @@ std::optional<DatabaseLogin> DatabaseService::project_login(const std::string& p
         refusal = removing(project);
         return std::nullopt;
     }
+    login.family = family;
     login.port = server->port();
     const std::string secret = server->key() + "/" + own_name;
     auto password = secrets_.read(secret);
@@ -1582,7 +1852,10 @@ std::optional<DatabaseLogin> DatabaseService::project_login(const std::string& p
         }
     }
     login.password = *password;
-    if (!server->run_sql(project_database_sql(login.database, login.user, login.password, family), error)) {
+    const std::string sql = family == kPostgreSqlFamily
+                                ? pg_project_database_sql(login.database, login.user, login.password)
+                                : project_database_sql(login.database, login.user, login.password, family);
+    if (!server->run_sql(sql, error)) {
         refusal = {"database_failed", error};
         return std::nullopt;
     }
@@ -1611,9 +1884,9 @@ std::shared_ptr<DatabaseService::Server> DatabaseService::project_server(const s
         refusal = not_installed(family, spec->version);
         return nullptr;
     }
-    auto server = server_of(family, mariadb_series(r->version));
+    auto server = server_of(family, database_series(family, r->version));
     if (!server) {
-        refusal = no_server_yet(family, mariadb_series(r->version));
+        refusal = no_server_yet(family, database_series(family, r->version));
     }
     return server;
 }
@@ -1659,6 +1932,10 @@ bool DatabaseService::run_project_tool(const std::string& project, bool dump, co
     // Its login first: made if it never was, and the server started.
     const auto login = project_login(project, refusal, true);
     if (!login) {
+        return false;
+    }
+    if (login->family == kPostgreSqlFamily) {
+        refusal = {"not_supported", "backups of PostgreSQL databases come with the next FloServer build"};
         return false;
     }
     const auto server = project_server(project, refusal);
@@ -1733,8 +2010,8 @@ std::optional<std::uint64_t> DatabaseService::project_database_bytes(const std::
     }
     const ConfigResult cfg = read_project_config_file(*p);
     const DatabaseSpec* spec = served(cfg);
-    if (spec == nullptr) {
-        return std::nullopt;
+    if (spec == nullptr || spec->family == kPostgreSqlFamily) {
+        return std::nullopt;  // PostgreSQL keeps a database by number (base/<oid>): later
     }
     const auto installed = list_installed(runtimes_dir(config_.data_dir));
     const InstalledRuntime* r = best_server(installed, spec->family, spec->version);
@@ -1815,10 +2092,10 @@ bool DatabaseService::drop_project_database(const std::string& project, ServiceR
     const auto installed = list_installed(runtimes_dir(config_.data_dir));
     std::map<std::string, std::pair<std::string, std::string>> servers;  // key -> family, series
     for (const InstalledRuntime& r : installed) {
-        if (!mysql_protocol_family(r.name)) {
+        if (!database_service_family(r.name)) {
             continue;
         }
-        const std::string s = mariadb_series(r.version);
+        const std::string s = database_series(r.name, r.version);
         const std::string key = database_server_key(r.name, s);
         if (!s.empty() && secrets_.read(secret_of(key))) {
             servers[key] = {r.name, s};
@@ -1828,7 +2105,8 @@ bool DatabaseService::drop_project_database(const std::string& project, ServiceR
     if (const DatabaseSpec* spec = served(cfg)) {
         const std::string& family = spec->family;
         if (const InstalledRuntime* r = best_server(installed, family, spec->version)) {
-            servers[database_server_key(family, mariadb_series(r->version))] = {family, mariadb_series(r->version)};
+            servers[database_server_key(family, database_series(family, r->version))] = {family,
+                                                                                         database_series(family, r->version)};
         }
     }
     // Servers already done, for a refusal part-way: trying again finishes the rest.
@@ -1881,8 +2159,13 @@ bool DatabaseService::drop_project_database(const std::string& project, ServiceR
         const std::lock_guard lock(server->login_mutex());
         const bool made = secrets_.read(secret_of(key)).has_value();  // FloServer made one there
         const std::string on_server = server_database_name(database, family);
-        if (!server->run_sql(
-                drop_project_database_sql(on_server, project_database_user(on_server, family), family), error)) {
+        const std::string drop = family == kPostgreSqlFamily
+                                     ? pg_drop_project_database_sql(on_server, project_database_user(on_server, family))
+                                     : drop_project_database_sql(on_server, project_database_user(on_server, family), family);
+        if (family == kPostgreSqlFamily && pg_reserved_name(on_server)) {
+            return failed(title, {"reserved_name", "\"" + on_server + "\" is one of PostgreSQL's own names"});
+        }
+        if (!server->run_sql(drop, error)) {
             return failed(title, {"database_failed",
                                   std::string("the database ").append(database).append(" couldn't be deleted: ").append(error)});
         }
@@ -1909,6 +2192,10 @@ std::optional<DatabaseLogin> DatabaseService::shared_login(ServiceRefusal& refus
         refusal = {"shared_off", "shared sites are off: flo shared on"};
         return std::nullopt;
     }
+    if (shared->database && shared->database->family == kPostgreSqlFamily) {
+        refusal = {"not_supported", "shared sites use MariaDB or MySQL; PostgreSQL is for projects"};
+        return std::nullopt;
+    }
     if (!shared->database || !mysql_protocol_family(shared->database->family)) {
         refusal = {"no_database", "shared sites have no database (choose one in Settings, or: flo shared db 11.4)"};
         return std::nullopt;
@@ -1932,7 +2219,7 @@ std::optional<DatabaseLogin> DatabaseService::shared_login(ServiceRefusal& refus
         const std::lock_guard lock(mutex_);
         reload_locked();
         if (r != nullptr) {
-            if (const auto it = servers_.find(database_server_key(r->name, mariadb_series(r->version)));
+            if (const auto it = servers_.find(database_server_key(r->name, database_series(r->name, r->version)));
                 it != servers_.end()) {
                 server = it->second;
             }
@@ -1952,6 +2239,7 @@ std::optional<DatabaseLogin> DatabaseService::shared_login(ServiceRefusal& refus
     }
     const std::lock_guard lock(server->login_mutex());
     DatabaseLogin login;
+    login.family = server->family();
     login.database = std::string(kSharedDatabaseUser);
     login.user = std::string(kSharedDatabaseUser);
     login.port = server->port();
@@ -2015,7 +2303,7 @@ namespace {
 ServiceRefusal no_server(const fs::path& data_dir, std::string_view family, const std::string& series) {
     const auto installed = list_installed(runtimes_dir(data_dir));
     const InstalledRuntime* r = best_server(installed, family, series);
-    if (r == nullptr || mariadb_series(r->version) != series) {
+    if (r == nullptr || database_series(family, r->version) != series) {
         return not_installed(family, series);
     }
     return no_server_yet(family, series);
@@ -2080,7 +2368,7 @@ std::optional<std::string> DatabaseService::root_password(const std::string& ser
 }
 
 DatabaseService::RemovalHold DatabaseService::hold_for_removal(const std::string& version, std::string_view family) {
-    const std::string series = mariadb_series(version);
+    const std::string series = database_series(family, version);
     const std::string key = database_server_key(family, series);
     std::vector<std::shared_ptr<Server>> going;
     {
@@ -2098,7 +2386,7 @@ DatabaseService::RemovalHold DatabaseService::hold_for_removal(const std::string
         // The series' last install: its server goes with it.
         bool last = true;
         for (const InstalledRuntime& r : list_installed(runtimes_dir(config_.data_dir))) {
-            if (r.name == family && r.version != version && mariadb_series(r.version) == series) {
+            if (r.name == family && r.version != version && database_series(family, r.version) == series) {
                 last = false;
             }
         }
@@ -2172,8 +2460,9 @@ std::optional<DatabaseLogin> DatabaseService::root_login(const std::string& seri
         return std::nullopt;
     }
     DatabaseLogin login;
+    login.family = server->family();
     login.port = server->port();
-    login.user = "root";
+    login.user = root_user(family);
     login.password = std::move(*password);
     return login;
 }
@@ -2200,6 +2489,10 @@ bool DatabaseService::set_root_password(const std::string& series, const std::st
 std::optional<fs::path> DatabaseService::final_ini(const std::string& series, ServiceRefusal& refusal,
                                                    std::string_view family) const {
     const std::string title = database_family_title(family) + " " + series;
+    if (family == kPostgreSqlFamily) {
+        refusal = {"not_supported", "PostgreSQL's settings come with the next FloServer build"};
+        return std::nullopt;
+    }
     std::shared_ptr<Server> server;
     {
         const std::lock_guard lock(mutex_);
@@ -2218,7 +2511,7 @@ std::optional<fs::path> DatabaseService::final_ini(const std::string& series, Se
     } else {
         const auto installed = list_installed(runtimes_dir(config_.data_dir));
         const InstalledRuntime* r = best_server(installed, family, series);
-        if (r == nullptr || mariadb_series(r->version) != series) {
+        if (r == nullptr || database_series(family, r->version) != series) {
             refusal = {"not_installed", title + " isn't installed"};
             return std::nullopt;
         }

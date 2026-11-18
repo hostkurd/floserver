@@ -545,7 +545,7 @@ struct Service {
                 return protocol::make_error(r.id, "in_use", "Garnet (Redis) needs the .NET runtime; remove Garnet instead");
             }
             const floserver::core::DatabaseService::RemovalHold hold =
-                floserver::core::mysql_protocol_family(name) && databases
+                floserver::core::database_service_family(name) && databases
                     ? databases->hold_for_removal(version, name)
                     : floserver::core::DatabaseService::RemovalHold();
             // Garnet saves and stops first (D30): its program is in use while it runs.

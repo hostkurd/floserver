@@ -1,11 +1,15 @@
 #include "floserver/core/database_engine.h"
 
+#include "floserver/core/mariadb.h"
+#include "floserver/core/version.h"
+
 #include <algorithm>
 
 namespace floserver::core {
 
 const std::vector<std::string>& database_families() {
-    static const std::vector<std::string> families = {std::string(kMariaDbFamily), std::string(kMySqlFamily)};
+    static const std::vector<std::string> families = {std::string(kMariaDbFamily), std::string(kMySqlFamily),
+                                                      std::string(kPostgreSqlFamily)};
     return families;
 }
 
@@ -16,12 +20,30 @@ bool known_database_family(std::string_view family) {
 
 bool mysql_protocol_family(std::string_view family) { return family == kMariaDbFamily || family == kMySqlFamily; }
 
+bool database_service_family(std::string_view family) {
+    return mysql_protocol_family(family) || family == kPostgreSqlFamily;
+}
+
+std::string database_series(std::string_view family, std::string_view version) {
+    if (family != kPostgreSqlFamily) {
+        return mariadb_series(version);
+    }
+    const auto v = Version::parse(version);
+    if (!v || version.empty() || version.front() < '1' || version.front() > '9') {
+        return {};
+    }
+    return std::string(version.substr(0, version.find('.')));
+}
+
 std::string database_family_title(std::string_view family) {
     if (family == kMariaDbFamily) {
         return "MariaDB";
     }
     if (family == kMySqlFamily) {
         return "MySQL";
+    }
+    if (family == kPostgreSqlFamily) {
+        return "PostgreSQL";
     }
     return std::string(family);
 }

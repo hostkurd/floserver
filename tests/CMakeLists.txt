@@ -17,6 +17,7 @@ add_executable(floserver_tests
     test_mariadb_settings.cpp
     test_mcp_server.cpp
     test_mysql.cpp
+    test_postgresql.cpp
     test_database_service.cpp
     test_data_folder.cpp
     test_ports.cpp
