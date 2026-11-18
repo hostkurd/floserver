@@ -150,7 +150,13 @@ steps 2 to 6 below in one window:
    - checks the files: those in the live list must still be served at their
      size; new ones are downloaded from the CDN and compared with the official
      checksum list (PHP, MariaDB, Node.js, Composer, Python, phpMyAdmin's .sha256) or the original
-     download (nginx, WordPress). Apache is compared by hand: select it,
+     download (nginx, WordPress). PostgreSQL (D29) is compared inside: EDB
+     publishes no checksums and its zip is mostly pgAdmin, so the CDN has a
+     server-only zip made by `tools/postgresql/make-postgresql-server-zip.ps1`
+     (`postgresql/<v>/postgresql-<v>-<n>-windows-x64-server.zip`), and the
+     Publisher downloads EDB's own `-binaries.zip` (about 350 MB) and requires
+     every file in ours to be byte-identical to the same path in EDB's, plus
+     the server's programs. Apache is compared by hand: select it,
      compare the SHA-256 shown with apachelounge.com, tick the box and press
      Publish again. FloServer's own installer is compared by hand too: with
      the SHA-256 of the MSI in the CI run's artifact;

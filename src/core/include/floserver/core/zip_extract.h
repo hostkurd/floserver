@@ -83,6 +83,19 @@ struct ZipResult {
 [[nodiscard]] std::optional<std::uint64_t> zip_entry_size(const std::filesystem::path& archive, std::string_view name,
                                                           std::string& error);
 
+// Each plain file in the archive, by its exact name there: its size and
+// SHA-256 (lowercase hex), its bytes unpacked and checked (CRC-32 and size).
+// Folders aren't listed. For the Publisher's check that a file FloServer
+// made from an official archive holds only that archive's files (D29).
+// `stop`, when set, ends it (nothing then, with error "stopped").
+struct ZipFileHash {
+    std::uint64_t size = 0;
+    std::string sha256;
+    bool operator==(const ZipFileHash&) const = default;
+};
+[[nodiscard]] std::optional<std::vector<std::pair<std::string, ZipFileHash>>> zip_file_hashes(
+    const std::filesystem::path& archive, std::string& error, const std::function<bool()>& stop = {});
+
 // The relative path an entry name is unpacked to, or empty when the name is
 // refused. Exposed for tests.
 [[nodiscard]] std::filesystem::path safe_entry_path(std::string_view name, bool unicode_names = false);

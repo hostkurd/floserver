@@ -1,6 +1,8 @@
 #include "floserver/core/zip_extract.h"
 
+#include "floserver/core/encoding.h"
 #include "floserver/core/paths.h"
+#include "floserver/core/sha256.h"
 
 #include <miniz.h>
 
@@ -385,6 +387,49 @@ bool stream_zip_entry(const fs::path& archive, std::string_view name,
         return false;
     }
     return true;
+}
+
+std::optional<std::vector<std::pair<std::string, ZipFileHash>>> zip_file_hashes(const fs::path& archive,
+                                                                                std::string& error,
+                                                                                const std::function<bool()>& stop) {
+    error.clear();
+    Reader reader;
+    Archive a;
+    if (!open_archive(archive, reader, a, error)) {
+        return std::nullopt;
+    }
+    std::vector<std::pair<std::string, ZipFileHash>> out;
+    const mz_uint count = mz_zip_reader_get_num_files(&a.zip);
+    for (mz_uint i = 0; i < count; ++i) {
+        if (stop && stop()) {
+            error = "stopped";
+            return std::nullopt;
+        }
+        mz_zip_archive_file_stat st{};
+        if (mz_zip_reader_file_stat(&a.zip, i, &st) == MZ_FALSE) {
+            error = "the archive's file list can't be read: " + zip_error(a.zip);
+            return std::nullopt;
+        }
+        if (st.m_is_directory != 0) {
+            continue;
+        }
+        if (st.m_is_encrypted != MZ_FALSE || st.m_is_supported == MZ_FALSE) {
+            error = "the archive has an encrypted or unsupported entry: " + std::string(st.m_filename);
+            return std::nullopt;
+        }
+        Sha256 hash;
+        const std::function<bool(std::string_view)> sink = [&hash](std::string_view piece) {
+            hash.update(piece);
+            return true;
+        };
+        Sink s{&sink, 0, st.m_uncomp_size, false};
+        if (mz_zip_reader_extract_to_callback(&a.zip, i, to_sink, &s, 0) == MZ_FALSE || s.written != st.m_uncomp_size) {
+            error = "can't unpack " + std::string(st.m_filename) + ": " + zip_error(a.zip);
+            return std::nullopt;
+        }
+        out.emplace_back(std::string(st.m_filename), ZipFileHash{st.m_uncomp_size, to_hex(hash.finish())});
+    }
+    return out;
 }
 
 std::optional<std::uint64_t> zip_entry_size(const fs::path& archive, std::string_view name, std::string& error) {
