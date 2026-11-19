@@ -269,6 +269,8 @@ void UpdatesWindow::fill() {
         item.pszText = const_cast<wchar_t*>(title.c_str());
         item.lParam = static_cast<LPARAM>(i);
         const int at = ListView_InsertItem(list_, &item);
+        // And set again: a list with check boxes may give a new row its own (unticked) state.
+        ListView_SetCheckState(list_, at, r.ticked ? TRUE : FALSE);
         const std::wstring listed = r.listed.empty() ? L"—" : widen(r.listed);
         const std::wstring latest = r.latest.empty() ? L"—" : widen(r.latest);
         const std::wstring kind = kind_text(r);

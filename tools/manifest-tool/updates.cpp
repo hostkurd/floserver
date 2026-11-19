@@ -478,6 +478,16 @@ std::optional<std::string> ask(core::HttpTransport& http, const std::string& url
     return body;
 }
 
+// Whether a file is there: its first bytes are asked for and the rest left.
+// The HTTP status, or 0 when nothing answered.
+int exists(core::HttpTransport& http, const std::string& url, const std::atomic<bool>* cancel) {
+    core::HttpLimits limits;
+    limits.max_time = std::chrono::seconds{30};
+    limits.cancel = cancel;
+    const core::HttpReply reply = http.get(url, limits, [](std::span<const std::uint8_t>) { return false; });
+    return reply.status;
+}
+
 }  // namespace
 
 std::map<std::string, FinderAnswer> find_updates(core::HttpTransport& http,
@@ -545,10 +555,36 @@ std::map<std::string, FinderAnswer> find_updates(core::HttpTransport& http,
             via("https://www.phpmyadmin.net/home_page/version.json",
                 [&](std::string_view t) { return one(parse_phpmyadmin_version(t)); });
         } else if (runtime == "mysql") {
-            via("https://dev.mysql.com/downloads/mysql/8.4.html", [&](std::string_view t) {
-                const auto v = parse_mysql_page(t);
-                return v ? std::vector<UpstreamVersion>{{"8.4", *v}} : std::vector<UpstreamVersion>{};
-            });
+            // dev.mysql.com doesn't answer programs reliably: Oracle's download
+            // server is asked for the next 8.4 patches' zips instead.
+            std::string newest;
+            for (const std::string& v : versions) {
+                if (update_series("mysql", v) == "8.4" && (newest.empty() || newer(v, newest))) {
+                    newest = v;
+                }
+            }
+            if (newest.empty()) {
+                newest = "8.4.0";
+            }
+            a.source = "https://cdn.mysql.com/Downloads/MySQL-8.4/";
+            const auto patch = std::stoi(newest.substr(newest.rfind('.') + 1));
+            std::string latest = newest;
+            for (int next = patch + 1; next <= patch + 6; ++next) {
+                const std::string v = "8.4." + std::to_string(next);
+                const int status = exists(http, a.source + "mysql-" + v + "-winx64.zip", cancel);
+                if (status == 0) {
+                    a.problem = a.source + ": no answer";
+                    read = false;
+                    break;
+                }
+                if (status != 200) {
+                    break;  // not out yet
+                }
+                latest = v;
+            }
+            if (read) {
+                got.push_back({"8.4", latest});
+            }
         } else if (runtime == "php-redis") {
             via("https://pecl.php.net/rest/r/redis/stable.txt", [&](std::string_view t) { return one(parse_pecl_stable(t)); });
         } else if (runtime == "dotnet") {
