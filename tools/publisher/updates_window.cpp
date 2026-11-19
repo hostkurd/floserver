@@ -81,7 +81,12 @@ UpdatesWindow::~UpdatesWindow() {
 }
 
 void UpdatesWindow::open(HWND owner, std::map<std::string, std::vector<std::string>> listed) {
-    listed_ = std::move(listed);
+    // The same list as last time: the rows (and their ticks) are kept, no new
+    // check (GitHub allows 60 an hour). A check still running isn't swapped.
+    const bool same = listed == listed_ && !rows_.empty();
+    if (!busy_) {
+        listed_ = std::move(listed);
+    }
     if (hwnd_ == nullptr) {
         HINSTANCE inst = GetModuleHandleW(nullptr);
         WNDCLASSEXW wc{};
@@ -117,7 +122,9 @@ void UpdatesWindow::open(HWND owner, std::map<std::string, std::vector<std::stri
     }
     ShowWindow(hwnd_, SW_SHOWNORMAL);
     SetForegroundWindow(hwnd_);
-    check();
+    if (!same && !busy_) {
+        check();
+    }
 }
 
 LRESULT CALLBACK UpdatesWindow::proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -227,11 +234,17 @@ void UpdatesWindow::check() {
             *found = mt::find_updates(
                 *http, listed, &cancel_,
                 [target](std::string_view runtime) {
-                    PostMessageW(target, kMsgAsking, 0, reinterpret_cast<LPARAM>(new std::string(runtime)));
+                    auto text = std::make_unique<std::string>(runtime);
+                    if (PostMessageW(target, kMsgAsking, 0, reinterpret_cast<LPARAM>(text.get())) != FALSE) {
+                        (void)text.release();  // the window owns it now
+                    }
                 },
                 save);
         }
-        PostMessageW(target, kMsgFound, 0, reinterpret_cast<LPARAM>(found.release()));
+        // The window may be gone (the Publisher closed): then nothing is handed over.
+        if (PostMessageW(target, kMsgFound, 0, reinterpret_cast<LPARAM>(found.get())) != FALSE) {
+            (void)found.release();
+        }
     });
 }
 
@@ -267,7 +280,8 @@ void UpdatesWindow::fill() {
     }
     status += L". Getting them comes in the next Publisher.";
     SetWindowTextW(status_, status.c_str());
-    if (!saved_to_.empty()) {
+    std::error_code ec;
+    if (!saved_to_.empty() && !fs::is_empty(floserver::ui::win::widen(saved_to_), ec) && !ec) {
         ShellExecuteW(hwnd_, L"explore", widen(saved_to_).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     }
 }
@@ -317,6 +331,25 @@ LRESULT UpdatesWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_DPICHANGED: {
         dpi_ = HIWORD(wp);
+        // Fonts at the new DPI for every control.
+        const auto font = [this](int pt, int weight) {
+            LOGFONTW lf{};
+            lf.lfHeight = -MulDiv(pt, static_cast<int>(dpi_), 72);
+            lf.lfWeight = weight;
+            lf.lfQuality = CLEARTYPE_QUALITY;
+            wcscpy_s(lf.lfFaceName, L"Segoe UI");
+            return CreateFontIndirectW(&lf);
+        };
+        HFONT old_font = font_;
+        HFONT old_heading = heading_font_;
+        font_ = font(9, FW_NORMAL);
+        heading_font_ = font(11, FW_SEMIBOLD);
+        for (HWND c : {hint_, list_, status_, keep_answers_, check_again_, get_, close_}) {
+            SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
+        }
+        SendMessageW(heading_, WM_SETFONT, reinterpret_cast<WPARAM>(heading_font_), TRUE);
+        DeleteObject(old_font);
+        DeleteObject(old_heading);
         const auto* r = int_to_ptr<const RECT*>(lp);
         SetWindowPos(hwnd_, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER);
         return 0;
@@ -344,7 +377,14 @@ LRESULT UpdatesWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
             const auto* lv = int_to_ptr<const NMLISTVIEW*>(lp);
             const auto row = static_cast<std::size_t>(lv->lParam);
             if ((lv->uChanged & LVIF_STATE) != 0 && row < rows_.size()) {
-                rows_[row].ticked = ListView_GetCheckState(list_, lv->iItem) != FALSE;
+                const bool actionable =
+                    rows_[row].kind == mt::UpdateKind::Update || rows_[row].kind == mt::UpdateKind::NewSeries;
+                const bool ticked = ListView_GetCheckState(list_, lv->iItem) != FALSE;
+                if (ticked && !actionable) {
+                    ListView_SetCheckState(list_, lv->iItem, FALSE);  // nothing to get
+                } else {
+                    rows_[row].ticked = ticked;
+                }
             }
         }
         break;
@@ -362,9 +402,15 @@ LRESULT UpdatesWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
             break;
         }
         break;
-    case WM_NCDESTROY:
-        hwnd_ = nullptr;  // destroyed with the Publisher's window
+    case WM_DESTROY:
+        cancel_ = true;  // destroyed with the Publisher's window: the check stops
         break;
+    case WM_NCDESTROY: {
+        HWND gone = hwnd_;
+        hwnd_ = nullptr;
+        list_ = nullptr;
+        return DefWindowProcW(gone, msg, wp, lp);
+    }
     case WM_CLOSE:
         ShowWindow(hwnd_, SW_HIDE);  // kept, with its rows, until the Publisher closes
         return 0;

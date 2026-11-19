@@ -24,7 +24,7 @@ TEST_CASE("updates: each site's answer read as the newest version of each series
     CHECK(update_series("bun", "1.3.14").empty());
     CHECK(update_series("dotnet", "10.0.14") == "10.0");
 
-    CHECK(parse_php_sums("aa *php-8.5.13-nts-Win32-vs17-x64.zip\n"
+    CHECK(parse_php_sums("aa *php-8.5.13-1-nts-Win32-vs17-x64.zip\n"
                          "bb *php-8.5.13-Win32-vs17-x64.zip\n"
                          "cc *php-8.4.16-nts-Win32-vs17-x64.zip\n"
                          "dd *php-8.2.30-nts-Win32-vs16-x64.zip\n"
@@ -79,11 +79,14 @@ TEST_CASE("updates: each site's answer read as the newest version of each series
         {"name":"cpython-3.14.2+20261118-x86_64-pc-windows-msvc-install_only_stripped.tar.gz"}]})") ==
           V{{"3.12", "3.12.17"}, {"3.13", "3.13.19"}, {"3.14", "3.14.2"}});
 
-    CHECK(parse_apachelounge_page(R"(<a href="/download/VS18/binaries/httpd-2.4.70-261115-Win64-VS18.zip">)") ==
-          V{{"2.4", "2.4.70"}});
+    CHECK(parse_apachelounge_page(R"(<a href="/download/VS18/binaries/httpd-2.4.70-261115-Win64-VS18.zip">
+                                      httpd-2.4.63-250207-win64-VS17.zip)") == V{{"2.4", "2.4.70"}});
+    CHECK(parse_apachelounge_page("httpd-2.4.63-250207-win64-VS17.zip") == V{{"2.4", "2.4.63"}});
     CHECK(parse_dotnet_releases(R"({"channel-version":"10.0","latest-release":"10.0.15","latest-runtime":"10.0.15"})") ==
           "10.0.15");
-    CHECK(parse_mysql_page("<h1>MySQL Community Server 8.4.14 LTS</h1> ... 8.4.13 ...") == "8.4.14");
+    CHECK(parse_mysql_page(R"(<a>mysql-8.4.14-winx64.zip</a> 10.18.4.200 <a>mysql-8.4.13-winx64.zip</a> 9.7.4)") ==
+          "8.4.14");
+    CHECK_FALSE(parse_mysql_page("MySQL 8.4.99 is coming"));
     CHECK(parse_pecl_stable("6.3.1\n") == "6.3.1");
 
     // Something that isn't the expected answer: nothing, never a guess.
@@ -140,6 +143,26 @@ TEST_CASE("updates: compared with the list, as Update, New series, Up to date or
     CHECK(row("Node.js").kind == UpdateKind::Failed);
     CHECK(row("Node.js").detail.find("HTTP 503") != std::string::npos);
 
+    // A site whose answer names none of the listed series: Failed, never up to date.
+    {
+        std::map<std::string, FinderAnswer> changed;
+        changed["php"].versions = {{"8.1", "8.1.34"}};
+        changed["php"].source = "https://downloads.php.net/~windows/releases/sha256sum.txt";
+        const auto r = compare_updates({{"php", {"8.5.12", "8.4.27"}}}, changed);
+        REQUIRE(r.size() == 1);
+        CHECK(r[0].kind == UpdateKind::Failed);
+        CHECK(r[0].detail.find("named none of the listed series") != std::string::npos);
+    }
+    // phpredis: an update isn't ticked (its Windows builds can come later).
+    {
+        std::map<std::string, FinderAnswer> redis;
+        redis["php-redis"].versions = {{"", "6.3.1"}};
+        const auto r = compare_updates({{"php-redis", {"6.3.0", "6.3.0"}}}, redis);
+        REQUIRE(r.size() == 1);
+        CHECK(r[0].kind == UpdateKind::Update);
+        CHECK_FALSE(r[0].ticked);
+    }
+
     CHECK(update_series_wanted("mysql", "8.4", {}));
     CHECK_FALSE(update_series_wanted("mysql", "9.5", {}));
     CHECK(update_series_wanted("composer", "2.12", {"2.10", "2.11"}));
@@ -156,15 +179,21 @@ TEST_CASE("updates: every site asked once, a failed one doesn't stop the others"
                                             {"release_id":"11.4","release_status":"Stable","release_support_type":"Long Term Support"}]})"});
     http.serve("https://downloads.mariadb.org/rest-api/mariadb/11.8/latest/", {200, R"({"releases":{"11.8.10":{}}})"});
     http.serve("https://downloads.mariadb.org/rest-api/mariadb/11.4/latest/", {200, R"({"releases":{"11.4.14":{}}})"});
-    http.serve("https://api.github.com/repos/axllent/mailpit/releases/latest", {200, "<html>rate limited</html>"});
+    http.serve("https://api.github.com/repos/axllent/mailpit/releases/latest", {200, "<html>not json</html>"});
+    http.serve("https://api.github.com/repos/oven-sh/bun/releases/latest", {403, "{}"});
+    http.serve("https://builds.dotnet.microsoft.com/dotnet/release-metadata/10.0/releases.json",
+               {200, R"({"latest-runtime":"10.0.15"})"});
 
     const std::map<std::string, std::vector<std::string>> listed = {
-        {"postgresql", {"18.7"}}, {"php", {"8.5.12"}}, {"mariadb", {"11.4.13", "11.8.9"}}, {"mailpit", {"1.33.0"}}};
+        {"postgresql", {"18.7"}}, {"php", {"8.5.12"}}, {"mariadb", {"11.4.13", "11.8.9"}}, {"mailpit", {"1.33.0"}},
+        {"bun", {"1.3.14"}}, {"dotnet", {"10.0.14"}}};
     std::vector<std::string> asked;
     const test_util::TempDir saved;
     const auto found = find_updates(http, listed, nullptr, [&asked](std::string_view r) { asked.emplace_back(r); },
                                     floserver::core::path_to_utf8(saved.path()));
-    CHECK(asked.size() == 4);
+    CHECK(asked.size() == 6);
+    CHECK(found.at("bun").problem.find("hourly limit") != std::string::npos);
+    CHECK(found.at("dotnet").versions == V{{"10.0", "10.0.15"}});  // the listed channel's address
     CHECK(found.at("postgresql").problem.empty());
     CHECK(found.at("postgresql").versions == V{{"18", "18.7"}, {"17", "17.12"}});
     CHECK(found.at("php").problem.find("HTTP 503") != std::string::npos);
@@ -178,5 +207,5 @@ TEST_CASE("updates: every site asked once, a failed one doesn't stop the others"
     for (const UpdateRow& r : rows) {
         updates += r.kind == UpdateKind::Update ? 1U : 0U;
     }
-    CHECK(updates == 2);  // MariaDB 11.8 and 11.4
+    CHECK(updates == 3);  // MariaDB 11.8 and 11.4, .NET
 }

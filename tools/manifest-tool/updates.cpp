@@ -118,7 +118,8 @@ std::string update_series(std::string_view runtime, std::string_view version) {
 }
 
 std::vector<UpstreamVersion> parse_php_sums(std::string_view text) {
-    static const std::regex re(R"(php-(\d+\.\d+\.\d+)-nts-Win32-vs1[67]-x64\.zip)");
+    // A rebuild has a number after the version ("php-8.5.12-1-nts-...").
+    static const std::regex re(R"(php-(\d+\.\d+\.\d+)(?:-\d+)?-nts-Win32-vs1[67]-x64\.zip)");
     return newest_by_series("php", regex_versions(text, re));
 }
 
@@ -284,7 +285,8 @@ std::vector<UpstreamVersion> parse_python_release(std::string_view text) {
 }
 
 std::vector<UpstreamVersion> parse_apachelounge_page(std::string_view html) {
-    static const std::regex re(R"(httpd-(\d+\.\d+\.\d+)-\d+-Win64-VS\d+\.zip)");
+    // "Win64" has been "win64" on some releases (2.4.63).
+    static const std::regex re(R"(httpd-(\d+\.\d+\.\d+)-\d+-[Ww]in64-VS\d+\.zip)");
     return newest_by_series("apache", regex_versions(html, re));
 }
 
@@ -295,7 +297,8 @@ std::optional<std::string> parse_dotnet_releases(std::string_view text) {
 }
 
 std::optional<std::string> parse_mysql_page(std::string_view html) {
-    static const std::regex re(R"((8\.4\.\d+))");
+    // The Windows zip's name: never a number elsewhere on the page.
+    static const std::regex re(R"(mysql-(8\.4\.\d+)-winx64\.zip)");
     std::optional<std::string> best;
     for (const std::string& v : regex_versions(html, re)) {
         if (!best || newer(v, *best)) {
@@ -375,6 +378,19 @@ std::vector<UpdateRow> compare_updates(const std::map<std::string, std::vector<s
             out.push_back(std::move(row));
             continue;
         }
+        // A site that names none of the listed series: its answer has changed
+        // (or isn't what was asked for), never "up to date".
+        const bool any_listed = std::any_of(f->second.versions.begin(), f->second.versions.end(),
+                                            [&have](const UpstreamVersion& u) { return have.contains(u.series); });
+        if (!any_listed) {
+            UpdateRow row;
+            row.runtime = runtime;
+            row.title = title_of(runtime, "");
+            row.kind = UpdateKind::Failed;
+            row.detail = f->second.source + " named none of the listed series (the site may have changed)";
+            out.push_back(std::move(row));
+            continue;
+        }
         std::set<std::string> seen;
         for (const UpstreamVersion& u : f->second.versions) {
             const auto h = have.find(u.series);
@@ -388,6 +404,11 @@ std::vector<UpdateRow> compare_updates(const std::map<std::string, std::vector<s
                 row.listed = h->second;
                 row.kind = newer(u.version, h->second) ? UpdateKind::Update : UpdateKind::UpToDate;
                 row.ticked = row.kind == UpdateKind::Update;
+                if (row.kind == UpdateKind::Update && runtime == "php-redis") {
+                    // PECL names the source release; its Windows builds can come later.
+                    row.ticked = false;
+                    row.detail = "check that its Windows builds are out for each PHP series";
+                }
             } else if (update_series_wanted(runtime, u.series, listed_series)) {
                 row.kind = UpdateKind::NewSeries;
             } else {
@@ -441,7 +462,12 @@ std::optional<std::string> ask(core::HttpTransport& http, const std::string& url
         return std::nullopt;
     }
     if (reply.status != 200 || reply.stopped) {
-        error = reply.status == 0 ? (reply.error.empty() ? "no answer" : reply.error) : "HTTP " + std::to_string(reply.status);
+        if ((reply.status == 403 || reply.status == 429) && url.starts_with("https://api.github.com/")) {
+            error = "GitHub's hourly limit for checks without an account is used up; try again in an hour";
+        } else {
+            error = reply.status == 0 ? (reply.error.empty() ? "no answer" : reply.error)
+                                      : "HTTP " + std::to_string(reply.status);
+        }
         return std::nullopt;
     }
     return body;
