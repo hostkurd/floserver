@@ -80,12 +80,13 @@ std::vector<std::string> postgresql_server_args(const MariaDbFiles& files, Port 
 }
 
 const std::vector<std::string>& pg_quiet_settings() {
-    // The statements, and the parse trees the debug_print_* settings write
-    // (ALTER ROLE's password is in them too).
+    // The statements, the parse trees the debug_print_* settings write
+    // (ALTER ROLE's password is in them too), and the text a crash or a
+    // deadlock report would quote (track_activities).
     static const std::vector<std::string> settings = {
         "log_statement=none",          "log_min_duration_statement=-1", "log_min_duration_sample=-1",
         "log_transaction_sample_rate=0", "debug_print_parse=off",       "debug_print_rewritten=off",
-        "debug_print_plan=off"};
+        "debug_print_plan=off",        "track_activities=off"};
     return settings;
 }
 

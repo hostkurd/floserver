@@ -201,7 +201,8 @@ TEST_CASE("PostgreSQL's SQL, password file and client environment (D29)") {
     // FloServer's superuser sessions log no statements (they set passwords).
     CHECK(value("PGOPTIONS") == "-c log_statement=none -c log_min_duration_statement=-1 "
                                 "-c log_min_duration_sample=-1 -c log_transaction_sample_rate=0 "
-                                "-c debug_print_parse=off -c debug_print_rewritten=off -c debug_print_plan=off");
+                                "-c debug_print_parse=off -c debug_print_rewritten=off -c debug_print_plan=off "
+                                "-c track_activities=off");
     for (const auto& [key, v] : pg_client_env("/f/x.pgpass", "/f", false)) {
         CHECK(key != "PGOPTIONS");
     }
