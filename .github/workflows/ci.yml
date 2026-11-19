@@ -726,15 +726,35 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      # The Ubuntu mirror often stops answering (5-6 Nov, 18-19 Nov): the
+      # packages are kept in the Actions cache, so most runs don't need it.
+      - name: Packages from the cache
+        id: debs
+        uses: actions/cache@v4
+        with:
+          path: ~/mingw-debs
+          key: mingw-debs-ubuntu-24.04-x86-64-posix-v1
       - name: Install tools
-        # An Ubuntu mirror that stops answering held this step until the job's
-        # 30-minute limit (twice on 5-6 Nov): each try is time-limited, with
-        # network timeouts, and tried up to three times.
+        # Only the 64-bit posix compiler (the mingw-w64 package brings the
+        # 32-bit one too: twice the download). From the cache when it's
+        # there; otherwise from the mirror, each try time-limited, the second
+        # and third from archive.ubuntu.com instead of the runner's mirror.
         run: |
+          pkgs="ninja-build g++-mingw-w64-x86-64-posix gcc-mingw-w64-x86-64-posix binutils-mingw-w64-x86-64"
+          if ls ~/mingw-debs/*.deb >/dev/null 2>&1 && sudo dpkg -i ~/mingw-debs/*.deb &&
+             command -v x86_64-w64-mingw32-g++-posix && command -v ninja; then
+            exit 0
+          fi
           apt_opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+          apt_opts="$apt_opts -o APT::Keep-Downloaded-Packages=true"
           for try in 1 2 3; do
+            if [ "$try" -gt 1 ]; then
+              sudo sed -i 's#http://azure.archive.ubuntu.com/ubuntu#http://archive.ubuntu.com/ubuntu#g' \
+                /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list 2>/dev/null || true
+            fi
             if timeout 300 sudo apt-get $apt_opts update &&
-               timeout 300 sudo apt-get $apt_opts install -y ninja-build mingw-w64; then
+               timeout 480 sudo apt-get $apt_opts install -y --no-install-recommends $pkgs; then
+              mkdir -p ~/mingw-debs && cp /var/cache/apt/archives/*.deb ~/mingw-debs/ || true
               exit 0
             fi
             echo "::warning title=apt::try $try didn't finish; trying again"
