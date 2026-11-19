@@ -217,3 +217,43 @@ TEST_CASE("damaged or oversized archives are refused") {
         CHECK_FALSE(extract_zip(save(tmp, make_zip({{"a", "1"}})), tmp.path() / "out").ok);
     }
 }
+
+TEST_CASE("zip_file_hashes: files hashed, folders listed, and what the installer treats otherwise refused (D29)") {
+    const TempDir tmp;
+    std::string error;
+    {
+        const auto zip = save(tmp, make_zip({{"pgsql/", ""}, {"pgsql/a.txt", "abc"}, {"pgsql/b.txt", "xyz"}}));
+        const auto all = zip_file_hashes(zip, error);
+        REQUIRE_MESSAGE(all, error);
+        REQUIRE(all->size() == 3);
+        CHECK(all->at(0).second.folder);
+        CHECK(all->at(1).second == ZipFileHash{3, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", false});
+        // `want` skips a file: its size only.
+        const auto some = zip_file_hashes(zip, error, {}, [](std::string_view name, std::uint64_t) {
+            return name == "pgsql/a.txt";
+        });
+        REQUIRE(some);
+        CHECK(some->at(2).second == ZipFileHash{3, "", false});
+        // Stopped.
+        CHECK_FALSE(zip_file_hashes(zip, error, [] { return true; }));
+        CHECK(error == "stopped");
+    }
+    {
+        std::string bytes = make_zip({{"ok.txt", "1"}, {"link", "../../etc"}});
+        make_symlink(bytes, "link");
+        CHECK_FALSE(zip_file_hashes(save(tmp, bytes), error));
+        CHECK(error.find("symbolic link") != std::string::npos);
+    }
+    {
+        // A file marked as a folder (DOS attribute): the installer would make a folder there.
+        std::string bytes = make_zip({{"ok.txt", "1"}, {"evil.dll", "data"}});
+        const std::string sig("PK\x01\x02", 4);
+        for (std::size_t at = bytes.find(sig); at != std::string::npos; at = bytes.find(sig, at + 1)) {
+            if (bytes.compare(at + 46, 8, "evil.dll") == 0) {
+                put32(bytes, at + 38, 0x10U);
+            }
+        }
+        CHECK_FALSE(zip_file_hashes(save(tmp, bytes), error));
+        CHECK(error.find("isn't a plain folder: evil.dll") != std::string::npos);
+    }
+}

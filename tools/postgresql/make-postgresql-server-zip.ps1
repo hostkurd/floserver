@@ -30,8 +30,10 @@ $ProgressPreference = "SilentlyContinue"   # Invoke-WebRequest is very slow with
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
-# Kept: the folders the server and its tools need. Everything else in EDB's zip
-# (pgAdmin 4, StackBuilder, doc, symbols, ...) is left out.
+# Kept: the folders the server and its tools need, every file EDB ships in
+# them. Everything else in EDB's zip (pgAdmin 4, StackBuilder, doc, symbols,
+# ...) is left out. The Publisher checks the same list (OfficialSource::kept
+# in tools/manifest-tool/publish.cpp): change both together.
 $keep = @("pgsql/bin/", "pgsql/lib/", "pgsql/share/", "pgsql/include/")
 # Must be there, as the Publisher also checks.
 $required = @("pgsql/bin/postgres.exe", "pgsql/bin/initdb.exe", "pgsql/bin/pg_ctl.exe", "pgsql/bin/psql.exe",
@@ -57,15 +59,20 @@ if ($source -notmatch '^postgresql-(\d+\.\d+)-(\d+)-windows-x64-binaries\.zip$')
 $pgVersion = $Matches[1]
 $outName = $source -replace '-binaries\.zip$', '-server.zip'
 if ($OutDir -eq "") { $OutDir = Split-Path $Zip -Parent }
+# A full path: .NET resolves a relative one against the process's folder, not PowerShell's.
+$OutDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutDir)
 $out = Join-Path $OutDir $outName
 if (Test-Path $out) { Remove-Item $out }
 
-$in = [System.IO.Compression.ZipFile]::OpenRead($Zip)
-$dest = [System.IO.Compression.ZipFile]::Open($out, [System.IO.Compression.ZipArchiveMode]::Create)
+$in = $null
+$dest = $null
 $kept = 0
 $left = 0
 $names = @{}
+$done = $false
 try {
+    $in = [System.IO.Compression.ZipFile]::OpenRead($Zip)
+    $dest = [System.IO.Compression.ZipFile]::Open($out, [System.IO.Compression.ZipArchiveMode]::Create)
     foreach ($e in $in.Entries) {
         $path = $e.FullName -replace '\\', '/'
         if ($path.EndsWith("/")) { continue }   # folders come with their files
@@ -81,9 +88,12 @@ try {
         $names[$path] = $true
         $kept++
     }
+    $done = $true
 } finally {
-    $dest.Dispose()
-    $in.Dispose()
+    if ($dest) { $dest.Dispose() }
+    if ($in) { $in.Dispose() }
+    # Never leave a partial zip that looks finished.
+    if (-not $done -and (Test-Path $out)) { Remove-Item $out }
 }
 
 $missing = @($required | Where-Object { -not $names.ContainsKey($_) })

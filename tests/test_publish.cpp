@@ -974,6 +974,32 @@ TEST_CASE("publisher: PostgreSQL's server zip is compared file by file with EDB'
     CHECK(f.state == CheckState::Failed);
     CHECK(f.detail.find("missing pgsql/bin/pg_dump.exe") != std::string::npos);
 
+    // Every file EDB ships in the kept folders must be there.
+    auto partial = server_files();
+    std::erase_if(partial, [](const auto& e) { return e.first == "pgsql/lib/plpgsql.dll"; });
+    f = check(partial);
+    CHECK(f.state == CheckState::Failed);
+    CHECK(f.detail.find("missing pgsql/lib/plpgsql.dll, which the original has") != std::string::npos);
+
+    // A folder entry around our files is fine; one elsewhere would change where the install goes.
+    auto with_folder = server_files();
+    with_folder.emplace_back("pgsql/bin/", "");
+    f = check(with_folder);
+    CHECK_MESSAGE(f.state == CheckState::Ok, f.detail);
+    auto stray_folder = server_files();
+    stray_folder.emplace_back("other/", "");
+    f = check(stray_folder);
+    CHECK(f.state == CheckState::Failed);
+    CHECK(f.detail.find("folder entry with none of the original's files in it: other/") != std::string::npos);
+
+    // Names with '\\' (an older Windows zip tool) are the same paths.
+    auto backslashes = server_files();
+    for (auto& e : backslashes) {
+        std::replace(e.first.begin(), e.first.end(), '/', '\\');
+    }
+    f = check(backslashes);
+    CHECK_MESSAGE(f.state == CheckState::Ok, f.detail);
+
     // Not a zip at all.
     cdn.http.serve(kTestCdn + "/" + path, {200, std::string("not a zip")});
     PublishFile bad = *added.file;
@@ -992,4 +1018,10 @@ TEST_CASE("publisher: made_from_problem reads backslashes as slashes and refuses
     CHECK(made_from_problem({{"pgsql/bin/psql.exe", {2, "bb"}}, {"pgsql\\bin\\psql.exe", {2, "bb"}}}, theirs, {})
               .find("twice") != std::string::npos);
     CHECK(made_from_problem({}, theirs, {}) == "Our zip has no files");
+    // Folders: only around our files; the original's files under `kept` all present.
+    CHECK(made_from_problem({{"pgsql/bin/postgres.exe", {3, "aa"}}, {"pgsql\\", {0, "", true}}}, theirs, {}).empty());
+    CHECK(made_from_problem({{"pgsql/bin/postgres.exe", {3, "aa"}}, {"pgsql/lib/", {0, "", true}}}, theirs, {})
+              .find("folder entry") != std::string::npos);
+    CHECK(made_from_problem({{"pgsql/bin/postgres.exe", {3, "aa"}}}, theirs, {}, {"pgsql/bin/"})
+              .find("missing pgsql/bin/psql.exe") != std::string::npos);
 }

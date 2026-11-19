@@ -389,9 +389,9 @@ bool stream_zip_entry(const fs::path& archive, std::string_view name,
     return true;
 }
 
-std::optional<std::vector<std::pair<std::string, ZipFileHash>>> zip_file_hashes(const fs::path& archive,
-                                                                                std::string& error,
-                                                                                const std::function<bool()>& stop) {
+std::optional<std::vector<std::pair<std::string, ZipFileHash>>> zip_file_hashes(
+    const fs::path& archive, std::string& error, const std::function<bool()>& stop,
+    const std::function<bool(std::string_view, std::uint64_t)>& want) {
     error.clear();
     Reader reader;
     Archive a;
@@ -410,24 +410,45 @@ std::optional<std::vector<std::pair<std::string, ZipFileHash>>> zip_file_hashes(
             error = "the archive's file list can't be read: " + zip_error(a.zip);
             return std::nullopt;
         }
+        const std::string name(st.m_filename);
+        if ((st.m_version_made_by >> 8U) == kUnixHost &&
+            ((st.m_external_attr >> 16U) & kUnixTypeMask) == kUnixSymlink) {
+            error = "the archive has a symbolic link: " + name;
+            return std::nullopt;
+        }
         if (st.m_is_directory != 0) {
+            // The installer makes a folder for it whatever its name: only a
+            // plain, empty one named like a folder is allowed.
+            if (st.m_uncomp_size != 0 || st.m_comp_size != 0 || !(name.ends_with('/') || name.ends_with('\\'))) {
+                error = "the archive has a folder entry that isn't a plain folder: " + name;
+                return std::nullopt;
+            }
+            out.emplace_back(name, ZipFileHash{0, {}, true});
             continue;
         }
         if (st.m_is_encrypted != MZ_FALSE || st.m_is_supported == MZ_FALSE) {
-            error = "the archive has an encrypted or unsupported entry: " + std::string(st.m_filename);
+            error = "the archive has an encrypted or unsupported entry: " + name;
             return std::nullopt;
         }
+        if (want && !want(name, st.m_uncomp_size)) {
+            out.emplace_back(name, ZipFileHash{st.m_uncomp_size, {}, false});
+            continue;
+        }
         Sha256 hash;
-        const std::function<bool(std::string_view)> sink = [&hash](std::string_view piece) {
+        const std::function<bool(std::string_view)> sink = [&hash, &stop](std::string_view piece) {
             hash.update(piece);
-            return true;
+            return !(stop && stop());
         };
         Sink s{&sink, 0, st.m_uncomp_size, false};
         if (mz_zip_reader_extract_to_callback(&a.zip, i, to_sink, &s, 0) == MZ_FALSE || s.written != st.m_uncomp_size) {
-            error = "can't unpack " + std::string(st.m_filename) + ": " + zip_error(a.zip);
+            if (stop && stop()) {
+                error = "stopped";
+                return std::nullopt;
+            }
+            error = "can't unpack " + name + ": " + zip_error(a.zip);
             return std::nullopt;
         }
-        out.emplace_back(std::string(st.m_filename), ZipFileHash{st.m_uncomp_size, to_hex(hash.finish())});
+        out.emplace_back(name, ZipFileHash{st.m_uncomp_size, to_hex(hash.finish()), false});
     }
     return out;
 }

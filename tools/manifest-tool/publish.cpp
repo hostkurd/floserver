@@ -514,6 +514,8 @@ OfficialSource official_source(std::string_view path) {
         s.required = {"pgsql/bin/postgres.exe", "pgsql/bin/initdb.exe", "pgsql/bin/pg_ctl.exe",
                       "pgsql/bin/psql.exe",     "pgsql/bin/pg_dump.exe", "pgsql/bin/libpq.dll",
                       "pgsql/share/postgres.bki"};
+        // The script's $keep: everything EDB ships in these is in ours.
+        s.kept = {"pgsql/bin/", "pgsql/lib/", "pgsql/share/", "pgsql/include/"};
     } else if (p.runtime == "apache" || p.runtime == kAppFolder) {
         // Apache Lounge publishes no checksum list; FloServer's installer is
         // HostKurd's own, compared with the CI artifact.
@@ -590,18 +592,22 @@ std::optional<std::string> find_official_hash(std::string_view sums, std::string
 
 std::string made_from_problem(const std::vector<std::pair<std::string, ZipFileHash>>& ours,
                               const std::vector<std::pair<std::string, ZipFileHash>>& original,
-                              const std::vector<std::string>& required) {
+                              const std::vector<std::string>& required, const std::vector<std::string>& kept) {
     std::map<std::string, ZipFileHash> theirs;
     for (const auto& [name, hash] : original) {
-        theirs.emplace(slashes(name), hash);
+        if (!hash.folder) {
+            theirs.emplace(slashes(name), hash);
+        }
     }
-    if (ours.empty()) {
-        return "Our zip has no files";
-    }
-    std::set<std::string> seen;
+    std::set<std::string> files;
+    std::vector<std::string> folders;
     for (const auto& [raw, hash] : ours) {
-        const std::string name = slashes(raw);
-        if (!seen.insert(name).second) {
+        std::string name = slashes(raw);
+        if (hash.folder) {
+            folders.push_back(std::move(name));
+            continue;
+        }
+        if (!files.insert(name).second) {
             return "Our zip has " + name + " twice";
         }
         const auto it = theirs.find(name);
@@ -612,8 +618,24 @@ std::string made_from_problem(const std::vector<std::pair<std::string, ZipFileHa
             return name + " is DIFFERENT from the original's. Don't publish it";
         }
     }
+    if (files.empty()) {
+        return "Our zip has no files";
+    }
+    // A folder entry is made wherever it points: only one around our files.
+    for (const std::string& folder : folders) {
+        const auto inside = files.lower_bound(folder);
+        if (!folder.ends_with('/') || inside == files.end() || !inside->starts_with(folder)) {
+            return "Our zip has a folder entry with none of the original's files in it: " + folder;
+        }
+    }
+    for (const auto& [name, hash] : theirs) {
+        const bool in_kept = std::ranges::any_of(kept, [&name](const std::string& k) { return name.starts_with(k); });
+        if (in_kept && !files.contains(name)) {
+            return "Our zip is missing " + name + ", which the original has";
+        }
+    }
     for (const std::string& need : required) {
-        if (!seen.contains(need)) {
+        if (!files.contains(need)) {
             return "Our zip is missing " + need;
         }
     }
@@ -670,8 +692,11 @@ void check_file(CheckContext& ctx, PublishFile& file) {
             return;
         }
     }
-    const Download got = download_and_hash(ctx, url, ours_out.is_open() ? &ours_out : nullptr);
-    ours_out.close();
+    Download got = download_and_hash(ctx, url, ours_out.is_open() ? &ours_out : nullptr);
+    if (ours_out.is_open()) {
+        ours_out.close();
+        got.write_failed = got.write_failed || ours_out.fail();  // the last bytes, at close
+    }
     if (cancelled(ctx.cancel)) {
         file.detail = "Stopped";
         return;
@@ -759,21 +784,35 @@ void check_file(CheckContext& ctx, PublishFile& file) {
         const std::filesystem::path orig_zip = scratch->path() / "original.zip";
         std::ofstream orig_out(orig_zip, std::ios::binary);
         const bool opened = orig_out.is_open();
-        const Download orig = opened ? download_and_hash(ctx, original, &orig_out) : Download{};
+        Download orig = opened ? download_and_hash(ctx, original, &orig_out) : Download{};
         orig_out.close();
+        orig.write_failed = orig.write_failed || (opened && orig_out.fail());
         if (cancelled(ctx.cancel)) {
             file.detail = "Stopped";
             return;
         }
         if (!opened || orig.write_failed) {
             why_not = "Can't write a temporary copy of the original (is the disk full?)";
-        } else if (orig.reply.status != 200 || orig.reply.stopped || orig.too_big) {
+        } else if (orig.too_big) {
+            why_not = "The original from " + host_of(original) + " is larger than 2 GB";
+        } else if (orig.reply.status != 200 || orig.reply.stopped) {
             why_not = "Can't download the original to compare with (" + describe_failure(orig.reply) + ")";
         } else {
             std::string error;
             const std::function<bool()> stop = [&ctx] { return cancelled(ctx.cancel); };
             const auto mine = zip_file_hashes(ours_zip, error, stop);
-            const auto theirs = mine ? zip_file_hashes(orig_zip, error, stop) : std::nullopt;
+            // Only the original's files ours has (by name and size) are unpacked and hashed.
+            std::map<std::string, std::uint64_t> wanted;
+            for (const auto& [name, hash] : mine.value_or(std::vector<std::pair<std::string, ZipFileHash>>{})) {
+                if (!hash.folder) {
+                    wanted.emplace(slashes(name), hash.size);
+                }
+            }
+            const auto want = [&wanted](std::string_view name, std::uint64_t size) {
+                const auto it = wanted.find(slashes(std::string(name)));
+                return it != wanted.end() && it->second == size;
+            };
+            const auto theirs = mine ? zip_file_hashes(orig_zip, error, stop, want) : std::nullopt;
             if (cancelled(ctx.cancel)) {
                 file.detail = "Stopped";
                 return;
@@ -782,11 +821,12 @@ void check_file(CheckContext& ctx, PublishFile& file) {
                 why_not = "Can't read the zip on the CDN: " + error;
             } else if (!theirs) {
                 why_not = "Can't read the original zip from " + host_of(original) + ": " + error;
-            } else if (std::string problem = made_from_problem(*mine, *theirs, source.required); !problem.empty()) {
+            } else if (std::string problem = made_from_problem(*mine, *theirs, source.required, source.kept);
+                       !problem.empty()) {
                 why_not = std::move(problem);
             } else {
                 official = file.sha256;
-                from = "the original from " + host_of(original) + ", file by file (" + std::to_string(mine->size()) +
+                from = "the original from " + host_of(original) + ", file by file (" + std::to_string(wanted.size()) +
                        " files)";
             }
         }

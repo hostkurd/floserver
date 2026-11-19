@@ -110,6 +110,9 @@ struct OfficialSource {
     std::string name;               // the file's name in the checksum list
     bool powershell_print = false;  // the list is a Get-FileHash print (Deno's)
     std::vector<std::string> required;  // MadeFrom: paths ours must have
+    // MadeFrom: folders whose files in the original must all be in ours too
+    // (the same list as the script that makes our zip).
+    std::vector<std::string> kept;
 };
 [[nodiscard]] OfficialSource official_source(std::string_view path);
 
@@ -120,13 +123,15 @@ struct OfficialSource {
 [[nodiscard]] std::optional<std::string> find_official_hash(std::string_view sums, std::string_view name,
                                                             bool powershell_print = false);
 
-// MadeFrom: what's wrong with `ours` against `original` (file name ->
-// size and SHA-256, as zip_file_hashes gives them), or empty when every file
-// in ours is the same file at the same path in the original and ours has
-// every one of `required`. Paths compare with '\\' read as '/'.
+// MadeFrom: what's wrong with `ours` against `original` (entries as
+// zip_file_hashes gives them), or empty when every file in ours is the same
+// file at the same path in the original, every folder entry in ours holds
+// some of those files, ours has every file the original has under `kept`,
+// and every one of `required`. Paths compare with '\\' read as '/'.
 [[nodiscard]] std::string made_from_problem(const std::vector<std::pair<std::string, core::ZipFileHash>>& ours,
                                             const std::vector<std::pair<std::string, core::ZipFileHash>>& original,
-                                            const std::vector<std::string>& required);
+                                            const std::vector<std::string>& required,
+                                            const std::vector<std::string>& kept = {});
 
 struct CheckContext {
     CheckContext(core::HttpTransport& transport, std::string_view cdn_base)
