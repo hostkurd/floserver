@@ -83,6 +83,26 @@ struct ZipResult {
 [[nodiscard]] std::optional<std::uint64_t> zip_entry_size(const std::filesystem::path& archive, std::string_view name,
                                                           std::string& error);
 
+// Each entry in the archive, by its exact name there, for the Publisher's
+// check that a zip FloServer made from an official archive holds only that
+// archive's files (D29). A file has its size and SHA-256 (lowercase hex),
+// its bytes unpacked and checked (CRC-32 and size). A folder is listed with
+// `folder` set. It fails on what the installer would refuse or treat
+// otherwise: an encrypted or unsupported entry, a symbolic link, a folder
+// entry holding data or not named with a final '/'. With `want` (for the
+// original archive) only the files it wants are hashed and checked; the
+// others are listed with their size only, and folders not at all.
+// `stop`, when set, ends it (error "stopped").
+struct ZipFileHash {
+    std::uint64_t size = 0;
+    std::string sha256;  // empty for a folder, or a file `want` skipped
+    bool folder = false;
+    bool operator==(const ZipFileHash&) const = default;
+};
+[[nodiscard]] std::optional<std::vector<std::pair<std::string, ZipFileHash>>> zip_file_hashes(
+    const std::filesystem::path& archive, std::string& error, const std::function<bool()>& stop = {},
+    const std::function<bool(std::string_view name, std::uint64_t size)>& want = {});
+
 // The relative path an entry name is unpacked to, or empty when the name is
 // refused. Exposed for tests.
 [[nodiscard]] std::filesystem::path safe_entry_path(std::string_view name, bool unicode_names = false);

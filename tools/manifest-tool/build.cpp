@@ -39,7 +39,7 @@ struct CatalogEntry {
 
 // The runtimes FloServer 1.0 knows (Windows x64). Add a row here before
 // publishing a new kind of runtime.
-constexpr std::array<CatalogEntry, 17> kCatalog = {{
+constexpr std::array<CatalogEntry, 18> kCatalog = {{
     {"php", R"(php-{v}(-\d+)?-Win32-vs1[67]-x64\.zip)", "PHP-3.01", "windows-x64", "nts", R"(php-{v}(-\d+)?-nts-Win32-vs1[67]-x64\.zip)",
      "https://downloads.php.net/~windows/releases/archives/{file}"},
     {"mariadb", "", "GPL-2.0", "windows-x64", "", R"(mariadb-{v}-winx64\.zip)",
@@ -51,6 +51,11 @@ constexpr std::array<CatalogEntry, 17> kCatalog = {{
     // ("noinstall"); its MSI and debug/test builds aren't listed.
     {"mysql", R"(mysql-{v}-winx64(-debug-test\.zip|\.msi))", "GPL-2.0", "windows-x64", "", R"(mysql-{v}-winx64\.zip)",
      "https://cdn.mysql.com/Downloads/MySQL-8.4/{file}"},
+    // PostgreSQL (D29): EDB's Windows binaries zip without pgAdmin 4,
+    // StackBuilder and the docs ("-server.zip", made by
+    // tools/postgresql/make-postgresql-server-zip.ps1); EDB's own zip and installer aren't listed.
+    {"postgresql", R"(postgresql-{v}-\d+-windows-x64(-binaries\.zip|\.exe))", "PostgreSQL", "windows-x64", "",
+     R"(postgresql-{v}-\d+-windows-x64-server\.zip)", ""},
     {"nginx", "", "BSD-2-Clause", "windows-x64", "", R"(nginx-{v}\.zip)",
      "https://nginx.org/download/{file}"},
     {"apache", "", "Apache-2.0", "windows-x64", "", R"(httpd-{v}-\d+-Win64-VS1[78]\.zip)", ""},

@@ -11,6 +11,9 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <filesystem>
+
+#include <miniz.h>
 
 using namespace floserver::manifest_tool;
 using floserver::core::TrustedKey;
@@ -869,4 +872,158 @@ TEST_CASE("publisher: Garnet, .NET and phpredis are compared with their original
     CHECK(second.error.empty());
     const auto again = new_file("php-redis/6.3.0/php_redis-6.3.0-8.4-nts-vs17-x64.zip", kTestCdn, files);
     CHECK_FALSE(again.file);
+}
+
+namespace {
+
+std::string pg_zip(const std::vector<std::pair<std::string, std::string>>& files) {
+    mz_zip_archive zip{};
+    REQUIRE(mz_zip_writer_init_heap(&zip, 0, 0));
+    for (const auto& [name, content] : files) {
+        REQUIRE(mz_zip_writer_add_mem(&zip, name.c_str(), content.data(), content.size(),
+                                      static_cast<mz_uint>(MZ_DEFAULT_COMPRESSION)));
+    }
+    void* buffer = nullptr;
+    std::size_t size = 0;
+    REQUIRE(mz_zip_writer_finalize_heap_archive(&zip, &buffer, &size));
+    std::string out(static_cast<const char*>(buffer), size);
+    mz_free(buffer);
+    mz_zip_writer_end(&zip);
+    return out;
+}
+
+// EDB's zip in small: the server, and pgAdmin, StackBuilder and the docs.
+std::vector<std::pair<std::string, std::string>> edb_files() {
+    return {{"pgsql/bin/postgres.exe", "postgres"},       {"pgsql/bin/initdb.exe", "initdb"},
+            {"pgsql/bin/pg_ctl.exe", "pg_ctl"},           {"pgsql/bin/psql.exe", "psql"},
+            {"pgsql/bin/pg_dump.exe", "pg_dump"},         {"pgsql/bin/libpq.dll", "libpq"},
+            {"pgsql/share/postgres.bki", "bki"},          {"pgsql/lib/plpgsql.dll", "plpgsql"},
+            {"pgsql/pgAdmin 4/runtime/pgAdmin4.exe", "pgadmin"},
+            {"pgsql/StackBuilder/bin/stackbuilder.exe", "sb"}, {"pgsql/doc/index.html", "docs"}};
+}
+
+std::vector<std::pair<std::string, std::string>> server_files() {
+    auto files = edb_files();
+    std::erase_if(files, [](const auto& f) {
+        return f.first.find("pgAdmin") != std::string::npos || f.first.find("StackBuilder") != std::string::npos ||
+               f.first.starts_with("pgsql/doc/");
+    });
+    return files;
+}
+
+}  // namespace
+
+TEST_CASE("publisher: PostgreSQL's server zip is compared file by file with EDB's zip (D29)") {
+    FakeCdn cdn;
+    const std::string path = "postgresql/18.1/postgresql-18.1-1-windows-x64-server.zip";
+    const std::string original = "https://get.enterprisedb.com/postgresql/postgresql-18.1-1-windows-x64-binaries.zip";
+
+    const OfficialSource source = official_source(path);
+    CHECK(source.kind == OfficialSource::Kind::MadeFrom);
+    CHECK(source.urls == std::vector<std::string>{original});
+    CHECK(describe_cdn_path(path).listable);
+    CHECK(describe_cdn_path("postgresql/18.1/postgresql-18.1-1-windows-x64-binaries.zip").problem.find("another build") !=
+          std::string::npos);
+    CHECK(describe_cdn_path("postgresql/18.1/postgresql-18.1-1-windows-x64.exe").problem.find("another build") !=
+          std::string::npos);
+    CHECK_FALSE(describe_cdn_path("postgresql/18.1/postgresql-18.2-1-windows-x64-server.zip").listable);
+
+    const AddResult added = new_file(kTestCdn + "/" + path, kTestCdn, cdn.files);
+    REQUIRE_MESSAGE(added.file, added.error);
+    CHECK(added.file->title == "PostgreSQL 18.1");
+
+    const test_util::TempDir scratch;
+    CheckContext ctx{cdn.http, kTestCdn};
+    ctx.scratch = scratch.path();
+    const auto check = [&](const std::vector<std::pair<std::string, std::string>>& ours) {
+        cdn.http.serve(kTestCdn + "/" + path, {200, pg_zip(ours)});
+        PublishFile f = *added.file;
+        check_file(ctx, f);
+        return f;
+    };
+
+    // A copy an earlier run left behind is cleared.
+    std::filesystem::create_directories(scratch.path() / "floserver-publisher-old" / "x");
+    // Without EDB's zip there's nothing to compare with.
+    PublishFile f = check(server_files());
+    CHECK(f.state == CheckState::Failed);
+    CHECK(f.detail.find("Can't download the original") != std::string::npos);
+
+    cdn.http.serve(original, {200, pg_zip(edb_files())});
+    f = check(server_files());
+    CHECK_MESSAGE(f.state == CheckState::Ok, f.detail);
+    CHECK(f.detail == "Matches the original from get.enterprisedb.com, file by file (8 files)");
+    CHECK(f.sha256 == sha256_hex(pg_zip(server_files())));
+    // The temporary copies are gone.
+    CHECK(std::filesystem::is_empty(scratch.path()));
+
+    // A changed file, an added one, and a missing server program all fail.
+    auto changed = server_files();
+    changed.front().second = "patched postgres";
+    f = check(changed);
+    CHECK(f.state == CheckState::Failed);
+    CHECK(f.detail.find("pgsql/bin/postgres.exe is DIFFERENT") != std::string::npos);
+
+    auto added_file = server_files();
+    added_file.emplace_back("pgsql/bin/extra.dll", "extra");
+    f = check(added_file);
+    CHECK(f.state == CheckState::Failed);
+    CHECK(f.detail.find("pgsql/bin/extra.dll isn't in the original zip") != std::string::npos);
+
+    auto missing = server_files();
+    std::erase_if(missing, [](const auto& e) { return e.first == "pgsql/bin/pg_dump.exe"; });
+    f = check(missing);
+    CHECK(f.state == CheckState::Failed);
+    CHECK(f.detail.find("missing pgsql/bin/pg_dump.exe") != std::string::npos);
+
+    // Every file EDB ships in the kept folders must be there.
+    auto partial = server_files();
+    std::erase_if(partial, [](const auto& e) { return e.first == "pgsql/lib/plpgsql.dll"; });
+    f = check(partial);
+    CHECK(f.state == CheckState::Failed);
+    CHECK(f.detail.find("missing pgsql/lib/plpgsql.dll, which the original has") != std::string::npos);
+
+    // A folder entry around our files is fine; one elsewhere would change where the install goes.
+    auto with_folder = server_files();
+    with_folder.emplace_back("pgsql/bin/", "");
+    f = check(with_folder);
+    CHECK_MESSAGE(f.state == CheckState::Ok, f.detail);
+    auto stray_folder = server_files();
+    stray_folder.emplace_back("other/", "");
+    f = check(stray_folder);
+    CHECK(f.state == CheckState::Failed);
+    CHECK(f.detail.find("folder entry with none of the original's files in it: other/") != std::string::npos);
+
+    // Names with '\\' (an older Windows zip tool) are the same paths.
+    auto backslashes = server_files();
+    for (auto& e : backslashes) {
+        std::replace(e.first.begin(), e.first.end(), '/', '\\');
+    }
+    f = check(backslashes);
+    CHECK_MESSAGE(f.state == CheckState::Ok, f.detail);
+
+    // Not a zip at all.
+    cdn.http.serve(kTestCdn + "/" + path, {200, std::string("not a zip")});
+    PublishFile bad = *added.file;
+    check_file(ctx, bad);
+    CHECK(bad.state == CheckState::Failed);
+    CHECK(bad.detail.find("Can't read the zip on the CDN") != std::string::npos);
+    CHECK(std::filesystem::is_empty(scratch.path()));
+}
+
+TEST_CASE("publisher: made_from_problem reads backslashes as slashes and refuses a name twice") {
+    using floserver::core::ZipFileHash;
+    const std::vector<std::pair<std::string, ZipFileHash>> theirs = {{"pgsql\\bin\\postgres.exe", {3, "aa"}},
+                                                                      {"pgsql/bin/psql.exe", {2, "bb"}}};
+    CHECK(made_from_problem({{"pgsql/bin/postgres.exe", {3, "aa"}}}, theirs, {"pgsql/bin/postgres.exe"}).empty());
+    CHECK(made_from_problem({{"pgsql/bin/postgres.exe", {4, "aa"}}}, theirs, {}).find("DIFFERENT") != std::string::npos);
+    CHECK(made_from_problem({{"pgsql/bin/psql.exe", {2, "bb"}}, {"pgsql\\bin\\psql.exe", {2, "bb"}}}, theirs, {})
+              .find("twice") != std::string::npos);
+    CHECK(made_from_problem({}, theirs, {}) == "Our zip has no files");
+    // Folders: only around our files; the original's files under `kept` all present.
+    CHECK(made_from_problem({{"pgsql/bin/postgres.exe", {3, "aa"}}, {"pgsql\\", {0, "", true}}}, theirs, {}).empty());
+    CHECK(made_from_problem({{"pgsql/bin/postgres.exe", {3, "aa"}}, {"pgsql/lib/", {0, "", true}}}, theirs, {})
+              .find("folder entry") != std::string::npos);
+    CHECK(made_from_problem({{"pgsql/bin/postgres.exe", {3, "aa"}}}, theirs, {}, {"pgsql/bin/"})
+              .find("missing pgsql/bin/psql.exe") != std::string::npos);
 }

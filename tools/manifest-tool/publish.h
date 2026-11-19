@@ -19,10 +19,12 @@
 
 #include "floserver/core/http.h"
 #include "floserver/core/manifest.h"
+#include "floserver/core/zip_extract.h"
 
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <optional>
@@ -101,10 +103,16 @@ struct AddResult {
 // Where the official checksum comes from.
 struct OfficialSource {
     // Unknown: a runtime with no source set here yet; its files fail.
-    enum class Kind : std::uint8_t { Unknown, Sums, Original, ByHand } kind = Kind::Unknown;
+    // MadeFrom (D29): our zip is a part of the original zip, so every file in
+    // ours must be byte-identical to the same path in the original's.
+    enum class Kind : std::uint8_t { Unknown, Sums, Original, ByHand, MadeFrom } kind = Kind::Unknown;
     std::vector<std::string> urls;  // checksum lists to try in order, or the original file
     std::string name;               // the file's name in the checksum list
     bool powershell_print = false;  // the list is a Get-FileHash print (Deno's)
+    std::vector<std::string> required;  // MadeFrom: paths ours must have
+    // MadeFrom: folders whose files in the original must all be in ours too
+    // (the same list as the script that makes our zip).
+    std::vector<std::string> kept;
 };
 [[nodiscard]] OfficialSource official_source(std::string_view path);
 
@@ -115,6 +123,16 @@ struct OfficialSource {
 [[nodiscard]] std::optional<std::string> find_official_hash(std::string_view sums, std::string_view name,
                                                             bool powershell_print = false);
 
+// MadeFrom: what's wrong with `ours` against `original` (entries as
+// zip_file_hashes gives them), or empty when every file in ours is the same
+// file at the same path in the original, every folder entry in ours holds
+// some of those files, ours has every file the original has under `kept`,
+// and every one of `required`. Paths compare with '\\' read as '/'.
+[[nodiscard]] std::string made_from_problem(const std::vector<std::pair<std::string, core::ZipFileHash>>& ours,
+                                            const std::vector<std::pair<std::string, core::ZipFileHash>>& original,
+                                            const std::vector<std::string>& required,
+                                            const std::vector<std::string>& kept = {});
+
 struct CheckContext {
     CheckContext(core::HttpTransport& transport, std::string_view cdn_base)
         : http(transport), cdn(cdn_base) {}
@@ -124,6 +142,8 @@ struct CheckContext {
     // Bytes done of the current download, for the window.
     std::function<void(std::uint64_t done)> progress;
     std::map<std::string, std::optional<std::string>> sums_cache;  // url -> text
+    // MadeFrom downloads both zips here for a moment; empty: the system's temp folder.
+    std::filesystem::path scratch;
 };
 
 // Checks one file and sets its state, detail, and (new files) size and sha256.

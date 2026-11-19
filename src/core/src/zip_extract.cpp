@@ -1,6 +1,8 @@
 #include "floserver/core/zip_extract.h"
 
+#include "floserver/core/encoding.h"
 #include "floserver/core/paths.h"
+#include "floserver/core/sha256.h"
 
 #include <miniz.h>
 
@@ -385,6 +387,74 @@ bool stream_zip_entry(const fs::path& archive, std::string_view name,
         return false;
     }
     return true;
+}
+
+std::optional<std::vector<std::pair<std::string, ZipFileHash>>> zip_file_hashes(
+    const fs::path& archive, std::string& error, const std::function<bool()>& stop,
+    const std::function<bool(std::string_view, std::uint64_t)>& want) {
+    error.clear();
+    Reader reader;
+    Archive a;
+    if (!open_archive(archive, reader, a, error)) {
+        return std::nullopt;
+    }
+    std::vector<std::pair<std::string, ZipFileHash>> out;
+    const mz_uint count = mz_zip_reader_get_num_files(&a.zip);
+    for (mz_uint i = 0; i < count; ++i) {
+        if (stop && stop()) {
+            error = "stopped";
+            return std::nullopt;
+        }
+        mz_zip_archive_file_stat st{};
+        if (mz_zip_reader_file_stat(&a.zip, i, &st) == MZ_FALSE) {
+            error = "the archive's file list can't be read: " + zip_error(a.zip);
+            return std::nullopt;
+        }
+        const std::string name(st.m_filename);
+        // With `want` (the original archive), only the entries asked for are
+        // checked: an odd one elsewhere (pgAdmin's) isn't ours to refuse.
+        if (want && (st.m_is_directory != 0 || !want(name, st.m_uncomp_size))) {
+            if (st.m_is_directory == 0) {
+                out.emplace_back(name, ZipFileHash{st.m_uncomp_size, {}, false});
+            }
+            continue;
+        }
+        if ((st.m_version_made_by >> 8U) == kUnixHost &&
+            ((st.m_external_attr >> 16U) & kUnixTypeMask) == kUnixSymlink) {
+            error = "the archive has a symbolic link: " + name;
+            return std::nullopt;
+        }
+        if (st.m_is_directory != 0) {
+            // The installer makes a folder for it whatever its name: only a
+            // plain, empty one named like a folder is allowed.
+            if (st.m_uncomp_size != 0 || st.m_comp_size != 0 || !(name.ends_with('/') || name.ends_with('\\'))) {
+                error = "the archive has a folder entry that isn't a plain folder: " + name;
+                return std::nullopt;
+            }
+            out.emplace_back(name, ZipFileHash{0, {}, true});
+            continue;
+        }
+        if (st.m_is_encrypted != MZ_FALSE || st.m_is_supported == MZ_FALSE) {
+            error = "the archive has an encrypted or unsupported entry: " + name;
+            return std::nullopt;
+        }
+        Sha256 hash;
+        const std::function<bool(std::string_view)> sink = [&hash, &stop](std::string_view piece) {
+            hash.update(piece);
+            return !(stop && stop());
+        };
+        Sink s{&sink, 0, st.m_uncomp_size, false};
+        if (mz_zip_reader_extract_to_callback(&a.zip, i, to_sink, &s, 0) == MZ_FALSE || s.written != st.m_uncomp_size) {
+            if (stop && stop()) {
+                error = "stopped";
+                return std::nullopt;
+            }
+            error = "can't unpack " + name + ": " + zip_error(a.zip);
+            return std::nullopt;
+        }
+        out.emplace_back(name, ZipFileHash{st.m_uncomp_size, to_hex(hash.finish()), false});
+    }
+    return out;
 }
 
 std::optional<std::uint64_t> zip_entry_size(const fs::path& archive, std::string_view name, std::string& error) {
