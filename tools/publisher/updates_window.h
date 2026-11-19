@@ -1,0 +1,65 @@
+#pragma once
+
+// D34: the Publisher's Updates window. "Check for updates" asks each
+// runtime's official site what it offers now (updates.h) and lists, per
+// series, what's newer than the next list: an Update (ticked), a New series
+// (your choice) or Up to date, and why a site couldn't be checked.
+
+#include "updates.h"
+
+#include <windows.h>
+
+#include <commctrl.h>
+
+#include <atomic>
+#include <map>
+#include <memory>
+#include <string>
+#include <thread>
+#include <vector>
+
+namespace floserver::publisher {
+
+class UpdatesWindow {
+public:
+    UpdatesWindow() = default;
+    UpdatesWindow(const UpdatesWindow&) = delete;
+    UpdatesWindow& operator=(const UpdatesWindow&) = delete;
+    UpdatesWindow(UpdatesWindow&&) = delete;
+    UpdatesWindow& operator=(UpdatesWindow&&) = delete;
+    ~UpdatesWindow();
+
+    // Opens the window (or brings it forward) and checks `listed`: runtime ->
+    // the versions in the next list.
+    void open(HWND owner, std::map<std::string, std::vector<std::string>> listed);
+    [[nodiscard]] HWND hwnd() const { return hwnd_; }
+
+private:
+    static LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
+    LRESULT handle(UINT msg, WPARAM wp, LPARAM lp);
+    void create_controls();
+    void layout();
+    void check();
+    void stop_worker();
+    void fill();
+    LRESULT custom_draw(NMLVCUSTOMDRAW* cd) const;
+    [[nodiscard]] int px(int dip) const { return MulDiv(dip, static_cast<int>(dpi_), 96); }
+
+    HWND hwnd_ = nullptr;
+    HWND heading_ = nullptr, hint_ = nullptr, list_ = nullptr, status_ = nullptr;
+    HWND keep_answers_ = nullptr, check_again_ = nullptr, get_ = nullptr, close_ = nullptr;
+    HFONT font_ = nullptr, heading_font_ = nullptr;
+    HBRUSH bg_ = nullptr;
+    UINT dpi_ = 96;
+
+    std::map<std::string, std::vector<std::string>> listed_;
+    std::vector<manifest_tool::UpdateRow> rows_;
+    std::string saved_to_;  // where the sites' answers were kept, when asked
+    std::thread worker_;
+    std::atomic<bool> cancel_{false};
+    bool busy_ = false;
+    bool filling_ = false;  // fill() sets the ticks: its notifications aren't the user's
+    UINT dpi_before_ = 96;  // for the columns at a DPI change
+};
+
+}  // namespace floserver::publisher
