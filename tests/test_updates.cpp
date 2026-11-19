@@ -153,6 +153,15 @@ TEST_CASE("updates: compared with the list, as Update, New series, Up to date or
         CHECK(r[0].kind == UpdateKind::Failed);
         CHECK(r[0].detail.find("named none of the listed series") != std::string::npos);
     }
+    // Composer names only its newest minor (and 2.2): a new minor is a new series, not a broken site.
+    {
+        std::map<std::string, FinderAnswer> composer;
+        composer["composer"].versions = {{"2.12", "2.12.0"}, {"2.2", "2.2.26"}};
+        const auto r = compare_updates({{"composer", {"2.11.0", "2.10.3"}}}, composer);
+        REQUIRE_FALSE(r.empty());
+        CHECK(r[0].title == "Composer 2.12");
+        CHECK(r[0].kind == UpdateKind::NewSeries);
+    }
     // phpredis: an update isn't ticked (its Windows builds can come later).
     {
         std::map<std::string, FinderAnswer> redis;

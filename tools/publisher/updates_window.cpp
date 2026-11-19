@@ -55,7 +55,7 @@ fs::path answers_folder() {
 std::wstring kind_text(const mt::UpdateRow& r) {
     switch (r.kind) {
     case mt::UpdateKind::Update:
-        return L"Update";
+        return r.detail.empty() ? L"Update" : L"Update (" + widen(r.detail) + L")";
     case mt::UpdateKind::NewSeries:
         return L"New series";
     case mt::UpdateKind::Failed:
@@ -85,7 +85,7 @@ void UpdatesWindow::open(HWND owner, std::map<std::string, std::vector<std::stri
     // check (GitHub allows 60 an hour). A check still running isn't swapped.
     const bool same = listed == listed_ && !rows_.empty();
     if (!busy_) {
-        listed_ = std::move(listed);
+        listed_ = listed;
     }
     if (hwnd_ == nullptr) {
         HINSTANCE inst = GetModuleHandleW(nullptr);
@@ -103,6 +103,7 @@ void UpdatesWindow::open(HWND owner, std::map<std::string, std::vector<std::stri
             return;
         }
         dpi_ = GetDpiForWindow(hwnd_);
+        dpi_before_ = dpi_;
         const auto font = [this](int pt, int weight) {
             LOGFONTW lf{};
             lf.lfHeight = -MulDiv(pt, static_cast<int>(dpi_), 72);
@@ -124,6 +125,8 @@ void UpdatesWindow::open(HWND owner, std::map<std::string, std::vector<std::stri
     SetForegroundWindow(hwnd_);
     if (!same && !busy_) {
         check();
+    } else if (busy_ && listed != listed_) {
+        SetWindowTextW(status_, L"The list changed while checking: press Check again when this check ends.");
     }
 }
 
@@ -249,6 +252,7 @@ void UpdatesWindow::check() {
 }
 
 void UpdatesWindow::fill() {
+    filling_ = true;
     ListView_DeleteAllItems(list_);
     int updates = 0;
     int fresh = 0;
@@ -257,7 +261,10 @@ void UpdatesWindow::fill() {
         const mt::UpdateRow& r = rows_[i];
         const std::wstring title = widen(r.title);
         LVITEMW item{};
-        item.mask = LVIF_TEXT | LVIF_PARAM;
+        // Inserted with its tick already set, so no notification changes the row meanwhile.
+        item.mask = LVIF_TEXT | LVIF_PARAM | LVIF_STATE;
+        item.state = INDEXTOSTATEIMAGEMASK(r.ticked ? 2U : 1U);
+        item.stateMask = LVIS_STATEIMAGEMASK;
         item.iItem = static_cast<int>(i);
         item.pszText = const_cast<wchar_t*>(title.c_str());
         item.lParam = static_cast<LPARAM>(i);
@@ -268,11 +275,11 @@ void UpdatesWindow::fill() {
         ListView_SetItemText(list_, at, 1, const_cast<wchar_t*>(listed.c_str()));
         ListView_SetItemText(list_, at, 2, const_cast<wchar_t*>(latest.c_str()));
         ListView_SetItemText(list_, at, 3, const_cast<wchar_t*>(kind.c_str()));
-        ListView_SetCheckState(list_, at, r.ticked ? TRUE : FALSE);
         updates += r.kind == mt::UpdateKind::Update ? 1 : 0;
         fresh += r.kind == mt::UpdateKind::NewSeries ? 1 : 0;
         failed += r.kind == mt::UpdateKind::Failed ? 1 : 0;
     }
+    filling_ = false;
     std::wstring status = std::to_wstring(updates) + (updates == 1 ? L" update, " : L" updates, ") +
                           std::to_wstring(fresh) + (fresh == 1 ? L" new series" : L" new series");
     if (failed > 0) {
@@ -350,6 +357,12 @@ LRESULT UpdatesWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
         SendMessageW(heading_, WM_SETFONT, reinterpret_cast<WPARAM>(heading_font_), TRUE);
         DeleteObject(old_font);
         DeleteObject(old_heading);
+        const UINT before = dpi_before_;
+        for (int c = 0; c < 3; ++c) {
+            ListView_SetColumnWidth(list_, c, MulDiv(ListView_GetColumnWidth(list_, c), static_cast<int>(dpi_),
+                                                     static_cast<int>(before)));
+        }
+        dpi_before_ = dpi_;
         const auto* r = int_to_ptr<const RECT*>(lp);
         SetWindowPos(hwnd_, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER);
         return 0;
@@ -376,10 +389,11 @@ LRESULT UpdatesWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
             // A tick is kept with its row: the next Publisher gets what's ticked.
             const auto* lv = int_to_ptr<const NMLISTVIEW*>(lp);
             const auto row = static_cast<std::size_t>(lv->lParam);
-            if ((lv->uChanged & LVIF_STATE) != 0 && row < rows_.size()) {
+            if (!filling_ && (lv->uChanged & LVIF_STATE) != 0 &&
+                ((lv->uNewState ^ lv->uOldState) & LVIS_STATEIMAGEMASK) != 0 && row < rows_.size()) {
                 const bool actionable =
                     rows_[row].kind == mt::UpdateKind::Update || rows_[row].kind == mt::UpdateKind::NewSeries;
-                const bool ticked = ListView_GetCheckState(list_, lv->iItem) != FALSE;
+                const bool ticked = ListView_GetCheckState(list_, lv->iItem) == TRUE;
                 if (ticked && !actionable) {
                     ListView_SetCheckState(list_, lv->iItem, FALSE);  // nothing to get
                 } else {

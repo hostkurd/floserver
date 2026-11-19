@@ -58,6 +58,8 @@ private:
     std::thread worker_;
     std::atomic<bool> cancel_{false};
     bool busy_ = false;
+    bool filling_ = false;  // fill() sets the ticks: its notifications aren't the user's
+    UINT dpi_before_ = 96;  // for the columns at a DPI change
 };
 
 }  // namespace floserver::publisher

@@ -380,8 +380,13 @@ std::vector<UpdateRow> compare_updates(const std::map<std::string, std::vector<s
         }
         // A site that names none of the listed series: its answer has changed
         // (or isn't what was asked for), never "up to date".
+        // (A new series FloServer would offer counts: Composer names only its
+        // newest minor and 2.2.)
         const bool any_listed = std::any_of(f->second.versions.begin(), f->second.versions.end(),
-                                            [&have](const UpstreamVersion& u) { return have.contains(u.series); });
+                                            [&](const UpstreamVersion& u) {
+                                                return have.contains(u.series) ||
+                                                       update_series_wanted(runtime, u.series, listed_series);
+                                            });
         if (!any_listed) {
             UpdateRow row;
             row.runtime = runtime;
