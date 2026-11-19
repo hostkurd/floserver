@@ -276,6 +276,9 @@ using Defaults = std::map<std::string, std::string>;
 // offered as "(not installed)" and downloaded when the project is made.
 // A default from Settings is picked instead when it's installed and not
 // older than the series the template names.
+// Whether a template's Database choice offers PostgreSQL (D29.9): not
+// FloCMS's or WordPress's, which need MySQL's protocol.
+[[nodiscard]] bool card_offers_postgresql(const TemplateCard& card);
 [[nodiscard]] std::vector<VersionField> template_fields(const TemplateCard& card, const Installed& installed, Lang lang,
                                                         const Defaults& defaults = {});
 

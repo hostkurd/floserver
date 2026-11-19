@@ -157,11 +157,11 @@ std::string SettingsWindow::access_id(const Hit& hit) const {
                                                           : std::string();
         case Part::DbField:
         case Part::DbReset:
-            return row < settings_db_ini_fields().size() ? part + "/" + settings_db_ini_fields()[row].key
+            return row < settings_db_ini_fields(db_family_).size() ? part + "/" + settings_db_ini_fields(db_family_)[row].key
                                                          : std::string();
         case Part::DbEngine:
             // By the engine: "db/engine/mysql".
-            return row < db_engines().size() ? part + "/" + std::string(db_engines()[row].family) : std::string();
+            return row < shown_db_engines().size() ? part + "/" + std::string(shown_db_engines()[row].family) : std::string();
         default:
             break;
     }
@@ -292,11 +292,11 @@ AccessNode SettingsWindow::access_node(const Hit& hit) const {
         // Settings > Database.
         case Part::DbEngine: {
             // A tab per engine (D28); its help names the group.
-            if (row >= db_engines().size()) {
+            if (row >= shown_db_engines().size()) {
                 break;
             }
-            AccessNode n = tab_node(access_id(hit), db_engines()[row].title, db_engines()[row].family == db_family_,
-                                    static_cast<int>(row) + 1, static_cast<int>(db_engines().size()));
+            AccessNode n = tab_node(access_id(hit), shown_db_engines()[row].title, shown_db_engines()[row].family == db_family_,
+                                    static_cast<int>(row) + 1, static_cast<int>(shown_db_engines().size()));
             n.help = access_text(text(lang_, Str::DbEngines));
             n.enabled = !db_saving_;
             return n;
@@ -321,8 +321,8 @@ AccessNode SettingsWindow::access_node(const Hit& hit) const {
         case Part::DbKeep:
             return check_node(access_id(hit), {}, db_ && db_keep_running(*db_, db_changes_), !db_saving_);
         case Part::DbReset:
-            if (row < settings_db_ini_fields().size()) {
-                return page_link_node(access_id(hit), reset_name(settings_db_ini_fields()[row].label, lang_), !db_saving_);
+            if (row < settings_db_ini_fields(db_family_).size()) {
+                return page_link_node(access_id(hit), reset_name(settings_db_ini_fields(db_family_)[row].label, lang_), !db_saving_);
             }
             break;
         case Part::DbRootShow:

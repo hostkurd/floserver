@@ -88,9 +88,38 @@ DbServer db_server_from_json(const json& server) {
 }
 
 const std::vector<DbEngine>& db_engines() {
-    static const std::vector<DbEngine> engines = {{"mariadb", "MariaDB"}, {"mysql", "MySQL"}};
+    static const std::vector<DbEngine> engines = {
+        {"mariadb", "MariaDB"}, {"mysql", "MySQL"}, {"postgresql", "PostgreSQL"}};
     return engines;
 }
+
+Str db_str(std::string_view family, Str s) {
+    if (family != "postgresql") {
+        return s;
+    }
+    switch (s) {
+        case Str::DbShowFinal: return Str::DbPgShowFinal;
+        case Str::DbEditFull: return Str::DbPgEditFull;
+        case Str::DbUnknownOption: return Str::DbPgUnknownOption;
+        case Str::DbUnknownOptionMaybe: return Str::DbPgUnknownOptionMaybe;
+        case Str::DbCustomProblems: return Str::DbPgCustomProblems;
+        case Str::DbOpenIniFailed: return Str::DbPgOpenIniFailed;
+        case Str::DbFinalOpened: return Str::DbPgFinalOpened;
+        case Str::DbRoot: return Str::DbPgRoot;
+        case Str::DbRootPassword: return Str::DbPgRootPassword;
+        case Str::DbRootNote: return Str::DbPgRootNote;
+        case Str::DbPasswordSet: return Str::DbPgPasswordSet;
+        case Str::DbPasswordCopied: return Str::DbPgPasswordCopied;
+        case Str::DbPasswordFailed: return Str::DbPgPasswordFailed;
+        case Str::DbRootReadFailed: return Str::DbPgRootReadFailed;
+        case Str::DbPathNotAscii: return Str::DbPgPathNotAscii;
+        default: return s;
+    }
+}
+
+std::string_view db_ini_name(std::string_view family) { return family == "postgresql" ? "postgresql.conf" : "my.ini"; }
+
+bool db_has_phpmyadmin(std::string_view family) { return family == "mariadb" || family == "mysql"; }
 
 std::string db_engine_title(std::string_view family) {
     for (const DbEngine& e : db_engines()) {
@@ -154,8 +183,9 @@ std::vector<std::pair<std::string, std::string>> installed_db_series(const Insta
     std::sort(versions.begin(), versions.end(),
               [](const std::string& a, const std::string& b) { return is_newer_version(a, b); });
     for (const std::string& v : versions) {
+        // MariaDB's and MySQL's series are two numbers, PostgreSQL's one (D29).
         const std::string series = version_series(family, v);
-        if (series.find('.') == std::string::npos) {
+        if (series.empty() || (family != "postgresql" && series.find('.') == std::string::npos)) {
             continue;
         }
         if (std::none_of(out.begin(), out.end(), [&](const auto& s) { return s.first == series; })) {
@@ -191,6 +221,18 @@ std::vector<std::pair<std::string, std::string>> settings_db_versions(bool has_i
     return installed_db_series(installed_of_reply(runtimes_reply), family);
 }
 
+std::vector<DbEngine> db_engines_shown(bool has_installed, const Installed& installed, const json& runtimes_reply,
+                                       std::string_view shown) {
+    std::vector<DbEngine> out;
+    for (const DbEngine& e : db_engines()) {
+        if (e.family != "postgresql" || e.family == shown ||
+            !settings_db_versions(has_installed, installed, runtimes_reply, e.family).empty()) {
+            out.push_back(e);
+        }
+    }
+    return out;
+}
+
 std::string db_family_to_show(const std::string& shown, bool has_installed, const Installed& installed,
                               const json& runtimes_reply) {
     const auto has = [&](std::string_view family) {
@@ -219,7 +261,21 @@ std::string db_engine_note(std::string_view family, Lang lang) {
     return family == "mysql" ? std::string(text(lang, Str::DbMysqlLtsNote)) : std::string();
 }
 
-const std::vector<DbIniField>& settings_db_ini_fields() {
+const std::vector<DbIniField>& settings_db_ini_fields(std::string_view family) {
+    // PostgreSQL's (D29): its names as postgresql.conf writes them.
+    static const std::vector<DbIniField> postgres = {
+        {"shared_buffers", "shared_buffers"},
+        {"work_mem", "work_mem"},
+        {"max_connections", "max_connections"},
+        {"maintenance_work_mem", "maintenance_work_mem"},
+        {"effective_cache_size", "effective_cache_size"},
+        {"statement_timeout", "statement_timeout"},
+        {"log_min_duration_statement", "log_min_duration_statement"},
+        {"timezone", "timezone"},
+    };
+    if (family == "postgresql") {
+        return postgres;
+    }
     static const std::vector<DbIniField> fields = {
         {"max_allowed_packet", "max_allowed_packet"},
         {"innodb_buffer_pool_size", "innodb_buffer_pool_size"},
@@ -246,7 +302,9 @@ std::string db_option_base(std::string_view name) {
 
 std::optional<std::string> unknown_db_option(const std::vector<std::string>& known, std::string_view key) {
     const std::string base = db_option_base(key);
-    if (known.empty() || base.empty()) {
+    // PostgreSQL's dotted names (auto_explain.log_min_duration) are an
+    // extension's, which postgres doesn't list: never said to be unknown.
+    if (known.empty() || base.empty() || base.find('.') != std::string::npos) {
         return std::nullopt;
     }
     // skip-, enable-, disable- and maximum- go with the name after them.
@@ -259,9 +317,9 @@ std::optional<std::string> unknown_db_option(const std::vector<std::string>& kno
 }
 
 std::string unknown_db_option_text(std::string_view server, std::string_view key, const std::string& suggestion,
-                                   Lang lang) {
-    return suggestion.empty() ? fill(lang, Str::DbUnknownOption, {server, key})
-                              : fill(lang, Str::DbUnknownOptionMaybe, {server, key, suggestion});
+                                   Lang lang, std::string_view family) {
+    return suggestion.empty() ? fill(lang, db_str(family, Str::DbUnknownOption), {server, key})
+                              : fill(lang, db_str(family, Str::DbUnknownOptionMaybe), {server, key, suggestion});
 }
 
 // --- changes until Save --------------------------------------------------------
@@ -441,7 +499,7 @@ std::string db_state_text(const DbSeries& series, const DbServer& server, Lang l
     } else if (server.state == "stopping") {
         line = std::string(text(lang, Str::DbStopping));
     } else if (server.state == "failed" && server.error_code == "path_not_ascii") {
-        line = std::string(text(lang, Str::DbPathNotAscii));
+        line = std::string(text(lang, db_str(series.family, Str::DbPathNotAscii)));
     } else if (server.state == "failed") {
         line = fill(lang, Str::DbFailed, {server.error});
     } else {
@@ -450,7 +508,6 @@ std::string db_state_text(const DbSeries& series, const DbServer& server, Lang l
     if (server.port_wanted > 0) {
         line += " " + fill(lang, Str::DbPortTaken, {std::to_string(server.port_wanted), port});
     }
-    (void)series;
     return line;
 }
 

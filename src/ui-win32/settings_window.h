@@ -754,6 +754,8 @@ private:
     void select_db_engine(const std::string& family);
     // "MySQL 8.4", for the words.
     [[nodiscard]] std::string db_title() const;
+    // Settings > Database's tabs now (PostgreSQL's once it's installed, D29.7).
+    [[nodiscard]] std::vector<DbEngine> shown_db_engines() const;
     // True when a Save chosen on the way out is done and the window should close.
     [[nodiscard]] bool on_db_answers(const Snapshot& snap);
     void make_db_edits();

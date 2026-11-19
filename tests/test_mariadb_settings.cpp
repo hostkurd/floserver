@@ -299,3 +299,59 @@ TEST_CASE("database.get and database.set through the project service") {
     CHECK((*got)["custom_problems"].size() == 1);
     CHECK((*got)["custom_keys"] == json{"max_conections"});
 }
+
+TEST_CASE("database.get and database.set for PostgreSQL through the project service (D29)") {
+    const test_util::TempDir tmp;
+    const fs::path data = tmp.path() / "data";
+    const fs::path dir = runtimes_dir(data) / "postgresql" / "18.7";
+    fs::create_directories(dir);
+    test_util::write_file(dir / ".floserver-runtime.json",
+                          json{{"schema", 1}, {"name", "postgresql"}, {"version", "18.7"},
+                               {"platform", std::string(current_platform())}, {"variant", ""},
+                               {"license", "PostgreSQL"}, {"sha256", std::string(64, 'a')}}
+                              .dump());
+    std::string error;
+    REQUIRE(write_file_atomically(app_config_file(data), R"({"projects": []})", error));
+    ProjectService service(data);
+    ServiceRefusal refusal;
+
+    auto got = service.database_get("18", refusal, "postgresql");
+    REQUIRE_MESSAGE(got, refusal.message);
+    CHECK((*got)["family"] == "postgresql");
+    CHECK((*got)["version"] == "18.7");
+    CHECK((*got)["ini"]["shared_buffers"] == "64MB");
+    CHECK((*got)["ini"]["max_connections"] == "100");
+    CHECK_FALSE(service.database_get("18.7", refusal, "postgresql"));
+    CHECK(refusal.message.find("such as 18") != std::string::npos);
+
+    bool changed = false;
+    got = service.database_set("18", {{"work_mem", "16MB"}, {"TimeZone", "UTC"}}, nullptr, nullptr, changed, refusal,
+                               "postgresql");
+    REQUIRE_MESSAGE(got, refusal.message);
+    CHECK(changed);
+    CHECK((*got)["changed"] == json{{"timezone", "UTC"}, {"work_mem", "16MB"}});
+    const auto app = load_app_config(app_config_file(data), error);
+    REQUIRE(app);
+    CHECK(app->other["postgresql"]["18"]["ini"]["work_mem"] == "16MB");
+    // What FloServer sets itself is refused.
+    CHECK_FALSE(service.database_set("18", {{"listen_addresses", "*"}}, nullptr, nullptr, changed, refusal, "postgresql"));
+    CHECK(refusal.message.find("127.0.0.1") != std::string::npos);
+    CHECK_FALSE(service.database_set("18", {{"port", "1"}}, nullptr, nullptr, changed, refusal, "postgresql"));
+    // A directive or a program isn't a setting: refused here as in custom.conf.
+    CHECK_FALSE(service.database_set("18", {{"include", "C:/evil.conf"}}, nullptr, nullptr, changed, refusal, "postgresql"));
+    CHECK_FALSE(service.database_set("18", {{"shared_preload_libraries", "x"}}, nullptr, nullptr, changed, refusal,
+                                     "postgresql"));
+    CHECK_FALSE(service.database_set("18", {{"archive_command", "calc"}}, nullptr, nullptr, changed, refusal, "postgresql"));
+
+    // custom.conf, with its own header.
+    const auto custom = service.database_custom_ini("18", refusal, "postgresql");
+    REQUIRE_MESSAGE(custom, refusal.message);
+    CHECK(custom->filename() == "custom.conf");
+    CHECK(read_small_file(*custom, 4096) == mariadb_custom_ini_header("18", "postgresql"));
+    test_util::write_file(*custom, "work_mem = 32MB\nssl = on\n");
+    got = service.database_get("18", refusal, "postgresql");
+    REQUIRE(got);
+    CHECK((*got)["custom_keys"] == json{"work_mem"});
+    REQUIRE(got->contains("custom_problems"));
+    CHECK((*got)["custom_problems"].size() == 1);
+}

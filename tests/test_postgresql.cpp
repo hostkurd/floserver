@@ -6,6 +6,7 @@
 #include "floserver/core/database_engine.h"
 #include "floserver/core/database_service.h"
 #include "floserver/core/mariadb.h"
+#include "floserver/core/mariadb_settings.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/postgresql.h"
 #include "floserver/core/process.h"
@@ -100,6 +101,74 @@ TEST_CASE("PostgreSQL on Windows: ASCII paths keep each file in its own folder (
     CHECK(f.init_file.filename() == "pwfile");
 }
 
+TEST_CASE("PostgreSQL's settings: names it refuses, custom.conf, floserver.conf (D29)") {
+    const std::string_view pg = "postgresql";
+    CHECK(mariadb_request_series("18", pg) == "18");
+    CHECK_FALSE(mariadb_request_series("18.1", pg));
+    CHECK_FALSE(mariadb_request_series("18"));  // MariaDB's are two numbers
+    CHECK_FALSE(mariadb_option_problem("work_mem", pg));
+    CHECK_FALSE(mariadb_option_problem("TimeZone", pg));
+    CHECK_FALSE(mariadb_option_problem("auto_explain.log_min_duration", pg));
+    for (const char* refused : {"listen_addresses", "port", "unix_socket_directories", "ssl", "ssl_cert_file",
+                                "hba_file", "data_directory", "password_encryption", "lc_messages",
+                                "logging_collector", "log_min_error_statement", "Listen_Addresses"}) {
+        CAPTURE(refused);
+        CHECK(mariadb_option_problem(refused, pg));
+    }
+    // Directives, programs and libraries: refused on every path, Settings' too.
+    for (const char* refused : {"include", "INCLUDE_IF_EXISTS", "include_dir", "shared_preload_libraries",
+                                "session_preload_libraries", "local_preload_libraries", "archive_command",
+                                "archive_library", "restore_command", "ssl_passphrase_command"}) {
+        CAPTURE(refused);
+        CHECK(mariadb_option_problem(refused, pg));
+    }
+    CHECK(mariadb_option_problem("work-mem", pg));  // not a PostgreSQL name
+    CHECK(mariadb_option_problem("1abc", pg));
+    CHECK(mariadb_ini_defaults(pg).size() == 2);
+    CHECK(mariadb_custom_ini_file("D", "18", pg).filename() == "custom.conf");
+
+    const FilteredCustomIni f = filter_mariadb_custom_ini(
+        "\xEF\xBB\xBF# mine\n"
+        "work_mem = 16MB\n"
+        "TimeZone='Asia/Baghdad'   # here\n"
+        "search_path 'a, b'\n"
+        "listen_addresses = '*'\n"
+        "include 'other.conf'\n"
+        "application_name = 'it''s' # quoted quote\n"
+        "bad value here\n"
+        "statement_timeout = 'unclosed\n"
+        "search_path = 'a\\nb'\n"
+        "application_name = 'back\\\\slash'\n",
+        pg);
+    CHECK(f.text ==
+          "work_mem = '16MB'\n"
+          "timezone = 'Asia/Baghdad'\n"
+          "search_path = 'a, b'\n"
+          "# FloServer left out line 5\n"
+          "# FloServer left out line 6\n"
+          "application_name = 'it''s'\n"
+          "# FloServer left out line 8\n"
+          "# FloServer left out line 9\n"
+          "# FloServer left out line 10\n"
+          "application_name = 'back\\\\slash'\n");
+    REQUIRE(f.problems.size() == 5);
+    CHECK(f.problems[0].starts_with("line 5: listen_addresses can't be set"));
+    CHECK(f.problems[1].starts_with("line 6: include can't be used"));
+    CHECK(f.keys == std::vector<std::string>{"application_name", "search_path", "timezone", "work_mem"});
+
+    MariaDbExtras extras;
+    extras.ini = {{"shared_buffers", "128MB"}, {"timezone", "it's"}};
+    extras.custom_ini = "work_mem = '16MB'\n";
+    extras.custom_ini_path = "C:/data/postgresql/18/custom.conf";
+    const std::string conf = postgresql_settings_conf(extras);
+    CHECK(conf.find("max_connections = '100'\nshared_buffers = '128MB'\ntimezone = 'it''s'\n") != std::string::npos);
+    CHECK(conf.find("# C:/data/postgresql/18/custom.conf\nwork_mem = '16MB'\n") != std::string::npos);
+
+    CHECK(parse_postgres_describe_config("work_mem\tuser\tResource Usage\tINTEGER\n"
+                                         "TimeZone\tuser\tClient\tSTRING\n"
+                                         "not a line\n") == std::vector<std::string>{"timezone", "work_mem"});
+}
+
 TEST_CASE("PostgreSQL's SQL, password file and client environment (D29)") {
     CHECK(pg_identifier("my_shop") == "\"my_shop\"");
     CHECK(pg_identifier("a\"b") == "\"a\"\"b\"");
@@ -129,6 +198,14 @@ TEST_CASE("PostgreSQL's SQL, password file and client environment (D29)") {
     };
     CHECK(value("PGREQUIREAUTH") == "scram-sha-256");
     CHECK(value("PGPASSFILE").ends_with("x.pgpass"));
+    // FloServer's superuser sessions log no statements (they set passwords).
+    CHECK(value("PGOPTIONS") == "-c log_statement=none -c log_min_duration_statement=-1 "
+                                "-c log_min_duration_sample=-1 -c log_transaction_sample_rate=0 "
+                                "-c debug_print_parse=off -c debug_print_rewritten=off -c debug_print_plan=off "
+                                "-c track_activities=off");
+    for (const auto& [key, v] : pg_client_env("/f/x.pgpass", "/f", false)) {
+        CHECK(key != "PGOPTIONS");
+    }
     CHECK(std::find(pg_client_env_removed().begin(), pg_client_env_removed().end(), "PGPASSWORD") !=
           pg_client_env_removed().end());
 }
@@ -252,7 +329,19 @@ TEST_CASE("a project's PostgreSQL database: made, logged in to, asleep when idle
     REQUIRE(add_project(app, shop, "", error));
     REQUIRE(add_project(app, other, "", error));
     REQUIRE(add_project(app, reserved, "", error));
+    // Settings > Database's values and custom.conf reach the server; what
+    // FloServer sets itself (the port) doesn't move.
+    MariaDbSeriesSettings settings;
+    settings.ini["work_mem"] = "8MB";
+    // Every statement logged: still no password in the log.
+    settings.ini["log_min_duration_statement"] = "0";
+    settings.ini["log_statement"] = "all";
+    settings.ini["debug_print_rewritten"] = "on";
+    write_mariadb_series(app, major, settings, "postgresql");
     REQUIRE(save_app_config(app_config_file(data), app, error));
+    REQUIRE(ensure_mariadb_custom_ini(data, major, error, "postgresql"));
+    test_util::write_file(mariadb_custom_ini_file(data, major, "postgresql"),
+                          "statement_timeout = '5s'  # a comment\nport = 1\napplication_name = 'it''s mine'\n");
 
     const SecretStore secrets(data);
     DatabaseServiceConfig cfg;
@@ -290,6 +379,50 @@ TEST_CASE("a project's PostgreSQL database: made, logged in to, asleep when idle
     CHECK(pg_query(bin, port, "my_shop", "wrong", "my_shop", "SELECT 1").starts_with("ERROR"));
     CHECK(pg_query(bin, port, "my_shop", login->password, "my_shop", "CREATE DATABASE x").starts_with("ERROR"));
     CHECK(pg_query(bin, port, "my_shop", login->password, "my_shop", "SHOW server_encoding") == "UTF8");
+    CHECK(pg_query(bin, port, "my_shop", login->password, "my_shop", "SHOW work_mem") == "8MB");
+    CHECK(pg_query(bin, port, "my_shop", login->password, "my_shop", "SHOW shared_buffers") == "64MB");
+    CHECK(pg_query(bin, port, "my_shop", login->password, "my_shop", "SHOW statement_timeout") == "5s");
+    CHECK(pg_query(bin, port, "my_shop", login->password, "my_shop", "SHOW port") != "1");
+    CHECK(pg_query(bin, port, "my_shop", login->password, "my_shop", "SHOW lc_messages") == "C");
+    {
+        const fs::path conf = data / "data" / ("postgresql-" + major) / "data" / "postgresql.conf";
+        const auto count = [&conf] {
+            const std::string text = test_util::read_file(conf);
+            std::size_t n = 0;
+            for (std::size_t at = text.find("\ninclude_if_exists = 'floserver.conf'"); at != std::string::npos;
+                 at = text.find("\ninclude_if_exists = 'floserver.conf'", at + 1)) {
+                ++n;
+            }
+            return n;
+        };
+        CHECK(count() == 1);
+        // A comment that looks like the line doesn't count: the real one is added again at the end.
+        test_util::write_file(conf, test_util::read_file(conf) + "#include_if_exists = 'floserver.conf'\n");
+        REQUIRE(db.server_action(major, "restart", refusal, "postgresql"));
+        CHECK(eventually([&] { return count() == 2; }, 20s));
+        CHECK(eventually([&] { return pg_server(db)["state"] == "running"; }, 20s));
+        // Starting again adds nothing.
+        REQUIRE(db.server_action(major, "restart", refusal, "postgresql"));
+        CHECK(eventually([&] { return pg_server(db)["state"] == "running"; }, 20s));
+        CHECK(count() == 2);
+    }
+    {
+        // The final settings name custom.conf's refused line, and FloServer's own.
+        const auto final_file = db.final_ini(major, refusal, "postgresql");
+        REQUIRE_MESSAGE(final_file, refusal.message);
+        const std::string text = test_util::read_file(*final_file);
+        CHECK(text.find("work_mem = '8MB'") != std::string::npos);
+        CHECK(text.find("statement_timeout = '5s'") != std::string::npos);
+        CHECK(text.find("# FloServer left out line 2") != std::string::npos);
+        CHECK(text.find("#   listen_addresses=127.0.0.1") != std::string::npos);
+        // The names this postgres knows, for "did you mean".
+        bool timed_out = false;
+        const auto known = known_mariadb_options(bin / "postgres", tmp.path() / "known-options-pg.json", error,
+                                                 timed_out);
+        REQUIRE_MESSAGE(known, error);
+        CHECK(std::binary_search(known->begin(), known->end(), "work_mem"));
+        CHECK(std::binary_search(known->begin(), known->end(), "timezone"));
+    }
     // Asking again: the same password, and the database is kept.
     const auto again = db.project_login("my-shop", refusal);
     REQUIRE(again);
@@ -307,6 +440,20 @@ TEST_CASE("a project's PostgreSQL database: made, logged in to, asleep when idle
     REQUIRE(root);
     CHECK(pg_query(bin, port, "postgres", *root, "postgres", "SELECT 1") == "1");
     CHECK(pg_query(bin, port, "postgres", "", "postgres", "SELECT 1").starts_with("ERROR"));
+
+    // FloServer's sessions set the passwords: with every statement logged, none is in the log
+    // (the superuser's new one, set while it runs, either).
+    const std::string running_root = "Run-Root-Pass_1";
+    REQUIRE_MESSAGE(db.set_root_password(major, running_root, refusal, "postgresql"), refusal.message);
+    CHECK(pg_query(bin, port, "postgres", running_root, "postgres", "SELECT 1") == "1");
+    {
+        const std::string log = test_util::read_file(data / "data" / ("postgresql-" + major) / "postgres.log");
+        CHECK(log.find(running_root) == std::string::npos);
+        CHECK(log.find("statement:") != std::string::npos);  // the project's own statements are logged
+        CHECK(log.find(login->password) == std::string::npos);
+        CHECK(log.find(*root) == std::string::npos);
+        CHECK(log.find(other_login->password) == std::string::npos);
+    }
 
     // Idle: it sleeps, and the next connection wakes it.
     CHECK(eventually([&] { return pg_server(db)["state"] == "sleeping"; }, 20s));

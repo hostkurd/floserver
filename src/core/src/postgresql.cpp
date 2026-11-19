@@ -69,7 +69,33 @@ std::vector<std::string> postgresql_server_args(const MariaDbFiles& files, Port 
             "password_encryption=scram-sha-256",
             // A failed statement (ALTER ROLE ... PASSWORD) isn't logged with its text.
             "-c",
-            "log_min_error_statement=panic"};
+            "log_min_error_statement=panic",
+            // FloServer reads the server's messages, in English, from its own log.
+            "-c",
+            "lc_messages=C",
+            "-c",
+            "logging_collector=off",
+            "-c",
+            "log_destination=stderr"};
+}
+
+const std::vector<std::string>& pg_quiet_settings() {
+    // The statements, the parse trees the debug_print_* settings write
+    // (ALTER ROLE's password is in them too), and the text a crash or a
+    // deadlock report would quote (track_activities).
+    static const std::vector<std::string> settings = {
+        "log_statement=none",          "log_min_duration_statement=-1", "log_min_duration_sample=-1",
+        "log_transaction_sample_rate=0", "debug_print_parse=off",       "debug_print_rewritten=off",
+        "debug_print_plan=off",        "track_activities=off"};
+    return settings;
+}
+
+std::string pg_quiet_options() {
+    std::string out;
+    for (const std::string& s : pg_quiet_settings()) {
+        out += (out.empty() ? "-c " : " -c ") + s;
+    }
+    return out;
 }
 
 std::string postgresql_hba() {
@@ -152,13 +178,18 @@ std::string pg_password_file(Port port, const std::string& user, const std::stri
     return "127.0.0.1:" + std::to_string(port) + ":*:" + escape(user) + ":" + escape(password) + "\n";
 }
 
-std::vector<std::pair<std::string, std::string>> pg_client_env(const fs::path& password_file, const fs::path& dir) {
-    return {{"PGPASSFILE", path_to_utf8(password_file)},
-            {"PGCONNECT_TIMEOUT", "10"},
-            {"PGREQUIREAUTH", "scram-sha-256"},
-            {"PGSYSCONFDIR", path_to_utf8(dir)},
-            {"PSQLRC", path_to_utf8(dir / "no-psqlrc")},
-            {"PGCLIENTENCODING", "UTF8"}};
+std::vector<std::pair<std::string, std::string>> pg_client_env(const fs::path& password_file, const fs::path& dir,
+                                                               bool superuser) {
+    std::vector<std::pair<std::string, std::string>> env = {{"PGPASSFILE", path_to_utf8(password_file)},
+                                                            {"PGCONNECT_TIMEOUT", "10"},
+                                                            {"PGREQUIREAUTH", "scram-sha-256"},
+                                                            {"PGSYSCONFDIR", path_to_utf8(dir)},
+                                                            {"PSQLRC", path_to_utf8(dir / "no-psqlrc")},
+                                                            {"PGCLIENTENCODING", "UTF8"}};
+    if (superuser) {
+        env.emplace_back("PGOPTIONS", pg_quiet_options());
+    }
+    return env;
 }
 
 const std::vector<std::string>& pg_client_env_removed() {

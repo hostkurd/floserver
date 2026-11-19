@@ -950,8 +950,12 @@ TEST_CASE("publisher: PostgreSQL's server zip is compared file by file with EDB'
     CHECK(f.detail.find("Can't download the original") != std::string::npos);
 
     cdn.http.serve(original, {200, pg_zip(edb_files())});
+    std::vector<CheckPhase> phases;
+    ctx.phase = [&phases](CheckPhase p) { phases.push_back(p); };
     f = check(server_files());
     CHECK_MESSAGE(f.state == CheckState::Ok, f.detail);
+    CHECK(phases == std::vector<CheckPhase>{CheckPhase::Original, CheckPhase::Compare});
+    ctx.phase = nullptr;
     CHECK(f.detail == "Matches the original from get.enterprisedb.com, file by file (8 files)");
     CHECK(f.sha256 == sha256_hex(pg_zip(server_files())));
     // The temporary copies are gone.

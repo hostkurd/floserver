@@ -333,6 +333,24 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     DbMysqlLtsNote,          // under MySQL's tab: 8.4 LTS only (D28)
     DbEngines,               // the engines' tabs, for screen readers
     DbPathNotAscii,          // MySQL on Windows: no ASCII (8.3) form of its folder's path
+    // D29: PostgreSQL's tab says postgresql.conf, custom.conf and postgres where
+    // the others say my.ini, custom.ini and root (db_str()).
+    DbPgShowFinal,
+    DbPgEditFull,
+    DbPgUnknownOption,       // {0}: "PostgreSQL 18", {1}: the name
+    DbPgUnknownOptionMaybe,  // {0}, {1}, {2}: the closest name
+    DbPgCustomProblems,      // {0}: the problems
+    DbPgOpenIniFailed,       // {0}: the reason
+    DbPgFinalOpened,
+    DbPgRoot,
+    DbPgRootPassword,
+    DbPgRootNote,
+    DbPgPasswordSet,
+    DbPgPasswordCopied,
+    DbPgPasswordFailed,      // {0}: the reason
+    DbPgRootReadFailed,      // {0}: the reason
+    DbPgPathNotAscii,
+    DbPgTools,               // where MariaDB's tab has phpMyAdmin
     // phpMyAdmin (an optional tool).
     SettingsTools,
     PmaOpen,

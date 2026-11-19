@@ -504,7 +504,9 @@ std::optional<std::string> phpmyadmin_login(DatabaseService& databases, PhpMyAdm
         login.only_db = std::move(own->database);
     } else {
         const auto series = mariadb_request_series(request.series);
-        if (!series || !request_database_family(request.family, login.family)) {
+        // phpMyAdmin speaks MySQL's protocol only: not PostgreSQL's.
+        if (!series || !request_database_family(request.family, login.family) ||
+            !mysql_protocol_family(login.family)) {
             refusal = {"bad_params", "name a MariaDB or MySQL series such as 11.4 (with its family), or a project"};
             return std::nullopt;
         }

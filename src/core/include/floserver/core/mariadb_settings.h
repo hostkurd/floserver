@@ -1,11 +1,15 @@
 #pragma once
 
-// Settings → Database (MariaDB, and MySQL since D28): per series, in
+// Settings → Database (MariaDB, MySQL since D28, PostgreSQL since D29): per series, in
 // config.json, beside PHP's "php" key, under the family's name:
 //
 //   "mariadb": {"11.4": {"port": 3307, "keep_running": true,
 //                        "ini": {"max_connections": "300"}}},
-//   "mysql":   {"8.4": {"keep_running": true}}
+//   "mysql":   {"8.4": {"keep_running": true}},
+//   "postgresql": {"18": {"ini": {"work_mem": "16MB"}}}
+//
+// For PostgreSQL "ini" holds postgresql.conf settings and the user's file is
+// <data>/postgresql/<series>/custom.conf (postgresql.conf's syntax).
 //
 // "port" is the public port projects connect to (absent: 3306 or the next
 // free one, kept in the series' folder as before). "keep_running": the
@@ -83,8 +87,9 @@ using MariaDbSettings = std::map<std::string, MariaDbSeriesSettings>;
 void write_mariadb_series(AppConfig& app, const std::string& series, const MariaDbSeriesSettings& settings,
                           std::string_view family = kMariaDbFamily);
 
-// "11.4" from a request: two numbers, nothing else.
-[[nodiscard]] std::optional<std::string> mariadb_request_series(std::string_view series);
+// "11.4" from a request: two numbers, nothing else (PostgreSQL's: one, "18").
+[[nodiscard]] std::optional<std::string> mariadb_request_series(std::string_view series,
+                                                                std::string_view family = kMariaDbFamily);
 
 // <data>/mariadb/<series>/custom.ini (<data>/mysql/<series>/custom.ini).
 [[nodiscard]] std::filesystem::path mariadb_custom_ini_file(const std::filesystem::path& data, const std::string& series,
@@ -132,5 +137,13 @@ struct MariaDbExtras {
     bool& timed_out, std::chrono::milliseconds limit = std::chrono::seconds{10});
 // The names in `mariadbd --verbose --help`'s text.
 [[nodiscard]] std::vector<std::string> parse_mariadb_help(std::string_view text);
+// The names in `postgres --describe-config`'s text (lower case).
+[[nodiscard]] std::vector<std::string> parse_postgres_describe_config(std::string_view text);
+
+// PostgreSQL (D29): what FloServer writes to the data folder's floserver.conf
+// each start, which postgresql.conf includes at its end: the series' values
+// and custom.conf (filtered), every value quoted. Its own settings are on
+// postgres' command line, which wins over any file.
+[[nodiscard]] std::string postgresql_settings_conf(const MariaDbExtras& extras);
 
 }  // namespace floserver::core

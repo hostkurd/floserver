@@ -133,6 +133,10 @@ struct OfficialSource {
                                             const std::vector<std::string>& required,
                                             const std::vector<std::string>& kept = {});
 
+// What check_file is doing, for the window: a MadeFrom check downloads a
+// second file and then compares them.
+enum class CheckPhase : std::uint8_t { Download, Original, Compare };
+
 struct CheckContext {
     CheckContext(core::HttpTransport& transport, std::string_view cdn_base)
         : http(transport), cdn(cdn_base) {}
@@ -141,6 +145,8 @@ struct CheckContext {
     const std::atomic<bool>* cancel = nullptr;
     // Bytes done of the current download, for the window.
     std::function<void(std::uint64_t done)> progress;
+    // Each phase after the first download (bytes start again from 0).
+    std::function<void(CheckPhase)> phase;
     std::map<std::string, std::optional<std::string>> sums_cache;  // url -> text
     // MadeFrom downloads both zips here for a moment; empty: the system's temp folder.
     std::filesystem::path scratch;

@@ -1792,3 +1792,71 @@ TEST_CASE("Settings > Runtimes: Bun and Deno cards (D31)") {
     CHECK(rows[1].label == "1.3.14 baseline");
     CHECK(rows[1].action == RowAction::Remove);
 }
+
+TEST_CASE("PostgreSQL in the window's model (D29): the pickers, shared sites, Runtimes") {
+    const Installed installed = {{"php", {"8.4.27"}}, {"mariadb", {"11.4.9"}}, {"postgresql", {"18.7", "17.9"}}};
+    ProjectRow row;
+    row.wants.known = true;
+    row.wants.php = "8.4";
+    row.wants.database = "postgresql-18";
+    const auto fields = version_fields(row, installed, Lang::En);
+    const auto db = std::find_if(fields.begin(), fields.end(), [](const VersionField& f) { return f.key == "database"; });
+    REQUIRE(db != fields.end());
+    // None, MariaDB's series, then PostgreSQL's (major versions).
+    REQUIRE(db->choices.size() == 4);
+    CHECK(db->choices[2].label == "PostgreSQL 18");
+    CHECK(db->choices[2].value == std::optional<std::string>("postgresql-18"));
+    CHECK(db->choices[3].label == "PostgreSQL 17");
+    CHECK(db->current == 2);
+    CHECK(database_chip("postgresql-18") == "PostgreSQL 18");
+    CHECK(runtime_label("postgresql") == "PostgreSQL");
+
+    // New project: Laravel (and the plain PHP app) offer it; FloCMS and WordPress don't.
+    TemplateCard laravel;
+    laravel.id = "laravel";
+    laravel.uses_php = true;
+    laravel.config.known = true;
+    laravel.config.php = "8.4";
+    laravel.config.database = "mariadb-11.4";
+    TemplateCard flocms = laravel;
+    flocms.id = "flocms";
+    const auto has_pg = [&](const TemplateCard& card) {
+        for (const VersionField& f : template_fields(card, installed, Lang::En)) {
+            if (f.key == "database") {
+                return std::any_of(f.choices.begin(), f.choices.end(), [](const auto& c) {
+                    return c.value && c.value->starts_with("postgresql-");
+                });
+            }
+        }
+        return false;
+    };
+    CHECK(has_pg(laravel));
+    CHECK_FALSE(has_pg(flocms));
+    TemplateCard wordpress = laravel;
+    wordpress.id = "wordpress";
+    CHECK_FALSE(has_pg(wordpress));
+    CHECK_FALSE(card_offers_postgresql(wordpress));
+
+    // Shared sites: MySQL's protocol only.
+    SharedSites shared;
+    shared.php = "8.4";
+    for (const VersionField& f : shared_fields(shared, installed, Lang::En)) {
+        for (const auto& c : f.choices) {
+            CHECK_FALSE((c.value && c.value->starts_with("postgresql-")));
+        }
+    }
+
+    // Runtimes: its own card, with the server's port.
+    const json reply = {{"installed", json::array({{{"name", "postgresql"}, {"version", "18.7"}, {"folder", "18.7"}}})}};
+    const json servers = {{"servers", json::array({{{"family", "postgresql"}, {"series", "18"}, {"version", "18.7"},
+                                                    {"port", 5432}, {"state", "running"}}})}};
+    const Installed pg_only = {{"postgresql", {"18.7"}}};
+    const RuntimesPage page = runtimes_page(reply, &pg_only, servers, Lang::En);
+    const auto g = std::find_if(page.groups.begin(), page.groups.end(),
+                                [](const RuntimeGroup& x) { return x.runtime == "postgresql"; });
+    REQUIRE(g != page.groups.end());
+    CHECK(g->title == "PostgreSQL");
+    CHECK_FALSE(g->picker);
+    REQUIRE(g->rows.size() == 1);
+    CHECK(g->rows[0].usage.find("5432") != std::string::npos);
+}

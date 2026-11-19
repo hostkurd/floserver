@@ -435,16 +435,17 @@ public:
 
     // The my.ini this server writes when it starts (`first`: with the init
     // file), from Settings > Database as config.json has it now.
+    // PostgreSQL's: the floserver.conf its postgresql.conf includes (D29).
     [[nodiscard]] std::string config_text(bool first) const {
-        if (pg()) {
-            return postgresql_hba();  // its settings are in the data folder's postgresql.conf
-        }
         std::string error;
         const auto app = load_app_config(app_config_file(data_dir_), error);
         const MariaDbSettings all = app ? read_mariadb_settings(*app, nullptr, files_.family) : MariaDbSettings{};
         const auto it = all.find(files_.series);
         const MariaDbExtras extras =
             mariadb_extras(data_dir_, files_.series, it != all.end() ? &it->second : nullptr, files_.family);
+        if (pg()) {
+            return postgresql_settings_conf(extras);
+        }
         return mariadb_config(files_, internal_, running_as_root(), first, &extras);
     }
 
@@ -635,7 +636,7 @@ private:
             o.args = {"--host=127.0.0.1", "--port=" + std::to_string(internal_.load()), "--username=" + user,
                       "--no-password"};
             o.working_dir = dir;
-            o.env = pg_client_env(cnf, dir);
+            o.env = pg_client_env(cnf, dir, user == kPostgreSqlSuperuser);
             o.remove_env = pg_client_env_removed();
             return true;
         }
@@ -1069,7 +1070,9 @@ private:
             }
             internal_ = *port;
         }
-        if (!write_file_atomically(files_.config, postgresql_hba(), error)) {
+        if (!write_file_atomically(files_.config, postgresql_hba(), error) ||
+            !write_file_atomically(files_.data_dir / std::string(kPostgreSqlSettingsFile), config_text(false), error) ||
+            !include_floserver_conf(error)) {
             return nullptr;
         }
         const std::uintmax_t log_from = log_size();
@@ -1169,15 +1172,40 @@ private:
             error = "setting up " + title() + " failed: " + tail(o.output_log, 800);
             return false;
         }
-        const fs::path conf = files_.data_dir / "postgresql.conf";
-        const std::string text = read_small_file(conf, std::size_t{1024} * 1024).value_or("");
-        if (!write_file_atomically(conf,
-                                   text + "\n# FloServer's defaults for a development server (D29)\n"
-                                          "shared_buffers = 64MB\nmax_connections = 100\n",
-                                   error)) {
+        if (!include_floserver_conf(error)) {
             return false;
         }
         return write_file_atomically(files_.installed_marker, "1\n", error);
+    }
+
+    // postgresql.conf ends by reading floserver.conf (Settings > Database's
+    // values and custom.conf, written at each start), so they win over its
+    // lines. Added once; a line the user moved or removed is added again.
+    bool include_floserver_conf(std::string& error) {
+        const fs::path conf = files_.data_dir / "postgresql.conf";
+        const auto text = read_small_file(conf, std::size_t{4} * 1024 * 1024);
+        if (!text) {
+            error = path_to_utf8(conf) + " is missing, or larger than 4 MB: FloServer can't add its settings to it";
+            return false;
+        }
+        const std::string line = "include_if_exists = '" + std::string(kPostgreSqlSettingsFile) + "'";
+        // The last line with any text, as a line of its own (not in a comment).
+        const auto end = text->find_last_not_of(" \t\r\n");
+        if (end != std::string::npos) {
+            const auto start = text->find_last_of('\n', end);
+            const std::string last = text->substr(start == std::string::npos ? 0 : start + 1,
+                                                  end + 1 - (start == std::string::npos ? 0 : start + 1));
+            if (last.find_first_not_of(" \t") != std::string::npos &&
+                last.substr(last.find_first_not_of(" \t")) == line) {
+                return true;  // already the last line
+            }
+        }
+        std::string out = *text;
+        if (!out.empty() && !out.ends_with('\n')) {
+            out += '\n';
+        }
+        out += "\n# FloServer (D29): Settings > Database and custom.conf. Keep this the last line.\n" + line + "\n";
+        return write_file_atomically(conf, out, error);
     }
 
     // A new password for the superuser while the server is down: postgres in
@@ -1192,8 +1220,11 @@ private:
         ChildOptions o;
         o.program = files_.server;
         // A failed statement isn't written to the log with its text (the password).
-        o.args = {"--single", "-D", path_to_utf8(files_.data_dir.filename()), "-c", "log_min_error_statement=panic",
-                  std::string(kPostgreSqlSuperuser)};
+        o.args = {"--single", "-D", path_to_utf8(files_.data_dir.filename()), "-c", "log_min_error_statement=panic"};
+        for (const std::string& quiet : pg_quiet_settings()) {
+            o.args.insert(o.args.end(), {"-c", quiet});  // no statement logging writes the password
+        }
+        o.args.emplace_back(kPostgreSqlSuperuser);
         o.working_dir = files_.folder;
         o.stdin_file = sql;
         o.output_log = files_.folder / "reset.log";
@@ -2292,8 +2323,10 @@ json DatabaseService::series_status(const std::string& series, std::string_view 
     json databases = json::array();
     if (const auto app = load_app_config(app_config_file(config_.data_dir), error)) {
         for (const Project& p : app->projects) {
-            const std::string db = project_database_name(p);
-            if (!reserved_database_name(db) && secrets_.read(std::string(key).append("/").append(db))) {
+            // Its name on this server (MySQL's cut, PostgreSQL's with '_').
+            const std::string own = project_database_name(p);
+            const std::string db = server_database_name(own, family);
+            if (!reserved_database_name(own) && secrets_.read(std::string(key).append("/").append(db))) {
                 databases.push_back(p.name);
             }
         }
@@ -2498,10 +2531,6 @@ bool DatabaseService::set_root_password(const std::string& series, const std::st
 std::optional<fs::path> DatabaseService::final_ini(const std::string& series, ServiceRefusal& refusal,
                                                    std::string_view family) const {
     const std::string title = database_family_title(family) + " " + series;
-    if (family == kPostgreSqlFamily) {
-        refusal = {"not_supported", "PostgreSQL's settings come with the next FloServer build"};
-        return std::nullopt;
-    }
     std::shared_ptr<Server> server;
     {
         const std::lock_guard lock(mutex_);
@@ -2530,15 +2559,40 @@ std::optional<fs::path> DatabaseService::final_ini(const std::string& series, Se
         const auto it = all.find(series);
         const MariaDbExtras extras =
             mariadb_extras(config_.data_dir, series, it != all.end() ? &it->second : nullptr, family);
-        text = mariadb_config(mariadb_files(r->dir, r->version, config_.data_dir, family), kFirstInternalDatabasePort,
-                              running_as_root(), false, &extras);
+        text = family == kPostgreSqlFamily
+                   ? postgresql_settings_conf(extras)
+                   : mariadb_config(mariadb_files(r->dir, r->version, config_.data_dir, family),
+                                    kFirstInternalDatabasePort, running_as_root(), false, &extras);
         port_note = "# " + title + " isn't running for any project now; the port below is chosen when it starts.\n";
     }
-    text = "# What " + title +
-           " reads when it starts. Written by FloServer when you ask to see it: edits here are lost and do nothing.\n"
-           "# Change values in Settings > Database, or add your own lines to custom.ini beside this file.\n" +
-           port_note + "\n" + text;
-    fs::path file = mariadb_custom_ini_file(config_.data_dir, series, family).parent_path() / "final-my.ini";
+    if (family == kPostgreSqlFamily) {
+        // Its command line wins over every file: shown as the lines it sets.
+        const Port port = server ? server->internal_port() : kFirstInternalDatabasePort;
+        std::string fixed = "# FloServer's own settings, on postgres' command line (they win over every file):\n";
+        const auto installed = list_installed(runtimes_dir(config_.data_dir));
+        if (const InstalledRuntime* r = best_server(installed, family, series)) {
+            const std::vector<std::string> args =
+                postgresql_server_args(mariadb_files(r->dir, r->version, config_.data_dir, family), port);
+            for (std::size_t i = 0; i + 1 < args.size(); ++i) {
+                if (args[i] == "-c") {
+                    fixed += "#   " + args[i + 1] + "\n";
+                }
+            }
+        }
+        text = "# What " + title +
+               " reads after its own postgresql.conf. Written by FloServer when you ask to see it: edits here are "
+               "lost and do nothing.\n"
+               "# Change values in Settings > Database, or add your own lines to custom.conf beside this file.\n" +
+               port_note + fixed + "\n" + text;
+    } else {
+        text = "# What " + title +
+               " reads when it starts. Written by FloServer when you ask to see it: edits here are lost and do "
+               "nothing.\n"
+               "# Change values in Settings > Database, or add your own lines to custom.ini beside this file.\n" +
+               port_note + "\n" + text;
+    }
+    fs::path file = mariadb_custom_ini_file(config_.data_dir, series, family).parent_path() /
+                    (family == kPostgreSqlFamily ? "final-postgresql.conf" : "final-my.ini");
     std::error_code ec;
     fs::create_directories(file.parent_path(), ec);
     // Read-only, so Notepad says so on Save; made writable again to replace it.
