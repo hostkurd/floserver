@@ -200,7 +200,8 @@ TEST_CASE("PostgreSQL's SQL, password file and client environment (D29)") {
     CHECK(value("PGPASSFILE").ends_with("x.pgpass"));
     // FloServer's superuser sessions log no statements (they set passwords).
     CHECK(value("PGOPTIONS") == "-c log_statement=none -c log_min_duration_statement=-1 "
-                                "-c log_min_duration_sample=-1 -c log_transaction_sample_rate=0");
+                                "-c log_min_duration_sample=-1 -c log_transaction_sample_rate=0 "
+                                "-c debug_print_parse=off -c debug_print_rewritten=off -c debug_print_plan=off");
     for (const auto& [key, v] : pg_client_env("/f/x.pgpass", "/f", false)) {
         CHECK(key != "PGOPTIONS");
     }
@@ -334,6 +335,7 @@ TEST_CASE("a project's PostgreSQL database: made, logged in to, asleep when idle
     // Every statement logged: still no password in the log.
     settings.ini["log_min_duration_statement"] = "0";
     settings.ini["log_statement"] = "all";
+    settings.ini["debug_print_rewritten"] = "on";
     write_mariadb_series(app, major, settings, "postgresql");
     REQUIRE(save_app_config(app_config_file(data), app, error));
     REQUIRE(ensure_mariadb_custom_ini(data, major, error, "postgresql"));
@@ -438,9 +440,14 @@ TEST_CASE("a project's PostgreSQL database: made, logged in to, asleep when idle
     CHECK(pg_query(bin, port, "postgres", *root, "postgres", "SELECT 1") == "1");
     CHECK(pg_query(bin, port, "postgres", "", "postgres", "SELECT 1").starts_with("ERROR"));
 
-    // FloServer's sessions set the passwords: with every statement logged, none is in the log.
+    // FloServer's sessions set the passwords: with every statement logged, none is in the log
+    // (the superuser's new one, set while it runs, either).
+    const std::string running_root = "Run-Root-Pass_1";
+    REQUIRE_MESSAGE(db.set_root_password(major, running_root, refusal, "postgresql"), refusal.message);
+    CHECK(pg_query(bin, port, "postgres", running_root, "postgres", "SELECT 1") == "1");
     {
         const std::string log = test_util::read_file(data / "data" / ("postgresql-" + major) / "postgres.log");
+        CHECK(log.find(running_root) == std::string::npos);
         CHECK(log.find("statement:") != std::string::npos);  // the project's own statements are logged
         CHECK(log.find(login->password) == std::string::npos);
         CHECK(log.find(*root) == std::string::npos);
