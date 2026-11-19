@@ -127,6 +127,14 @@ public:
         if (ec) {
             return;
         }
+        // A copy an earlier run couldn't remove (a virus scanner still had it open).
+        for (std::filesystem::directory_iterator it(base, ec), end; !ec && it != end; it.increment(ec)) {
+            if (it->path().filename().string().starts_with("floserver-publisher-")) {
+                std::error_code ignored;
+                std::filesystem::remove_all(it->path(), ignored);
+            }
+        }
+        ec.clear();
         std::random_device rd;
         const std::filesystem::path p =
             base / ("floserver-publisher-" + std::to_string(rd()) + std::to_string(rd()));

@@ -942,6 +942,8 @@ TEST_CASE("publisher: PostgreSQL's server zip is compared file by file with EDB'
         return f;
     };
 
+    // A copy an earlier run left behind is cleared.
+    std::filesystem::create_directories(scratch.path() / "floserver-publisher-old" / "x");
     // Without EDB's zip there's nothing to compare with.
     PublishFile f = check(server_files());
     CHECK(f.state == CheckState::Failed);
