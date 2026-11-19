@@ -135,6 +135,15 @@ std::optional<std::string> postgres_option_problem(const std::string& shown) {
         return "\"" + cut + "\" isn't a PostgreSQL setting name (letters, digits, _ and .)";
     }
     const std::string n = lower(shown);
+    // Directives, not settings: they'd read a file FloServer never checks.
+    if (n == "include" || n == "include_if_exists" || n == "include_dir") {
+        return shown + " can't be used: every line must be here, where FloServer can check it";
+    }
+    // Programs and libraries the server would run or load.
+    if (n.ends_with("preload_libraries") || n == "archive_command" || n == "archive_library" ||
+        n == "archive_cleanup_command" || n == "restore_command" || n == "recovery_end_command") {
+        return shown + " can't be set: FloServer's database servers don't run other programs or load extra libraries";
+    }
     if (n == "listen_addresses" || n.starts_with("ssl")) {
         return shown + " can't be set: FloServer keeps the database server on this computer only (127.0.0.1), reached "
                        "through its own port";
@@ -498,10 +507,6 @@ FilteredCustomIni filter_postgres_custom_conf(std::string_view text) {
         }
         const std::string key = line.substr(0, at);
         const std::string lowered = lower(key);
-        if (lowered == "include" || lowered == "include_if_exists" || lowered == "include_dir") {
-            leave_out(key + " can't be used: every line must be here, where FloServer can check it");
-            continue;
-        }
         if (const auto problem = postgres_option_problem(key)) {
             leave_out(*problem);
             continue;
@@ -527,8 +532,12 @@ FilteredCustomIni filter_postgres_custom_conf(std::string_view text) {
                 if ((c == '\\' || c == '\'') && i + 1 < rest.size() && rest[i + 1] == '\'') {
                     value += '\'';
                     ++i;
-                } else if (c == '\\' && i + 1 < rest.size()) {
-                    value += rest[++i];
+                } else if (c == '\\' && i + 1 < rest.size() && rest[i + 1] == '\\') {
+                    value += '\\';
+                    ++i;
+                } else if (c == '\\') {
+                    // PostgreSQL reads \n, \t, \123... as other characters: not guessed at.
+                    break;
                 } else if (c == '\'') {
                     closed = true;
                     break;

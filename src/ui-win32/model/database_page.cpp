@@ -302,7 +302,9 @@ std::string db_option_base(std::string_view name) {
 
 std::optional<std::string> unknown_db_option(const std::vector<std::string>& known, std::string_view key) {
     const std::string base = db_option_base(key);
-    if (known.empty() || base.empty()) {
+    // PostgreSQL's dotted names (auto_explain.log_min_duration) are an
+    // extension's, which postgres doesn't list: never said to be unknown.
+    if (known.empty() || base.empty() || base.find('.') != std::string::npos) {
         return std::nullopt;
     }
     // skip-, enable-, disable- and maximum- go with the name after them.

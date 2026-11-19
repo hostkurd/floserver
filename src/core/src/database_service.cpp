@@ -636,7 +636,7 @@ private:
             o.args = {"--host=127.0.0.1", "--port=" + std::to_string(internal_.load()), "--username=" + user,
                       "--no-password"};
             o.working_dir = dir;
-            o.env = pg_client_env(cnf, dir);
+            o.env = pg_client_env(cnf, dir, user == kPostgreSqlSuperuser);
             o.remove_env = pg_client_env_removed();
             return true;
         }
@@ -1185,13 +1185,20 @@ private:
         const fs::path conf = files_.data_dir / "postgresql.conf";
         const auto text = read_small_file(conf, std::size_t{4} * 1024 * 1024);
         if (!text) {
-            error = "can't read " + path_to_utf8(conf);
+            error = path_to_utf8(conf) + " is missing, or larger than 4 MB: FloServer can't add its settings to it";
             return false;
         }
         const std::string line = "include_if_exists = '" + std::string(kPostgreSqlSettingsFile) + "'";
-        const auto at = text->rfind(line);
-        if (at != std::string::npos && text->find_first_not_of(" \t\r\n", at + line.size()) == std::string::npos) {
-            return true;  // already the last line
+        // The last line with any text, as a line of its own (not in a comment).
+        const auto end = text->find_last_not_of(" \t\r\n");
+        if (end != std::string::npos) {
+            const auto start = text->find_last_of('\n', end);
+            const std::string last = text->substr(start == std::string::npos ? 0 : start + 1,
+                                                  end + 1 - (start == std::string::npos ? 0 : start + 1));
+            if (last.find_first_not_of(" \t") != std::string::npos &&
+                last.substr(last.find_first_not_of(" \t")) == line) {
+                return true;  // already the last line
+            }
         }
         std::string out = *text;
         if (!out.empty() && !out.ends_with('\n')) {
@@ -1213,8 +1220,11 @@ private:
         ChildOptions o;
         o.program = files_.server;
         // A failed statement isn't written to the log with its text (the password).
-        o.args = {"--single", "-D", path_to_utf8(files_.data_dir.filename()), "-c", "log_min_error_statement=panic",
-                  std::string(kPostgreSqlSuperuser)};
+        o.args = {"--single", "-D", path_to_utf8(files_.data_dir.filename()), "-c", "log_min_error_statement=panic"};
+        for (const std::string& quiet : pg_quiet_settings()) {
+            o.args.insert(o.args.end(), {"-c", quiet});  // no statement logging writes the password
+        }
+        o.args.emplace_back(kPostgreSqlSuperuser);
         o.working_dir = files_.folder;
         o.stdin_file = sql;
         o.output_log = files_.folder / "reset.log";

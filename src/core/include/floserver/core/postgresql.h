@@ -97,8 +97,18 @@ inline constexpr std::string_view kPostgreSqlSettingsFile = "floserver.conf";
 // a 10-second connect limit, only scram-sha-256 accepted (a program that
 // took the internal port can't ask for the password in clear), and no
 // user's pg_service.conf or psqlrc.
+// FloServer's own sessions as the superuser (`superuser`) also get
+// PGOPTIONS = pg_quiet_options(), so no statement logging the user turned on
+// (log_statement, log_min_duration_statement...) writes the passwords those
+// sessions set into the log. A project's role couldn't set those.
 [[nodiscard]] std::vector<std::pair<std::string, std::string>> pg_client_env(const std::filesystem::path& password_file,
-                                                                             const std::filesystem::path& dir);
+                                                                             const std::filesystem::path& dir,
+                                                                             bool superuser = true);
+// "log_statement=none", "log_min_duration_statement=-1"...: statement
+// logging off for one session (single-user mode takes them as -c).
+[[nodiscard]] const std::vector<std::string>& pg_quiet_settings();
+// The same as a PGOPTIONS value: "-c log_statement=none -c ...".
+[[nodiscard]] std::string pg_quiet_options();
 // The libpq variables taken out of it: none of them may point the client
 // elsewhere.
 [[nodiscard]] const std::vector<std::string>& pg_client_env_removed();

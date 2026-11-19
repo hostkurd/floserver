@@ -80,6 +80,9 @@ std::vector<DbEngine> SettingsWindow::shown_db_engines() const {
 
 void SettingsWindow::show_db_engine(const std::string& family) {
     db_family_ = family;
+    root_busy_ = false;  // an answer for the old tab is dropped: its buttons mustn't stay off
+    db_.reset();         // the old tab's values aren't this one's
+    fill_db_edits();     // the boxes' names for screen readers
     const auto versions = db_versions();
     if (!versions.empty()) {
         load_db(versions.front().first);
@@ -144,6 +147,7 @@ bool SettingsWindow::settle_db_changes(AfterSave then, const std::string& series
 
 void SettingsWindow::load_db(const std::string& series) {
     db_series_ = series;
+    root_busy_ = false;
     db_error_key_.clear();
     db_error_.clear();
     db_.reset();
@@ -382,7 +386,15 @@ void SettingsWindow::make_db_edits() {
 }
 
 void SettingsWindow::fill_db_edits() {
-    if (!db_ || db_edits_.empty()) {
+    if (db_edits_.empty()) {
+        return;
+    }
+    // The boxes are shared by the engines' tabs: screen readers get this tab's names.
+    const auto& names = settings_db_ini_fields(db_family_);
+    for (std::size_t i = 0; i < names.size() && i + 1 < db_edits_.size(); ++i) {
+        set_accessible_name(db_edits_[i + 1]->hwnd(), names[i].label);
+    }
+    if (!db_) {
         return;
     }
     db_edits_.front()->set_text(db_port_text(*db_, db_changes_));

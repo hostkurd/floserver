@@ -337,6 +337,11 @@ TEST_CASE("database.get and database.set for PostgreSQL through the project serv
     CHECK_FALSE(service.database_set("18", {{"listen_addresses", "*"}}, nullptr, nullptr, changed, refusal, "postgresql"));
     CHECK(refusal.message.find("127.0.0.1") != std::string::npos);
     CHECK_FALSE(service.database_set("18", {{"port", "1"}}, nullptr, nullptr, changed, refusal, "postgresql"));
+    // A directive or a program isn't a setting: refused here as in custom.conf.
+    CHECK_FALSE(service.database_set("18", {{"include", "C:/evil.conf"}}, nullptr, nullptr, changed, refusal, "postgresql"));
+    CHECK_FALSE(service.database_set("18", {{"shared_preload_libraries", "x"}}, nullptr, nullptr, changed, refusal,
+                                     "postgresql"));
+    CHECK_FALSE(service.database_set("18", {{"archive_command", "calc"}}, nullptr, nullptr, changed, refusal, "postgresql"));
 
     // custom.conf, with its own header.
     const auto custom = service.database_custom_ini("18", refusal, "postgresql");
