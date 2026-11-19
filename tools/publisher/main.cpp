@@ -15,6 +15,7 @@
 #include "publish.h"
 #include "signing.h"
 #include "templates_json.h"
+#include "updates_window.h"
 #include "win_util.h"
 #include "floserver/core/builtin.h"
 #include "floserver/core/http.h"
@@ -68,6 +69,7 @@ enum Id : int {
     IdPublish,
     IdOpenFolder,
     IdCopyPaths,
+    IdUpdates,
     IdDot0 = 200,  // four step dots
 };
 
@@ -197,6 +199,7 @@ private:
     int px(int dip) const { return MulDiv(dip, static_cast<int>(dpi_), 96); }
 
     void check_live();
+    void open_updates();
     void add_path();
     void remove_selected();
     void choose_key();
@@ -218,7 +221,7 @@ private:
 
     HWND hwnd_ = nullptr;
     HWND live_label_ = nullptr, live_value_ = nullptr, expires_label_ = nullptr, expires_value_ = nullptr;
-    HWND check_live_ = nullptr;
+    HWND check_live_ = nullptr, updates_button_ = nullptr;
     HWND files_heading_ = nullptr, files_hint_ = nullptr, path_ = nullptr, add_ = nullptr, list_ = nullptr;
     HWND remove_ = nullptr, accept_ = nullptr, detail_ = nullptr;
     HWND steps_heading_ = nullptr;
@@ -249,6 +252,7 @@ private:
     std::thread worker_;
     std::atomic<bool> cancel_{false};
     bool busy_ = false;
+    floserver::publisher::UpdatesWindow updates_;  // D34
 };
 
 // ---- window ----
@@ -331,6 +335,7 @@ void Publisher::create_controls() {
     expires_label_ = label(L"Expires", font_.get(), SS_RIGHT);
     expires_value_ = label(L"", font_.get(), SS_RIGHT);
     check_live_ = make(L"BUTTON", L"Check live", WS_TABSTOP | BS_PUSHBUTTON, IdCheckLive, font_.get());
+    updates_button_ = make(L"BUTTON", L"Check for updates…", WS_TABSTOP | BS_PUSHBUTTON, IdUpdates, font_.get());
 
     files_heading_ = label(L"Files in the next list", heading_.get());
     files_hint_ = label(L"After uploading a file to the bucket, add its path", font_.get(), SS_RIGHT);
@@ -396,7 +401,10 @@ void Publisher::layout() {
     const int ty = top_card_.top + px(12);
     const int button_w = px(110);
     put(check_live_, top_card_.right - px(16) - button_w, top_card_.top + px(14), button_w, px(32));
-    const int exp_right = top_card_.right - px(16) - button_w - px(16);
+    const int updates_w = px(150);
+    put(updates_button_, top_card_.right - px(16) - button_w - px(8) - updates_w, top_card_.top + px(14), updates_w,
+        px(32));
+    const int exp_right = top_card_.right - px(16) - button_w - px(8) - updates_w - px(16);
     put(expires_label_, exp_right - px(260), ty, px(260), px(18));
     put(expires_value_, exp_right - px(260), ty + px(19), px(260), px(20));
     put(live_label_, top_card_.left + px(16), ty, exp_right - px(276) - top_card_.left, px(18));
@@ -612,6 +620,9 @@ LRESULT Publisher::handle(UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case IdCheckLive:
             check_live();
+            return 0;
+        case IdUpdates:
+            open_updates();
             return 0;
         case IdAdd:
             add_path();
@@ -905,6 +916,20 @@ void Publisher::check_live() {
         }
         PostMessageW(target, kMsgLive, 0, reinterpret_cast<LPARAM>(result.release()));
     });
+}
+
+// D34: what's new upstream for the runtimes in the next list.
+void Publisher::open_updates() {
+    std::map<std::string, std::vector<std::string>> listed;
+    for (const mt::PublishFile& f : files_) {
+        // <runtime>/<version>/<file>
+        const auto a = f.path.find('/');
+        const auto b = a == std::string::npos ? a : f.path.find('/', a + 1);
+        if (b != std::string::npos) {
+            listed[f.path.substr(0, a)].push_back(f.path.substr(a + 1, b - a - 1));
+        }
+    }
+    updates_.open(hwnd_, std::move(listed));
 }
 
 void Publisher::on_live(std::unique_ptr<mt::LiveResult> live) {
@@ -1352,7 +1377,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE /*prev*/, PWSTR /*cmd*/, int s
         if (app.create(instance, show)) {
             MSG msg;
             while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-                if (!IsDialogMessageW(app.hwnd(), &msg)) {
+                // Tab and Enter in whichever of its windows is in front (D34's Updates too).
+                HWND active = GetActiveWindow();
+                if (!IsDialogMessageW(active != nullptr ? active : app.hwnd(), &msg)) {
                     TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 }
