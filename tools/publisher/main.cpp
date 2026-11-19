@@ -54,6 +54,7 @@ constexpr UINT kMsgRow = WM_APP + 2;       // wParam: row, lParam: PublishFile*
 constexpr UINT kMsgProgress = WM_APP + 3;  // wParam: row, lParam: bytes (capped)
 constexpr UINT kMsgDone = WM_APP + 4;      // lParam: Outcome*
 constexpr UINT kMsgStep = WM_APP + 5;      // wParam: step being worked on
+constexpr UINT kMsgPhase = WM_APP + 6;     // wParam: row, lParam: mt::CheckPhase
 
 enum Id : int {
     IdCheckLive = 100,
@@ -235,6 +236,7 @@ private:
     std::vector<mt::PublishFile> files_;
     int working_row_ = -1;
     std::uint64_t working_bytes_ = 0;
+    mt::CheckPhase working_phase_ = mt::CheckPhase::Download;
     std::array<StepState, 4> steps_{};
     std::array<std::string, 4> step_details_text_;
     fs::path key_file_;
@@ -684,6 +686,12 @@ LRESULT Publisher::handle(UINT msg, WPARAM wp, LPARAM lp) {
         working_bytes_ = static_cast<std::uint64_t>(lp);
         update_row(working_row_);
         return 0;
+    case kMsgPhase:
+        working_row_ = static_cast<int>(wp);
+        working_phase_ = static_cast<mt::CheckPhase>(lp);
+        working_bytes_ = 0;
+        update_row(working_row_);
+        return 0;
     case kMsgStep:
         for (std::size_t i = 0; i < 4; ++i) {
             if (i == wp) {
@@ -717,7 +725,19 @@ LRESULT Publisher::handle(UINT msg, WPARAM wp, LPARAM lp) {
 std::wstring Publisher::check_text(int row) const {
     const mt::PublishFile& f = files_.at(static_cast<std::size_t>(row));
     if (row == working_row_) {
-        return f.published ? L"Checking…" : L"Downloading… " + widen(mt::format_size(working_bytes_));
+        if (f.published) {
+            return L"Checking…";
+        }
+        // PostgreSQL's (D29): our zip, then EDB's to compare it with.
+        switch (working_phase_) {
+        case mt::CheckPhase::Original:
+            return L"Downloading the original… " + widen(mt::format_size(working_bytes_));
+        case mt::CheckPhase::Compare:
+            return L"Comparing the files…";
+        case mt::CheckPhase::Download:
+            break;
+        }
+        return L"Downloading… " + widen(mt::format_size(working_bytes_));
     }
     switch (f.state) {
     case mt::CheckState::NotRun:
@@ -816,7 +836,11 @@ void Publisher::update_selection() {
     } else if (f.published) {
         text += "\r\nIn the live list. Publish checks it's still served.";
     } else {
-        text += "\r\nNew. Publish downloads it from the CDN and compares it with the official checksum.";
+        // PostgreSQL's zip is compared with EDB's whole zip, file by file (D29).
+        text += mt::official_source(f.path).kind == mt::OfficialSource::Kind::MadeFrom
+                    ? "\r\nNew. Publish downloads it from the CDN and the original it was made from, and compares "
+                      "them file by file."
+                    : "\r\nNew. Publish downloads it from the CDN and compares it with the official checksum.";
     }
     if (!f.sha256.empty() && f.detail.find(f.sha256) == std::string::npos) {
         text += "\r\nSHA-256 " + f.sha256;
@@ -1091,6 +1115,10 @@ std::unique_ptr<Outcome> run_publish(HWND target, std::vector<mt::PublishFile> f
                          static_cast<LPARAM>(std::min<std::uint64_t>(done, 0x7fffffff)));
         }
     };
+    ctx.phase = [&](mt::CheckPhase phase) {
+        last_post = std::chrono::steady_clock::now();
+        PostMessageW(target, kMsgPhase, row, static_cast<LPARAM>(phase));
+    };
     std::size_t matched = 0;
     std::size_t served = 0;
     std::size_t problems = 0;
@@ -1100,7 +1128,7 @@ std::unique_ptr<Outcome> run_publish(HWND target, std::vector<mt::PublishFile> f
         // re-uploaded). A tick for a by-hand file holds only while its
         // SHA-256 stays the one that was compared.
         const std::string ticked_sha = f.accepted ? f.sha256 : std::string();
-        PostMessageW(target, kMsgProgress, row, 0);
+        PostMessageW(target, kMsgPhase, row, static_cast<LPARAM>(mt::CheckPhase::Download));
         mt::check_file(ctx, f);
         if (cancel) {
             return fail(0, "Stopped");

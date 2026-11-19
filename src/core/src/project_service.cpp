@@ -1237,14 +1237,15 @@ namespace {
 
 std::optional<std::string> request_database_series(const std::string& series, std::string_view family,
                                                    ServiceRefusal& refusal) {
-    if (!mysql_protocol_family(family)) {
-        refusal = {"bad_params", "\"" + std::string(family) + "\" isn't a database FloServer runs (mariadb or mysql)"};
+    if (!database_service_family(family)) {
+        refusal = {"bad_params",
+                   "\"" + std::string(family) + "\" isn't a database FloServer runs (mariadb, mysql or postgresql)"};
         return std::nullopt;
     }
-    auto out = mariadb_request_series(series);
+    auto out = mariadb_request_series(series, family);
     if (!out) {
         refusal = {"bad_params", "\"" + series + "\" isn't a " + database_family_title(family) + " series such as " +
-                                     (family == kMySqlFamily ? "8.4" : "11.4")};
+                                     std::string(database_series_example(family))};
     }
     return out;
 }
@@ -1253,7 +1254,7 @@ std::optional<std::string> request_database_series(const std::string& series, st
 const InstalledRuntime* newest_mariadb(const std::vector<InstalledRuntime>& installed, std::string_view family,
                                        const std::string& series) {
     const InstalledRuntime* r = best_installed(installed, std::string(family), series);
-    return r != nullptr && mariadb_series(r->version) == series ? r : nullptr;
+    return r != nullptr && database_series(family, r->version) == series ? r : nullptr;
 }
 
 }  // namespace
@@ -1310,7 +1311,7 @@ std::optional<json> ProjectService::database_get(const std::string& series_text,
     std::set<std::string> users;
     const auto by_runtime = floserver::core::runtime_users(config, read_project_config_file, installed, std::nullopt);
     for (const InstalledRuntime& r : installed) {
-        if (r.name == family && mariadb_series(r.version) == *series) {
+        if (r.name == family && database_series(family, r.version) == *series) {
             const auto it = by_runtime.find(std::string(family) + "/" + path_to_utf8(r.dir.filename()));
             if (it != by_runtime.end()) {
                 users.insert(it->second.begin(), it->second.end());

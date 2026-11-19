@@ -623,3 +623,18 @@ TEST_CASE("the php.ini names: a php that gets stuck is stopped, one that fails i
 }
 
 #endif
+
+TEST_CASE("a project on PostgreSQL gets PHP's PostgreSQL drivers (D29.6)") {
+    ProjectConfig pc;
+    pc.database = DatabaseSpec{"postgresql", "18"};
+    PhpIniSettings s = effective_php_settings("8.5", nullptr, "", &pc);
+    CHECK(s.extensions == std::vector<std::string>{"pdo_pgsql", "pgsql"});
+    // Its own "off" still wins.
+    pc.extensions_off = {"pgsql"};
+    s = effective_php_settings("8.5", nullptr, "", &pc);
+    CHECK(s.extensions == std::vector<std::string>{"pdo_pgsql"});
+    // MariaDB's projects: nothing more.
+    pc = {};
+    pc.database = DatabaseSpec{"mariadb", "11.4"};
+    CHECK(effective_php_settings("8.5", nullptr, "", &pc).extensions.empty());
+}

@@ -51,7 +51,9 @@ int text_height(HDC dc, std::wstring_view s, HFONT font, int width, bool rtl) {
     return static_cast<int>(r.bottom - r.top);
 }
 
-const DbIniField& field_at(int index) { return settings_db_ini_fields()[static_cast<std::size_t>(index)]; }
+const DbIniField& field_at(const std::string& family, int index) {
+    return settings_db_ini_fields(family)[static_cast<std::size_t>(index)];
+}
 
 // What stands for root's password while it's hidden.
 constexpr std::string_view kMasked = "\xE2\x97\x8F\xE2\x97\x8F\xE2\x97\x8F\xE2\x97\x8F\xE2\x97\x8F\xE2\x97\x8F\xE2\x97\x8F\xE2\x97\x8F"
@@ -71,6 +73,10 @@ std::vector<std::pair<std::string, std::string>> SettingsWindow::db_versions() c
 }
 
 std::string SettingsWindow::db_title() const { return db_server_title(db_family_, db_series_); }
+
+std::vector<DbEngine> SettingsWindow::shown_db_engines() const {
+    return db_engines_shown(has_installed_, installed_, reply_, db_family_);
+}
 
 void SettingsWindow::show_db_engine(const std::string& family) {
     db_family_ = family;
@@ -147,7 +153,7 @@ void SettingsWindow::load_db(const std::string& series) {
     db_server_ = db_server_from_list(databases_, series, db_family_);
     db_loading_ = true;
     worker_.database_call("database.get", db_params(db_family_, series));
-    if (db_edits_.size() > settings_db_ini_fields().size() + 1) {
+    if (db_edits_.size() > settings_db_ini_fields(db_family_).size() + 1) {
         db_edits_.back()->set_text({});  // a password typed for another version isn't kept
     }
     relayout();
@@ -181,7 +187,7 @@ bool SettingsWindow::on_db_answers(const Snapshot& snap) {
                 }
                 after_save_ = AfterSave::Stay;  // refused: stay here with the reason shown
                 std::vector<std::string> keys;
-                for (const DbIniField& field : settings_db_ini_fields()) {
+                for (const DbIniField& field : settings_db_ini_fields(db_family_)) {
                     keys.push_back(field.key);
                 }
                 db_error_key_ = ini_error_key(answer.error, keys);
@@ -227,7 +233,7 @@ bool SettingsWindow::on_db_answers(const Snapshot& snap) {
         } else if (answer.method == "database.root") {
             root_busy_ = false;
             if (!answer.error.empty() || !answer.reply) {
-                show_message(fill(lang_, Str::DbRootReadFailed, {answer.error}), true);
+                show_message(fill(lang_, db_str(db_family_, Str::DbRootReadFailed), {answer.error}), true);
                 continue;
             }
             std::string password = answer.reply->is_object() && answer.reply->contains("password") &&
@@ -236,7 +242,7 @@ bool SettingsWindow::on_db_answers(const Snapshot& snap) {
                                        : std::string();
             if (answer.purpose == "copy") {
                 const bool done = put_secret_on_clipboard(hwnd_, password);
-                show_message(done ? std::string(text(lang_, Str::DbPasswordCopied))
+                show_message(done ? std::string(text(lang_, db_str(db_family_, Str::DbPasswordCopied)))
                                   : fill(lang_, Str::OpenFailed, {"clipboard"}),
                              !done);
             } else {
@@ -252,19 +258,19 @@ bool SettingsWindow::on_db_answers(const Snapshot& snap) {
         } else if (answer.method == "database.root_set") {
             root_busy_ = false;
             if (!answer.error.empty() || !answer.reply) {
-                password_error_ = fill(lang_, Str::DbPasswordFailed, {answer.error});
+                password_error_ = fill(lang_, db_str(db_family_, Str::DbPasswordFailed), {answer.error});
                 continue;
             }
             wipe(root_shown_);  // the old one: Show asks again
             password_error_.clear();
-            show_message(std::string(text(lang_, Str::DbPasswordSet)), false);
+            show_message(std::string(text(lang_, db_str(db_family_, Str::DbPasswordSet))), false);
         } else if (answer.method == "database.custom_ini" || answer.method == "database.final_ini") {
             const std::string path = answer.reply && answer.reply->is_object() && answer.reply->contains("path") &&
                                              (*answer.reply)["path"].is_string()
                                          ? (*answer.reply)["path"].get<std::string>()
                                          : std::string();
             if (path.empty()) {
-                show_message(fill(lang_, Str::DbOpenIniFailed, {answer.error}), true);
+                show_message(fill(lang_, db_str(db_family_, Str::DbOpenIniFailed), {answer.error}), true);
                 continue;
             }
             // Notepad, so the user edits (or reads) it.
@@ -272,9 +278,9 @@ bool SettingsWindow::on_db_answers(const Snapshot& snap) {
             const auto opened = reinterpret_cast<INT_PTR>(
                 ShellExecuteW(nullptr, L"open", L"notepad.exe", quoted.c_str(), nullptr, SW_SHOWNORMAL));
             if (opened <= 32) {
-                show_message(fill(lang_, Str::DbOpenIniFailed, {path}), true);
+                show_message(fill(lang_, db_str(db_family_, Str::DbOpenIniFailed), {path}), true);
             } else {
-                show_message(std::string(text(lang_, answer.method == "database.final_ini" ? Str::DbFinalOpened
+                show_message(std::string(text(lang_, answer.method == "database.final_ini" ? db_str(db_family_, Str::DbFinalOpened)
                                                                                         : Str::DbIniOpened)),
                              false);
             }
@@ -365,7 +371,7 @@ void SettingsWindow::make_db_edits() {
     make(text(lang_, Str::DbPortCue));
     // Screen readers: each box's label, as drawn over it.
     set_accessible_name(db_edits_.back()->hwnd(), text(lang_, Str::DbPort));
-    for (const DbIniField& field : settings_db_ini_fields()) {
+    for (const DbIniField& field : settings_db_ini_fields(db_family_)) {
         make(text(lang_, Str::PhpDefaultCue));
         set_accessible_name(db_edits_.back()->hwnd(), field.label);
     }
@@ -380,7 +386,7 @@ void SettingsWindow::fill_db_edits() {
         return;
     }
     db_edits_.front()->set_text(db_port_text(*db_, db_changes_));
-    const auto& fields = settings_db_ini_fields();
+    const auto& fields = settings_db_ini_fields(db_family_);
     for (std::size_t i = 0; i < fields.size() && i + 1 < db_edits_.size(); ++i) {
         db_edits_[i + 1]->set_text(db_ini_text(*db_, db_changes_, fields[i].key));
     }
@@ -394,7 +400,7 @@ void SettingsWindow::place_db_edits() {
     const bool shown = db_.has_value();
     const int h = px(20);
     db_edits_.front()->place(g.port, px(8), h, shown && !is_empty(g.port));
-    const auto& fields = settings_db_ini_fields();
+    const auto& fields = settings_db_ini_fields(db_family_);
     for (std::size_t i = 0; i < fields.size() && i + 1 < db_edits_.size(); ++i) {
         const RECT box = i < g.boxes.size() ? g.boxes[i] : RECT{};
         db_edits_[i + 1]->place(box, px(8), h, shown && !is_empty(box));
@@ -423,8 +429,8 @@ void SettingsWindow::on_db_edit_change(const Hit& hit, FieldEdit& edit) {
     if (hit.part == Part::DbPort) {
         db_set_port_text(*db_, db_changes_, edit.text());
     } else if (hit.part == Part::DbField) {
-        db_set_ini_text(*db_, db_changes_, field_at(hit.row).key, edit.text());
-        if (field_at(hit.row).key == db_error_key_) {
+        db_set_ini_text(*db_, db_changes_, field_at(db_family_, hit.row).key, edit.text());
+        if (field_at(db_family_, hit.row).key == db_error_key_) {
             db_error_key_.clear();
             db_error_.clear();
         }
@@ -469,7 +475,7 @@ void SettingsWindow::layout_db(HDC dc, Geometry& g, int x0, int x1, int y) const
     {
         int tx = x0;
         const int th = px(kControlH) + px(2);
-        for (const DbEngine& e : db_engines()) {
+        for (const DbEngine& e : shown_db_engines()) {
             const int tw = Canvas::measure(dc, w(e.title), fonts_.body_bold.get(), false) + px(28);
             dg.engines.push_back({tx, y, std::min(x1, tx + tw), y + th});
             tx += tw + px(4);
@@ -580,17 +586,17 @@ void SettingsWindow::layout_db(HDC dc, Geometry& g, int x0, int x1, int y) const
     // my.ini: the fields, your own lines, the final file.
     top = y + px(14);
     dg.ini_card = {x0, y, x1, y};
-    const int edit_w = button_w(Str::DbEditFull);
+    const int edit_w = button_w(db_str(db_family_, Str::DbEditFull));
     dg.edit_ini = {std::max(cx0, cx1 - edit_w), top, cx1, top + px(kControlH)};
-    const int final_w = button_w(Str::DbShowFinal);
+    const int final_w = button_w(db_str(db_family_, Str::DbShowFinal));
     dg.final_ini = {std::max(cx0, static_cast<int>(dg.edit_ini.left) - px(8) - final_w), top,
                     static_cast<int>(dg.edit_ini.left) - px(8), top + px(kControlH)};
     const int ini_end = static_cast<int>(dg.final_ini.left) - px(kGap);
-    const int ini_w = Canvas::measure(dc, L"my.ini", fonts_.body_bold.get(), false);
+    const int ini_w = Canvas::measure(dc, w(db_ini_name(db_family_)), fonts_.body_bold.get(), false);
     dg.ini_title = {cx0, top, std::min(ini_end, cx0 + ini_w), top + px(kControlH)};
     dg.ini_hint = {std::min(ini_end, static_cast<int>(dg.ini_title.right) + px(8)), top, ini_end, top + px(kControlH)};
     yy = top + px(kControlH) + px(kGap);
-    const auto& fields = settings_db_ini_fields();
+    const auto& fields = settings_db_ini_fields(db_family_);
     const int fcols = std::clamp((avail + px(kGap)) / (px(kFieldMinW) + px(kGap)), 1, 4);
     const int fcol_w = (avail - (fcols - 1) * px(kGap)) / fcols;
     const int cell_h = px(kLabelH) + px(4) + px(kControlH);
@@ -637,7 +643,7 @@ void SettingsWindow::layout_db(HDC dc, Geometry& g, int x0, int x1, int y) const
         for (const std::string& problem : db_->custom_problems) {
             all += (all.empty() ? "" : "; ") + problem;
         }
-        const std::string line = fill(lang_, Str::DbCustomProblems, {all});
+        const std::string line = fill(lang_, db_str(db_family_, Str::DbCustomProblems), {all});
         const int ph = text_height(dc, w(line), fonts_.caption.get(), avail - px(24), rtl_) + px(14);
         yy += px(10);
         dg.custom_problems = {cx0, yy, cx1, yy + ph};
@@ -645,7 +651,7 @@ void SettingsWindow::layout_db(HDC dc, Geometry& g, int x0, int x1, int y) const
     }
     for (const std::string& key : db_->custom_keys) {
         if (const auto suggestion = unknown_db_option(db_->known_options, key)) {
-            const std::string words = unknown_db_option_text(db_title(), key, *suggestion, lang_);
+            const std::string words = unknown_db_option_text(db_title(), key, *suggestion, lang_, db_family_);
             const int nh = std::max(error_h, text_height(dc, w(words), fonts_.caption.get(), avail, rtl_));
             dg.warnings.emplace_back(RECT{cx0, yy + px(4), cx1, yy + px(4) + nh}, words);
             yy += px(4) + nh;
@@ -662,15 +668,19 @@ void SettingsWindow::layout_db(HDC dc, Geometry& g, int x0, int x1, int y) const
     // Root access.
     top = y + px(14);
     dg.root_card = {x0, y, x1, y};
-    // Open phpMyAdmin (as root, on this series) beside the title.
-    const int pma_w = std::max({button_w(Str::PmaOpen), button_w(Str::PmaOpening),
-                                measure(fill(lang_, Str::PmaStarting, {db_title()}), fonts_.button.get()) + px(24)});
-    dg.pma = {std::max(cx0, cx1 - pma_w), top, cx1, top + px(kControlH)};
-    dg.root_title = {cx0, top, std::max(cx0, static_cast<int>(dg.pma.left) - px(kGap)), top + px(kControlH)};
+    // Open phpMyAdmin (as root, on this series) beside the title; PostgreSQL's
+    // tab names tools that speak its protocol instead (D29).
+    const bool pma = db_has_phpmyadmin(db_family_);
+    if (pma) {
+        const int pma_w = std::max({button_w(Str::PmaOpen), button_w(Str::PmaOpening),
+                                    measure(fill(lang_, Str::PmaStarting, {db_title()}), fonts_.button.get()) + px(24)});
+        dg.pma = {std::max(cx0, cx1 - pma_w), top, cx1, top + px(kControlH)};
+    }
+    dg.root_title = {cx0, top, pma ? std::max(cx0, static_cast<int>(dg.pma.left) - px(kGap)) : cx1, top + px(kControlH)};
     yy = top + px(kControlH) + px(4);
-    if (!phpmyadmin_installed(installed_)) {
-        const int hh = std::max(px(kNoteH), text_height(dc, w(text(lang_, Str::PmaNotInstalled)), fonts_.caption.get(),
-                                                        avail, rtl_));
+    if (!pma || !phpmyadmin_installed(installed_)) {
+        const int hh = std::max(px(kNoteH), text_height(dc, w(text(lang_, pma ? Str::PmaNotInstalled : Str::DbPgTools)),
+                                                        fonts_.caption.get(), avail, rtl_));
         dg.pma_hint = {cx0, yy, cx1, yy + hh};
         yy += hh + px(4);
     }
@@ -679,7 +689,7 @@ void SettingsWindow::layout_db(HDC dc, Geometry& g, int x0, int x1, int y) const
     dg.root_copy = {cx1 - copy_w, yy, cx1, yy + px(kControlH)};
     dg.root_show = {static_cast<int>(dg.root_copy.left) - px(8) - show_w, yy, static_cast<int>(dg.root_copy.left) - px(8),
                     yy + px(kControlH)};
-    const int rl_w = measure(text(lang_, Str::DbRootPassword), fonts_.caption.get()) + px(2);
+    const int rl_w = measure(text(lang_, db_str(db_family_, Str::DbRootPassword)), fonts_.caption.get()) + px(2);
     dg.root_label = {cx0, yy, std::min(static_cast<int>(dg.root_show.left) - px(8), cx0 + rl_w), yy + px(kControlH)};
     dg.root_value = {static_cast<int>(dg.root_label.right) + px(12), yy, static_cast<int>(dg.root_show.left) - px(kGap),
                      yy + px(kControlH)};
@@ -698,7 +708,7 @@ void SettingsWindow::layout_db(HDC dc, Geometry& g, int x0, int x1, int y) const
         yy = static_cast<int>(dg.password_error.bottom);
     }
     yy += px(kGap);
-    const int rn_h = text_height(dc, w(text(lang_, Str::DbRootNote)), fonts_.caption.get(), avail, rtl_);
+    const int rn_h = text_height(dc, w(text(lang_, db_str(db_family_, Str::DbRootNote))), fonts_.caption.get(), avail, rtl_);
     dg.root_note = {cx0, yy, cx1, yy + rn_h};
     yy += rn_h + px(4);
     const std::string dbs = db_->databases.empty() ? std::string(text(lang_, Str::DbNoDatabases))
@@ -830,8 +840,8 @@ void SettingsWindow::on_db_click(const Hit& hit) {
     };
     switch (hit.part) {
         case Part::DbEngine:
-            if (hit.row >= 0 && std::cmp_less(hit.row, db_engines().size())) {
-                select_db_engine(std::string(db_engines()[static_cast<std::size_t>(hit.row)].family));
+            if (hit.row >= 0 && std::cmp_less(hit.row, shown_db_engines().size())) {
+                select_db_engine(std::string(shown_db_engines()[static_cast<std::size_t>(hit.row)].family));
             }
             break;
         case Part::DbVersion:
@@ -879,7 +889,7 @@ void SettingsWindow::on_db_click(const Hit& hit) {
             break;
         case Part::DbReset:
             if (db_ && !db_saving_ && hit.row >= 0) {
-                const std::string& key = field_at(hit.row).key;
+                const std::string& key = field_at(db_family_, hit.row).key;
                 db_reset_ini(*db_, db_changes_, key);
                 if (FieldEdit* edit = edit_of({Part::DbField, -1, hit.row}); edit != nullptr) {
                     edit->set_text(db_ini_text(*db_, db_changes_, key));
@@ -978,13 +988,13 @@ void SettingsWindow::paint_db_shapes(Canvas& c) const {
         }
     };
     // The engines' tabs: the shown one underlined.
-    for (std::size_t i = 0; i < dg.engines.size() && i < db_engines().size(); ++i) {
+    for (std::size_t i = 0; i < dg.engines.size() && i < shown_db_engines().size(); ++i) {
         const Hit hit{Part::DbEngine, -1, static_cast<int>(i)};
         const RECT& r = dg.engines[i];
         if (hover_ == hit) {
             c.round_rect(r, pxf(4), p.row_hover);
         }
-        if (db_engines()[i].family == db_family_) {
+        if (shown_db_engines()[i].family == db_family_) {
             const RECT under{r.left + px(4), r.bottom - px(3), r.right - px(4), r.bottom};
             c.round_rect(under, pxf(1.5F), p.accent);
         }
@@ -1013,6 +1023,9 @@ void SettingsWindow::paint_db_shapes(Canvas& c) const {
     if (db_) {
         const DbActions actions = db_actions(db_server_);
         const auto button = [&](Part part, const RECT& r, bool enabled) {
+            if (is_empty(r)) {
+                return;  // PostgreSQL's tab has no phpMyAdmin button
+            }
             const Hit hit{part, -1, -1};
             paint_button(c, r, hover_ == hit && enabled, is_focused(hit), enabled);
         };
@@ -1052,7 +1065,7 @@ void SettingsWindow::paint_db_shapes(Canvas& c) const {
         c.round_rect(dg.ini_card, pxf(8), p.card, p.card_border, border);
         button(Part::DbEditIni, dg.edit_ini, connected_);
         button(Part::DbFinalIni, dg.final_ini, connected_);
-        const auto& fields = settings_db_ini_fields();
+        const auto& fields = settings_db_ini_fields(db_family_);
         for (std::size_t i = 0; i < dg.boxes.size() && i < fields.size(); ++i) {
             const Hit hit{Part::DbField, -1, static_cast<int>(i)};
             const FieldEdit* edit = edit_of(hit);
@@ -1103,9 +1116,9 @@ void SettingsWindow::paint_db_text(Canvas& c) const {
     c.clip_text(column);
     c.text(g.title, w(text(lang_, Str::DbTitle)), fonts_.title.get(), p.text, Align::Start, false);
     c.paragraph(g.hint, w(text(lang_, Str::DbHint)), fonts_.caption.get(), p.text_subtle);
-    for (std::size_t i = 0; i < dg.engines.size() && i < db_engines().size(); ++i) {
-        const bool shown = db_engines()[i].family == db_family_;
-        c.text(dg.engines[i], w(db_engines()[i].title), shown ? fonts_.body_bold.get() : fonts_.button.get(),
+    for (std::size_t i = 0; i < dg.engines.size() && i < shown_db_engines().size(); ++i) {
+        const bool shown = shown_db_engines()[i].family == db_family_;
+        c.text(dg.engines[i], w(shown_db_engines()[i].title), shown ? fonts_.body_bold.get() : fonts_.button.get(),
                shown ? p.text : p.text_subtle, Align::Center, true);
     }
     if (!is_empty(dg.engine_note)) {
@@ -1182,11 +1195,11 @@ void SettingsWindow::paint_db_text(Canvas& c) const {
     }
 
     // my.ini.
-    c.text(dg.ini_title, L"my.ini", fonts_.body_bold.get(), p.text, Align::Start, true);
+    c.text(dg.ini_title, w(db_ini_name(db_family_)), fonts_.body_bold.get(), p.text, Align::Start, true);
     c.text(dg.ini_hint, w(text(lang_, Str::PhpIniHint)), fonts_.caption.get(), p.text_subtle, Align::Start, false);
-    label(dg.edit_ini, Str::DbEditFull, connected_);
-    label(dg.final_ini, Str::DbShowFinal, connected_);
-    const auto& fields = settings_db_ini_fields();
+    label(dg.edit_ini, db_str(db_family_, Str::DbEditFull), connected_);
+    label(dg.final_ini, db_str(db_family_, Str::DbShowFinal), connected_);
+    const auto& fields = settings_db_ini_fields(db_family_);
     for (std::size_t i = 0; i < dg.boxes.size() && i < fields.size(); ++i) {
         c.text(dg.labels[i], w(fields[i].label), fonts_.caption.get(), p.text_subtle, Align::Start, true);
         if (!is_empty(dg.resets[i])) {
@@ -1203,7 +1216,7 @@ void SettingsWindow::paint_db_text(Canvas& c) const {
         }
         RECT inner = dg.custom_problems;
         InflateRect(&inner, -px(12), -px(7));
-        c.paragraph(inner, w(fill(lang_, Str::DbCustomProblems, {all})), fonts_.caption.get(), p.banner_error.text);
+        c.paragraph(inner, w(fill(lang_, db_str(db_family_, Str::DbCustomProblems), {all})), fonts_.caption.get(), p.banner_error.text);
     }
     for (const auto& [r, words] : dg.warnings) {
         c.paragraph(r, w(words), fonts_.caption.get(), p.asleep.text);
@@ -1211,8 +1224,8 @@ void SettingsWindow::paint_db_text(Canvas& c) const {
     c.paragraph(dg.custom_note, w(text(lang_, Str::DbCustomIniUsed)), fonts_.caption.get(), p.text_subtle);
 
     // Root access.
-    c.text(dg.root_title, w(text(lang_, Str::DbRoot)), fonts_.body_bold.get(), p.text, Align::Start, false);
-    c.text(dg.root_label, w(text(lang_, Str::DbRootPassword)), fonts_.caption.get(), p.text_subtle, Align::Start, false);
+    c.text(dg.root_title, w(text(lang_, db_str(db_family_, Str::DbRoot))), fonts_.body_bold.get(), p.text, Align::Start, false);
+    c.text(dg.root_label, w(text(lang_, db_str(db_family_, Str::DbRootPassword))), fonts_.caption.get(), p.text_subtle, Align::Start, false);
     if (!is_empty(dg.root_value)) {
         c.text(dg.root_value, w(root_shown_.empty() ? kMasked : std::string_view(root_shown_)), fonts_.mono.get(), p.text, Align::Start, true);
     }
@@ -1222,18 +1235,21 @@ void SettingsWindow::paint_db_text(Canvas& c) const {
         // While it waits: "Starting MariaDB 11.8…" until the server runs.
         const bool enabled = connected_ && !pma_busy_ && phpmyadmin_installed(installed_);
         const std::string busy = phpmyadmin_busy_text(db_title(), db_server_.state, lang_);
-        c.text(dg.pma, w(pma_busy_ ? std::string_view(busy) : text(lang_, Str::PmaOpen)), fonts_.button.get(),
-               enabled ? p.text : p.button_disabled_text, Align::Center, false);
+        if (!is_empty(dg.pma)) {
+            c.text(dg.pma, w(pma_busy_ ? std::string_view(busy) : text(lang_, Str::PmaOpen)), fonts_.button.get(),
+                   enabled ? p.text : p.button_disabled_text, Align::Center, false);
+        }
     }
     if (!is_empty(dg.pma_hint)) {
-        c.paragraph(dg.pma_hint, w(text(lang_, Str::PmaNotInstalled)), fonts_.caption.get(), p.text_subtle);
+        c.paragraph(dg.pma_hint, w(text(lang_, db_has_phpmyadmin(db_family_) ? Str::PmaNotInstalled : Str::DbPgTools)),
+                    fonts_.caption.get(), p.text_subtle);
     }
     c.text(dg.new_label, w(text(lang_, Str::DbNewPassword)), fonts_.caption.get(), p.text_subtle, Align::Start, false);
     label(dg.set_password, Str::DbSetPassword, connected_ && !root_busy_);
     if (!is_empty(dg.password_error)) {
         c.paragraph(dg.password_error, w(password_error_), fonts_.caption.get(), p.banner_error.text);
     }
-    c.paragraph(dg.root_note, w(text(lang_, Str::DbRootNote)), fonts_.caption.get(), p.text_subtle);
+    c.paragraph(dg.root_note, w(text(lang_, db_str(db_family_, Str::DbRootNote))), fonts_.caption.get(), p.text_subtle);
     const std::string dbs = db_->databases.empty() ? std::string(text(lang_, Str::DbNoDatabases))
                                                    : fill_pattern(text(lang_, Str::DbDatabases), false,
                                                                   {db_names_text(db_->databases, lang_)});

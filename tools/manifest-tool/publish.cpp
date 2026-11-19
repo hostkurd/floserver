@@ -790,6 +790,9 @@ void check_file(CheckContext& ctx, PublishFile& file) {
     } else if (source.kind == OfficialSource::Kind::MadeFrom) {
         const std::string& original = source.urls.front();
         const std::filesystem::path orig_zip = scratch->path() / "original.zip";
+        if (ctx.phase) {
+            ctx.phase(CheckPhase::Original);
+        }
         std::ofstream orig_out(orig_zip, std::ios::binary);
         const bool opened = orig_out.is_open();
         Download orig = opened ? download_and_hash(ctx, original, &orig_out) : Download{};
@@ -806,6 +809,9 @@ void check_file(CheckContext& ctx, PublishFile& file) {
         } else if (orig.reply.status != 200 || orig.reply.stopped) {
             why_not = "Can't download the original to compare with (" + describe_failure(orig.reply) + ")";
         } else {
+            if (ctx.phase) {
+                ctx.phase(CheckPhase::Compare);
+            }
             std::string error;
             const std::function<bool()> stop = [&ctx] { return cancelled(ctx.cancel); };
             const auto mine = zip_file_hashes(ours_zip, error, stop);

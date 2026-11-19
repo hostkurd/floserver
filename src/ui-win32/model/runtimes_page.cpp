@@ -56,10 +56,11 @@ struct Spec {
     bool picker;
 };
 // The groups in order; Web servers (nginx and Apache) go in after the wide ones.
-// MySQL (D28) has one series (8.4 LTS), so no default to pick.
-constexpr std::array kGroups{Spec{"php", true, true},   Spec{"mariadb", true, true}, Spec{"mysql", true, false},
-                             Spec{"node", false, false}, Spec{"bun", false, false},   Spec{"deno", false, false},
-                             Spec{"python", false, false}};
+// MySQL (D28) has one series (8.4 LTS), so no default to pick; PostgreSQL's
+// (D29) is chosen per project, so it has none either.
+constexpr std::array kGroups{Spec{"php", true, true},         Spec{"mariadb", true, true}, Spec{"mysql", true, false},
+                             Spec{"postgresql", true, false}, Spec{"node", false, false},  Spec{"bun", false, false},
+                             Spec{"deno", false, false},      Spec{"python", false, false}};
 
 // "3 projects · Shared sites" and who they are, from a used_by list.
 void describe_users(const json& used_by, RuntimeRow& row, Lang lang) {
@@ -95,7 +96,7 @@ void describe_users(const json& used_by, RuntimeRow& row, Lang lang) {
     }
 }
 
-// MariaDB, MySQL: the port of the server of `family` running this exact version.
+// MariaDB, MySQL, PostgreSQL: the port of the server of `family` running this exact version.
 std::string port_text(const json& databases, const std::string& family, const std::string& version, Lang lang) {
     for (const json& server : array_of(databases, "servers")) {
         const std::string own = server.is_object() && server.contains("family") ? text_of(server, "family") : "mariadb";
@@ -228,7 +229,7 @@ RuntimesPage runtimes_page(const json& reply, const Installed* installed, const 
         const std::string variant = text_of(r, "variant");
         row.label = usual_variant(variant) ? row.version : row.version + " " + variant;
         describe_users(array_of(r, "used_by"), row, lang);
-        if (row.name == "mariadb" || row.name == "mysql") {
+        if (row.name == "mariadb" || row.name == "mysql" || row.name == "postgresql") {
             if (const std::string port = port_text(databases, row.name, row.version, lang); !port.empty()) {
                 row.usage += (row.usage.empty() ? "" : " · ") + port;
             }

@@ -35,6 +35,13 @@ std::string database_series(std::string_view family, std::string_view version) {
     return std::string(version.substr(0, version.find('.')));
 }
 
+std::string_view database_series_example(std::string_view family) {
+    if (family == kMySqlFamily) {
+        return "8.4";
+    }
+    return family == kPostgreSqlFamily ? "18" : "11.4";
+}
+
 std::string database_family_title(std::string_view family) {
     if (family == kMariaDbFamily) {
         return "MariaDB";
@@ -57,7 +64,7 @@ bool request_database_family(std::string_view given, std::string& family) {
         family = std::string(kMariaDbFamily);
         return true;
     }
-    if (!mysql_protocol_family(given)) {
+    if (!database_service_family(given)) {
         return false;
     }
     family = std::string(given);

@@ -40,12 +40,15 @@ inline constexpr std::string_view kPostgreSqlFamily = "postgresql";
 
 // "MariaDB", "MySQL", "PostgreSQL"; the name itself for anything else.
 [[nodiscard]] std::string database_family_title(std::string_view family);
+// A series of the family, for messages: "11.4", "8.4", "18".
+[[nodiscard]] std::string_view database_series_example(std::string_view family);
 
 // "mysql-8.4": a server's data folder, secrets and logs are named after it.
 [[nodiscard]] std::string database_server_key(std::string_view family, std::string_view series);
 
 // The family a request names: "mariadb" when it names none (requests from
-// before D28), nothing when it names one FloServer doesn't run.
+// before D28), nothing when it names one FloServer doesn't run (MariaDB,
+// MySQL, PostgreSQL).
 [[nodiscard]] bool request_database_family(std::string_view given, std::string& family);
 
 }  // namespace floserver::core

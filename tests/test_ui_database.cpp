@@ -148,9 +148,10 @@ TEST_CASE("Settings > Database's footer, names and root password rule") {
 }
 
 TEST_CASE("Settings > Database: one tab per engine, each with its own versions and requests (D28)") {
-    REQUIRE(db_engines().size() == 2);
+    REQUIRE(db_engines().size() == 3);
     CHECK(db_engines()[0].family == "mariadb");
     CHECK(db_engines()[1].family == "mysql");
+    CHECK(db_engines()[2].family == "postgresql");
     CHECK(db_engine_title("mysql") == "MySQL");
     CHECK(db_server_title("mysql", "8.4") == "MySQL 8.4");
 
@@ -212,10 +213,11 @@ TEST_CASE("Settings > Database: one tab per engine, each with its own versions a
 
 TEST_CASE("Settings > Database's engine tabs as a screen reader gets them") {
     std::vector<AccessNode> tabs;
-    for (std::size_t i = 0; i < db_engines().size(); ++i) {
-        tabs.push_back(tab_node("db/engine/" + std::string(db_engines()[i].family), db_engines()[i].title,
-                                db_engines()[i].family == "mysql", static_cast<int>(i) + 1,
-                                static_cast<int>(db_engines().size())));
+    const auto engines = db_engines_shown(true, {}, json(), "mysql");
+    for (std::size_t i = 0; i < engines.size(); ++i) {
+        tabs.push_back(tab_node("db/engine/" + std::string(engines[i].family), engines[i].title,
+                                engines[i].family == "mysql", static_cast<int>(i) + 1,
+                                static_cast<int>(engines.size())));
     }
     REQUIRE(tabs.size() == 2);
     CHECK(tabs[1].role == AccessRole::TabItem);
@@ -225,4 +227,62 @@ TEST_CASE("Settings > Database's engine tabs as a screen reader gets them") {
     CHECK(tabs[1].position == 2);
     CHECK(tabs[1].set_size == 2);
     CHECK(tabs[0].focusable);
+}
+
+TEST_CASE("Settings > Database: PostgreSQL's tab once it's installed, with its own words and fields (D29)") {
+    // Its tab: only once a version is installed, or while it's the one shown.
+    CHECK(db_engines_shown(true, {}, json(), "mariadb").size() == 2);
+    const Installed installed = {{"postgresql", {"17.9", "18.7", "18.6"}}};
+    const auto shown = db_engines_shown(true, installed, json(), "mariadb");
+    REQUIRE(shown.size() == 3);
+    CHECK(shown[2].title == "PostgreSQL");
+    CHECK(db_engines_shown(true, {}, json(), "postgresql").size() == 3);
+    const json runtimes = {{"installed", json::array({{{"name", "postgresql"}, {"version", "18.7"}}})}};
+    CHECK(db_engines_shown(false, {}, runtimes, "mariadb").size() == 3);
+
+    // Its series are its major versions, newest first.
+    const auto series = installed_db_series(installed, "postgresql");
+    REQUIRE(series.size() == 2);
+    CHECK(series[0] == std::pair<std::string, std::string>{"18", "18.7"});
+    CHECK(series[1] == std::pair<std::string, std::string>{"17", "17.9"});
+    CHECK(db_family_to_show("", true, installed, json()) == "postgresql");
+    CHECK(db_server_title("postgresql", "18") == "PostgreSQL 18");
+    CHECK(db_params("postgresql", "18") == json{{"family", "postgresql"}, {"series", "18"}});
+
+    // Its fields: as many as MariaDB's (one set of boxes), PostgreSQL's names.
+    REQUIRE(settings_db_ini_fields("postgresql").size() == settings_db_ini_fields().size());
+    CHECK(settings_db_ini_fields("postgresql").front().key == "shared_buffers");
+    for (const DbIniField& f : settings_db_ini_fields("postgresql")) {
+        CHECK(f.key == db_option_base(f.label));
+    }
+    CHECK(db_ini_name("postgresql") == "postgresql.conf");
+    CHECK(db_ini_name("mysql") == "my.ini");
+    CHECK_FALSE(db_has_phpmyadmin("postgresql"));
+    CHECK(db_has_phpmyadmin("mysql"));
+
+    // Its words: postgresql.conf, custom.conf and postgres; the others keep theirs.
+    CHECK(db_str("mariadb", Str::DbRootPassword) == Str::DbRootPassword);
+    CHECK(text(Lang::En, db_str("postgresql", Str::DbRootPassword)) == std::string_view("postgres's password"));
+    CHECK(unknown_db_option_text("PostgreSQL 18", "work_mme", "work_mem", Lang::En, "postgresql") ==
+          "custom.conf: PostgreSQL 18 has no setting named work_mme. Did you mean work_mem?");
+    for (const Lang lang : {Lang::En, Lang::Ar, Lang::Ku}) {
+        CAPTURE(static_cast<int>(lang));
+        for (const Str s : {Str::DbShowFinal, Str::DbEditFull, Str::DbRoot, Str::DbRootPassword, Str::DbRootNote,
+                            Str::DbPasswordSet, Str::DbPasswordCopied, Str::DbPathNotAscii}) {
+            const std::string words(text(lang, db_str("postgresql", s)));
+            CHECK_FALSE(words.empty());
+            CHECK(words.find("root") == std::string::npos);
+            CHECK(words.find("my.ini") == std::string::npos);
+        }
+        CHECK(std::string(text(lang, Str::DbPgTools)).find("pgAdmin") != std::string::npos);
+        CHECK(fill(lang, db_str("postgresql", Str::DbPasswordFailed), {"x"}).find('x') != std::string::npos);
+    }
+    DbSeries pg;
+    pg.family = "postgresql";
+    pg.series = "18";
+    DbServer failed;
+    failed.exists = true;
+    failed.state = "failed";
+    failed.error_code = "path_not_ascii";
+    CHECK(db_state_text(pg, failed, Lang::En).starts_with("PostgreSQL can't start here"));
 }

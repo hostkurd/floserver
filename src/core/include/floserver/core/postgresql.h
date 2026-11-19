@@ -31,6 +31,9 @@ namespace floserver::core {
 inline constexpr std::string_view kPostgreSqlSuperuser = "postgres";
 // The first public port a PostgreSQL server takes (5433, 5434... after it).
 inline constexpr Port kFirstPostgreSqlPort = 5432;
+// In the data folder: Settings > Database's values and custom.conf, written
+// at each start; postgresql.conf includes it at its end.
+inline constexpr std::string_view kPostgreSqlSettingsFile = "floserver.conf";
 
 // The files for an install of `version` ("18.6") and FloServer's data
 // folder: bin/postgres, initdb, pg_ctl, psql, pg_dump (.exe on Windows), in a

@@ -111,6 +111,64 @@ std::string why_refused(std::string_view name, std::string_view managed) {
     return n + " is set by FloServer (where the database server keeps its files and logs) and can't be changed";
 }
 
+// PostgreSQL's (D29): FloServer passes these on its command line, where they
+// win over any file, or they'd move its files, open it beyond this computer,
+// change how passwords work or stop FloServer reading its log.
+constexpr std::array<std::string_view, 21> kManagedPostgres = {
+    "listen_addresses",        "port",                "unix_socket_directories", "unix_socket_group",
+    "unix_socket_permissions", "data_directory",      "config_file",             "hba_file",
+    "ident_file",              "external_pid_file",   "password_encryption",     "log_min_error_statement",
+    "lc_messages",             "logging_collector",   "log_destination",         "log_directory",
+    "log_filename",            "dynamic_library_path", "krb_server_keyfile",     "bonjour",
+    "bonjour_name",
+};
+
+bool is_pg_option_char(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '.';
+}
+
+std::optional<std::string> postgres_option_problem(const std::string& shown) {
+    if (shown.empty() || shown.size() > kMaxOptionLength ||
+        !std::all_of(shown.begin(), shown.end(), is_pg_option_char) || shown.front() == '.' || shown.back() == '.' ||
+        (shown.front() >= '0' && shown.front() <= '9')) {
+        const std::string cut = shown.size() > kMaxOptionLength ? shown.substr(0, kMaxOptionLength) + "..." : shown;
+        return "\"" + cut + "\" isn't a PostgreSQL setting name (letters, digits, _ and .)";
+    }
+    const std::string n = lower(shown);
+    if (n == "listen_addresses" || n.starts_with("ssl")) {
+        return shown + " can't be set: FloServer keeps the database server on this computer only (127.0.0.1), reached "
+                       "through its own port";
+    }
+    if (n == "port" || n.starts_with("unix_socket")) {
+        return shown + " can't be set here: FloServer chooses how the database server is reached (change the port in "
+                       "Settings > Database)";
+    }
+    if (n == "password_encryption" || n == "log_min_error_statement" || n == "krb_server_keyfile") {
+        return shown + " is set by FloServer, so passwords stay safe (scram-sha-256, and never written to the log)";
+    }
+    if (n == "lc_messages" || n == "logging_collector" || n == "log_destination" || n == "log_directory" ||
+        n == "log_filename") {
+        return shown + " is set by FloServer: it reads the server's messages, in English, from its own log";
+    }
+    if (std::find(kManagedPostgres.begin(), kManagedPostgres.end(), n) != kManagedPostgres.end()) {
+        return shown + " is set by FloServer (where the database server keeps its files) and can't be changed";
+    }
+    return std::nullopt;
+}
+
+// A value as postgresql.conf reads it: always quoted ('' inside), so a
+// space or a # can't change what follows.
+std::string pg_conf_value(std::string_view value) {
+    std::string out = "'";
+    for (const char c : value) {
+        if (c == '\'' || c == '\\') {
+            out += c;
+        }
+        out += c;
+    }
+    return out + "'";
+}
+
 }  // namespace
 
 std::string canonical_mariadb_option(std::string_view name) {
@@ -121,6 +179,9 @@ std::string canonical_mariadb_option(std::string_view name) {
 
 std::optional<std::string> mariadb_option_problem(std::string_view name, std::string_view family) {
     const std::string shown = trimmed(name);
+    if (family == kPostgreSqlFamily) {
+        return postgres_option_problem(shown);
+    }
     if (shown.empty() || shown.size() > kMaxOptionLength || !std::all_of(shown.begin(), shown.end(), is_option_char) ||
         shown.front() == '-' || shown.front() == '_') {
         const std::string cut = shown.size() > kMaxOptionLength ? shown.substr(0, kMaxOptionLength) + "..." : shown;
@@ -217,12 +278,21 @@ const std::vector<std::pair<std::string, std::string>>& mariadb_ini_defaults(std
         {"collation_server", "utf8mb4_0900_ai_ci"},
         {"innodb_buffer_pool_size", "64M"},
     };
+    // PostgreSQL's (D29): small memory; its other defaults are a development server's already.
+    static const std::vector<std::pair<std::string, std::string>> postgres = {
+        {"max_connections", "100"},
+        {"shared_buffers", "64MB"},
+    };
+    if (family == kPostgreSqlFamily) {
+        return postgres;
+    }
     return family == kMySqlFamily ? mysql : defaults;
 }
 
-std::optional<std::string> mariadb_request_series(std::string_view series) {
+std::optional<std::string> mariadb_request_series(std::string_view series, std::string_view family) {
     const auto v = Version::parse(series);
-    if (!v || v->parts().size() != 2) {
+    // PostgreSQL's series is its major version alone ("18").
+    if (!v || v->parts().size() != (family == kPostgreSqlFamily ? 1U : 2U)) {
         return std::nullopt;
     }
     return v->to_string();
@@ -251,9 +321,9 @@ MariaDbSettings read_mariadb_settings(const AppConfig& app, std::vector<std::str
         return out;
     }
     for (const auto& [name, entry] : stored.items()) {
-        const auto parsed = mariadb_request_series(name);
+        const auto parsed = mariadb_request_series(name, family);
         if (!parsed) {
-            problem(name, "isn't a " + title + " series such as " + (family == kMySqlFamily ? "8.4" : "11.4"));
+            problem(name, "isn't a " + title + " series such as " + std::string(database_series_example(family)));
             continue;
         }
         const std::string& series = *parsed;
@@ -309,7 +379,7 @@ void write_mariadb_series(AppConfig& app, const std::string& series, const Maria
     }
     std::vector<std::string> same;
     for (const auto& [key, value] : all.items()) {
-        if (key != series && mariadb_request_series(key) == series) {
+        if (key != series && mariadb_request_series(key, family) == series) {
             same.push_back(key);
         }
     }
@@ -344,11 +414,21 @@ void write_mariadb_series(AppConfig& app, const std::string& series, const Maria
 }
 
 fs::path mariadb_custom_ini_file(const fs::path& data, const std::string& series, std::string_view family) {
-    return data / path_from_utf8(std::string(family)) / path_from_utf8(series) / "custom.ini";
+    return data / path_from_utf8(std::string(family)) / path_from_utf8(series) /
+           (family == kPostgreSqlFamily ? "custom.conf" : "custom.ini");
 }
 
 std::string mariadb_custom_ini_header(const std::string& series, std::string_view family) {
     const std::string title = database_family_title(family);
+    if (family == kPostgreSqlFamily) {
+        return "# Your own postgresql.conf lines for PostgreSQL " + series +
+               ", one setting a line: name = value\n"
+               "# FloServer adds them after the values in Settings > Database, so a line here wins.\n"
+               "# Lines that would move PostgreSQL's files, change its port, open it beyond this computer or\n"
+               "# change how passwords work are left out (Show the final settings says which).\n"
+               "# Changes are used the next time PostgreSQL " +
+               series + " starts: Restart it in Settings > Database.\n\n";
+    }
     return "# Your own my.ini lines for " + title + " " + series +
            ".\n"
            "# FloServer adds them after the values in Settings > Database, in the [mysqld] group, so a line here wins.\n"
@@ -386,7 +466,104 @@ std::string read_mariadb_custom_ini(const fs::path& data, const std::string& ser
     return text;
 }
 
+namespace {
+
+// postgresql.conf's lines: "name = value", "name value" or "name=value", a
+// value quoted with '...' ('' or \\' inside) or bare up to a #.
+FilteredCustomIni filter_postgres_custom_conf(std::string_view text) {
+    FilteredCustomIni out;
+    std::set<std::string> keys;
+    std::size_t pos = text.starts_with("\xEF\xBB\xBF") ? 3 : 0;
+    std::size_t number = 0;
+    while (pos < text.size()) {
+        const auto end = text.find('\n', pos);
+        const std::string_view raw = text.substr(pos, end == std::string_view::npos ? std::string_view::npos : end - pos);
+        pos = end == std::string_view::npos ? text.size() : end + 1;
+        ++number;
+        const auto leave_out = [&](const std::string& why) {
+            out.problems.push_back("line " + std::to_string(number) + ": " + why);
+            out.text += "# FloServer left out line " + std::to_string(number) + "\n";
+        };
+        if (raw.size() > kMaxLineLength) {
+            leave_out("the line is longer than 1000 characters");
+            continue;
+        }
+        const std::string line = trimmed(raw);
+        if (line.empty() || line.front() == '#') {
+            continue;  // comments stay in custom.conf only
+        }
+        std::size_t at = 0;
+        while (at < line.size() && is_pg_option_char(line[at])) {
+            ++at;
+        }
+        const std::string key = line.substr(0, at);
+        const std::string lowered = lower(key);
+        if (lowered == "include" || lowered == "include_if_exists" || lowered == "include_dir") {
+            leave_out(key + " can't be used: every line must be here, where FloServer can check it");
+            continue;
+        }
+        if (const auto problem = postgres_option_problem(key)) {
+            leave_out(*problem);
+            continue;
+        }
+        std::string_view rest = std::string_view(line).substr(at);
+        while (!rest.empty() && (rest.front() == ' ' || rest.front() == '\t')) {
+            rest.remove_prefix(1);
+        }
+        if (!rest.empty() && rest.front() == '=') {
+            rest.remove_prefix(1);
+            while (!rest.empty() && (rest.front() == ' ' || rest.front() == '\t')) {
+                rest.remove_prefix(1);
+            }
+        }
+        std::string value;
+        bool ok = true;
+        if (!rest.empty() && rest.front() == '\'') {
+            // Quoted: up to the closing quote; '' and \' are a quote inside.
+            std::size_t i = 1;
+            bool closed = false;
+            for (; i < rest.size(); ++i) {
+                const char c = rest[i];
+                if ((c == '\\' || c == '\'') && i + 1 < rest.size() && rest[i + 1] == '\'') {
+                    value += '\'';
+                    ++i;
+                } else if (c == '\\' && i + 1 < rest.size()) {
+                    value += rest[++i];
+                } else if (c == '\'') {
+                    closed = true;
+                    break;
+                } else {
+                    value += c;
+                }
+            }
+            const std::string after = closed ? trimmed(rest.substr(i + 1)) : std::string();
+            ok = closed && (after.empty() || after.front() == '#');
+        } else {
+            const auto hash = rest.find('#');
+            value = trimmed(rest.substr(0, hash));
+            ok = !value.empty() && value.find_first_of(" \t") == std::string::npos;
+        }
+        if (!ok) {
+            leave_out("a setting is written as name = value (a value with spaces in '...')");
+            continue;
+        }
+        if (const auto problem = mariadb_value_problem(value)) {
+            leave_out(key + ": " + *problem);
+            continue;
+        }
+        keys.insert(lowered);
+        out.text += lowered + " = " + pg_conf_value(value) + "\n";
+    }
+    out.keys.assign(keys.begin(), keys.end());
+    return out;
+}
+
+}  // namespace
+
 FilteredCustomIni filter_mariadb_custom_ini(std::string_view text, std::string_view family) {
+    if (family == kPostgreSqlFamily) {
+        return filter_postgres_custom_conf(text);
+    }
     FilteredCustomIni out;
     std::set<std::string> keys;
     std::size_t pos = 0;
@@ -554,6 +731,50 @@ std::optional<std::vector<std::string>> names_from_json(const std::optional<std:
 
 }  // namespace
 
+std::string postgresql_settings_conf(const MariaDbExtras& extras) {
+    std::string out =
+        "# Written by FloServer each time PostgreSQL starts, from Settings > Database: edits here are lost.\n"
+        "# Read at the end of postgresql.conf (include_if_exists), so these win over its lines.\n";
+    // FloServer's defaults, then the series' own values in their place.
+    std::map<std::string, std::string> values;
+    for (const auto& [k, v] : mariadb_ini_defaults(kPostgreSqlFamily)) {
+        values[k] = v;
+    }
+    for (const auto& [k, v] : extras.ini) {
+        values[k] = v;
+    }
+    for (const auto& [k, v] : values) {
+        out += k + " = " + pg_conf_value(v) + "\n";
+    }
+    if (!extras.custom_ini.empty()) {
+        out += "\n# " + extras.custom_ini_path + "\n" + extras.custom_ini;
+        if (!extras.custom_ini.ends_with('\n')) {
+            out += '\n';
+        }
+    }
+    return out;
+}
+
+std::vector<std::string> parse_postgres_describe_config(std::string_view text) {
+    std::set<std::string> names;
+    std::size_t pos = 0;
+    while (pos < text.size()) {
+        const auto end = text.find('\n', pos);
+        const std::string_view line = text.substr(pos, end == std::string_view::npos ? std::string_view::npos : end - pos);
+        pos = end == std::string_view::npos ? text.size() : end + 1;
+        // "shared_buffers\tpostmaster\tResource Usage / Memory\tINTEGER\t...".
+        const auto tab = line.find('\t');
+        if (tab == std::string_view::npos || tab == 0) {
+            continue;
+        }
+        const std::string_view name = line.substr(0, tab);
+        if (std::all_of(name.begin(), name.end(), is_pg_option_char)) {
+            names.insert(lower(name));
+        }
+    }
+    return {names.begin(), names.end()};
+}
+
 std::optional<std::vector<std::string>> known_mariadb_options(const fs::path& server_program, const fs::path& cache_file,
                                                               std::string& error, bool& timed_out,
                                                               std::chrono::milliseconds limit) {
@@ -575,7 +796,15 @@ std::optional<std::vector<std::string>> known_mariadb_options(const fs::path& se
     ChildOptions o;
     o.program = server_program;
     // --no-defaults first: no option file of this computer's is read.
-    o.args = {"--no-defaults", "--verbose", "--help"};
+    // PostgreSQL's postgres.exe lists its settings with --describe-config
+    // (and refuses an administrator's token, like when it serves).
+    const bool postgres = server_program.stem() == "postgres";
+    if (postgres) {
+        o.args = {"--describe-config"};
+        o.restricted_token = true;
+    } else {
+        o.args = {"--no-defaults", "--verbose", "--help"};
+    }
     o.working_dir = folder;
     o.output_log = out;
     std::optional<std::vector<std::string>> names;
@@ -585,7 +814,8 @@ std::optional<std::vector<std::string>> known_mariadb_options(const fs::path& se
             timed_out = true;
             error = path_to_utf8(server_program.filename()) + " didn't list its options in time";
         } else {
-            auto list = parse_mariadb_help(read_small_file(out, kMaxHelpBytes).value_or(std::string()));
+            const std::string text = read_small_file(out, kMaxHelpBytes).value_or(std::string());
+            auto list = postgres ? parse_postgres_describe_config(text) : parse_mariadb_help(text);
             // A real list has hundreds; a few names are an error message.
             if (list.size() >= 50) {
                 names = std::move(list);

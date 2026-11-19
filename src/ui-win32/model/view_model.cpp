@@ -553,7 +553,8 @@ bool is_newer_version(std::string_view a, std::string_view b) { return newer(std
 
 std::string version_series(std::string_view runtime, std::string_view version) {
     const std::size_t first = version.find('.');
-    if (runtime == "node" || first == std::string_view::npos) {
+    // Node's and PostgreSQL's series are their major version alone (D29).
+    if (runtime == "node" || runtime == "postgresql" || first == std::string_view::npos) {
         return std::string(version.substr(0, first));
     }
     const std::size_t second = version.find('.', first + 1);
@@ -570,7 +571,11 @@ constexpr std::string_view kPhpNewest = "newest";
 // The pickers; `project` gives PHP its None and Newest installed choices
 // (a project's panel), else the first PHP choice removes the key and means
 // the newest (shared sites, the new project wizard).
-std::vector<VersionField> fields_of(const ProjectRow& row, const Installed& installed, Lang lang, bool project) {
+// `postgresql`: PostgreSQL is offered too (D29.9): not for templates that
+// need MySQL's protocol (FloCMS, WordPress) or for shared sites. A project
+// that already names it keeps it either way.
+std::vector<VersionField> fields_of(const ProjectRow& row, const Installed& installed, Lang lang, bool project,
+                                    bool postgresql = true) {
     std::vector<VersionField> out;
     const Wants& w = row.wants;
 
@@ -602,13 +607,16 @@ std::vector<VersionField> fields_of(const ProjectRow& row, const Installed& inst
     }
     out.push_back(std::move(php));
 
-    // None, then MariaDB's series and MySQL's (D28), each installed one.
+    // None, then MariaDB's series, MySQL's (D28) and PostgreSQL's (D29), each installed one.
     VersionField db{Field::Database, "database", std::string(text(lang, Str::FieldDatabase)), {}, 0};
     db.choices.push_back({std::string(text(lang, Str::ChoiceNone)), std::nullopt});
     bool known_db = false;
-    for (const char* family : {"mariadb", "mysql"}) {
+    for (const char* family : {"mariadb", "mysql", "postgresql"}) {
         const std::string prefix = std::string(family) + "-";
         const bool this_one = w.database.starts_with(prefix);
+        if (std::string_view(family) == "postgresql" && !postgresql && !this_one) {
+            continue;
+        }
         known_db = known_db || this_one;
         add_series(db, installed, family, this_one ? w.database.substr(prefix.size()) : std::string(), prefix,
                    runtime_label(family) + " ", lang);
@@ -820,6 +828,9 @@ std::string runtime_label(std::string_view name) {
     if (name == "mysql") {
         return "MySQL";
     }
+    if (name == "postgresql") {
+        return "PostgreSQL";
+    }
     if (name == "node") {
         return "Node.js";
     }
@@ -952,7 +963,7 @@ namespace {
 
 // The family of a Database choice's value ("mysql-8.4" -> "mysql"), or empty.
 std::string database_family_of(const std::optional<std::string>& value) {
-    for (const char* family : {"mariadb", "mysql"}) {
+    for (const char* family : {"mariadb", "mysql", "postgresql"}) {
         if (value && value->starts_with(std::string(family) + "-")) {
             return family;
         }
@@ -1076,11 +1087,16 @@ Defaults defaults_from_list(const json& result) {
     return out;
 }
 
+bool card_offers_postgresql(const TemplateCard& card) {
+    // D29.9: FloCMS and WordPress speak MySQL's protocol only.
+    return card.id != "flocms" && card.id != "wordpress";
+}
+
 std::vector<VersionField> template_fields(const TemplateCard& card, const Installed& installed, Lang lang,
                                           const Defaults& defaults) {
     ProjectRow row;
     row.wants = card.config;
-    std::vector<VersionField> all = fields_of(row, installed, lang, false);
+    std::vector<VersionField> all = fields_of(row, installed, lang, false, card_offers_postgresql(card));
     std::vector<VersionField> out;
     for (VersionField& f : all) {
         const bool keep = (f.field == Field::Php && card.uses_php) ||
@@ -1093,7 +1109,7 @@ std::vector<VersionField> template_fields(const TemplateCard& card, const Instal
             prefer_installed(f, installed);
             const std::string& db = card.config.database;
             const std::size_t dash = db.find('-');
-            const bool known_db = db.starts_with("mariadb-") || db.starts_with("mysql-");
+            const bool known_db = db.starts_with("mariadb-") || db.starts_with("mysql-") || db.starts_with("postgresql-");
             const std::string named = f.field == Field::Php        ? card.config.php
                                       : f.field == Field::Database ? (known_db ? db.substr(dash + 1) : std::string())
                                       : f.field == Field::Javascript
@@ -1250,7 +1266,8 @@ std::vector<VersionField> shared_fields(const SharedSites& shared, const Install
     row.wants.database = shared.database;
     row.wants.web = shared.web;
     std::vector<VersionField> out;
-    for (VersionField& f : fields_of(row, installed, lang, false)) {
+    // Shared sites' database is MySQL's protocol only (one shared login, phpMyAdmin).
+    for (VersionField& f : fields_of(row, installed, lang, false, false)) {
         if (f.field == Field::Php || f.field == Field::Database) {
             out.push_back(std::move(f));
         }

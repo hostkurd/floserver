@@ -1,5 +1,6 @@
 #include "floserver/core/php_settings.h"
 
+#include "floserver/core/database_engine.h"
 #include "floserver/core/encoding.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/sha256.h"
@@ -308,6 +309,13 @@ PhpIniSettings effective_php_settings(const std::string& series, const PhpSeries
         }
     }
     if (project != nullptr) {
+        // D29.6: a project on PostgreSQL gets PHP's PostgreSQL drivers (its own
+        // "extensions_off" below can still turn them off). PHP's Windows zip
+        // has the libpq.dll they need beside php-cgi.exe.
+        if (project->database && project->database->family == kPostgreSqlFamily) {
+            apply("pdo_pgsql", true);
+            apply("pgsql", true);
+        }
         for (const std::string& name : project->extensions) {
             apply(name, true);
         }

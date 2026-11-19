@@ -1406,8 +1406,9 @@ struct Service {
         return protocol::make_result(r.id, {{"env", env}, {"env_file", core::path_to_utf8(p->dir / ".env")}});
     }
 
-    // Settings → Database, per series ("11.4") and family ("family": "mariadb"
-    // when left out, or "mysql" since D28; every method below takes it):
+    // Settings → Database, per series ("11.4", PostgreSQL's "18") and family
+    // ("family": "mariadb" when left out, "mysql" since D28, "postgresql" since
+    // D29; every method below takes it):
     //   database.get {series}: ProjectService::database_get() with "server"
     //     and "databases" from DatabaseService::series_status();
     //   database.set {series, ini?, port?, keep_running?}: the same reply, and
@@ -1425,14 +1426,14 @@ struct Service {
         const std::string text = string_param(r.params, "series");
         std::string family;
         if (!core::request_database_family(string_param(r.params, "family"), family)) {
-            return protocol::make_error(r.id, "bad_params", R"("family" is "mariadb" or "mysql")");
+            return protocol::make_error(r.id, "bad_params", R"("family" is "mariadb", "mysql" or "postgresql")");
         }
-        const auto series = core::mariadb_request_series(text);
+        const auto series = core::mariadb_request_series(text, family);
         if (!series) {
             return protocol::make_error(r.id, "bad_params", "\"" + text + "\" isn't a " +
                                                                 core::database_family_title(family) +
                                                                 " series such as " +
-                                                                (family == core::kMySqlFamily ? "8.4" : "11.4"));
+                                                                std::string(core::database_series_example(family)));
         }
         const auto with_status = [&](json reply) {
             json status = databases->series_status(*series, family);

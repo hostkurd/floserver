@@ -30,13 +30,25 @@ struct DbServer {
     std::string error_code;  // "path_not_ascii": MySQL can't be given its folder's path (Windows)
 };
 
-// The engines' tabs, in order: their family ("mariadb", "mysql") and name.
-// PostgreSQL (D29) gets its tab when it's built.
+// The engines' tabs, in order: their family ("mariadb", "mysql",
+// "postgresql") and name.
 struct DbEngine {
     std::string_view family;
     std::string_view title;
 };
 [[nodiscard]] const std::vector<DbEngine>& db_engines();
+// The tabs Settings shows: MariaDB and MySQL always (each says how to get
+// it), PostgreSQL once a version of it is installed, or while it's the one
+// shown (D29.7).
+[[nodiscard]] std::vector<DbEngine> db_engines_shown(bool has_installed, const Installed& installed,
+                                                     const nlohmann::json& runtimes_reply, std::string_view shown);
+// The words of `s` for `family`'s tab: PostgreSQL's say postgresql.conf,
+// custom.conf and postgres where the others say my.ini, custom.ini and root.
+[[nodiscard]] Str db_str(std::string_view family, Str s);
+// The settings file's name above the fields: "my.ini", "postgresql.conf".
+[[nodiscard]] std::string_view db_ini_name(std::string_view family);
+// Whether phpMyAdmin can open the family's servers (MySQL's protocol only).
+[[nodiscard]] bool db_has_phpmyadmin(std::string_view family);
 // "MySQL" for "mysql"; the family itself for anything else.
 [[nodiscard]] std::string db_engine_title(std::string_view family);
 // "MySQL 8.4": what the window calls one server.
@@ -93,7 +105,9 @@ struct DbIniField {
     std::string key;
     std::string label;
 };
-[[nodiscard]] const std::vector<DbIniField>& settings_db_ini_fields();
+// MariaDB's and MySQL's my.ini fields, or PostgreSQL's postgresql.conf ones;
+// as many for each, so the window keeps one set of boxes.
+[[nodiscard]] const std::vector<DbIniField>& settings_db_ini_fields(std::string_view family = "mariadb");
 
 // "max-connections", "loose-Max_Connections" -> "max_connections": what
 // MariaDB reads it as, for comparing with the names it knows.
@@ -103,7 +117,8 @@ struct DbIniField {
 [[nodiscard]] std::optional<std::string> unknown_db_option(const std::vector<std::string>& known, std::string_view key);
 // `server`: db_server_title(), "MySQL 8.4".
 [[nodiscard]] std::string unknown_db_option_text(std::string_view server, std::string_view key,
-                                                 const std::string& suggestion, Lang lang);
+                                                 const std::string& suggestion, Lang lang,
+                                                 std::string_view family = "mariadb");
 
 // --- changes until Save -------------------------------------------------------
 
