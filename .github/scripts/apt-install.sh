@@ -19,7 +19,7 @@ for try in 1 2 3; do
       /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list 2>/dev/null || true
   fi
   if timeout -k 30 300 sudo apt-get update &&
-     timeout -k 30 600 sudo DEBIAN_FRONTEND=noninteractive apt-get -o APT::Keep-Downloaded-Packages=true \
+     timeout -k 30 600 sudo DEBIAN_FRONTEND=noninteractive apt-get \
        install -y "$@"; then
     exit 0
   fi
