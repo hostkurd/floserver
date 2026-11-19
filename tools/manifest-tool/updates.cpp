@@ -478,6 +478,21 @@ std::optional<std::string> ask(core::HttpTransport& http, const std::string& url
     return body;
 }
 
+// Whether a file is there: its first bytes are asked for and the rest left.
+// The HTTP status, or 0 when nothing answered.
+// `zip`: its first bytes are a zip's ("PK\3\4"), not a page it was sent to.
+int exists(core::HttpTransport& http, const std::string& url, const std::atomic<bool>* cancel, bool& zip) {
+    core::HttpLimits limits;
+    limits.max_time = std::chrono::seconds{30};
+    limits.cancel = cancel;
+    zip = false;
+    const core::HttpReply reply = http.get(url, limits, [&zip](std::span<const std::uint8_t> chunk) {
+        zip = chunk.size() >= 4 && chunk[0] == 'P' && chunk[1] == 'K' && chunk[2] == 3 && chunk[3] == 4;
+        return false;
+    });
+    return reply.status;
+}
+
 }  // namespace
 
 std::map<std::string, FinderAnswer> find_updates(core::HttpTransport& http,
@@ -545,10 +560,42 @@ std::map<std::string, FinderAnswer> find_updates(core::HttpTransport& http,
             via("https://www.phpmyadmin.net/home_page/version.json",
                 [&](std::string_view t) { return one(parse_phpmyadmin_version(t)); });
         } else if (runtime == "mysql") {
-            via("https://dev.mysql.com/downloads/mysql/8.4.html", [&](std::string_view t) {
-                const auto v = parse_mysql_page(t);
-                return v ? std::vector<UpstreamVersion>{{"8.4", *v}} : std::vector<UpstreamVersion>{};
-            });
+            // dev.mysql.com doesn't answer programs reliably: Oracle's download
+            // server is asked for the next 8.4 patches' zips instead.
+            std::optional<Version> newest;
+            for (const std::string& v : versions) {
+                const auto parsed = Version::parse(v);
+                if (parsed && parsed->parts().size() == 3 && update_series("mysql", v) == "8.4" &&
+                    (!newest || *newest < *parsed)) {
+                    newest = parsed;
+                }
+            }
+            a.source = "https://cdn.mysql.com/Downloads/MySQL-8.4/";
+            if (!newest) {
+                a.problem = "no MySQL 8.4 version in the list to look from";
+                read = false;
+            } else {
+                // Every one of the next patches: an older one is moved to Oracle's
+                // archive when a newer comes out, so a gap doesn't end the search.
+                const auto patch = newest->parts().back();
+                std::string latest = newest->to_string();
+                for (auto next = patch + 1; next <= patch + 8 && read; ++next) {
+                    const std::string v = "8.4." + std::to_string(next);
+                    const std::string url = a.source + "mysql-" + v + "-winx64.zip";
+                    bool zip = false;
+                    const int status = exists(http, url, cancel, zip);
+                    if (status == 200 && zip) {
+                        latest = v;
+                    } else if (status != 404) {
+                        a.problem = url + (status == 0 ? ": no answer" : ": HTTP " + std::to_string(status) +
+                                                                            (status == 200 ? " but not a zip" : ""));
+                        read = false;
+                    }
+                }
+                if (read) {
+                    got.push_back({"8.4", latest});
+                }
+            }
         } else if (runtime == "php-redis") {
             via("https://pecl.php.net/rest/r/redis/stable.txt", [&](std::string_view t) { return one(parse_pecl_stable(t)); });
         } else if (runtime == "dotnet") {

@@ -190,17 +190,35 @@ TEST_CASE("updates: every site asked once, a failed one doesn't stop the others"
     http.serve("https://downloads.mariadb.org/rest-api/mariadb/11.4/latest/", {200, R"({"releases":{"11.4.14":{}}})"});
     http.serve("https://api.github.com/repos/axllent/mailpit/releases/latest", {200, "<html>not json</html>"});
     http.serve("https://api.github.com/repos/oven-sh/bun/releases/latest", {403, "{}"});
+    // MySQL: the next patches' zips on Oracle's download server, until one isn't there.
+    // MySQL: the next patches' zips on Oracle's download server; 8.4.14 has
+    // already moved to its archive, so a gap doesn't end the search.
+    const std::string zip("PK\x03\x04 rest", 9);
+    const std::string mysql = "https://cdn.mysql.com/Downloads/MySQL-8.4/mysql-8.4.";
+    for (int n = 14; n <= 21; ++n) {
+        http.serve(mysql + std::to_string(n) + "-winx64.zip", {404, ""});
+    }
+    http.serve(mysql + "15-winx64.zip", {200, zip});
+    http.serve(mysql + "16-winx64.zip", {200, zip});
     http.serve("https://builds.dotnet.microsoft.com/dotnet/release-metadata/10.0/releases.json",
                {200, R"({"latest-runtime":"10.0.15"})"});
 
     const std::map<std::string, std::vector<std::string>> listed = {
         {"postgresql", {"18.7"}}, {"php", {"8.5.12"}}, {"mariadb", {"11.4.13", "11.8.9"}}, {"mailpit", {"1.33.0"}},
-        {"bun", {"1.3.14"}}, {"dotnet", {"10.0.14"}}};
+        {"bun", {"1.3.14"}}, {"dotnet", {"10.0.14"}}, {"mysql", {"8.4.13"}}};
     std::vector<std::string> asked;
     const test_util::TempDir saved;
     const auto found = find_updates(http, listed, nullptr, [&asked](std::string_view r) { asked.emplace_back(r); },
                                     floserver::core::path_to_utf8(saved.path()));
-    CHECK(asked.size() == 6);
+    CHECK(asked.size() == 7);
+    CHECK(found.at("mysql").versions == V{{"8.4", "8.4.16"}});
+
+    // A page instead of the zip, or another answer than 404: Couldn't check, never "up to date".
+    http.serve(mysql + "16-winx64.zip", {200, "<html>moved</html>"});
+    CHECK(find_updates(http, {{"mysql", {"8.4.13"}}}).at("mysql").problem.find("not a zip") != std::string::npos);
+    http.serve(mysql + "16-winx64.zip", {403, ""});
+    CHECK(find_updates(http, {{"mysql", {"8.4.13"}}}).at("mysql").problem.find("HTTP 403") != std::string::npos);
+    CHECK(find_updates(http, {{"mysql", {"8.4."}}}).at("mysql").problem.find("no MySQL 8.4 version") != std::string::npos);
     CHECK(found.at("bun").problem.find("hourly limit") != std::string::npos);
     CHECK(found.at("dotnet").versions == V{{"10.0", "10.0.15"}});  // the listed channel's address
     CHECK(found.at("postgresql").problem.empty());
@@ -216,5 +234,5 @@ TEST_CASE("updates: every site asked once, a failed one doesn't stop the others"
     for (const UpdateRow& r : rows) {
         updates += r.kind == UpdateKind::Update ? 1U : 0U;
     }
-    CHECK(updates == 3);  // MariaDB 11.8 and 11.4, .NET
+    CHECK(updates == 4);  // MariaDB 11.8 and 11.4, .NET, MySQL
 }
