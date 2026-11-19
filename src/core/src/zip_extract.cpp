@@ -411,6 +411,14 @@ std::optional<std::vector<std::pair<std::string, ZipFileHash>>> zip_file_hashes(
             return std::nullopt;
         }
         const std::string name(st.m_filename);
+        // With `want` (the original archive), only the entries asked for are
+        // checked: an odd one elsewhere (pgAdmin's) isn't ours to refuse.
+        if (want && (st.m_is_directory != 0 || !want(name, st.m_uncomp_size))) {
+            if (st.m_is_directory == 0) {
+                out.emplace_back(name, ZipFileHash{st.m_uncomp_size, {}, false});
+            }
+            continue;
+        }
         if ((st.m_version_made_by >> 8U) == kUnixHost &&
             ((st.m_external_attr >> 16U) & kUnixTypeMask) == kUnixSymlink) {
             error = "the archive has a symbolic link: " + name;
@@ -429,10 +437,6 @@ std::optional<std::vector<std::pair<std::string, ZipFileHash>>> zip_file_hashes(
         if (st.m_is_encrypted != MZ_FALSE || st.m_is_supported == MZ_FALSE) {
             error = "the archive has an encrypted or unsupported entry: " + name;
             return std::nullopt;
-        }
-        if (want && !want(name, st.m_uncomp_size)) {
-            out.emplace_back(name, ZipFileHash{st.m_uncomp_size, {}, false});
-            continue;
         }
         Sha256 hash;
         const std::function<bool(std::string_view)> sink = [&hash, &stop](std::string_view piece) {

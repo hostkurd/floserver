@@ -233,7 +233,8 @@ TEST_CASE("zip_file_hashes: files hashed, folders listed, and what the installer
             return name == "pgsql/a.txt";
         });
         REQUIRE(some);
-        CHECK(some->at(2).second == ZipFileHash{3, "", false});
+        REQUIRE(some->size() == 2);  // folders aren't listed with `want`
+        CHECK(some->at(1).second == ZipFileHash{3, "", false});
         // Stopped.
         CHECK_FALSE(zip_file_hashes(zip, error, [] { return true; }));
         CHECK(error == "stopped");
@@ -243,6 +244,11 @@ TEST_CASE("zip_file_hashes: files hashed, folders listed, and what the installer
         make_symlink(bytes, "link");
         CHECK_FALSE(zip_file_hashes(save(tmp, bytes), error));
         CHECK(error.find("symbolic link") != std::string::npos);
+        // In the original, an odd entry we don't want is only listed.
+        const auto original = zip_file_hashes(save(tmp, bytes), error, {},
+                                              [](std::string_view name, std::uint64_t) { return name == "ok.txt"; });
+        REQUIRE_MESSAGE(original, error);
+        CHECK(original->size() == 2);
     }
     {
         // A file marked as a folder (DOS attribute): the installer would make a folder there.
