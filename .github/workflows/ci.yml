@@ -738,6 +738,8 @@ jobs:
           path: ~/mingw-debs
           # A new key each month: a cache that stopped matching the image isn't kept for good.
           key: mingw-debs-ubuntu-24.04-x86-64-posix-${{ steps.month.outputs.month }}
+          # Last month's, until this month's is saved: no month starts on the mirror.
+          restore-keys: mingw-debs-ubuntu-24.04-x86-64-posix-
       - name: Install tools
         id: tools
         # Only the 64-bit posix compiler (the mingw-w64 package brings the
@@ -747,7 +749,12 @@ jobs:
           pkgs="ninja-build g++-mingw-w64-x86-64-posix gcc-mingw-w64-x86-64-posix binutils-mingw-w64-x86-64"
           if ls ~/mingw-debs/*.deb >/dev/null 2>&1; then
             # apt resolves the cached files' dependencies itself (no network needed when it has them all).
-            if sudo apt-get install -y --no-download ~/mingw-debs/*.deb && command -v x86_64-w64-mingw32-g++-posix; then
+            if sudo apt-get install -y --no-download --no-install-recommends ~/mingw-debs/*.deb &&
+               command -v x86_64-w64-mingw32-g++-posix; then
+              # Last month's files under this month's key, so they're kept on.
+              if [ "${{ steps.debs.outputs.cache-matched-key }}" != "${{ steps.debs.outputs.cache-primary-key }}" ]; then
+                echo "save=true" >> "$GITHUB_OUTPUT"
+              fi
               exit 0
             fi
             echo "::warning title=cache::the cached packages didn't install; using the mirror"
@@ -756,7 +763,9 @@ jobs:
           .github/scripts/apt-install.sh --no-install-recommends -f $pkgs || exit 1
           rm -rf ~/mingw-debs && mkdir -p ~/mingw-debs
           # Kept only when the download is all there (never an empty or partial cache).
-          if cp /var/cache/apt/archives/*.deb ~/mingw-debs/ 2>/dev/null &&
+          # (A key that's already saved can't be saved again: not tried.)
+          if [ "${{ steps.debs.outputs.cache-hit }}" != "true" ] &&
+             cp /var/cache/apt/archives/*.deb ~/mingw-debs/ 2>/dev/null &&
              ls ~/mingw-debs | grep -q '^g++-mingw-w64-x86-64-posix_'; then
             echo "save=true" >> "$GITHUB_OUTPUT"
           fi
