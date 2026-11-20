@@ -56,11 +56,14 @@ private:
     void download(bool upload);
     void fetched(FetchDone& done);
     void set_buttons();
+    void tick_all(bool ticked);
+    void show_progress();
     LRESULT custom_draw(NMLVCUSTOMDRAW* cd) const;
     [[nodiscard]] int px(int dip) const { return MulDiv(dip, static_cast<int>(dpi_), 96); }
 
     HWND hwnd_ = nullptr;
-    HWND heading_ = nullptr, hint_ = nullptr, list_ = nullptr, status_ = nullptr;
+    HWND heading_ = nullptr, hint_ = nullptr, list_ = nullptr, status_ = nullptr, summary_ = nullptr;
+    HWND progress_ = nullptr, check_all_ = nullptr, uncheck_all_ = nullptr;
     HWND keep_answers_ = nullptr, check_again_ = nullptr, download_ = nullptr, get_ = nullptr, close_ = nullptr,
          key_ = nullptr;
     HFONT font_ = nullptr, heading_font_ = nullptr;
@@ -73,6 +76,9 @@ private:
     std::thread worker_;
     std::atomic<bool> cancel_{false};
     bool busy_ = false;         // checking
+    std::size_t asked_ = 0;     // ...sites asked so far, of
+    std::size_t to_ask_ = 0;    // ...this many
+    bool bar_shown_ = false;    // the progress bar (the window itself may be hidden)
     bool downloading_ = false;  // Download only or Get selected
     bool uploading_ = false;    // ...Get selected
     std::vector<std::wstring> outcome_;  // per row: what Download only did ("" before)

@@ -1,6 +1,7 @@
 #include "updates_window.h"
 
 #include "fetch.h"
+#include "publish.h"
 #include "r2.h"
 #include "r2_key.h"
 
@@ -35,7 +36,7 @@ constexpr UINT kMsgFound = WM_APP + 21;   // lParam: std::map<std::string, Finde
 constexpr UINT kMsgFetchStep = WM_APP + 22;  // lParam: std::wstring* (what Download only is doing)
 constexpr UINT kMsgFetched = WM_APP + 23;    // lParam: FetchDone*
 
-enum : int { IdList = 300, IdKeep, IdCheckAgain, IdDownload, IdGet, IdClose, IdKey };
+enum : int { IdList = 300, IdKeep, IdCheckAgain, IdDownload, IdGet, IdClose, IdKey, IdCheckAll, IdUncheckAll };
 
 constexpr COLORREF kWindowBg = RGB(0xF3, 0xF3, 0xF3);
 constexpr COLORREF kText = RGB(0x1B, 0x1B, 0x1B);
@@ -197,6 +198,11 @@ void UpdatesWindow::create_controls() {
                  L"Each runtime's official site, compared with the files in the next list. Updates are ticked; "
                  L"a new series is your choice.",
                  SS_LEFT | SS_NOPREFIX, -1, font_);
+    check_again_ = make(L"BUTTON", L"Check again", WS_TABSTOP | BS_PUSHBUTTON, IdCheckAgain, font_);
+    key_ = make(L"BUTTON", L"R2 key…", WS_TABSTOP | BS_PUSHBUTTON, IdKey, font_);
+    check_all_ = make(L"BUTTON", L"Check all", WS_TABSTOP | BS_PUSHBUTTON | WS_DISABLED, IdCheckAll, font_);
+    uncheck_all_ = make(L"BUTTON", L"Uncheck all", WS_TABSTOP | BS_PUSHBUTTON | WS_DISABLED, IdUncheckAll, font_);
+    summary_ = make(L"STATIC", L"", SS_RIGHT | SS_NOPREFIX | SS_ENDELLIPSIS, -1, font_);
     list_ = make(WC_LISTVIEWW, L"", WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOSORTHEADER,
                  IdList, font_, WS_EX_CLIENTEDGE);
     ListView_SetExtendedListViewStyle(list_, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP |
@@ -210,16 +216,20 @@ void UpdatesWindow::create_controls() {
         c.cx = px(columns.at(static_cast<std::size_t>(i)).second);
         ListView_InsertColumn(list_, i, &c);
     }
+    progress_ = make(PROGRESS_CLASSW, L"", 0, -1, font_);
+    ShowWindow(progress_, SW_HIDE);
     status_ = make(L"STATIC", L"", SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS, -1, font_);
-    keep_answers_ = make(L"BUTTON", L"Keep what each site answered (to send if a row can't be read)",
+    keep_answers_ = make(L"BUTTON", L"Keep each site's answer (to send if a row fails)",
                          WS_TABSTOP | BS_AUTOCHECKBOX, IdKeep, font_);
-    check_again_ = make(L"BUTTON", L"Check again", WS_TABSTOP | BS_PUSHBUTTON, IdCheckAgain, font_);
     download_ = make(L"BUTTON", L"Download only", WS_TABSTOP | BS_PUSHBUTTON | WS_DISABLED, IdDownload, font_);
     get_ = make(L"BUTTON", L"Get selected", WS_TABSTOP | BS_PUSHBUTTON | WS_DISABLED, IdGet, font_);
-    key_ = make(L"BUTTON", L"R2 key…", WS_TABSTOP | BS_PUSHBUTTON, IdKey, font_);
     close_ = make(L"BUTTON", L"Close", WS_TABSTOP | BS_PUSHBUTTON, IdClose, font_);
 }
 
+// Top: the heading, with Check again and R2 key… on its right; the hint.
+// Above the list: Check all / Uncheck all, and what the check found.
+// Below it: the progress bar while working, and the status line.
+// Bottom: Keep what each site answered; Download only, Get selected; Close.
 void UpdatesWindow::layout() {
     if (list_ == nullptr) {
         return;
@@ -228,28 +238,97 @@ void UpdatesWindow::layout() {
     GetClientRect(hwnd_, &client);
     const int pad = px(16);
     const int w = client.right - 2 * pad;
+    const int right = pad + w;
     const auto put = [](HWND c, int x, int y, int cw, int ch) {
         SetWindowPos(c, nullptr, x, y, std::max(cw, 0), std::max(ch, 0), SWP_NOZORDER | SWP_NOACTIVATE);
     };
-    put(heading_, pad, px(12), w, px(24));
-    put(hint_, pad, px(38), w, px(36));
+    const int button_h = px(30);
+
+    put(key_, right - px(90), px(12), px(90), button_h);
+    put(check_again_, right - px(90) - px(8) - px(110), px(12), px(110), button_h);
+    put(heading_, pad, px(14), w - px(220), px(26));
+    put(hint_, pad, px(46), w, px(34));  // two lines at narrow widths
+
+    const int tools_y = px(84);
+    put(check_all_, pad, tools_y, px(96), px(28));
+    put(uncheck_all_, pad + px(104), tools_y, px(104), px(28));
+    put(summary_, pad + px(220), tools_y + px(6), w - px(220), px(20));
+
     const int bottom = client.bottom - pad;
-    const int buttons_y = bottom - px(30);
-    put(close_, pad + w - px(90), buttons_y, px(90), px(30));
-    put(get_, pad + w - px(90) - px(8) - px(120), buttons_y, px(120), px(30));
-    put(download_, pad + w - px(90) - px(8) - px(120) - px(8) - px(120), buttons_y, px(120), px(30));
-    put(check_again_, pad + w - px(90) - px(8) - px(120) - px(8) - px(120) - px(8) - px(110), buttons_y, px(110),
-        px(30));
-    put(keep_answers_, pad, buttons_y - px(30), w - px(100), px(24));
-    put(key_, pad + w - px(90), buttons_y - px(32), px(90), px(26));
-    // The status line has its own row above the buttons: Download only's steps are long.
-    put(status_, pad, buttons_y - px(30) - px(24), w, px(20));
-    const int list_top = px(78);
-    put(list_, pad, list_top, w, buttons_y - px(30) - px(30) - list_top);
+    const int buttons_y = bottom - button_h;
+    put(close_, right - px(90), buttons_y, px(90), button_h);
+    // The two actions together; Close apart from them.
+    put(get_, right - px(90) - px(20) - px(120), buttons_y, px(120), button_h);
+    put(download_, right - px(90) - px(20) - px(120) - px(8) - px(120), buttons_y, px(120), button_h);
+    put(keep_answers_, pad, buttons_y + px(3), w - px(90) - px(20) - px(248) - px(12), px(24));
+
+    // Progress and status: their own row, as Download only's steps are long.
+    const int status_y = buttons_y - px(16) - px(20);
+    const bool working = bar_shown_;
+    const int bar_w = working ? px(200) : 0;
+    put(progress_, pad, status_y + px(2), bar_w, px(16));
+    put(status_, pad + (working ? bar_w + px(12) : 0), status_y, w - (working ? bar_w + px(12) : 0), px(20));
+
+    const int list_top = tools_y + px(36);
+    put(list_, pad, list_top, w, status_y - px(10) - list_top);
     const int fixed = ListView_GetColumnWidth(list_, 0) + ListView_GetColumnWidth(list_, 1) +
                       ListView_GetColumnWidth(list_, 2) + GetSystemMetricsForDpi(SM_CXVSCROLL, dpi_) + px(4);
     ListView_SetColumnWidth(list_, 3, std::max(px(160), w - fixed));
     InvalidateRect(hwnd_, nullptr, TRUE);
+}
+
+// The bar: counting the sites while checking, moving while downloading.
+void UpdatesWindow::show_progress() {
+    const bool working = busy_ || downloading_;
+    const bool was = bar_shown_;
+    LONG_PTR style = GetWindowLongPtrW(progress_, GWL_STYLE);
+    const bool marquee = downloading_;
+    if (((style & PBS_MARQUEE) != 0) != marquee) {
+        if (!marquee) {
+            SendMessageW(progress_, PBM_SETMARQUEE, FALSE, 0);  // its timer stops only this way
+        }
+        style = marquee ? (style | PBS_MARQUEE) : (style & ~static_cast<LONG_PTR>(PBS_MARQUEE));
+        SetWindowLongPtrW(progress_, GWL_STYLE, style);
+    }
+    if (marquee) {
+        SendMessageW(progress_, PBM_SETMARQUEE, working ? TRUE : FALSE, 30);
+    } else {
+        SendMessageW(progress_, PBM_SETRANGE32, 0, static_cast<LPARAM>(std::max<std::size_t>(to_ask_, 1)));
+        // Sites done: the one being asked isn't, yet.
+        SendMessageW(progress_, PBM_SETPOS, static_cast<WPARAM>(busy_ && asked_ > 0 ? asked_ - 1 : asked_), 0);
+    }
+    if (was != working) {
+        bar_shown_ = working;
+        ShowWindow(progress_, working ? SW_SHOWNA : SW_HIDE);
+        layout();
+    }
+}
+
+// Check all ticks every update and new series; Uncheck all clears them.
+void UpdatesWindow::tick_all(bool ticked) {
+    if (busy_ || downloading_) {
+        return;
+    }
+    filling_ = true;
+    const int n = ListView_GetItemCount(list_);
+    for (int at = 0; at < n; ++at) {
+        LVITEMW item{};
+        item.mask = LVIF_PARAM;
+        item.iItem = at;
+        if (ListView_GetItem(list_, &item) == FALSE) {
+            continue;
+        }
+        const auto row = static_cast<std::size_t>(item.lParam);
+        if (row >= rows_.size()) {
+            continue;
+        }
+        const bool actionable =
+            rows_[row].kind == mt::UpdateKind::Update || rows_[row].kind == mt::UpdateKind::NewSeries;
+        rows_[row].ticked = ticked && actionable;
+        ListView_SetCheckState(list_, at, rows_[row].ticked ? TRUE : FALSE);
+    }
+    filling_ = false;
+    set_buttons();
 }
 
 void UpdatesWindow::stop_worker() {
@@ -266,12 +345,15 @@ void UpdatesWindow::check() {
     }
     stop_worker();
     busy_ = true;
-    set_buttons();
+    asked_ = 0;
+    to_ask_ = mt::runtimes_to_ask(listed_);
     rows_.clear();
     outcome_.clear();
     outcome_ok_.clear();
     ListView_DeleteAllItems(list_);
-    SetWindowTextW(status_, L"Asking each site…");
+    set_buttons();
+    SetWindowTextW(summary_, L"");
+    SetWindowTextW(status_, to_ask_ == 1 ? L"Asking the official site…" : L"Asking the official sites…");
     saved_to_.clear();
     if (Button_GetCheck(keep_answers_) == BST_CHECKED) {
         const fs::path folder = dated_folder(L"site answers");
@@ -331,13 +413,18 @@ void UpdatesWindow::fill() {
         failed += r.kind == mt::UpdateKind::Failed ? 1 : 0;
     }
     filling_ = false;
-    std::wstring status = std::to_wstring(updates) + (updates == 1 ? L" update, " : L" updates, ") +
-                          std::to_wstring(fresh) + (fresh == 1 ? L" new series" : L" new series");
+    const int current = static_cast<int>(rows_.size()) - updates - fresh - failed;
+    // What needs you first: a cut-off end loses only "up to date".
+    std::wstring summary;
     if (failed > 0) {
-        status += L", " + std::to_wstring(failed) + L" couldn't be checked";
+        summary = std::to_wstring(failed) + L" couldn't be checked · ";
     }
-    status += updates + fresh > 0 ? L". Tick what you want, then Download only." : L".";
-    SetWindowTextW(status_, status.c_str());
+    summary += std::to_wstring(updates) + (updates == 1 ? L" update · " : L" updates · ") + std::to_wstring(fresh) +
+               L" new series · " + std::to_wstring(current) + L" up to date";
+    SetWindowTextW(summary_, summary.c_str());
+    SetWindowTextW(status_, updates + fresh > 0
+                                ? L"Tick what you want, then Get selected (or Download only, to upload by hand)."
+                                : L"Everything in the list is up to date.");
     std::error_code ec;
     if (!saved_to_.empty() && !fs::is_empty(floserver::ui::win::widen(saved_to_), ec) && !ec) {
         ShellExecuteW(hwnd_, L"explore", widen(saved_to_).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
@@ -386,7 +473,8 @@ LRESULT UpdatesWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_GETMINMAXINFO: {
         auto* mm = int_to_ptr<MINMAXINFO*>(lp);
-        mm->ptMinTrackSize = {px(600), px(380)};
+        // Room for the bottom row: the checkbox beside the three buttons.
+        mm->ptMinTrackSize = {px(720), px(420)};
         return 0;
     }
     case WM_DPICHANGED: {
@@ -404,7 +492,8 @@ LRESULT UpdatesWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
         HFONT old_heading = heading_font_;
         font_ = font(9, FW_NORMAL);
         heading_font_ = font(11, FW_SEMIBOLD);
-        for (HWND c : {hint_, list_, status_, keep_answers_, check_again_, download_, get_, close_, key_}) {
+        for (HWND c : {hint_, list_, status_, summary_, keep_answers_, check_again_, download_, get_, close_, key_,
+                       check_all_, uncheck_all_}) {
             SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
         }
         SendMessageW(heading_, WM_SETFONT, reinterpret_cast<WPARAM>(heading_font_), TRUE);
@@ -477,6 +566,10 @@ LRESULT UpdatesWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
                 download(LOWORD(wp) == IdGet);
             }
             return 0;
+        case IdCheckAll:
+        case IdUncheckAll:
+            tick_all(LOWORD(wp) == IdCheckAll);
+            return 0;
         case IdKey:
             if (!downloading_) {
                 (void)ask_r2_key(hwnd_);
@@ -517,7 +610,15 @@ LRESULT UpdatesWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case kMsgAsking: {
         const std::unique_ptr<std::string> runtime(int_to_ptr<std::string*>(lp));
-        SetWindowTextW(status_, (L"Asking about " + widen(*runtime) + L"…").c_str());
+        ++asked_;
+        std::string name = mt::runtime_title(*runtime, "", "");
+        while (!name.empty() && name.back() == ' ') {
+            name.pop_back();
+        }
+        SetWindowTextW(status_, (L"Asking " + widen(name) + L"'s site (" + std::to_wstring(asked_) + L" of " +
+                                 std::to_wstring(std::max(to_ask_, asked_)) + L")…")
+                                    .c_str());
+        show_progress();
         return 0;
     }
     case kMsgFound: {
@@ -527,6 +628,7 @@ LRESULT UpdatesWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
             worker_.join();
         }
         busy_ = false;
+        asked_ = to_ask_;
         rows_ = mt::compare_updates(listed_, *found);
         outcome_.assign(rows_.size(), std::wstring());
         outcome_ok_.assign(rows_.size(), false);
@@ -567,6 +669,13 @@ void UpdatesWindow::set_buttons() {
     EnableWindow(download_, (downloading_ && !uploading_) || (!downloading_ && !busy_ && any) ? TRUE : FALSE);
     EnableWindow(get_, (downloading_ && uploading_) || (!downloading_ && !busy_ && any) ? TRUE : FALSE);
     EnableWindow(key_, downloading_ ? FALSE : TRUE);
+    const bool idle = !busy_ && !downloading_;
+    const bool actionable = std::any_of(rows_.begin(), rows_.end(), [](const mt::UpdateRow& r) {
+        return r.kind == mt::UpdateKind::Update || r.kind == mt::UpdateKind::NewSeries;
+    });
+    EnableWindow(check_all_, idle && actionable ? TRUE : FALSE);
+    EnableWindow(uncheck_all_, idle && any ? TRUE : FALSE);
+    show_progress();
 }
 
 // D34.3: each ticked version from its official site, checked, into

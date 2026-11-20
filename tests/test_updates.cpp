@@ -211,6 +211,8 @@ TEST_CASE("updates: every site asked once, a failed one doesn't stop the others"
     const auto found = find_updates(http, listed, nullptr, [&asked](std::string_view r) { asked.emplace_back(r); },
                                     floserver::core::path_to_utf8(saved.path()));
     CHECK(asked.size() == 7);
+    CHECK(runtimes_to_ask(listed) == asked.size());  // what the progress bar counts to
+    CHECK(runtimes_to_ask({{"php", {"8.5.12"}}, {"not-a-runtime", {"1"}}}) == 1);
     CHECK(found.at("mysql").versions == V{{"8.4", "8.4.16"}});
 
     // A page instead of the zip, or another answer than 404: Couldn't check, never "up to date".

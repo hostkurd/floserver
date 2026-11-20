@@ -629,7 +629,7 @@ jobs:
         if: failure()
         shell: bash
         run: |
-          grep -E 'TEST CASE|ERROR|FATAL|values:|logged:|runtime error|Sanitizer|SUMMARY|AH[0-9]{5}|--- FloServer' test.log | head -60 |
+          grep -E 'TEST CASE|ERROR|FATAL|values:|logged:|runtime error|Sanitizer|SUMMARY|AH[0-9]{5}|--- FloServer|Timeout|tests failed' test.log | head -60 |
             while IFS= read -r line; do echo "::error title=floserver_tests::${line}"; done
 
   linux-release:
@@ -665,7 +665,7 @@ jobs:
         if: failure()
         shell: bash
         run: |
-          grep -E 'TEST CASE|ERROR|FATAL|values:|logged:|runtime error|Sanitizer|SUMMARY|AH[0-9]{5}|--- FloServer' test.log | head -60 |
+          grep -E 'TEST CASE|ERROR|FATAL|values:|logged:|runtime error|Sanitizer|SUMMARY|AH[0-9]{5}|--- FloServer|Timeout|tests failed' test.log | head -60 |
             while IFS= read -r line; do echo "::error title=floserver_tests::${line}"; done
 
   clang-tidy:

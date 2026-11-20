@@ -495,6 +495,12 @@ int exists(core::HttpTransport& http, const std::string& url, const std::atomic<
 
 }  // namespace
 
+std::size_t runtimes_to_ask(const std::map<std::string, std::vector<std::string>>& listed) {
+    return static_cast<std::size_t>(std::count_if(listed.begin(), listed.end(), [](const auto& entry) {
+        return order_of(entry.first) < kOrder.size();
+    }));
+}
+
 std::map<std::string, FinderAnswer> find_updates(core::HttpTransport& http,
                                                  const std::map<std::string, std::vector<std::string>>& listed,
                                                  const std::atomic<bool>* cancel,
