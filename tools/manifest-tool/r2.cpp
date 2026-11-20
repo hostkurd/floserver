@@ -439,7 +439,7 @@ bool R2Bucket::put_file(const std::string& object, const fs::path& file, std::st
             progress({sent, total});
         }
     };
-    if (total <= kMultipartFrom) {
+    if (total <= multipart_from_) {
         Call c;
         c.method = "PUT";
         c.object = object;
@@ -496,7 +496,7 @@ bool R2Bucket::put_file(const std::string& object, const fs::path& file, std::st
         p.query = {{"partNumber", std::to_string(part)}, {"uploadId", *upload_id}};
         p.file = &file;
         p.offset = offset;
-        p.size = std::min(kPartSize, total - offset);
+        p.size = std::min(part_size_, total - offset);
         p.max_time = std::chrono::minutes{30};
         const std::uint64_t base = offset;
         // One retry: a part is 64 MiB, a dropped connection shouldn't lose the whole file.

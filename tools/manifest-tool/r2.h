@@ -72,7 +72,7 @@ public:
     // answers say why (a HEAD's don't). Empty when it can.
     [[nodiscard]] std::string check(const std::atomic<bool>* cancel = nullptr);
 
-    // Uploads `file` as `object`: one PUT up to kMultipartFrom, in parts above.
+    // Uploads `file` as `object`: one PUT up to multipart_from(), in parts above.
     [[nodiscard]] bool put_file(const std::string& object, const std::filesystem::path& file, std::string& error,
                                 const std::atomic<bool>* cancel = nullptr,
                                 const std::function<void(const R2Progress&)>& progress = {});
@@ -87,6 +87,14 @@ public:
 
     static constexpr std::uint64_t kMultipartFrom = std::uint64_t{100} * 1024 * 1024;
     static constexpr std::uint64_t kPartSize = std::uint64_t{64} * 1024 * 1024;  // R2: equal parts, 5 MiB+
+
+    // Smaller sizes, so tests send parts without writing hundreds of MB.
+    void set_part_sizes(std::uint64_t multipart_from, std::uint64_t part_size) {
+        multipart_from_ = multipart_from;
+        part_size_ = part_size;
+    }
+    [[nodiscard]] std::uint64_t multipart_from() const { return multipart_from_; }
+    [[nodiscard]] std::uint64_t part_size() const { return part_size_; }
 
 private:
     struct Call {
@@ -110,6 +118,8 @@ private:
     R2Key key_;
     std::string bucket_;
     std::function<std::chrono::sys_seconds()> now_;
+    std::uint64_t multipart_from_ = kMultipartFrom;
+    std::uint64_t part_size_ = kPartSize;
 };
 
 // Get selected's upload (D34.3 step 4): each file of a version, from

@@ -203,8 +203,11 @@ public:
     bool aborted = false;
 };
 
+// Parts of 64 KiB from 100 KiB: the same steps as 64 MiB from 100 MiB, in milliseconds.
 R2Bucket bucket(FakeR2& r2) {
-    return {r2, kKey, kR2Bucket, [] { return std::chrono::sys_seconds{std::chrono::seconds{1'700'000'000}}; }};
+    R2Bucket b{r2, kKey, kR2Bucket, [] { return std::chrono::sys_seconds{std::chrono::seconds{1'700'000'000}}; }};
+    b.set_part_sizes(std::uint64_t{100} * 1024, std::uint64_t{64} * 1024);
+    return b;
 }
 
 void write(const fs::path& p, const std::string& text) {
@@ -298,7 +301,7 @@ TEST_CASE("r2: a big file goes in parts") {
         std::ofstream out(f, std::ios::binary);
         out << "head";
     }
-    const std::uint64_t size = 2 * R2Bucket::kPartSize + 1000;
+    const std::uint64_t size = 2 * b.part_size() + 1000;
     fs::resize_file(f, size);
     std::string error;
 
@@ -394,7 +397,7 @@ TEST_CASE("r2: retries only what may go better") {
     SUBCASE("a part refused with 403: not sent again") {
         const fs::path big = dir.path() / "big.zip";
         write(big, "h");
-        fs::resize_file(big, R2Bucket::kMultipartFrom + 1);
+        fs::resize_file(big, b.multipart_from() + 1);
         r2.fail_parts = 5;
         r2.fail_status = 403;
         CHECK(!b.put_file("t/1/big.zip", big, error));
@@ -404,7 +407,7 @@ TEST_CASE("r2: retries only what may go better") {
     SUBCASE("Stop during a part: aborted, said as stopped") {
         const fs::path big = dir.path() / "big.zip";
         write(big, "h");
-        fs::resize_file(big, R2Bucket::kMultipartFrom + 1);
+        fs::resize_file(big, b.multipart_from() + 1);
         std::atomic<bool> cancel{false};
         r2.cancel_flag = &cancel;
         CHECK(!b.put_file("t/1/big.zip", big, error, &cancel));
