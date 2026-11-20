@@ -1974,10 +1974,6 @@ bool DatabaseService::run_project_tool(const std::string& project, bool dump, co
     if (!login) {
         return false;
     }
-    if (login->family == kPostgreSqlFamily) {
-        refusal = {"not_supported", "backups of PostgreSQL databases come with the next FloServer build"};
-        return false;
-    }
     const auto server = project_server(project, refusal);
     if (!server) {
         return false;
@@ -1989,12 +1985,31 @@ bool DatabaseService::run_project_tool(const std::string& project, bool dump, co
         refusal = {"database_failed", error};
         return false;
     }
-    const bool ok = dump ? server->run_as(server->files().dump, *login,
-                                          mariadb_dump_args(login->database, std::string(kDumpFileName), server->family()),
-                                          work, {},
-                                          cancel, error)
-                         : server->run_as(server->files().client, *login, mariadb_load_args(false), work, input,
-                                          cancel, error);
+    bool ok = false;
+    if (login->family == kPostgreSqlFamily) {
+        // D29.8: pg_dump as its own role; a load goes into an empty database,
+        // dropped by the superuser and made again (owned by its role) first.
+        if (dump) {
+            ok = server->run_as(server->files().dump, *login, pg_dump_args(login->database, std::string(kDumpFileName)),
+                                work, {}, cancel, error);
+        } else {
+            if (!server->run_sql(pg_empty_database_sql(login->database), error) ||
+                !project_login(project, refusal, true)) {
+                if (refusal.code.empty()) {
+                    refusal = {"database_failed", error};
+                }
+                return false;
+            }
+            ok = server->run_as(server->files().client, *login,
+                                pg_load_args(login->database, path_to_utf8(input.filename())), work, {}, cancel, error);
+        }
+    } else {
+        ok = dump ? server->run_as(server->files().dump, *login,
+                                   mariadb_dump_args(login->database, std::string(kDumpFileName), server->family()),
+                                   work, {}, cancel, error)
+                  : server->run_as(server->files().client, *login, mariadb_load_args(false), work, input, cancel,
+                                   error);
+    }
     if (!ok) {
         refusal = {cancel ? "cancelled" : "database_failed", error};
         return false;

@@ -117,4 +117,14 @@ inline constexpr std::string_view kPostgreSqlSettingsFile = "floserver.conf";
 // psqlrc, no password prompt, stop at the first error, quiet.
 [[nodiscard]] std::vector<std::string> psql_args(Port port, const std::string& user, const std::string& database);
 
+// Backups (D29.8), run as the project's own role: pg_dump's plain SQL of
+// its database into `file`, without owners or grants (they name roles of
+// this computer), and psql loading such a file (backup.h's PgLoadWriter)
+// in one transaction, stopping at the first error.
+[[nodiscard]] std::vector<std::string> pg_dump_args(const std::string& database, const std::string& file);
+[[nodiscard]] std::vector<std::string> pg_load_args(const std::string& database, const std::string& file);
+// Empties a project's database before a load: dropped (its connections
+// closed), then made again by pg_project_database_sql().
+[[nodiscard]] std::string pg_empty_database_sql(const std::string& database);
+
 }  // namespace floserver::core

@@ -205,4 +205,18 @@ std::vector<std::string> psql_args(Port port, const std::string& user, const std
             "--no-psqlrc",      "--no-password",                  "--set=ON_ERROR_STOP=1", "--quiet"};
 }
 
+std::vector<std::string> pg_dump_args(const std::string& database, const std::string& file) {
+    return {"--dbname=" + database, "--format=plain", "--no-owner", "--no-privileges", "--encoding=UTF8",
+            "--file=" + file};
+}
+
+std::vector<std::string> pg_load_args(const std::string& database, const std::string& file) {
+    return {"--dbname=" + database, "--no-psqlrc",          "--set=ON_ERROR_STOP=1",
+            "--quiet",              "--single-transaction", "--file=" + file};
+}
+
+std::string pg_empty_database_sql(const std::string& database) {
+    return "DROP DATABASE IF EXISTS " + pg_identifier(database) + " WITH (FORCE);\n";
+}
+
 }  // namespace floserver::core

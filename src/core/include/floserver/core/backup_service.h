@@ -164,6 +164,8 @@ private:
     [[nodiscard]] std::optional<std::uint64_t> free_space(const std::filesystem::path& folder) const;
     // The project's own database's name (a renamed one keeps its old one).
     [[nodiscard]] std::string database_of(const std::string& project) const;
+    // Its database's family ("mariadb", "mysql", "postgresql"); empty: none.
+    [[nodiscard]] std::string family_of(const std::string& project) const;
     // .env (or wp-config.php) pointed at the project's database.
     void point_at_database(const std::shared_ptr<Job>& job, const std::filesystem::path& dir,
                            const std::string& project) const;
