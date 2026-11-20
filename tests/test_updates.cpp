@@ -21,7 +21,8 @@ TEST_CASE("updates: each site's answer read as the newest version of each series
     CHECK(update_series("php", "8.5.13") == "8.5");
     CHECK(update_series("node", "24.22.1") == "24");
     CHECK(update_series("postgresql", "17.12") == "17");
-    CHECK(update_series("bun", "1.3.14").empty());
+    CHECK(update_series("bun", "1.3.14") == "1.3");  // as a project names it
+    CHECK(update_series("deno", "2.9.8").empty());
     CHECK(update_series("dotnet", "10.0.14") == "10.0");
 
     CHECK(parse_php_sums("aa *php-8.5.13-1-nts-Win32-vs17-x64.zip\n"
@@ -108,7 +109,7 @@ TEST_CASE("updates: compared with the list, as Update, New series, Up to date or
     found["postgresql"].versions = {{"18", "18.7"}, {"17", "17.12"}, {"16", "16.16"}};
     found["php"].versions = {{"8.5", "8.5.13"}, {"8.4", "8.4.27"}, {"8.3", "8.3.30"}, {"8.1", "8.1.34"}};
     found["node"].problem = "https://nodejs.org/dist/index.json: HTTP 503";
-    found["bun"].versions = {{"", "1.3.15"}};
+    found["bun"].versions = {{"1.3", "1.3.15"}};
     found["nginx"].versions = {{"1.30", "1.30.6"}, {"1.28", "1.28.3"}, {"1.32", "1.32.0"}};
 
     const auto rows = compare_updates(listed, found);
@@ -138,8 +139,8 @@ TEST_CASE("updates: compared with the list, as Update, New series, Up to date or
     CHECK(row("PostgreSQL 18").kind == UpdateKind::UpToDate);
     // nginx: a newer stable branch is offered, an older one isn't.
     CHECK(row("nginx 1.32").kind == UpdateKind::NewSeries);
-    CHECK(row("Bun").kind == UpdateKind::Update);
-    CHECK(row("Bun").listed == "1.3.14");
+    CHECK(row("Bun 1.3").kind == UpdateKind::Update);
+    CHECK(row("Bun 1.3").listed == "1.3.14");
     CHECK(row("Node.js").kind == UpdateKind::Failed);
     CHECK(row("Node.js").detail.find("HTTP 503") != std::string::npos);
 
@@ -161,6 +162,19 @@ TEST_CASE("updates: compared with the list, as Update, New series, Up to date or
         REQUIRE_FALSE(r.empty());
         CHECK(r[0].title == "Composer 2.12");
         CHECK(r[0].kind == UpdateKind::NewSeries);
+    }
+    // Bun: a new minor is a new series, unticked; 1.3 stays as it is.
+    {
+        std::map<std::string, FinderAnswer> bun;
+        bun["bun"].versions = {{"1.4", "1.4.5"}};
+        const auto r = compare_updates({{"bun", {"1.3.14", "1.3.14"}}}, bun);
+        REQUIRE(r.size() == 2);
+        CHECK(r[0].title == "Bun 1.4");
+        CHECK(r[0].kind == UpdateKind::NewSeries);
+        CHECK_FALSE(r[0].ticked);
+        CHECK(r[1].title == "Bun 1.3");
+        CHECK(r[1].kind == UpdateKind::UpToDate);
+        CHECK(r[1].detail == "no longer named on its site");
     }
     // phpredis: an update isn't ticked (its Windows builds can come later).
     {
