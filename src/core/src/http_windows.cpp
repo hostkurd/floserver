@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <winhttp.h>
 
+#include <algorithm>
 #include <array>
 #include <condition_variable>
 #include <memory>
@@ -225,7 +226,139 @@ public:
         return reply;
     }
 
+    HttpResponse send(const HttpRequest& request, const HttpLimits& limits) override {
+        HttpResponse response;
+        const std::wstring wide_url = widen(request.url);
+        URL_COMPONENTS parts{};
+        parts.dwStructSize = sizeof(parts);
+        parts.dwHostNameLength = static_cast<DWORD>(-1);
+        parts.dwUrlPathLength = static_cast<DWORD>(-1);
+        parts.dwExtraInfoLength = static_cast<DWORD>(-1);
+        if (wide_url.empty() || !WinHttpCrackUrl(wide_url.c_str(), 0, 0, &parts) ||
+            parts.nScheme != INTERNET_SCHEME_HTTPS) {
+            response.error = "the address isn't a valid https address";
+            return response;
+        }
+        const std::wstring host(parts.lpszHostName, parts.dwHostNameLength);
+        std::wstring path(parts.lpszUrlPath, parts.dwUrlPathLength);
+        path.append(parts.lpszExtraInfo, parts.dwExtraInfoLength);
+        if (path.empty()) {
+            path = L"/";
+        }
+        const Handle connection(WinHttpConnect(session_.get(), host.c_str(), parts.nPort, 0));
+        if (!connection) {
+            response.error = describe(GetLastError());
+            return response;
+        }
+        // WINHTTP_FLAG_ESCAPE_DISABLE: the path is sent exactly as signed.
+        HINTERNET raw = WinHttpOpenRequest(connection.get(), widen(request.method).c_str(), path.c_str(), nullptr,
+                                           WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                           WINHTTP_FLAG_SECURE | WINHTTP_FLAG_ESCAPE_DISABLE |
+                                               WINHTTP_FLAG_ESCAPE_DISABLE_QUERY);
+        if (raw == nullptr) {
+            response.error = describe(GetLastError());
+            return response;
+        }
+        Watchdog watchdog(raw, limits);
+        DWORD no_redirects = WINHTTP_DISABLE_REDIRECTS;
+        WinHttpSetOption(watchdog.request(), WINHTTP_OPTION_DISABLE_FEATURE, &no_redirects, sizeof(no_redirects));
+        upload(watchdog.request(), request, response);
+        if (const std::string why = watchdog.finish(); !why.empty()) {
+            response = HttpResponse{};
+            response.error = why == "the download took too long" ? "the upload took too long" : why;
+        }
+        return response;
+    }
+
 private:
+    static void upload(HINTERNET request, const HttpRequest& in, HttpResponse& out) {
+        std::wstring headers;
+        for (const auto& [k, v] : in.headers) {
+            headers += widen(k) + L": " + widen(v) + L"\r\n";
+        }
+        if (in.body_size > 0xFFFFFFFFULL) {
+            out.error = "a single request can't send more than 4 GB";
+            return;
+        }
+        const auto total = static_cast<DWORD>(in.body_size);
+        if (!WinHttpSendRequest(request, headers.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : headers.c_str(),
+                                headers.empty() ? 0 : static_cast<DWORD>(-1L), WINHTTP_NO_REQUEST_DATA, 0, total,
+                                0)) {
+            out.error = describe(GetLastError());
+            return;
+        }
+        std::vector<std::uint8_t> buffer(std::size_t{256} * 1024);
+        std::uint64_t sent = 0;
+        while (sent < in.body_size) {
+            const std::size_t want =
+                static_cast<std::size_t>(std::min<std::uint64_t>(buffer.size(), in.body_size - sent));
+            const std::size_t got = in.source ? in.source(std::span<std::uint8_t>(buffer.data(), want)) : 0;
+            if (got == 0 || got > want) {
+                out.error = "the file couldn't be read while sending it";
+                return;
+            }
+            DWORD written = 0;
+            if (!WinHttpWriteData(request, buffer.data(), static_cast<DWORD>(got), &written) || written != got) {
+                out.error = describe(GetLastError());
+                return;
+            }
+            sent += got;
+        }
+        if (!WinHttpReceiveResponse(request, nullptr)) {
+            out.error = describe(GetLastError());
+            return;
+        }
+        DWORD status = 0;
+        DWORD size = sizeof(status);
+        if (!WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                 WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX)) {
+            out.error = describe(GetLastError());
+            return;
+        }
+        out.status = static_cast<int>(status);
+        // "Name: value" lines after the status line.
+        DWORD bytes = 0;
+        WinHttpQueryHeaders(request, WINHTTP_QUERY_RAW_HEADERS_CRLF, WINHTTP_HEADER_NAME_BY_INDEX, nullptr, &bytes,
+                            WINHTTP_NO_HEADER_INDEX);
+        if (GetLastError() == ERROR_INSUFFICIENT_BUFFER && bytes > 0 && bytes <= 65536) {
+            std::wstring raw(bytes / sizeof(wchar_t), L'\0');
+            if (WinHttpQueryHeaders(request, WINHTTP_QUERY_RAW_HEADERS_CRLF, WINHTTP_HEADER_NAME_BY_INDEX,
+                                    raw.data(), &bytes, WINHTTP_NO_HEADER_INDEX)) {
+                raw.resize(bytes / sizeof(wchar_t));
+                const std::string text = narrow(raw);
+                std::size_t at = text.find("\r\n");
+                while (at != std::string::npos && at + 2 < text.size()) {
+                    const std::size_t end = text.find("\r\n", at + 2);
+                    const std::string line = text.substr(at + 2, end == std::string::npos ? std::string::npos
+                                                                                           : end - at - 2);
+                    if (const auto colon = line.find(':'); colon != std::string::npos) {
+                        std::string value = line.substr(colon + 1);
+                        while (!value.empty() && value.front() == ' ') {
+                            value.erase(value.begin());
+                        }
+                        out.headers.emplace_back(line.substr(0, colon), std::move(value));
+                    }
+                    at = end;
+                }
+            }
+        }
+        std::vector<std::uint8_t> chunk(std::size_t{16} * 1024);
+        for (;;) {
+            DWORD got = 0;
+            if (!WinHttpReadData(request, chunk.data(), static_cast<DWORD>(chunk.size()), &got)) {
+                out.error = describe(GetLastError());
+                out.status = 0;
+                return;
+            }
+            if (got == 0) {
+                return;
+            }
+            const std::size_t room = in.max_reply - std::min(in.max_reply, out.body.size());
+            out.body.append(reinterpret_cast<const char*>(chunk.data()),  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+                            std::min<std::size_t>(room, got));
+        }
+    }
+
     // Sends the request and streams the reply into `body`.
     static void exchange(HINTERNET request, const HttpBody& body, HttpReply& reply) {
         if (!WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||

@@ -1,9 +1,12 @@
 #include "updates_window.h"
 
 #include "fetch.h"
+#include "r2.h"
+#include "r2_key.h"
 
 #include "win_util.h"
 #include "floserver/core/http.h"
+#include "floserver/core/paths.h"
 
 #include <commctrl.h>
 #include <knownfolders.h>
@@ -32,7 +35,7 @@ constexpr UINT kMsgFound = WM_APP + 21;   // lParam: std::map<std::string, Finde
 constexpr UINT kMsgFetchStep = WM_APP + 22;  // lParam: std::wstring* (what Download only is doing)
 constexpr UINT kMsgFetched = WM_APP + 23;    // lParam: FetchDone*
 
-enum : int { IdList = 300, IdKeep, IdCheckAgain, IdDownload, IdGet, IdClose };
+enum : int { IdList = 300, IdKeep, IdCheckAgain, IdDownload, IdGet, IdClose, IdKey };
 
 constexpr COLORREF kWindowBg = RGB(0xF3, 0xF3, 0xF3);
 constexpr COLORREF kText = RGB(0x1B, 0x1B, 0x1B);
@@ -78,6 +81,19 @@ std::wstring kind_text(const mt::UpdateRow& r) {
     return r.detail.empty() ? L"Up to date" : L"Up to date (" + widen(r.detail) + L")";
 }
 
+// Deletes a file written for this run, and its folders while empty, up to `top`.
+void remove_with_folders(const fs::path& top, const fs::path& file) {
+    std::error_code ec;
+    fs::remove(file, ec);
+    for (fs::path d = file.parent_path(); d != top && d.has_relative_path(); d = d.parent_path()) {
+        if (!fs::is_empty(d, ec) || ec || !fs::remove(d, ec)) {
+            break;
+        }
+    }
+}
+
+enum class Stage : std::uint8_t { None, Downloaded, Uploaded };
+
 }  // namespace
 
 struct FetchDone {
@@ -85,7 +101,11 @@ struct FetchDone {
     std::vector<std::size_t> rows;          // the rows asked for
     std::vector<std::string> problems;      // per row: empty when all its files were written
     std::vector<std::string> notes;         // per row
-    std::vector<std::string> cdn_paths;     // every file written
+    std::vector<std::string> cdn_paths;     // every file written (uploaded or not)
+    std::vector<Stage> stages;              // per row
+    std::vector<bool> all_there;            // per row: every file was on R2 already
+    std::vector<std::string> manual;        // still to upload by hand
+    bool upload = false;
     bool stopped = false;
 };
 
@@ -196,6 +216,7 @@ void UpdatesWindow::create_controls() {
     check_again_ = make(L"BUTTON", L"Check again", WS_TABSTOP | BS_PUSHBUTTON, IdCheckAgain, font_);
     download_ = make(L"BUTTON", L"Download only", WS_TABSTOP | BS_PUSHBUTTON | WS_DISABLED, IdDownload, font_);
     get_ = make(L"BUTTON", L"Get selected", WS_TABSTOP | BS_PUSHBUTTON | WS_DISABLED, IdGet, font_);
+    key_ = make(L"BUTTON", L"R2 key…", WS_TABSTOP | BS_PUSHBUTTON, IdKey, font_);
     close_ = make(L"BUTTON", L"Close", WS_TABSTOP | BS_PUSHBUTTON, IdClose, font_);
 }
 
@@ -219,7 +240,8 @@ void UpdatesWindow::layout() {
     put(download_, pad + w - px(90) - px(8) - px(120) - px(8) - px(120), buttons_y, px(120), px(30));
     put(check_again_, pad + w - px(90) - px(8) - px(120) - px(8) - px(120) - px(8) - px(110), buttons_y, px(110),
         px(30));
-    put(keep_answers_, pad, buttons_y - px(30), w, px(24));
+    put(keep_answers_, pad, buttons_y - px(30), w - px(100), px(24));
+    put(key_, pad + w - px(90), buttons_y - px(32), px(90), px(26));
     // The status line has its own row above the buttons: Download only's steps are long.
     put(status_, pad, buttons_y - px(30) - px(24), w, px(20));
     const int list_top = px(78);
@@ -382,7 +404,7 @@ LRESULT UpdatesWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
         HFONT old_heading = heading_font_;
         font_ = font(9, FW_NORMAL);
         heading_font_ = font(11, FW_SEMIBOLD);
-        for (HWND c : {hint_, list_, status_, keep_answers_, check_again_, download_, get_, close_}) {
+        for (HWND c : {hint_, list_, status_, keep_answers_, check_again_, download_, get_, close_, key_}) {
             SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
         }
         SendMessageW(heading_, WM_SETFONT, reinterpret_cast<WPARAM>(heading_font_), TRUE);
@@ -446,12 +468,18 @@ LRESULT UpdatesWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
             check();
             return 0;
         case IdDownload:
+        case IdGet:
             if (downloading_) {
                 cancel_ = true;  // Stop
                 SetWindowTextW(status_, L"Stopping…");
-                EnableWindow(download_, FALSE);
+                EnableWindow(LOWORD(wp) == IdGet ? get_ : download_, FALSE);
             } else {
-                download();
+                download(LOWORD(wp) == IdGet);
+            }
+            return 0;
+        case IdKey:
+            if (!downloading_) {
+                (void)ask_r2_key(hwnd_);
             }
             return 0;
         case IdClose:
@@ -520,15 +548,32 @@ LRESULT UpdatesWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
 void UpdatesWindow::set_buttons() {
     const bool any = std::any_of(rows_.begin(), rows_.end(), [](const mt::UpdateRow& r) { return r.ticked; });
     EnableWindow(check_again_, busy_ || downloading_ ? FALSE : TRUE);
-    SetWindowTextW(download_, downloading_ ? L"Stop" : L"Download only");
-    EnableWindow(download_, downloading_ || (!busy_ && any) ? TRUE : FALSE);
+    // The button that started a run stops it; the other waits.
+    SetWindowTextW(download_, downloading_ && !uploading_ ? L"Stop" : L"Download only");
+    SetWindowTextW(get_, downloading_ && uploading_ ? L"Stop" : L"Get selected");
+    EnableWindow(download_, (downloading_ && !uploading_) || (!downloading_ && !busy_ && any) ? TRUE : FALSE);
+    EnableWindow(get_, (downloading_ && uploading_) || (!downloading_ && !busy_ && any) ? TRUE : FALSE);
+    EnableWindow(key_, downloading_ ? FALSE : TRUE);
 }
 
-// D34.3, manual upload: each ticked version from its official site, checked,
-// into Documents\FloServer Publisher\downloads <date> <time>\<cdn path>.
-void UpdatesWindow::download() {
+// D34.3: each ticked version from its official site, checked, into
+// Documents\FloServer Publisher\downloads <date> <time>\<cdn path>. With
+// `upload` (Get selected), then to R2 (D34.4); what's uploaded is deleted
+// here, what isn't stays with the upload steps.
+void UpdatesWindow::download(bool upload) {
     if (busy_ || downloading_) {
         return;
+    }
+    std::optional<mt::R2Key> key;
+    if (upload) {
+        key = load_r2_key();
+        if (!key) {
+            key = ask_r2_key(hwnd_);
+        }
+        if (!key) {
+            SetWindowTextW(status_, L"Get selected needs the R2 key to upload. Without it, use Download only.");
+            return;
+        }
     }
     std::vector<std::size_t> picked;
     std::vector<mt::UpdateRow> rows;
@@ -543,6 +588,7 @@ void UpdatesWindow::download() {
     }
     stop_worker();
     downloading_ = true;
+    uploading_ = upload;
     set_buttons();
     for (const std::size_t i : picked) {
         outcome_[i].clear();
@@ -551,10 +597,11 @@ void UpdatesWindow::download() {
     SetWindowTextW(status_, L"Starting…");
     const fs::path folder = dated_folder(L"downloads");
     HWND target = hwnd_;
-    worker_ = std::thread([target, this, folder, picked, rows = std::move(rows), listed = listed_] {
+    worker_ = std::thread([target, this, folder, picked, rows = std::move(rows), listed = listed_, key] {
         auto done = std::make_unique<FetchDone>();
         done->folder = folder;
         done->rows = picked;
+        done->upload = key.has_value();
         const auto say = [target](std::wstring text) {
             auto t = std::make_unique<std::wstring>(std::move(text));
             if (PostMessageW(target, kMsgFetchStep, 0, reinterpret_cast<LPARAM>(t.get())) != FALSE) {
@@ -569,11 +616,15 @@ void UpdatesWindow::download() {
                 done->stopped = true;
                 done->problems.emplace_back("stopped");
                 done->notes.emplace_back();
+                done->stages.push_back(Stage::None);
+                done->all_there.push_back(false);
                 continue;
             }
             if (!http) {
                 done->problems.emplace_back("no HTTPS on this computer");
                 done->notes.emplace_back();
+                done->stages.push_back(Stage::None);
+                done->all_there.push_back(false);
                 continue;
             }
             say(count + widen(r.title) + L" " + widen(r.latest) + L": finding its files…");
@@ -581,6 +632,8 @@ void UpdatesWindow::download() {
             if (!plan.problem.empty()) {
                 done->problems.push_back(cancel_ ? std::string("stopped") : plan.problem);
                 done->notes.push_back(plan.note);
+                done->stages.push_back(Stage::None);
+                done->all_there.push_back(false);
                 continue;
             }
             auto last = std::chrono::steady_clock::now() - std::chrono::seconds{1};
@@ -596,13 +649,48 @@ void UpdatesWindow::download() {
                         (p.bytes != 0 ? L" " + megabytes(p.bytes) : std::wstring(L"…")));
                 });
             done->cdn_paths.insert(done->cdn_paths.end(), got.cdn_paths.begin(), got.cdn_paths.end());
-            done->problems.push_back(got.problem);
             done->notes.push_back(plan.note);
+            if (!got.problem.empty() || !key) {
+                done->problems.push_back(got.problem);
+                done->stages.push_back(got.problem.empty() ? Stage::Downloaded : Stage::None);
+                done->all_there.push_back(false);
+                if (got.problem.empty()) {
+                    done->manual.insert(done->manual.end(), got.cdn_paths.begin(), got.cdn_paths.end());
+                }
+                continue;
+            }
+            // Get selected: to R2, then the copies here go.
+            mt::R2Bucket bucket(*http, *key);
+            const mt::UploadResult up = mt::upload_files(
+                bucket, got.cdn_paths, folder, &cancel_, [&](const std::string& path, const mt::R2Progress& p) {
+                    const auto now = std::chrono::steady_clock::now();
+                    if (p.sent != p.total && now - last < std::chrono::milliseconds{250}) {
+                        return;
+                    }
+                    last = now;
+                    const auto slash = path.rfind('/');
+                    say(count + widen(plan.title) + L": uploading " + widen(path.substr(slash + 1)) + L", " +
+                        megabytes(p.sent) + L" of " + megabytes(p.total));
+                });
+            if (up.problem.empty()) {
+                for (const std::string& p : got.cdn_paths) {
+                    remove_with_folders(folder, folder / core::path_from_utf8(p));
+                }
+                done->problems.emplace_back();
+                done->stages.push_back(Stage::Uploaded);
+                done->all_there.push_back(up.uploaded.empty());
+            } else {
+                // Kept here for uploading by hand; Publish checks them either way.
+                done->problems.push_back(cancel_ ? std::string("stopped") : up.problem);
+                done->stages.push_back(Stage::Downloaded);
+                done->all_there.push_back(false);
+                done->manual.insert(done->manual.end(), got.cdn_paths.begin(), got.cdn_paths.end());
+            }
         }
         done->stopped = done->stopped || cancel_;
-        if (!done->cdn_paths.empty()) {
+        if (!done->manual.empty()) {
             std::ofstream steps(folder / L"upload-steps.txt", std::ios::binary | std::ios::trunc);
-            steps << mt::upload_steps(done->cdn_paths, folder);
+            steps << mt::upload_steps(done->manual, folder);
         }
         if (PostMessageW(target, kMsgFetched, 0, reinterpret_cast<LPARAM>(done.get())) != FALSE) {
             (void)done.release();
@@ -611,7 +699,8 @@ void UpdatesWindow::download() {
 }
 
 void UpdatesWindow::fetched(FetchDone& done) {
-    int ok = 0;
+    int uploaded = 0;
+    int downloaded = 0;
     int failed = 0;
     for (std::size_t n = 0; n < done.rows.size(); ++n) {
         const std::size_t i = done.rows[n];
@@ -620,30 +709,55 @@ void UpdatesWindow::fetched(FetchDone& done) {
         }
         const std::string& problem = done.problems.at(n);
         const std::string& note = done.notes.at(n);
-        outcome_ok_[i] = problem.empty();
-        if (problem.empty()) {
-            outcome_[i] = L"Downloaded, ready to upload" + (note.empty() ? std::wstring() : L" (" + widen(note) + L")");
+        const std::wstring extra = note.empty() ? std::wstring() : L" (" + widen(note) + L")";
+        switch (done.stages.at(n)) {
+        case Stage::Uploaded:
+            outcome_[i] = (done.all_there.at(n) ? L"On R2 already" : L"Uploaded to R2") + extra;
+            outcome_ok_[i] = true;
             rows_[i].ticked = false;
-            ++ok;
-        } else {
+            ++uploaded;
+            break;
+        case Stage::Downloaded:
+            if (done.upload) {
+                outcome_[i] = L"Downloaded, not uploaded: " + widen(problem) + L". Upload it by hand (upload-steps.txt)";
+                outcome_ok_[i] = false;
+                ++failed;
+            } else {
+                outcome_[i] = L"Downloaded, ready to upload" + extra;
+                outcome_ok_[i] = true;
+                ++downloaded;
+            }
+            rows_[i].ticked = false;
+            break;
+        case Stage::None:
             outcome_[i] = L"Not downloaded: " + widen(problem);
+            outcome_ok_[i] = false;
             ++failed;
+            break;
         }
     }
     fill();
     std::wstring status;
-    if (ok > 0) {
-        status = std::to_wstring(ok) + (ok == 1 ? L" version downloaded" : L" versions downloaded");
-        if (failed > 0) {
-            status += L", " + std::to_wstring(failed) + L" not";
-        }
+    const auto versions = [](int n) { return std::to_wstring(n) + (n == 1 ? L" version" : L" versions"); };
+    if (uploaded > 0) {
+        status = versions(uploaded) + L" on R2";
+    }
+    if (downloaded > 0) {
+        status += (status.empty() ? L"" : L", ") + versions(downloaded) + L" downloaded";
+    }
+    if (failed > 0) {
+        status += (status.empty() ? L"" : L", ") + std::to_wstring(failed) + L" not: see each row";
+    }
+    if (status.empty()) {
+        status = done.stopped ? L"Stopped. Nothing was downloaded." : L"Nothing was downloaded: see each row.";
+    } else if (!done.manual.empty()) {
         status += L". Upload the folder's files as upload-steps.txt says, then Publish.";
     } else {
-        status = done.stopped ? L"Stopped. Nothing was downloaded." : L"Nothing was downloaded: see each row.";
+        status += L". Press Publish: it checks each file from the CDN.";
     }
     SetWindowTextW(status_, status.c_str());
-    if (done.cdn_paths.empty()) {
-        // The folder was made for this run: without a file in it, it goes.
+    // The folder was made for this run: without a file in it, it goes.
+    {
         std::error_code ec;
         bool any_file = false;
         for (auto it = fs::recursive_directory_iterator(done.folder, ec); !ec && it != fs::recursive_directory_iterator();
@@ -653,16 +767,20 @@ void UpdatesWindow::fetched(FetchDone& done) {
         if (!any_file) {
             fs::remove_all(done.folder, ec);
         }
+    }
+    if (done.cdn_paths.empty()) {
         return;
     }
-    // Into the next list, so Publish checks them once they're on the CDN.
+    // Into the next list, so Publish checks them from the CDN.
     if (on_fetched) {
-        const std::wstring added = on_fetched(done.cdn_paths);
+        const std::wstring added = on_fetched(done.cdn_paths, done.manual.empty());
         if (!added.empty()) {
             MessageBoxW(hwnd_, added.c_str(), L"FloServer Publisher", MB_OK | MB_ICONINFORMATION);
         }
     }
-    ShellExecuteW(hwnd_, L"explore", done.folder.wstring().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    if (!done.manual.empty()) {
+        ShellExecuteW(hwnd_, L"explore", done.folder.wstring().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    }
 }
 
 }  // namespace floserver::publisher

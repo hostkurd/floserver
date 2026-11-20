@@ -2,11 +2,11 @@
 # runtime list. For HostKurd's release routine; not shipped to users.
 enable_language(RC)
 
-add_executable(floserver_publisher WIN32 main.cpp updates_window.cpp Publisher.rc)
+add_executable(floserver_publisher WIN32 main.cpp r2_key.cpp updates_window.cpp Publisher.rc)
 set_target_properties(floserver_publisher PROPERTIES OUTPUT_NAME floserver-publisher)
 target_include_directories(floserver_publisher PRIVATE ${PROJECT_SOURCE_DIR}/src/ui-win32)
 target_link_libraries(floserver_publisher PRIVATE floserver_manifest_build floserver_core
-    floserver_third_party floserver_monocypher comctl32 comdlg32 shell32 ole32 user32 gdi32)
+    floserver_third_party floserver_monocypher comctl32 comdlg32 shell32 ole32 user32 gdi32 advapi32)
 if(MINGW)
     target_link_options(floserver_publisher PRIVATE -municode)  # entry point is wWinMain
 endif()

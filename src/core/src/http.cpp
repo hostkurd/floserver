@@ -1,9 +1,27 @@
 #include "floserver/core/http.h"
 
+#include <algorithm>
 #include <array>
 #include <string_view>
 
 namespace floserver::core {
+
+HttpResponse HttpTransport::send(const HttpRequest& /*request*/, const HttpLimits& /*limits*/) {
+    HttpResponse r;
+    r.error = "this connection can only download";
+    return r;
+}
+
+std::optional<std::string> HttpResponse::header(std::string_view name) const {
+    const auto lower = [](char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c; };
+    for (const auto& [k, v] : headers) {
+        if (k.size() == name.size() && std::equal(k.begin(), k.end(), name.begin(),
+                                                  [&](char a, char b) { return lower(a) == lower(b); })) {
+            return v;
+        }
+    }
+    return std::nullopt;
+}
 
 std::optional<std::chrono::sys_seconds> parse_http_date(std::string_view text) {
     // "Wed, 28 Oct 2026 19:12:28 GMT": exactly 29 characters.

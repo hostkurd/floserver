@@ -202,7 +202,7 @@ private:
     void check_live();
     void open_updates();
     void add_path();
-    std::wstring add_fetched(const std::vector<std::string>& cdn_paths);
+    std::wstring add_fetched(const std::vector<std::string>& cdn_paths, bool on_r2);
     void remove_selected();
     void choose_key();
     void publish();
@@ -932,14 +932,16 @@ void Publisher::open_updates() {
         }
     }
     if (!updates_.on_fetched) {
-        updates_.on_fetched = [this](const std::vector<std::string>& paths) { return add_fetched(paths); };
+        updates_.on_fetched = [this](const std::vector<std::string>& paths, bool on_r2) {
+            return add_fetched(paths, on_r2);
+        };
     }
     updates_.open(hwnd_, std::move(listed));
 }
 
 // D34.5: Download only's files into the next list, each replacing the older
 // versions of its series.
-std::wstring Publisher::add_fetched(const std::vector<std::string>& cdn_paths) {
+std::wstring Publisher::add_fetched(const std::vector<std::string>& cdn_paths, bool on_r2) {
     std::wstring all;
     for (const std::string& p : cdn_paths) {
         all += L"\n" + widen(p);
@@ -977,8 +979,9 @@ std::wstring Publisher::add_fetched(const std::vector<std::string>& cdn_paths) {
             text += L"\n" + widen(p);
         }
     }
-    text += L"\n\nUpload the files first (upload-steps.txt in the folder), then press Publish: it checks each one "
-            L"from the CDN.";
+    text += on_r2 ? L"\n\nThey're on R2. Press Publish: it checks each one from the CDN."
+                  : L"\n\nUpload the files first (upload-steps.txt in the folder), then press Publish: it checks "
+                    L"each one from the CDN.";
     return text;
 }
 
