@@ -12,6 +12,7 @@
 // are read just before signing and wiped right after.
 
 #include "build.h"
+#include "fetch.h"
 #include "publish.h"
 #include "signing.h"
 #include "templates_json.h"
@@ -201,6 +202,7 @@ private:
     void check_live();
     void open_updates();
     void add_path();
+    std::wstring add_fetched(const std::vector<std::string>& cdn_paths);
     void remove_selected();
     void choose_key();
     void publish();
@@ -929,7 +931,55 @@ void Publisher::open_updates() {
             listed[f.path.substr(0, a)].push_back(f.path.substr(a + 1, b - a - 1));
         }
     }
+    if (!updates_.on_fetched) {
+        updates_.on_fetched = [this](const std::vector<std::string>& paths) { return add_fetched(paths); };
+    }
     updates_.open(hwnd_, std::move(listed));
+}
+
+// D34.5: Download only's files into the next list, each replacing the older
+// versions of its series.
+std::wstring Publisher::add_fetched(const std::vector<std::string>& cdn_paths) {
+    std::wstring all;
+    for (const std::string& p : cdn_paths) {
+        all += L"\n" + widen(p);
+    }
+    if (busy_ || live_busy_) {
+        return L"The Publisher is busy, so these weren't added to the next list. Add them by hand once it's done "
+               L"(upload-steps.txt has the paths):\n" + all;
+    }
+    const mt::ListChange change = mt::add_to_list(files_, cdn_paths);
+    files_ = change.files;
+    for (const std::string& p : change.added) {
+        removed_.erase(p);
+    }
+    for (const std::string& p : change.left_out) {
+        removed_.insert(p);
+    }
+    fill_list();
+    reset_steps();
+    std::wstring text = L"Added to the next list:";
+    for (const std::string& p : change.added) {
+        text += L"\n" + widen(p);
+    }
+    if (change.added.empty()) {
+        text = L"Already in the next list.";
+    }
+    if (!change.left_out.empty()) {
+        text += L"\n\nLeft out (older versions of the same series):";
+        for (const std::string& p : change.left_out) {
+            text += L"\n" + widen(p);
+        }
+    }
+    if (!change.problems.empty()) {
+        text += L"\n\nNot added:";
+        for (const std::string& p : change.problems) {
+            text += L"\n" + widen(p);
+        }
+    }
+    text += L"\n\nUpload the files first (upload-steps.txt in the folder), then press Publish: it checks each one "
+            L"from the CDN.";
+    return text;
 }
 
 void Publisher::on_live(std::unique_ptr<mt::LiveResult> live) {

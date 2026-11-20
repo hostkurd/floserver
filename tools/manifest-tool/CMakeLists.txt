@@ -1,11 +1,11 @@
-add_library(floserver_manifest_build STATIC build.cpp publish.cpp signing.cpp updates.cpp)
+add_library(floserver_manifest_build STATIC build.cpp fetch.cpp publish.cpp signing.cpp updates.cpp)
 target_include_directories(floserver_manifest_build PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/generated)
 # templates.json goes into the tool, so a build never needs a file beside it.
 include(${PROJECT_SOURCE_DIR}/cmake/TemplatesLiteral.cmake)
 floserver_templates_literal(${CMAKE_CURRENT_SOURCE_DIR}/templates.json FLOSERVER_TEMPLATES_LITERAL)
 configure_file(templates_json.h.in ${CMAKE_CURRENT_BINARY_DIR}/generated/templates_json.h @ONLY)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/templates.json)
-target_link_libraries(floserver_manifest_build PUBLIC floserver_core PRIVATE floserver_third_party floserver_monocypher)
+target_link_libraries(floserver_manifest_build PUBLIC floserver_core PRIVATE floserver_third_party floserver_monocypher floserver_miniz)
 floserver_code_rules(floserver_manifest_build)
 
 add_executable(floserver_manifest main.cpp)

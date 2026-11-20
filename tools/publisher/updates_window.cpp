@@ -1,5 +1,7 @@
 #include "updates_window.h"
 
+#include "fetch.h"
+
 #include "win_util.h"
 #include "floserver/core/http.h"
 
@@ -13,6 +15,7 @@
 #include <array>
 #include <chrono>
 #include <ctime>
+#include <fstream>
 #include <filesystem>
 
 namespace floserver::publisher {
@@ -26,8 +29,10 @@ using floserver::ui::win::widen;
 
 constexpr UINT kMsgAsking = WM_APP + 20;  // lParam: std::string* (the runtime being asked)
 constexpr UINT kMsgFound = WM_APP + 21;   // lParam: std::map<std::string, FinderAnswer>*
+constexpr UINT kMsgFetchStep = WM_APP + 22;  // lParam: std::wstring* (what Download only is doing)
+constexpr UINT kMsgFetched = WM_APP + 23;    // lParam: FetchDone*
 
-enum : int { IdList = 300, IdKeep, IdCheckAgain, IdGet, IdClose };
+enum : int { IdList = 300, IdKeep, IdCheckAgain, IdDownload, IdGet, IdClose };
 
 constexpr COLORREF kWindowBg = RGB(0xF3, 0xF3, 0xF3);
 constexpr COLORREF kText = RGB(0x1B, 0x1B, 0x1B);
@@ -35,9 +40,10 @@ constexpr COLORREF kMuted = RGB(0x5F, 0x5F, 0x5F);
 constexpr COLORREF kBlue = RGB(0x0B, 0x53, 0x94);
 constexpr COLORREF kAmber = RGB(0x7A, 0x4A, 0x00);
 constexpr COLORREF kRed = RGB(0xB3, 0x26, 0x1E);
+constexpr COLORREF kGreen = RGB(0x0F, 0x6B, 0x2E);
 
-// Documents\FloServer Publisher\site answers <date> <time>.
-fs::path answers_folder() {
+// Documents\FloServer Publisher\<what> <date> <time>.
+fs::path dated_folder(const std::wstring& what) {
     PWSTR docs = nullptr;
     fs::path base;
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Documents, 0, nullptr, &docs))) {
@@ -49,7 +55,13 @@ fs::path answers_folder() {
     localtime_s(&local, &now);
     std::array<wchar_t, 32> stamp{};
     (void)wcsftime(stamp.data(), stamp.size(), L"%Y-%m-%d %H%M%S", &local);
-    return base / L"FloServer Publisher" / (std::wstring(L"site answers ") + stamp.data());
+    return base / L"FloServer Publisher" / (what + L" " + stamp.data());
+}
+
+std::wstring megabytes(std::uint64_t bytes) {
+    std::array<wchar_t, 32> text{};
+    (void)swprintf(text.data(), text.size(), L"%.1f MB", static_cast<double>(bytes) / (1024.0 * 1024.0));
+    return text.data();
 }
 
 std::wstring kind_text(const mt::UpdateRow& r) {
@@ -67,6 +79,15 @@ std::wstring kind_text(const mt::UpdateRow& r) {
 }
 
 }  // namespace
+
+struct FetchDone {
+    fs::path folder;
+    std::vector<std::size_t> rows;          // the rows asked for
+    std::vector<std::string> problems;      // per row: empty when all its files were written
+    std::vector<std::string> notes;         // per row
+    std::vector<std::string> cdn_paths;     // every file written
+    bool stopped = false;
+};
 
 UpdatesWindow::~UpdatesWindow() {
     stop_worker();
@@ -123,9 +144,9 @@ void UpdatesWindow::open(HWND owner, std::map<std::string, std::vector<std::stri
     }
     ShowWindow(hwnd_, SW_SHOWNORMAL);
     SetForegroundWindow(hwnd_);
-    if (!same && !busy_) {
+    if (!same && !busy_ && !downloading_) {
         check();
-    } else if (busy_ && listed != listed_) {
+    } else if ((busy_ || downloading_) && listed != listed_) {
         SetWindowTextW(status_, L"The list changed while checking: press Check again when this check ends.");
     }
 }
@@ -173,6 +194,7 @@ void UpdatesWindow::create_controls() {
     keep_answers_ = make(L"BUTTON", L"Keep what each site answered (to send if a row can't be read)",
                          WS_TABSTOP | BS_AUTOCHECKBOX, IdKeep, font_);
     check_again_ = make(L"BUTTON", L"Check again", WS_TABSTOP | BS_PUSHBUTTON, IdCheckAgain, font_);
+    download_ = make(L"BUTTON", L"Download only", WS_TABSTOP | BS_PUSHBUTTON | WS_DISABLED, IdDownload, font_);
     get_ = make(L"BUTTON", L"Get selected", WS_TABSTOP | BS_PUSHBUTTON | WS_DISABLED, IdGet, font_);
     close_ = make(L"BUTTON", L"Close", WS_TABSTOP | BS_PUSHBUTTON, IdClose, font_);
 }
@@ -194,11 +216,14 @@ void UpdatesWindow::layout() {
     const int buttons_y = bottom - px(30);
     put(close_, pad + w - px(90), buttons_y, px(90), px(30));
     put(get_, pad + w - px(90) - px(8) - px(120), buttons_y, px(120), px(30));
-    put(check_again_, pad + w - px(90) - px(8) - px(120) - px(8) - px(110), buttons_y, px(110), px(30));
+    put(download_, pad + w - px(90) - px(8) - px(120) - px(8) - px(120), buttons_y, px(120), px(30));
+    put(check_again_, pad + w - px(90) - px(8) - px(120) - px(8) - px(120) - px(8) - px(110), buttons_y, px(110),
+        px(30));
     put(keep_answers_, pad, buttons_y - px(30), w, px(24));
-    put(status_, pad, buttons_y + px(6), w - px(90 + 8 + 120 + 8 + 110 + 8), px(20));
+    // The status line has its own row above the buttons: Download only's steps are long.
+    put(status_, pad, buttons_y - px(30) - px(24), w, px(20));
     const int list_top = px(78);
-    put(list_, pad, list_top, w, buttons_y - px(36) - list_top);
+    put(list_, pad, list_top, w, buttons_y - px(30) - px(30) - list_top);
     const int fixed = ListView_GetColumnWidth(list_, 0) + ListView_GetColumnWidth(list_, 1) +
                       ListView_GetColumnWidth(list_, 2) + GetSystemMetricsForDpi(SM_CXVSCROLL, dpi_) + px(4);
     ListView_SetColumnWidth(list_, 3, std::max(px(160), w - fixed));
@@ -214,18 +239,20 @@ void UpdatesWindow::stop_worker() {
 }
 
 void UpdatesWindow::check() {
-    if (busy_) {
+    if (busy_ || downloading_) {
         return;
     }
     stop_worker();
     busy_ = true;
-    EnableWindow(check_again_, FALSE);
+    set_buttons();
     rows_.clear();
+    outcome_.clear();
+    outcome_ok_.clear();
     ListView_DeleteAllItems(list_);
     SetWindowTextW(status_, L"Asking each site…");
     saved_to_.clear();
     if (Button_GetCheck(keep_answers_) == BST_CHECKED) {
-        const fs::path folder = answers_folder();
+        const fs::path folder = dated_folder(L"site answers");
         std::error_code ec;
         fs::create_directories(folder, ec);
         saved_to_ = floserver::ui::win::narrow(folder.wstring());
@@ -273,7 +300,7 @@ void UpdatesWindow::fill() {
         ListView_SetCheckState(list_, at, r.ticked ? TRUE : FALSE);
         const std::wstring listed = r.listed.empty() ? L"—" : widen(r.listed);
         const std::wstring latest = r.latest.empty() ? L"—" : widen(r.latest);
-        const std::wstring kind = kind_text(r);
+        const std::wstring kind = i < outcome_.size() && !outcome_[i].empty() ? outcome_[i] : kind_text(r);
         ListView_SetItemText(list_, at, 1, const_cast<wchar_t*>(listed.c_str()));
         ListView_SetItemText(list_, at, 2, const_cast<wchar_t*>(latest.c_str()));
         ListView_SetItemText(list_, at, 3, const_cast<wchar_t*>(kind.c_str()));
@@ -287,7 +314,7 @@ void UpdatesWindow::fill() {
     if (failed > 0) {
         status += L", " + std::to_wstring(failed) + L" couldn't be checked";
     }
-    status += L". Getting them comes in the next Publisher.";
+    status += updates + fresh > 0 ? L". Tick what you want, then Download only." : L".";
     SetWindowTextW(status_, status.c_str());
     std::error_code ec;
     if (!saved_to_.empty() && !fs::is_empty(floserver::ui::win::widen(saved_to_), ec) && !ec) {
@@ -304,7 +331,9 @@ LRESULT UpdatesWindow::custom_draw(NMLVCUSTOMDRAW* cd) const {
     case CDDS_ITEMPREPAINT | CDDS_SUBITEM: {
         const auto row = static_cast<std::size_t>(cd->nmcd.lItemlParam);
         COLORREF color = kText;
-        if (row < rows_.size() && cd->iSubItem == 3) {
+        if (row < rows_.size() && cd->iSubItem == 3 && row < outcome_.size() && !outcome_[row].empty()) {
+            color = outcome_ok_[row] ? kGreen : kRed;
+        } else if (row < rows_.size() && cd->iSubItem == 3) {
             switch (rows_[row].kind) {
             case mt::UpdateKind::Update:
                 color = kBlue;
@@ -353,7 +382,7 @@ LRESULT UpdatesWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
         HFONT old_heading = heading_font_;
         font_ = font(9, FW_NORMAL);
         heading_font_ = font(11, FW_SEMIBOLD);
-        for (HWND c : {hint_, list_, status_, keep_answers_, check_again_, get_, close_}) {
+        for (HWND c : {hint_, list_, status_, keep_answers_, check_again_, download_, get_, close_}) {
             SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
         }
         SendMessageW(heading_, WM_SETFONT, reinterpret_cast<WPARAM>(heading_font_), TRUE);
@@ -396,10 +425,16 @@ LRESULT UpdatesWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
                 const bool actionable =
                     rows_[row].kind == mt::UpdateKind::Update || rows_[row].kind == mt::UpdateKind::NewSeries;
                 const bool ticked = ListView_GetCheckState(list_, lv->iItem) == TRUE;
-                if (ticked && !actionable) {
+                if (downloading_) {
+                    // The run has its rows: a tick changed meanwhile goes back.
+                    filling_ = true;
+                    ListView_SetCheckState(list_, lv->iItem, rows_[row].ticked ? TRUE : FALSE);
+                    filling_ = false;
+                } else if (ticked && !actionable) {
                     ListView_SetCheckState(list_, lv->iItem, FALSE);  // nothing to get
                 } else {
                     rows_[row].ticked = ticked;
+                    set_buttons();
                 }
             }
         }
@@ -409,6 +444,15 @@ LRESULT UpdatesWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
         switch (LOWORD(wp)) {
         case IdCheckAgain:
             check();
+            return 0;
+        case IdDownload:
+            if (downloading_) {
+                cancel_ = true;  // Stop
+                SetWindowTextW(status_, L"Stopping…");
+                EnableWindow(download_, FALSE);
+            } else {
+                download();
+            }
             return 0;
         case IdClose:
         case IDCANCEL:
@@ -442,15 +486,183 @@ LRESULT UpdatesWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
             worker_.join();
         }
         busy_ = false;
-        EnableWindow(check_again_, TRUE);
         rows_ = mt::compare_updates(listed_, *found);
+        outcome_.assign(rows_.size(), std::wstring());
+        outcome_ok_.assign(rows_.size(), false);
         fill();
+        set_buttons();
+        return 0;
+    }
+    case kMsgFetchStep: {
+        const std::unique_ptr<std::wstring> text(int_to_ptr<std::wstring*>(lp));
+        if (downloading_) {
+            SetWindowTextW(status_, text->c_str());
+        }
+        return 0;
+    }
+    case kMsgFetched: {
+        const std::unique_ptr<FetchDone> done(int_to_ptr<FetchDone*>(lp));
+        if (worker_.joinable()) {
+            worker_.join();
+        }
+        cancel_ = false;
+        downloading_ = false;
+        fetched(*done);
+        set_buttons();
         return 0;
     }
     default:
         break;
     }
     return DefWindowProcW(hwnd_, msg, wp, lp);
+}
+
+void UpdatesWindow::set_buttons() {
+    const bool any = std::any_of(rows_.begin(), rows_.end(), [](const mt::UpdateRow& r) { return r.ticked; });
+    EnableWindow(check_again_, busy_ || downloading_ ? FALSE : TRUE);
+    SetWindowTextW(download_, downloading_ ? L"Stop" : L"Download only");
+    EnableWindow(download_, downloading_ || (!busy_ && any) ? TRUE : FALSE);
+}
+
+// D34.3, manual upload: each ticked version from its official site, checked,
+// into Documents\FloServer Publisher\downloads <date> <time>\<cdn path>.
+void UpdatesWindow::download() {
+    if (busy_ || downloading_) {
+        return;
+    }
+    std::vector<std::size_t> picked;
+    std::vector<mt::UpdateRow> rows;
+    for (std::size_t i = 0; i < rows_.size(); ++i) {
+        if (rows_[i].ticked) {
+            picked.push_back(i);
+            rows.push_back(rows_[i]);
+        }
+    }
+    if (picked.empty()) {
+        return;
+    }
+    stop_worker();
+    downloading_ = true;
+    set_buttons();
+    for (const std::size_t i : picked) {
+        outcome_[i].clear();
+    }
+    InvalidateRect(list_, nullptr, TRUE);
+    SetWindowTextW(status_, L"Starting…");
+    const fs::path folder = dated_folder(L"downloads");
+    HWND target = hwnd_;
+    worker_ = std::thread([target, this, folder, picked, rows = std::move(rows), listed = listed_] {
+        auto done = std::make_unique<FetchDone>();
+        done->folder = folder;
+        done->rows = picked;
+        const auto say = [target](std::wstring text) {
+            auto t = std::make_unique<std::wstring>(std::move(text));
+            if (PostMessageW(target, kMsgFetchStep, 0, reinterpret_cast<LPARAM>(t.get())) != FALSE) {
+                (void)t.release();
+            }
+        };
+        auto http = core::make_system_transport();
+        for (std::size_t n = 0; n < rows.size(); ++n) {
+            const mt::UpdateRow& r = rows[n];
+            const std::wstring count = L"(" + std::to_wstring(n + 1) + L" of " + std::to_wstring(rows.size()) + L") ";
+            if (cancel_) {
+                done->stopped = true;
+                done->problems.emplace_back("stopped");
+                done->notes.emplace_back();
+                continue;
+            }
+            if (!http) {
+                done->problems.emplace_back("no HTTPS on this computer");
+                done->notes.emplace_back();
+                continue;
+            }
+            say(count + widen(r.title) + L" " + widen(r.latest) + L": finding its files…");
+            const mt::FetchPlan plan = mt::plan_fetch(*http, r, listed, &cancel_);
+            if (!plan.problem.empty()) {
+                done->problems.push_back(cancel_ ? std::string("stopped") : plan.problem);
+                done->notes.push_back(plan.note);
+                continue;
+            }
+            auto last = std::chrono::steady_clock::now() - std::chrono::seconds{1};
+            const mt::FetchResult got = mt::fetch_files(
+                *http, plan, folder, &cancel_, [&](const mt::FetchProgress& p) {
+                    // A few lines a second, not one per chunk.
+                    const auto now = std::chrono::steady_clock::now();
+                    if (p.bytes != 0 && now - last < std::chrono::milliseconds{250}) {
+                        return;
+                    }
+                    last = now;
+                    say(count + widen(p.title) + L": " + widen(p.step) +
+                        (p.bytes != 0 ? L" " + megabytes(p.bytes) : std::wstring(L"…")));
+                });
+            done->cdn_paths.insert(done->cdn_paths.end(), got.cdn_paths.begin(), got.cdn_paths.end());
+            done->problems.push_back(got.problem);
+            done->notes.push_back(plan.note);
+        }
+        done->stopped = done->stopped || cancel_;
+        if (!done->cdn_paths.empty()) {
+            std::ofstream steps(folder / L"upload-steps.txt", std::ios::binary | std::ios::trunc);
+            steps << mt::upload_steps(done->cdn_paths);
+        }
+        if (PostMessageW(target, kMsgFetched, 0, reinterpret_cast<LPARAM>(done.get())) != FALSE) {
+            (void)done.release();
+        }
+    });
+}
+
+void UpdatesWindow::fetched(FetchDone& done) {
+    int ok = 0;
+    int failed = 0;
+    for (std::size_t n = 0; n < done.rows.size(); ++n) {
+        const std::size_t i = done.rows[n];
+        if (i >= outcome_.size()) {
+            continue;
+        }
+        const std::string& problem = done.problems.at(n);
+        const std::string& note = done.notes.at(n);
+        outcome_ok_[i] = problem.empty();
+        if (problem.empty()) {
+            outcome_[i] = L"Downloaded, ready to upload" + (note.empty() ? std::wstring() : L" (" + widen(note) + L")");
+            rows_[i].ticked = false;
+            ++ok;
+        } else {
+            outcome_[i] = L"Not downloaded: " + widen(problem);
+            ++failed;
+        }
+    }
+    fill();
+    std::wstring status;
+    if (ok > 0) {
+        status = std::to_wstring(ok) + (ok == 1 ? L" version downloaded" : L" versions downloaded");
+        if (failed > 0) {
+            status += L", " + std::to_wstring(failed) + L" not";
+        }
+        status += L". Upload the folder's files as upload-steps.txt says, then Publish.";
+    } else {
+        status = done.stopped ? L"Stopped. Nothing was downloaded." : L"Nothing was downloaded: see each row.";
+    }
+    SetWindowTextW(status_, status.c_str());
+    if (done.cdn_paths.empty()) {
+        // The folder was made for this run: without a file in it, it goes.
+        std::error_code ec;
+        bool any_file = false;
+        for (auto it = fs::recursive_directory_iterator(done.folder, ec); !ec && it != fs::recursive_directory_iterator();
+             it.increment(ec)) {
+            any_file = any_file || it->is_regular_file(ec);
+        }
+        if (!any_file) {
+            fs::remove_all(done.folder, ec);
+        }
+        return;
+    }
+    // Into the next list, so Publish checks them once they're on the CDN.
+    if (on_fetched) {
+        const std::wstring added = on_fetched(done.cdn_paths);
+        if (!added.empty()) {
+            MessageBoxW(hwnd_, added.c_str(), L"FloServer Publisher", MB_OK | MB_ICONINFORMATION);
+        }
+    }
+    ShellExecuteW(hwnd_, L"explore", done.folder.wstring().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
 
 }  // namespace floserver::publisher
