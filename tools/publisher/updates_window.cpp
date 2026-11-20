@@ -247,9 +247,9 @@ void UpdatesWindow::layout() {
     put(key_, right - px(90), px(12), px(90), button_h);
     put(check_again_, right - px(90) - px(8) - px(110), px(12), px(110), button_h);
     put(heading_, pad, px(14), w - px(220), px(26));
-    put(hint_, pad, px(46), w, px(20));
+    put(hint_, pad, px(46), w, px(34));  // two lines at narrow widths
 
-    const int tools_y = px(74);
+    const int tools_y = px(84);
     put(check_all_, pad, tools_y, px(96), px(28));
     put(uncheck_all_, pad + px(104), tools_y, px(104), px(28));
     put(summary_, pad + px(220), tools_y + px(6), w - px(220), px(20));
@@ -264,7 +264,7 @@ void UpdatesWindow::layout() {
 
     // Progress and status: their own row, as Download only's steps are long.
     const int status_y = buttons_y - px(16) - px(20);
-    const bool working = IsWindowVisible(progress_) != FALSE;
+    const bool working = bar_shown_;
     const int bar_w = working ? px(200) : 0;
     put(progress_, pad, status_y + px(2), bar_w, px(16));
     put(status_, pad + (working ? bar_w + px(12) : 0), status_y, w - (working ? bar_w + px(12) : 0), px(20));
@@ -280,10 +280,13 @@ void UpdatesWindow::layout() {
 // The bar: counting the sites while checking, moving while downloading.
 void UpdatesWindow::show_progress() {
     const bool working = busy_ || downloading_;
-    const bool was = IsWindowVisible(progress_) != FALSE;
+    const bool was = bar_shown_;
     LONG_PTR style = GetWindowLongPtrW(progress_, GWL_STYLE);
     const bool marquee = downloading_;
     if (((style & PBS_MARQUEE) != 0) != marquee) {
+        if (!marquee) {
+            SendMessageW(progress_, PBM_SETMARQUEE, FALSE, 0);  // its timer stops only this way
+        }
         style = marquee ? (style | PBS_MARQUEE) : (style & ~static_cast<LONG_PTR>(PBS_MARQUEE));
         SetWindowLongPtrW(progress_, GWL_STYLE, style);
     }
@@ -291,9 +294,11 @@ void UpdatesWindow::show_progress() {
         SendMessageW(progress_, PBM_SETMARQUEE, working ? TRUE : FALSE, 30);
     } else {
         SendMessageW(progress_, PBM_SETRANGE32, 0, static_cast<LPARAM>(std::max<std::size_t>(to_ask_, 1)));
-        SendMessageW(progress_, PBM_SETPOS, static_cast<WPARAM>(asked_), 0);
+        // Sites done: the one being asked isn't, yet.
+        SendMessageW(progress_, PBM_SETPOS, static_cast<WPARAM>(busy_ && asked_ > 0 ? asked_ - 1 : asked_), 0);
     }
     if (was != working) {
+        bar_shown_ = working;
         ShowWindow(progress_, working ? SW_SHOWNA : SW_HIDE);
         layout();
     }
@@ -348,7 +353,7 @@ void UpdatesWindow::check() {
     ListView_DeleteAllItems(list_);
     set_buttons();
     SetWindowTextW(summary_, L"");
-    SetWindowTextW(status_, (L"Asking " + std::to_wstring(to_ask_) + L" official sites…").c_str());
+    SetWindowTextW(status_, to_ask_ == 1 ? L"Asking the official site…" : L"Asking the official sites…");
     saved_to_.clear();
     if (Button_GetCheck(keep_answers_) == BST_CHECKED) {
         const fs::path folder = dated_folder(L"site answers");
@@ -409,11 +414,13 @@ void UpdatesWindow::fill() {
     }
     filling_ = false;
     const int current = static_cast<int>(rows_.size()) - updates - fresh - failed;
-    std::wstring summary = std::to_wstring(updates) + (updates == 1 ? L" update · " : L" updates · ") +
-                           std::to_wstring(fresh) + L" new series · " + std::to_wstring(current) + L" up to date";
+    // What needs you first: a cut-off end loses only "up to date".
+    std::wstring summary;
     if (failed > 0) {
-        summary += L" · " + std::to_wstring(failed) + L" couldn't be checked";
+        summary = std::to_wstring(failed) + L" couldn't be checked · ";
     }
+    summary += std::to_wstring(updates) + (updates == 1 ? L" update · " : L" updates · ") + std::to_wstring(fresh) +
+               L" new series · " + std::to_wstring(current) + L" up to date";
     SetWindowTextW(summary_, summary.c_str());
     SetWindowTextW(status_, updates + fresh > 0
                                 ? L"Tick what you want, then Get selected (or Download only, to upload by hand)."
@@ -466,7 +473,8 @@ LRESULT UpdatesWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_GETMINMAXINFO: {
         auto* mm = int_to_ptr<MINMAXINFO*>(lp);
-        mm->ptMinTrackSize = {px(600), px(380)};
+        // Room for the bottom row: the checkbox beside the three buttons.
+        mm->ptMinTrackSize = {px(720), px(420)};
         return 0;
     }
     case WM_DPICHANGED: {

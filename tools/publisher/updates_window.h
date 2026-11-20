@@ -78,6 +78,7 @@ private:
     bool busy_ = false;         // checking
     std::size_t asked_ = 0;     // ...sites asked so far, of
     std::size_t to_ask_ = 0;    // ...this many
+    bool bar_shown_ = false;    // the progress bar (the window itself may be hidden)
     bool downloading_ = false;  // Download only or Get selected
     bool uploading_ = false;    // ...Get selected
     std::vector<std::wstring> outcome_;  // per row: what Download only did ("" before)
