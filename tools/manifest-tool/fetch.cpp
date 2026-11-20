@@ -272,6 +272,7 @@ FetchPlan plan_fetch(core::HttpTransport& http, const UpdateRow& row,
         // current releases first, then the archives (where it goes once a
         // newer patch is out).
         const std::regex re("php-" + regex_escape(v) + R"((-\d+)?-nts-Win32-vs1[67]-x64\.zip)");
+        std::string read_errors;  // a list that couldn't be read, said with the answer
         for (const std::string base : {"https://downloads.php.net/~windows/releases/",
                                        "https://downloads.php.net/~windows/releases/archives/"}) {
             if (const auto sums = get_text(http, base + "sha256sum.txt", cancel, error)) {
@@ -279,12 +280,16 @@ FetchPlan plan_fetch(core::HttpTransport& http, const UpdateRow& row,
                     plan.files.clear();
                     simple(base, *file);
                     plan.problem.clear();
+                    read_errors.clear();
                     break;
                 }
                 plan.problem = "php.net's checksum lists don't name PHP " + v + "'s Windows NTS x64 zip";
-            } else if (plan.problem.empty()) {
-                plan.problem = error;
+            } else {
+                read_errors += (read_errors.empty() ? "" : "; ") + error;
             }
+        }
+        if (!read_errors.empty()) {
+            plan.problem = plan.problem.empty() ? read_errors : plan.problem + " (" + read_errors + ")";
         }
     } else if (r == "mariadb") {
         simple("https://archive.mariadb.org/mariadb-" + v + "/winx64-packages/", "mariadb-" + v + "-winx64.zip");

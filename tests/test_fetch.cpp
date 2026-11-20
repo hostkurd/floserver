@@ -50,7 +50,7 @@ void write_zip64(const fs::path& file, const std::vector<std::string>& names) {
     REQUIRE(mz_zip_writer_init_heap_v2(&z, 0, 0, MZ_ZIP_FLAG_WRITE_ZIP64) != MZ_FALSE);
     for (const std::string& n : names) {
         const std::string body = "contents of " + n;
-        REQUIRE(mz_zip_writer_add_mem(&z, n.c_str(), body.data(), body.size(), MZ_DEFAULT_COMPRESSION) != MZ_FALSE);
+        REQUIRE(mz_zip_writer_add_mem(&z, n.c_str(), body.data(), body.size(), static_cast<mz_uint>(MZ_BEST_SPEED)) != MZ_FALSE);
     }
     void* buf = nullptr;
     std::size_t size = 0;
@@ -322,4 +322,27 @@ TEST_CASE("fetch: add_to_list replaces the older versions of the same series") {
                                             "bun/1.3.14/bun-windows-x64-baseline.zip",
                                             "postgresql/17.12/postgresql-17.12-1-windows-x64-server.zip"});
     CHECK(add_to_list(c.files, {"nonsense"}).problems.size() == 1);
+}
+
+TEST_CASE("fetch: a path the list can't carry leaves the older version in it") {
+    PublishFile old;
+    old.path = "node/24.22.1/node-v24.22.1-win-x64.zip";
+    old.published = true;
+    const ListChange c = add_to_list({old}, {"node/24.23.0/wrong-name.zip"});
+    CHECK(c.problems.size() == 1);
+    CHECK(c.left_out.empty());
+    REQUIRE(c.files.size() == 1);
+    CHECK(c.files[0].path == old.path);
+}
+
+TEST_CASE("fetch: upload_steps lists a file over 300 MiB apart") {
+    const test_util::TempDir dir;
+    const fs::path big = dir.path() / "mysql" / "8.4.8" / "mysql-8.4.8-winx64.zip";
+    fs::create_directories(big.parent_path());
+    std::ofstream(big) << "x";
+    fs::resize_file(big, std::uintmax_t{301} * 1024 * 1024);  // sparse: no real 301 MiB written
+    const std::string s = upload_steps({"mysql/8.4.8/mysql-8.4.8-winx64.zip"}, dir.path());
+    CHECK(s.find("object put floserver-cdn/mysql") == std::string::npos);
+    CHECK(s.find("Over 300 MiB") != std::string::npos);
+    CHECK(s.find("  mysql/8.4.8/mysql-8.4.8-winx64.zip") != std::string::npos);
 }
