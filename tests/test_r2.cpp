@@ -124,6 +124,13 @@ public:
             r.body = "<ListBucketResult></ListBucketResult>";
             return r;
         }
+        if (req.method == "GET" && query.empty()) {
+            const auto it = objects.find(decode(path));
+            r.status = it == objects.end() ? 404 : 200;
+            r.body = it == objects.end() ? "<Error><Code>NoSuchKey</Code></Error>" : it->second;
+            r.body.resize(std::min(r.body.size(), req.max_reply));
+            return r;
+        }
         if (req.method == "HEAD") {
             const auto it = objects.find(decode(path));
             r.status = it == objects.end() ? 404 : 200;
@@ -427,4 +434,31 @@ TEST_CASE("r2: upload_files stopping half way says what went up") {
     CHECK(u.uploaded == std::vector<std::string>{"bun/1.3.14/bun-windows-x64.zip"});
     CHECK(u.conflict);
     CHECK(!u.problem.empty());
+}
+
+TEST_CASE("r2: put_text replaces, get_text reads back, and says when it's missing or too big") {
+    FakeR2 r2;
+    R2Bucket b = bucket(r2);
+    std::string error;
+    CHECK_FALSE(b.get_text("manifest.json", 100, error));
+    CHECK(error.empty());
+
+    REQUIRE(b.put_text("manifest.json", "old", error));
+    REQUIRE(b.put_text("manifest.json", "new list", error));  // replaced, unlike upload_files
+    CHECK(r2.objects["/floserver-cdn/manifest.json"] == "new list");
+    CHECK(r2.content_types["/floserver-cdn/manifest.json"] == "application/json");
+    CHECK(b.get_text("manifest.json", 100, error) == "new list");
+    CHECK_FALSE(b.get_text("manifest.json", 3, error));
+    CHECK(error.find("bigger than 3 bytes") != std::string::npos);
+
+    r2.fail_puts = 1;
+    CHECK(b.put_text("manifest.json.sig", "sig", error));  // one retry
+    r2.fail_puts = 2;
+    CHECK_FALSE(b.put_text("manifest.json.sig", "sig2", error));
+    CHECK(error.find("HTTP 503") != std::string::npos);
+    CHECK(r2.objects["/floserver-cdn/manifest.json.sig"] == "sig");
+
+    r2.no_bucket = true;
+    CHECK_FALSE(b.get_text("manifest.json", 100, error));
+    CHECK(error.empty());  // a 404 either way; go_live says R2 has no list
 }

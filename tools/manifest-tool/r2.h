@@ -77,6 +77,14 @@ public:
                                 const std::atomic<bool>* cancel = nullptr,
                                 const std::function<void(const R2Progress&)>& progress = {});
 
+    // D34.6: a small object's contents; nullopt with `error` empty when it isn't there.
+    [[nodiscard]] std::optional<std::string> get_text(const std::string& object, std::size_t max_bytes,
+                                                      std::string& error, const std::atomic<bool>* cancel = nullptr);
+
+    // D34.6: one PUT of `text`, with one retry on no answer or 5xx. Unlike
+    // upload_files it replaces what's there: for the list and its signature only.
+    [[nodiscard]] bool put_text(const std::string& object, const std::string& text, std::string& error);
+
     static constexpr std::uint64_t kMultipartFrom = std::uint64_t{100} * 1024 * 1024;
     static constexpr std::uint64_t kPartSize = std::uint64_t{64} * 1024 * 1024;  // R2: equal parts, 5 MiB+
 
@@ -92,6 +100,7 @@ private:
         std::uint64_t size = 0;
         std::string text;
         std::chrono::seconds max_time{120};
+        std::size_t max_reply = std::size_t{1024} * 1024;
     };
     core::HttpResponse call(const Call& c, std::string& error, const std::atomic<bool>* cancel,
                             const std::function<void(std::uint64_t)>& sent = {});
