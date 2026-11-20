@@ -3,6 +3,9 @@
 #include "floserver/core/database_engine.h"
 #include "floserver/core/paths.h"
 
+#include <algorithm>
+#include <array>
+#include <fstream>
 #include <system_error>
 
 namespace floserver::core {
@@ -211,12 +214,36 @@ std::vector<std::string> pg_dump_args(const std::string& database, const std::st
 }
 
 std::vector<std::string> pg_load_args(const std::string& database, const std::string& file) {
-    return {"--dbname=" + database, "--no-psqlrc",          "--set=ON_ERROR_STOP=1",
-            "--quiet",              "--single-transaction", "--file=" + file};
+#ifdef _WIN32
+    constexpr std::string_view kNowhere = "NUL";
+#else
+    constexpr std::string_view kNowhere = "/dev/null";
+#endif
+    // Query results go nowhere: a backup's SELECTs can't fill the disk.
+    return {"--dbname=" + database,    "--no-psqlrc",          "--set=ON_ERROR_STOP=1",
+            "--quiet",                 "--single-transaction", "--output=" + std::string(kNowhere),
+            "--file=" + file};
 }
 
-std::string pg_empty_database_sql(const std::string& database) {
-    return "DROP DATABASE IF EXISTS " + pg_identifier(database) + " WITH (FORCE);\n";
+std::string pg_empty_database_sql(const std::string& database, const std::string& role) {
+    return "DROP DATABASE IF EXISTS " + pg_identifier(database) + " WITH (FORCE);\n" + pg_reset_role_sql(role);
+}
+
+std::string pg_reset_role_sql(const std::string& role) {
+    // The role may be gone (removed meanwhile): nothing to reset then.
+    return "SELECT 'ALTER ROLE ' || quote_ident(" + pg_string(role) +
+           ") || ' RESET ALL' WHERE EXISTS (SELECT FROM pg_roles WHERE rolname = " + pg_string(role) + ")\\gexec\n";
+}
+
+bool pg_load_file_restricted(const fs::path& file) {
+    std::ifstream in(file, std::ios::binary);
+    std::array<char, 59> head{};  // "\restrict " + 48 + "\n"
+    if (!in.read(head.data(), head.size())) {
+        return false;
+    }
+    const std::string_view h(head.data(), head.size());
+    return h.starts_with("\\restrict ") && h.back() == '\n' &&
+           std::all_of(h.begin() + 10, h.end() - 1, [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); });
 }
 
 }  // namespace floserver::core

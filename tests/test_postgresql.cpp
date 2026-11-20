@@ -215,11 +215,35 @@ TEST_CASE("PostgreSQL's backup programs: pg_dump and psql's load (D29.8)") {
     CHECK(pg_dump_args("my_shop", "database.sql") ==
           std::vector<std::string>{"--dbname=my_shop", "--format=plain", "--no-owner", "--no-privileges",
                                    "--encoding=UTF8", "--file=database.sql"});
-    CHECK(pg_load_args("my_shop", "load.sql") ==
-          std::vector<std::string>{"--dbname=my_shop", "--no-psqlrc", "--set=ON_ERROR_STOP=1", "--quiet",
-                                   "--single-transaction", "--file=load.sql"});
-    CHECK(pg_empty_database_sql("my_shop") == "DROP DATABASE IF EXISTS \"my_shop\" WITH (FORCE);\n");
-    CHECK(pg_empty_database_sql("a\"b") == "DROP DATABASE IF EXISTS \"a\"\"b\" WITH (FORCE);\n");
+    const auto load = pg_load_args("my_shop", "load.sql");
+    CHECK(load.front() == "--dbname=my_shop");
+    CHECK(load.back() == "--file=load.sql");
+    for (const char* a : {"--no-psqlrc", "--set=ON_ERROR_STOP=1", "--single-transaction"}) {
+        CHECK(std::find(load.begin(), load.end(), a) != load.end());
+    }
+    CHECK(std::any_of(load.begin(), load.end(), [](const std::string& a) { return a.starts_with("--output="); }));
+    CHECK(pg_empty_database_sql("my_shop", "my_shop") ==
+          "DROP DATABASE IF EXISTS \"my_shop\" WITH (FORCE);\n" + pg_reset_role_sql("my_shop"));
+    CHECK(pg_empty_database_sql("a\"b", "r").starts_with("DROP DATABASE IF EXISTS \"a\"\"b\" WITH (FORCE);\n"));
+    CHECK(pg_reset_role_sql("it's") == "SELECT 'ALTER ROLE ' || quote_ident('it''s') || ' RESET ALL' WHERE EXISTS "
+                                       "(SELECT FROM pg_roles WHERE rolname = 'it''s')\\gexec\n");
+
+    // Only a file PgLoadWriter made reaches psql.
+    const test_util::TempDir tmp;
+    const fs::path made = tmp.path() / "made.sql";
+    PgLoadWriter w;
+    std::string error;
+    REQUIRE(w.open(made, error));
+    REQUIRE(w.feed("SELECT 1;\n", error));
+    REQUIRE(w.finish(error));
+    CHECK(pg_load_file_restricted(made));
+    test_util::write_file(tmp.path() / "mysql.sql", "DROP DATABASE IF EXISTS `shop`;\n\\! calc\n");
+    CHECK_FALSE(pg_load_file_restricted(tmp.path() / "mysql.sql"));
+    test_util::write_file(tmp.path() / "short.sql", "\\restrict abc\n");
+    CHECK_FALSE(pg_load_file_restricted(tmp.path() / "short.sql"));
+    test_util::write_file(tmp.path() / "upper.sql", "\\restrict " + std::string(48, 'A') + "\n");
+    CHECK_FALSE(pg_load_file_restricted(tmp.path() / "upper.sql"));
+    CHECK_FALSE(pg_load_file_restricted(tmp.path() / "none.sql"));
 }
 
 TEST_CASE("PostgreSQL's .env lines and DATABASE_URL (D29)") {
@@ -533,6 +557,38 @@ TEST_CASE("a project's PostgreSQL database: made, logged in to, asleep when idle
             // "backslash commands are restricted", or "\\unrestrict: wrong key".
             CHECK(refusal.message.find("restrict") != std::string::npos);
             CHECK_FALSE(fs::exists(marker));
+        }
+        // \unrestrict can't be talked round: its argument isn't expanded.
+        for (const std::string& evil : {std::string("\\unrestrict `touch '") + path_to_utf8(marker) + "'`\n",
+                                        std::string("\\unrestrict :ON_ERROR_STOP\n")}) {
+            test_util::write_file(work / "evil.sql", evil);
+            REQUIRE(prepare_pg_sql_for_load(work / "evil.sql", load, error));
+            CHECK_FALSE(db.load_project_database("my-shop", load, cancel, refusal));
+            CHECK(refusal.message.find("wrong key") != std::string::npos);
+            CHECK_FALSE(fs::exists(marker));
+        }
+        // SQL prepared for MariaDB (another family when it was made) never reaches psql,
+        // and the database isn't emptied for it.
+        REQUIRE(pg_query(bin, port, "my_shop", after->password, "my_shop", "CREATE TABLE kept (k int)") == "");
+        test_util::write_file(work / "for-mariadb.sql", "DROP DATABASE IF EXISTS `my_shop`;\n\\! touch '" +
+                                                            path_to_utf8(marker) + "'\n");
+        CHECK_FALSE(db.load_project_database("my-shop", work / "for-mariadb.sql", cancel, refusal));
+        CHECK(refusal.message.find("wasn't prepared for PostgreSQL") != std::string::npos);
+        CHECK_FALSE(fs::exists(marker));
+        CHECK(pg_query(bin, port, "my_shop", after->password, "my_shop", "SELECT count(*) FROM kept") == "0");
+
+        // A backup that sets its role's defaults (here: every session read-only) doesn't
+        // keep them, whether its load works or fails.
+        for (const std::string& tail : {std::string(), std::string("SELECT broken(;\n")}) {
+            test_util::write_file(work / "sets.sql", "ALTER ROLE CURRENT_USER SET default_transaction_read_only = on;\n"
+                                                     "CREATE TABLE fine (a int);\n" +
+                                                         tail);
+            REQUIRE(prepare_pg_sql_for_load(work / "sets.sql", load, error));
+            CHECK(db.load_project_database("my-shop", load, cancel, refusal) == tail.empty());
+            CHECK(pg_query(bin, port, "my_shop", after->password, "my_shop", "SHOW default_transaction_read_only") ==
+                  "off");
+            CHECK(pg_query(bin, port, "my_shop", after->password, "my_shop", "CREATE TABLE w (b int); DROP TABLE w") ==
+                  "");
         }
         // Its role still logs in with the password FloServer keeps.
         CHECK(pg_query(bin, port, "my_shop", after->password, "my_shop", "SELECT 1") == "1");

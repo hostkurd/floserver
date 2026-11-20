@@ -683,6 +683,7 @@ bool BackupService::load_from_backup(const std::shared_ptr<Job>& job, const fs::
     std::string warning;
     if (!hooks_.load_database ||
         !hooks_.load_database(project, main, has_extras ? extras : fs::path(), job->cancel, warning, error)) {
+        error = shown_text(error);  // a program's words about the backup's SQL
         if (job->cancel) {
             error = "cancelled";
         }
@@ -698,12 +699,12 @@ bool BackupService::load_from_backup(const std::shared_ptr<Job>& job, const fs::
     return true;
 }
 
-bool BackupService::load_saved(const std::string& project, const fs::path& saved, const fs::path& work,
-                               std::string& error) const {
+bool BackupService::load_saved(const std::string& project, const std::string& family, const fs::path& saved,
+                               const fs::path& work, std::string& error) const {
     const fs::path main = work / "back.sql";
     const fs::path extras = work / "back-extras.sql";
     bool has_extras = false;
-    const bool prepared = family_of(project) == kPostgreSqlFamily
+    const bool prepared = family == kPostgreSqlFamily
                               ? prepare_pg_sql_for_load(saved, main, error)
                               : prepare_sql_for_load(saved, main, extras, database_of(project), has_extras, error);
     if (!prepared) {
@@ -910,7 +911,9 @@ void BackupService::run_restore(const std::shared_ptr<Job>& job, const RestoreRe
     } const start_again(hooks_, project->name, dir, was_on);
 
     // 3. Today's database, kept next to the backup (or in FloServer's own
-    // folder when that one can't be written).
+    // folder when that one can't be written). Its family now: today's goes
+    // back into it, whatever floserver.json says by then.
+    const std::string today_family = family_of(project->name);
     if (database) {
         job->set([](Job& j) { j.database = "saving"; });
         job->set_step("Saving today's database…");
@@ -992,7 +995,7 @@ void BackupService::run_restore(const std::shared_ptr<Job>& job, const RestoreRe
                 }
             }
             std::string again;
-            if (load_saved(project->name, saved, work, again)) {
+            if (load_saved(project->name, today_family, saved, work, again)) {
                 undone += " Today's database was loaded back.";
             } else {
                 database_replaced = true;

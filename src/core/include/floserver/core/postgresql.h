@@ -124,7 +124,15 @@ inline constexpr std::string_view kPostgreSqlSettingsFile = "floserver.conf";
 [[nodiscard]] std::vector<std::string> pg_dump_args(const std::string& database, const std::string& file);
 [[nodiscard]] std::vector<std::string> pg_load_args(const std::string& database, const std::string& file);
 // Empties a project's database before a load: dropped (its connections
-// closed), then made again by pg_project_database_sql().
-[[nodiscard]] std::string pg_empty_database_sql(const std::string& database);
+// closed), then made again by pg_project_database_sql(). Its role's own
+// settings (ALTER ROLE ... SET, which a backup's SQL may run, and which
+// outlive the database) are reset with it.
+[[nodiscard]] std::string pg_empty_database_sql(const std::string& database, const std::string& role);
+// The same for the role alone, after a load.
+[[nodiscard]] std::string pg_reset_role_sql(const std::string& role);
+// The file starts with backup.h's PgLoadWriter's own line ("\restrict"
+// and 48 hex digits): psql's own commands are off in it. Checked again just
+// before psql runs it, so SQL prepared for another family never reaches psql.
+[[nodiscard]] bool pg_load_file_restricted(const std::filesystem::path& file);
 
 }  // namespace floserver::core

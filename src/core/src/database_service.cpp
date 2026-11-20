@@ -1993,7 +1993,12 @@ bool DatabaseService::run_project_tool(const std::string& project, bool dump, co
             ok = server->run_as(server->files().dump, *login, pg_dump_args(login->database, std::string(kDumpFileName)),
                                 work, {}, cancel, error);
         } else {
-            if (!server->run_sql(pg_empty_database_sql(login->database), error) ||
+            // Only SQL made by PgLoadWriter, whatever floserver.json said when it was made.
+            if (!pg_load_file_restricted(input)) {
+                refusal = {"database_failed", "this SQL wasn't prepared for PostgreSQL, so it wasn't loaded"};
+                return false;
+            }
+            if (!server->run_sql(pg_empty_database_sql(login->database, login->user), error) ||
                 !project_login(project, refusal, true)) {
                 if (refusal.code.empty()) {
                     refusal = {"database_failed", error};
@@ -2002,6 +2007,12 @@ bool DatabaseService::run_project_tool(const std::string& project, bool dump, co
             }
             ok = server->run_as(server->files().client, *login,
                                 pg_load_args(login->database, path_to_utf8(input.filename())), work, {}, cancel, error);
+            // What the backup's SQL set on its role goes, loaded or not.
+            std::string reset_error;
+            if (!server->run_sql(pg_reset_role_sql(login->user), reset_error) && ok) {
+                refusal = {"database_failed", reset_error};
+                return false;
+            }
         }
     } else {
         ok = dump ? server->run_as(server->files().dump, *login,

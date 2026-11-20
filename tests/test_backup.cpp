@@ -501,6 +501,22 @@ TEST_CASE("a PostgreSQL backup's SQL: psql's own commands off, the dump's own ke
     REQUIRE(again.open(second, error));
     REQUIRE(again.finish(error));
     CHECK(test_util::read_file(second).substr(0, first.size()) != first);
+    // One huge line (a long INSERT, or a backup made to fill the memory) is written on as it comes.
+    {
+        PgLoadWriter big;
+        const fs::path big_out = tmp.path() / "big.sql";
+        REQUIRE(big.open(big_out, error));
+        const std::string chunk(4096, 'x');
+        REQUIRE(big.feed("--\n\\restrict ", error));
+        for (int i = 0; i < 64; ++i) {
+            REQUIRE(big.feed(chunk, error));
+        }
+        REQUIRE(big.feed("\nSELECT 1;\n" + std::string(300, 'y'), error));
+        REQUIRE(big.finish(error));
+        const std::string text = test_util::read_file(big_out);
+        const std::string body = text.substr(text.find('\n') + 1);
+        CHECK(body == "--\n\\restrict " + std::string(std::size_t{64} * 4096, 'x') + "\nSELECT 1;\n" + std::string(300, 'y') + "\n");
+    }
     // From a file, as today's is put back.
     const fs::path in = tmp.path() / "today.sql";
     test_util::write_file(in, "\\restrict abc\nSELECT 1;\n\\unrestrict abc\n");
@@ -516,6 +532,8 @@ TEST_CASE("a backup's database family, and which can be loaded into which (D29)"
     CHECK(backup_database_family(info) == "postgresql");
     info.versions["database"] = "mariadb-11.4";
     CHECK(backup_database_family(info) == "mariadb");
+    info.versions["database"] = "PostgreSQL-18";  // written by hand: taken as floserver.json's reader takes it
+    CHECK(backup_database_family(info) == "postgresql");
     CHECK(database_family_mismatch("mariadb", "mysql").empty());
     CHECK(database_family_mismatch("", "mariadb").empty());
     CHECK(database_family_mismatch("postgresql", "postgresql").empty());

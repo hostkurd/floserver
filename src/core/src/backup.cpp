@@ -246,8 +246,12 @@ std::string backup_database_family(const BackupInfo& info) {
     if (!info.versions.is_object() || !info.versions.contains("database") || !info.versions.at("database").is_string()) {
         return {};
     }
-    const std::string text = info.versions.at("database").get<std::string>();
-    return text.substr(0, text.find('-'));
+    std::string family = info.versions.at("database").get<std::string>();
+    family = family.substr(0, family.find('-'));
+    // As floserver.json's reader takes it: "PostgreSQL-18" is postgresql.
+    std::transform(family.begin(), family.end(), family.begin(),
+                   [](char c) { return static_cast<char>(std::tolower(static_cast<unsigned char>(c))); });
+    return family;
 }
 
 std::string database_family_mismatch(std::string_view made, std::string_view into) {
@@ -795,16 +799,37 @@ void PgLoadWriter::flush_line() {
     pending_.clear();
 }
 
+// Only a line's start decides anything (a key line is short): a longer one
+// is written on as it comes, so one huge line doesn't fill the memory.
 bool PgLoadWriter::feed(std::string_view piece, std::string& /*error*/) {
+    static constexpr std::size_t kLook = 256;
     std::size_t from = 0;
     while (from < piece.size()) {
         const std::size_t nl = piece.find('\n', from);
+        const std::string_view part = piece.substr(from, nl == std::string_view::npos ? std::string_view::npos : nl - from);
+        if (passing_) {
+            main_ << part;
+        } else {
+            pending_.append(part);
+            if (pending_.size() > kLook) {
+                // Too long to be one of the dump's key lines.
+                if (in_header_ && !pending_.starts_with("--")) {
+                    in_header_ = false;
+                }
+                main_ << pending_;
+                pending_.clear();
+                passing_ = true;
+            }
+        }
         if (nl == std::string_view::npos) {
-            pending_.append(piece.substr(from));
             break;
         }
-        pending_.append(piece.substr(from, nl - from));
-        flush_line();
+        if (passing_) {
+            main_ << '\n';
+            passing_ = false;
+        } else {
+            flush_line();
+        }
         from = nl + 1;
     }
     return true;
@@ -813,6 +838,9 @@ bool PgLoadWriter::feed(std::string_view piece, std::string& /*error*/) {
 bool PgLoadWriter::finish(std::string& error) {
     if (!pending_.empty()) {
         flush_line();
+    } else if (passing_) {
+        main_ << '\n';
+        passing_ = false;
     }
     main_.close();
     if (main_.fail()) {

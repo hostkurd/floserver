@@ -237,6 +237,7 @@ private:
     std::string pending_;
     bool in_header_ = true;  // only blank lines and "--" comments so far
     std::string dump_key_;   // the dump's own \restrict key, once seen
+    bool passing_ = false;   // a long line, written on as it comes
 };
 // The same from a file.
 [[nodiscard]] bool prepare_pg_sql_for_load(const std::filesystem::path& in, const std::filesystem::path& main,
