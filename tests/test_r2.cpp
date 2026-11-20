@@ -113,7 +113,15 @@ public:
         }
         if (no_bucket) {
             r.status = 404;
-            r.body = "<Error><Code>NoSuchBucket</Code><Message>The specified bucket does not exist.</Message></Error>";
+            if (req.method != "HEAD") {  // a HEAD's answer has no body
+                r.body =
+                    "<Error><Code>NoSuchBucket</Code><Message>The specified bucket does not exist.</Message></Error>";
+            }
+            return r;
+        }
+        if (req.method == "GET" && path == "/floserver-cdn/" && query == "list-type=2&max-keys=1") {
+            r.status = 200;
+            r.body = "<ListBucketResult></ListBucketResult>";
             return r;
         }
         if (req.method == "HEAD") {
@@ -399,13 +407,12 @@ TEST_CASE("r2: retries only what may go better") {
     }
 }
 
-TEST_CASE("r2: a bucket that isn't there isn't 'not there'") {
+TEST_CASE("r2: check() lists one item, so a missing bucket says so") {
     FakeR2 r2;
-    r2.no_bucket = true;
     R2Bucket b = bucket(r2);
-    std::string error;
-    CHECK(!b.size_of("manifest.json", error));
-    CHECK(error.find("NoSuchBucket") != std::string::npos);
+    CHECK(b.check().empty());
+    r2.no_bucket = true;
+    CHECK(b.check().find("NoSuchBucket") != std::string::npos);
 }
 
 TEST_CASE("r2: upload_files stopping half way says what went up") {

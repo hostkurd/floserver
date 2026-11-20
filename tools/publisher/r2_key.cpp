@@ -28,12 +28,16 @@ constexpr COLORREF kRed = RGB(0xB3, 0x26, 0x1E);
 constexpr COLORREF kGreen = RGB(0x0F, 0x6B, 0x2E);
 
 enum : int { IdAccount = 400, IdKeyId, IdSecret, IdTest, IdSave, IdForget, IdCancel };
-constexpr UINT kMsgTested = WM_APP + 30;  // lParam: TestResult*
 
 struct TestResult {
     std::string error;
-    bool manifest_there = false;
 };
+
+// Registered, so a stray post can't be read as some other window's message.
+UINT tested_message() {
+    static const UINT id = RegisterWindowMessageW(L"FloServerPublisher.R2KeyTested");
+    return id;
+}
 
 std::string field(HWND h) {
     const int n = GetWindowTextLengthW(h);
@@ -57,6 +61,7 @@ public:
     KeyWindow(KeyWindow&&) = delete;
     KeyWindow& operator=(KeyWindow&&) = delete;
     ~KeyWindow() {
+        alive_->store(false);
         if (tester_.joinable()) {
             // It holds only copies; its answer to the closed window is dropped.
             tester_.detach();
@@ -170,6 +175,19 @@ private:
     }
 
     LRESULT handle(UINT msg, WPARAM wp, LPARAM lp) {
+        if (msg != 0 && msg == tested_message()) {
+            const std::unique_ptr<TestResult> r(int_to_ptr<TestResult*>(lp));
+            if (tester_.joinable()) {
+                tester_.join();
+            }
+            EnableWindow(test_, TRUE);
+            if (r->error.empty()) {
+                say(L"The key works: R2 answered for floserver-cdn.", false, true);
+            } else {
+                say(L"R2 refused it: " + widen(r->error), true, true);
+            }
+            return 0;
+        }
         switch (msg) {
         case WM_CTLCOLORSTATIC: {
             auto* dc = int_to_ptr<HDC>(wp);
@@ -187,21 +205,6 @@ private:
         case WM_DESTROY:
             done_ = true;
             return 0;
-        case kMsgTested: {
-            const std::unique_ptr<TestResult> r(int_to_ptr<TestResult*>(lp));
-            if (tester_.joinable()) {
-                tester_.join();
-            }
-            EnableWindow(test_, TRUE);
-            if (r->error.empty()) {
-                say(r->manifest_there ? L"The key works: R2 answered for floserver-cdn (manifest.json is there)."
-                                      : L"The key works: R2 answered for floserver-cdn.",
-                    false, true);
-            } else {
-                say(L"R2 refused it: " + widen(r->error), true, true);
-            }
-            return 0;
-        }
         case WM_COMMAND:
             switch (LOWORD(wp)) {
             case IdCancel:
@@ -216,8 +219,8 @@ private:
                 save();
                 return 0;
             case IdForget:
-                if (MessageBoxW(hwnd_, L"Forget the R2 key on this PC? Get selected then only downloads, as Download "
-                                       L"only does, until a key is entered again.",
+                if (MessageBoxW(hwnd_, L"Forget the R2 key on this PC? Get selected then can't upload until a key "
+                                       L"is entered again; Download only still works.",
                                 L"FloServer Publisher", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES) {
                     forget_r2_key();
                     result_.reset();
@@ -259,15 +262,16 @@ private:
         say(L"Asking R2…", false, false);
         EnableWindow(test_, FALSE);
         HWND target = hwnd_;
-        tester_ = std::thread([target, key = *k] {
+        tester_ = std::thread([target, key = *k, alive = alive_] {
             auto r = std::make_unique<TestResult>();
             if (auto http = core::make_system_transport()) {
                 mt::R2Bucket bucket(*http, key);
-                r->manifest_there = bucket.size_of("manifest.json", r->error).has_value();
+                r->error = bucket.check();
             } else {
                 r->error = "no HTTPS on this computer";
             }
-            if (PostMessageW(target, kMsgTested, 0, reinterpret_cast<LPARAM>(r.get())) != FALSE) {
+            // Only while the window is still there; otherwise the answer goes with the thread.
+            if (alive->load() && PostMessageW(target, tested_message(), 0, reinterpret_cast<LPARAM>(r.get())) != FALSE) {
                 (void)r.release();
             }
         });
@@ -298,6 +302,7 @@ private:
     HWND account_ = nullptr, key_id_ = nullptr, secret_ = nullptr, status_ = nullptr, forget_ = nullptr,
          test_ = nullptr;
     std::thread tester_;
+    std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);
     HFONT font_ = nullptr, bold_ = nullptr;
     HBRUSH bg_ = nullptr;
     COLORREF status_color_ = kText;

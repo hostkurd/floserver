@@ -68,6 +68,10 @@ public:
     [[nodiscard]] std::optional<std::uint64_t> size_of(const std::string& object, std::string& error,
                                                        const std::atomic<bool>* cancel = nullptr);
 
+    // Whether the key can reach the bucket: a one-item listing, whose error
+    // answers say why (a HEAD's don't). Empty when it can.
+    [[nodiscard]] std::string check(const std::atomic<bool>* cancel = nullptr);
+
     // Uploads `file` as `object`: one PUT up to kMultipartFrom, in parts above.
     [[nodiscard]] bool put_file(const std::string& object, const std::filesystem::path& file, std::string& error,
                                 const std::atomic<bool>* cancel = nullptr,

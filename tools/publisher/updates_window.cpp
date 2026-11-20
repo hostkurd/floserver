@@ -92,7 +92,7 @@ void remove_with_folders(const fs::path& top, const fs::path& file) {
     }
 }
 
-enum class Stage : std::uint8_t { None, Downloaded, Uploaded };
+enum class Stage : std::uint8_t { None, Downloaded, Uploaded, Conflict };
 
 }  // namespace
 
@@ -507,6 +507,9 @@ LRESULT UpdatesWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
                             L"FloServer Publisher", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) {
                 return 0;
             }
+            if (!downloading_) {
+                return 0;  // it finished while you were asked: its result is showing
+            }
             cancel_ = true;
             SetWindowTextW(status_, L"Stopping…");
         }
@@ -693,7 +696,7 @@ void UpdatesWindow::download(bool upload) {
                 // R2 has another file there: neither uploaded nor listed, and
                 // not in the upload steps (they'd overwrite it). Kept here to look at.
                 done->problems.push_back(up.problem);
-                done->stages.push_back(Stage::None);
+                done->stages.push_back(Stage::Conflict);
                 done->all_there.push_back(false);
                 for (const std::string& p : got.cdn_paths) {
                     std::erase(done->cdn_paths, p);
@@ -760,10 +763,13 @@ void UpdatesWindow::fetched(FetchDone& done) {
             }
             rows_[i].ticked = false;
             break;
+        case Stage::Conflict:
+            outcome_[i] = L"Not uploaded or listed: " + widen(problem) + L". The download is in the folder";
+            outcome_ok_[i] = false;
+            ++failed;
+            break;
         case Stage::None:
-            outcome_[i] = (done.upload && problem.find("already on R2") != std::string::npos ? L"Not uploaded: "
-                                                                                              : L"Not downloaded: ") +
-                          widen(problem);
+            outcome_[i] = L"Not downloaded: " + widen(problem);
             outcome_ok_[i] = false;
             ++failed;
             break;
@@ -790,9 +796,9 @@ void UpdatesWindow::fetched(FetchDone& done) {
     }
     SetWindowTextW(status_, status.c_str());
     // The folder was made for this run: without a file in it, it goes.
+    bool any_file = false;
     {
         std::error_code ec;
-        bool any_file = false;
         for (auto it = fs::recursive_directory_iterator(done.folder, ec); !ec && it != fs::recursive_directory_iterator();
              it.increment(ec)) {
             any_file = any_file || it->is_regular_file(ec);
@@ -801,7 +807,14 @@ void UpdatesWindow::fetched(FetchDone& done) {
             fs::remove_all(done.folder, ec);
         }
     }
+    // Anything left here is for you: to upload by hand, or to look at.
+    const auto open_folder = [&] {
+        if (any_file) {
+            ShellExecuteW(hwnd_, L"explore", done.folder.wstring().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        }
+    };
     if (done.cdn_paths.empty()) {
+        open_folder();
         return;
     }
     // Into the next list, so Publish checks them from the CDN.
@@ -811,9 +824,7 @@ void UpdatesWindow::fetched(FetchDone& done) {
             MessageBoxW(hwnd_, added.c_str(), L"FloServer Publisher", MB_OK | MB_ICONINFORMATION);
         }
     }
-    if (!done.manual.empty()) {
-        ShellExecuteW(hwnd_, L"explore", done.folder.wstring().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-    }
+    open_folder();
 }
 
 }  // namespace floserver::publisher

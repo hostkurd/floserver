@@ -334,7 +334,7 @@ std::optional<std::uint64_t> R2Bucket::size_of(const std::string& object, std::s
     c.object = object;
     c.max_time = std::chrono::seconds{30};
     const core::HttpResponse r = call(c, error, cancel);
-    if (r.status == 404 && r.body.find("NoSuchBucket") == std::string::npos) {
+    if (r.status == 404) {
         return std::nullopt;
     }
     if (r.status != 200) {
@@ -357,6 +357,20 @@ namespace {
 // Worth sending again: no answer, or the server's own trouble.
 bool retryable(const core::HttpResponse& r) { return r.status == 0 || r.status >= 500; }
 }  // namespace
+
+std::string R2Bucket::check(const std::atomic<bool>* cancel) {
+    Call c;
+    c.method = "GET";
+    c.object = "";  // the bucket itself: "/floserver-cdn/"
+    c.query = {{"list-type", "2"}, {"max-keys", "1"}};
+    c.max_time = std::chrono::seconds{20};
+    std::string error;
+    const core::HttpResponse r = call(c, error, cancel);
+    if (r.status == 200) {
+        return {};
+    }
+    return error.empty() ? s3_error(r) : error;
+}
 
 bool R2Bucket::put_file(const std::string& object, const fs::path& file, std::string& error,
                         const std::atomic<bool>* cancel, const std::function<void(const R2Progress&)>& progress) {
