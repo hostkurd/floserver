@@ -1,6 +1,8 @@
 #include "floserver/core/backup.h"
 
 #include "floserver/core/build_info.h"
+#include "floserver/core/crypto.h"
+#include "floserver/core/database_engine.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/process.h"
 #include "floserver/core/project_config.h"
@@ -240,6 +242,30 @@ std::string shown_text(std::string_view text) {
     return out;
 }
 
+std::string backup_database_family(const BackupInfo& info) {
+    if (!info.versions.is_object() || !info.versions.contains("database") || !info.versions.at("database").is_string()) {
+        return {};
+    }
+    std::string family = info.versions.at("database").get<std::string>();
+    family = family.substr(0, family.find('-'));
+    // As floserver.json's reader takes it: "PostgreSQL-18" is postgresql.
+    std::transform(family.begin(), family.end(), family.begin(),
+                   [](char c) { return static_cast<char>(std::tolower(static_cast<unsigned char>(c))); });
+    return family;
+}
+
+std::string database_family_mismatch(std::string_view made, std::string_view into) {
+    const bool made_pg = made == kPostgreSqlFamily;
+    const bool into_pg = into == kPostgreSqlFamily;
+    if (made_pg == into_pg) {
+        return {};
+    }
+    // An older backup doesn't name it: those came from MariaDB or MySQL.
+    const std::string from = made.empty() ? std::string("MariaDB or MySQL") : database_family_title(made);
+    return "the backup's database is " + from + "'s and the project uses " + database_family_title(into) +
+           ": one can't be loaded into the other";
+}
+
 json backup_versions(const fs::path& dir) {
     json out = json::object();
     const auto text = read_small_file(dir / path_from_utf8(kProjectConfigFileName), std::size_t{1024} * 1024);
@@ -258,8 +284,8 @@ json backup_versions(const fs::path& dir) {
             out[key] = std::string(kPhpNone);
         }
     }
-    // "mysql": "8.4" (or "mariadb": "11.4") written by hand: the same as "database" (D28).
-    for (const char* family : {"mariadb", "mysql"}) {
+    // "mysql": "8.4" (or "mariadb": "11.4", "postgresql": "18") written by hand: the same as "database" (D28, D29).
+    for (const char* family : {"mariadb", "mysql", "postgresql"}) {
         if (!out.contains("database") && j.contains(family) && j.at(family).is_string()) {
             out["database"] = std::string(family) + "-" + j.at(family).get<std::string>();
         }
@@ -721,6 +747,130 @@ bool prepare_sql_for_load(const fs::path& in, const fs::path& main, const fs::pa
     }
     has_extras = writer.has_extras();
     return true;
+}
+
+bool PgLoadWriter::open(const fs::path& main, std::string& error) {
+    main_path_ = main;
+    main_.open(main, std::ios::binary | std::ios::trunc);
+    if (!main_) {
+        error = "can't write " + path_to_utf8(main.parent_path());
+        return false;
+    }
+    std::array<std::uint8_t, 24> bytes{};
+    if (!random_bytes(bytes, error)) {
+        return false;
+    }
+    static constexpr std::string_view kHex = "0123456789abcdef";
+    std::string key;
+    for (const std::uint8_t b : bytes) {
+        key += kHex.at(b >> 4U);
+        key += kHex.at(b & 0x0FU);
+    }
+    // psql reads its own commands no more from here on (D29).
+    main_ << "\\restrict " << key << "\n";
+    return true;
+}
+
+void PgLoadWriter::flush_line() {
+    std::string_view line = pending_;
+    if (line.ends_with('\r')) {
+        line.remove_suffix(1);
+    }
+    static constexpr std::string_view kRestrict = "\\restrict ";
+    static constexpr std::string_view kUnrestrict = "\\unrestrict ";
+    const auto is_key = [](std::string_view k) {
+        return !k.empty() && std::all_of(k.begin(), k.end(), [](char c) {
+            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+        });
+    };
+    bool drop = false;
+    if (in_header_ && line.starts_with(kRestrict) && is_key(line.substr(kRestrict.size()))) {
+        dump_key_ = std::string(line.substr(kRestrict.size()));
+        drop = true;
+    } else if (!dump_key_.empty() && line.starts_with(kUnrestrict) && line.substr(kUnrestrict.size()) == dump_key_) {
+        drop = true;
+    }
+    if (in_header_ && !line.empty() && !line.starts_with("--")) {
+        in_header_ = false;
+    }
+    if (!drop) {
+        main_ << pending_ << '\n';
+    }
+    pending_.clear();
+}
+
+// Only a line's start decides anything (a key line is short): a longer one
+// is written on as it comes, so one huge line doesn't fill the memory.
+bool PgLoadWriter::feed(std::string_view piece, std::string& /*error*/) {
+    static constexpr std::size_t kLook = 256;
+    std::size_t from = 0;
+    while (from < piece.size()) {
+        const std::size_t nl = piece.find('\n', from);
+        const std::string_view part = piece.substr(from, nl == std::string_view::npos ? std::string_view::npos : nl - from);
+        if (passing_) {
+            main_ << part;
+        } else {
+            pending_.append(part);
+            if (pending_.size() > kLook) {
+                // Too long to be one of the dump's key lines.
+                if (in_header_ && !pending_.starts_with("--")) {
+                    in_header_ = false;
+                }
+                main_ << pending_;
+                pending_.clear();
+                passing_ = true;
+            }
+        }
+        if (nl == std::string_view::npos) {
+            break;
+        }
+        if (passing_) {
+            main_ << '\n';
+            passing_ = false;
+        } else {
+            flush_line();
+        }
+        from = nl + 1;
+    }
+    return true;
+}
+
+bool PgLoadWriter::finish(std::string& error) {
+    if (!pending_.empty()) {
+        flush_line();
+    } else if (passing_) {
+        main_ << '\n';
+        passing_ = false;
+    }
+    main_.close();
+    if (main_.fail()) {
+        error = "can't write " + path_to_utf8(main_path_) + " (is the disk full?)";
+        return false;
+    }
+    return true;
+}
+
+bool prepare_pg_sql_for_load(const fs::path& in, const fs::path& main, std::string& error) {
+    std::ifstream from(in, std::ios::binary);
+    if (!from) {
+        error = "can't read " + path_to_utf8(in);
+        return false;
+    }
+    PgLoadWriter writer;
+    if (!writer.open(main, error)) {
+        return false;
+    }
+    std::array<char, 65536> buffer{};
+    while (from.read(buffer.data(), buffer.size()) || from.gcount() > 0) {
+        if (!writer.feed(std::string_view(buffer.data(), static_cast<std::size_t>(from.gcount())), error)) {
+            return false;
+        }
+    }
+    if (from.bad()) {
+        error = "can't read " + path_to_utf8(in);
+        return false;
+    }
+    return writer.finish(error);
 }
 
 std::vector<ReinstallStep> reinstall_steps(const fs::path& dir, const std::vector<std::string>& left_out) {

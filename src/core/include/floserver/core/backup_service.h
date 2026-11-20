@@ -152,7 +152,9 @@ private:
     bool load_from_backup(const std::shared_ptr<Job>& job, const std::filesystem::path& zip, const BackupInfo& info,
                           const std::string& project, const std::filesystem::path& work, std::string& error) const;
     // A .sql kept by a restore loaded back.
-    bool load_saved(const std::string& project, const std::filesystem::path& saved, const std::filesystem::path& work,
+    // `family`: the project's database family when today's was saved.
+    bool load_saved(const std::string& project, const std::string& family, const std::filesystem::path& saved,
+                    const std::filesystem::path& work,
                     std::string& error) const;
     // The backup's files unpacked beside `dir` (".flo-r<id>"), or nothing.
     std::optional<std::filesystem::path> unpack_beside(const std::shared_ptr<Job>& job,
@@ -164,6 +166,8 @@ private:
     [[nodiscard]] std::optional<std::uint64_t> free_space(const std::filesystem::path& folder) const;
     // The project's own database's name (a renamed one keeps its old one).
     [[nodiscard]] std::string database_of(const std::string& project) const;
+    // Its database's family ("mariadb", "mysql", "postgresql"); empty: none.
+    [[nodiscard]] std::string family_of(const std::string& project) const;
     // .env (or wp-config.php) pointed at the project's database.
     void point_at_database(const std::shared_ptr<Job>& job, const std::filesystem::path& dir,
                            const std::string& project) const;

@@ -2,6 +2,7 @@
 
 #include "floserver/core/build_info.h"
 #include "floserver/core/child_process.h"
+#include "floserver/core/database_engine.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/phpmyadmin.h"
 #include "floserver/core/project_registry.h"
@@ -289,6 +290,15 @@ std::optional<std::int64_t> BackupService::restore(const RestoreRequest& request
     if (request.database && !request.files && !info->database) {
         refusal = {"no_database", "this backup has no database to restore"};
         return std::nullopt;
+    }
+    // Only its database: it goes into the one the project uses now.
+    if (request.database && !request.files && info->database && project->database) {
+        const std::string mismatch =
+            database_family_mismatch(backup_database_family(*info), family_of(project->name));
+        if (!mismatch.empty()) {
+            refusal = {"different_database", mismatch + "; nothing was changed"};
+            return std::nullopt;
+        }
     }
     return start("restore", project->name, path_to_utf8(request.from),
                  [this, request](const std::shared_ptr<Job>& job) { run_restore(job, request); }, refusal);
@@ -633,28 +643,47 @@ std::string BackupService::database_of(const std::string& project) const {
     return cfg.config && cfg.config->database ? server_database_name(name, cfg.config->database->family) : name;
 }
 
+std::string BackupService::family_of(const std::string& project) const {
+    std::string ignored;
+    const auto p = hooks_.project ? hooks_.project(project, ignored) : std::nullopt;
+    const ConfigResult cfg = p ? read_project_config_file(Project{p->name, p->dir, true, false, {}}) : ConfigResult{};
+    return cfg.config && cfg.config->database ? cfg.config->database->family : std::string();
+}
+
 bool BackupService::load_from_backup(const std::shared_ptr<Job>& job, const fs::path& zip, const BackupInfo& info,
                                      const std::string& project, const fs::path& work, std::string& error) const {
+    const std::string family = family_of(project);
+    if (std::string mismatch = database_family_mismatch(backup_database_family(info), family); !mismatch.empty()) {
+        error = std::move(mismatch);
+        return false;
+    }
     job->set([](Job& j) { j.database = "loading"; });
     job->set_step("Loading the database from the backup…");
     const fs::path main = work / "load.sql";
     const fs::path extras = work / "load-extras.sql";
     // Unpacked straight into the SQL that's run: no other copy of it.
+    const bool pg = family == kPostgreSqlFamily;
     SqlLoadWriter writer;
-    if (!writer.open(main, extras, database_of(project), error)) {
+    PgLoadWriter pg_writer;
+    if (pg ? !pg_writer.open(main, error) : !writer.open(main, extras, database_of(project), error)) {
         return false;
     }
     std::string why;
     const bool unpacked = stream_zip_entry(
         zip, info.database_file,
-        [&](std::string_view piece) { return !job->cancel && writer.feed(piece, why); }, error);
-    if (!unpacked || !writer.finish(why)) {
+        [&](std::string_view piece) {
+            return !job->cancel && (pg ? pg_writer.feed(piece, why) : writer.feed(piece, why));
+        },
+        error);
+    if (!unpacked || !(pg ? pg_writer.finish(why) : writer.finish(why))) {
         error = job->cancel ? std::string("cancelled") : !why.empty() ? why : error;
         return false;
     }
+    const bool has_extras = !pg && writer.has_extras();
     std::string warning;
     if (!hooks_.load_database ||
-        !hooks_.load_database(project, main, writer.has_extras() ? extras : fs::path(), job->cancel, warning, error)) {
+        !hooks_.load_database(project, main, has_extras ? extras : fs::path(), job->cancel, warning, error)) {
+        error = shown_text(error);  // a program's words about the backup's SQL
         if (job->cancel) {
             error = "cancelled";
         }
@@ -670,12 +699,15 @@ bool BackupService::load_from_backup(const std::shared_ptr<Job>& job, const fs::
     return true;
 }
 
-bool BackupService::load_saved(const std::string& project, const fs::path& saved, const fs::path& work,
-                               std::string& error) const {
+bool BackupService::load_saved(const std::string& project, const std::string& family, const fs::path& saved,
+                               const fs::path& work, std::string& error) const {
     const fs::path main = work / "back.sql";
     const fs::path extras = work / "back-extras.sql";
     bool has_extras = false;
-    if (!prepare_sql_for_load(saved, main, extras, database_of(project), has_extras, error)) {
+    const bool prepared = family == kPostgreSqlFamily
+                              ? prepare_pg_sql_for_load(saved, main, error)
+                              : prepare_sql_for_load(saved, main, extras, database_of(project), has_extras, error);
+    if (!prepared) {
         return false;
     }
     // Putting today's back is never cancelled (it's bounded by the load's time limit).
@@ -879,7 +911,9 @@ void BackupService::run_restore(const std::shared_ptr<Job>& job, const RestoreRe
     } const start_again(hooks_, project->name, dir, was_on);
 
     // 3. Today's database, kept next to the backup (or in FloServer's own
-    // folder when that one can't be written).
+    // folder when that one can't be written). Its family now: today's goes
+    // back into it, whatever floserver.json says by then.
+    const std::string today_family = family_of(project->name);
     if (database) {
         job->set([](Job& j) { j.database = "saving"; });
         job->set_step("Saving today's database…");
@@ -961,7 +995,7 @@ void BackupService::run_restore(const std::shared_ptr<Job>& job, const RestoreRe
                 }
             }
             std::string again;
-            if (load_saved(project->name, saved, work, again)) {
+            if (load_saved(project->name, today_family, saved, work, again)) {
                 undone += " Today's database was loaded back.";
             } else {
                 database_replaced = true;

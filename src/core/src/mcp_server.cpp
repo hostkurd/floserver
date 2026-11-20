@@ -212,7 +212,8 @@ json all_tools() {
         "service_status", "FloServer status",
         "What FloServer is running now: its version and memory, nginx's HTTP and HTTPS ports, Apache, each PHP "
         "version's servers (running or asleep) and the projects on them, Node.js, Bun, Deno and Python app "
-        "servers, the database servers (MariaDB, MySQL) with their ports, Redis (Garnet) and Mailpit. Read-only.",
+        "servers, the database servers (MariaDB, MySQL, PostgreSQL) with their ports, Redis (Garnet) and Mailpit. "
+        "Read-only.",
         no_arguments(),
         object_of({{"service", typed("object")},
                    {"web", typed("object")},
@@ -978,9 +979,9 @@ json valid_setting(const std::string& key, const json& v) {
     if (key == "php" && v.is_string() && v.get<std::string>() == kPhpNewest) {
         return v;
     }
-    // "mariadb": "11.4" and "mysql": "8.4" are the database's shorthand (D28).
+    // "mariadb": "11.4", "mysql": "8.4" and "postgresql": "18" are the database's shorthand (D28, D29).
     if (key == "php" || key == "node" || key == "python" || key == "bun" || key == "deno" || key == "mariadb" ||
-        key == "mysql") {
+        key == "mysql" || key == "postgresql") {
         return v.is_string() && version_like(v.get<std::string>()) ? v : json(kNotValid);
     }
     if (key == "web") {
@@ -1007,7 +1008,7 @@ json valid_setting(const std::string& key, const json& v) {
         }
         const auto& d = v.get_ref<const std::string&>();
         const std::size_t dash = d.find('-');
-        static constexpr std::array<std::string_view, 2> kFamilies = {"mariadb", "mysql"};
+        static constexpr std::array<std::string_view, 3> kFamilies = {"mariadb", "mysql", "postgresql"};
         std::string family = d.substr(0, std::min(dash, d.size()));
         for (char& c : family) {
             c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));  // MariaDB-11.4, as the service takes it
@@ -1065,8 +1066,8 @@ json key_names(const json& object, std::string_view extra, int& hidden) {
 // what it says; the other keys by name. Names that may be secrets themselves
 // are counted in "hidden_names" instead.
 json safe_project_config(const json& config) {
-    static constexpr std::array<std::string_view, 11> kSettings = {"php",  "node", "python", "bun",   "deno",    "web",
-                                                                   "root", "redis", "database", "mariadb", "mysql"};
+    static constexpr std::array<std::string_view, 12> kSettings = {
+        "php", "node", "python", "bun", "deno", "web", "root", "redis", "database", "mariadb", "mysql", "postgresql"};
     json out = json::object();
     json other = json::array();
     int hidden = 0;

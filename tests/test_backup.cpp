@@ -464,6 +464,90 @@ TEST_CASE("a backup's SQL is made ready to load into another database") {
     CHECK(test_util::read_file(tmp.path() / "w.sql").ends_with("USE `x`;\nCREATE TABLE a (b int);\nINSERT INTO a VALUES (1);\n"));
 }
 
+TEST_CASE("a PostgreSQL backup's SQL: psql's own commands off, the dump's own key taken out (D29)") {
+    const test_util::TempDir tmp;
+    const fs::path main = tmp.path() / "load.sql";
+    PgLoadWriter w;
+    std::string error;
+    REQUIRE(w.open(main, error));
+    const std::string dump =
+        "--\r\n-- PostgreSQL database dump\n--\n\n\\restrict K3y0fTheDump\n\n"
+        "SET client_encoding = 'UTF8';\n"
+        "COPY public.t (x) FROM stdin;\n\\restrict K3y0fTheDump\n\\N\n\\\\restrict x\n\\.\n"
+        "\\restrict another\n"
+        "\\! calc.exe\n"
+        "\\unrestrict other\n"
+        "\\unrestrict K3y0fTheDump\r\n";
+    // In pieces that cut lines anywhere.
+    for (std::size_t at = 0; at < dump.size(); at += 7) {
+        REQUIRE(w.feed(std::string_view(dump).substr(at, 7), error));
+    }
+    REQUIRE(w.finish(error));
+    const std::string out = test_util::read_file(main);
+    const std::string first = out.substr(0, out.find('\n'));
+    // FloServer's own first line: a fresh key, never the dump's.
+    CHECK(first.starts_with("\\restrict "));
+    CHECK(first.size() == std::string("\\restrict ").size() + 48);
+    const std::string rest = out.substr(out.find('\n') + 1);
+    CHECK(rest == "--\r\n-- PostgreSQL database dump\n--\n\n\n"
+                  "SET client_encoding = 'UTF8';\n"
+                  "COPY public.t (x) FROM stdin;\n\\restrict K3y0fTheDump\n\\N\n\\\\restrict x\n\\.\n"
+                  "\\restrict another\n"
+                  "\\! calc.exe\n"  // left for psql, which refuses it: its own commands are off
+                  "\\unrestrict other\n");
+    // A new key each time.
+    PgLoadWriter again;
+    const fs::path second = tmp.path() / "again.sql";
+    REQUIRE(again.open(second, error));
+    REQUIRE(again.finish(error));
+    CHECK(test_util::read_file(second).substr(0, first.size()) != first);
+    // One huge line (a long INSERT, or a backup made to fill the memory) is written on as it comes.
+    {
+        PgLoadWriter big;
+        const fs::path big_out = tmp.path() / "big.sql";
+        REQUIRE(big.open(big_out, error));
+        const std::string chunk(4096, 'x');
+        REQUIRE(big.feed("--\n\\restrict ", error));
+        for (int i = 0; i < 64; ++i) {
+            REQUIRE(big.feed(chunk, error));
+        }
+        REQUIRE(big.feed("\nSELECT 1;\n" + std::string(300, 'y'), error));
+        REQUIRE(big.finish(error));
+        const std::string text = test_util::read_file(big_out);
+        const std::string body = text.substr(text.find('\n') + 1);
+        CHECK(body == "--\n\\restrict " + std::string(std::size_t{64} * 4096, 'x') + "\nSELECT 1;\n" + std::string(300, 'y') + "\n");
+    }
+    // From a file, as today's is put back.
+    const fs::path in = tmp.path() / "today.sql";
+    test_util::write_file(in, "\\restrict abc\nSELECT 1;\n\\unrestrict abc\n");
+    REQUIRE(prepare_pg_sql_for_load(in, tmp.path() / "back.sql", error));
+    const std::string back = test_util::read_file(tmp.path() / "back.sql");
+    CHECK(back.substr(back.find('\n') + 1) == "SELECT 1;\n");
+}
+
+TEST_CASE("a backup's database family, and which can be loaded into which (D29)") {
+    BackupInfo info;
+    CHECK(backup_database_family(info).empty());
+    info.versions["database"] = "postgresql-18";
+    CHECK(backup_database_family(info) == "postgresql");
+    info.versions["database"] = "mariadb-11.4";
+    CHECK(backup_database_family(info) == "mariadb");
+    info.versions["database"] = "PostgreSQL-18";  // written by hand: taken as floserver.json's reader takes it
+    CHECK(backup_database_family(info) == "postgresql");
+    CHECK(database_family_mismatch("mariadb", "mysql").empty());
+    CHECK(database_family_mismatch("", "mariadb").empty());
+    CHECK(database_family_mismatch("postgresql", "postgresql").empty());
+    CHECK(database_family_mismatch("mariadb", "postgresql") ==
+          "the backup's database is MariaDB's and the project uses PostgreSQL: one can't be loaded into the other");
+    CHECK(database_family_mismatch("", "postgresql").find("MariaDB or MySQL's") != std::string::npos);
+    CHECK(database_family_mismatch("postgresql", "mysql").find("PostgreSQL's and the project uses MySQL") !=
+          std::string::npos);
+
+    const test_util::TempDir tmp;
+    test_util::write_file(tmp.path() / "floserver.json", R"({"python": "3.12", "postgresql": "18"})");
+    CHECK(backup_versions(tmp.path())["database"] == "postgresql-18");
+}
+
 TEST_CASE("the mariadb program loads a backup with no client commands and no local files") {
     const auto args = mariadb_load_args(false);
     CHECK(std::find(args.begin(), args.end(), "--binary-mode") != args.end());
@@ -783,6 +867,40 @@ TEST_CASE("restore: today's database kept, today's files moved aside, the backup
     CHECK(r.fakes.loaded[0].starts_with("DROP DATABASE IF EXISTS `shop`;"));
     CHECK(r.fakes.switched == std::vector<std::pair<std::string, bool>>{{"shop", false}, {"shop", true}});
     CHECK_FALSE(fs::exists(r.dir.parent_path() / ".flo-r2"));
+}
+
+TEST_CASE("restore: a PostgreSQL project's database goes through psql's restricted load (D29)") {
+    Restorable r;
+    // The backup was made from MariaDB; the project uses PostgreSQL now.
+    test_util::write_file(r.dir / "floserver.json", R"({"python": "3.12", "database": "postgresql-18"})");
+    ServiceRefusal refusal;
+    CHECK_FALSE(r.service->restore({"shop", r.zip, false, true, false}, refusal));
+    CHECK(refusal.code == "different_database");
+    CHECK(refusal.message.find("MariaDB's and the project uses PostgreSQL") != std::string::npos);
+    CHECK(r.fakes.switched.empty());
+    CHECK(r.fakes.loaded.empty());
+
+    // A backup made from PostgreSQL, restored database only.
+    r.fakes.dump = "\\restrict abc\nCREATE TABLE t (x int);\n\\unrestrict abc\n";
+    const fs::path pg_zip = r.tmp.path() / "backups" / "shop-pg.zip";
+    const auto id = r.service->backup({"shop", pg_zip, true, std::nullopt}, refusal);
+    REQUIRE_MESSAGE(id, refusal.message);
+    REQUIRE(wait_for(*r.service, *id).at("state") == "done");
+    const auto restored = r.service->restore({"shop", pg_zip, false, true, false}, refusal);
+    REQUIRE_MESSAGE(restored, refusal.message);
+    const auto j = wait_for(*r.service, *restored);
+    REQUIRE_MESSAGE(j.at("state") == "done", j.dump());
+    REQUIRE(r.fakes.loaded.size() == 1);
+    CHECK(r.fakes.loaded[0].starts_with("\\restrict "));
+    CHECK(r.fakes.loaded[0].substr(r.fakes.loaded[0].find('\n') + 1) == "CREATE TABLE t (x int);\n");
+    // Its files and today's other backup's database: a files-and-database
+    // restore takes the backup's floserver.json, so MariaDB's goes into MariaDB.
+    const auto both = r.service->restore({"shop", r.zip, true, true, false}, refusal);
+    REQUIRE_MESSAGE(both, refusal.message);
+    const auto k = wait_for(*r.service, *both);
+    REQUIRE_MESSAGE(k.at("state") == "done", k.dump());
+    REQUIRE(r.fakes.loaded.size() == 2);
+    CHECK(r.fakes.loaded[1].starts_with("DROP DATABASE IF EXISTS `shop`;"));
 }
 
 TEST_CASE("restore: a backup that can't be used changes nothing") {

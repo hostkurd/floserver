@@ -99,6 +99,14 @@ struct BackupInfo {
 // marks and overrides taken out, line breaks and tabs made spaces.
 [[nodiscard]] std::string shown_text(std::string_view text);
 
+// The family of the database a backup holds ("mariadb", "mysql",
+// "postgresql"), from its recorded versions; empty when it doesn't say.
+[[nodiscard]] std::string backup_database_family(const BackupInfo& info);
+// Why a dump made on `made` (a family, or empty: an older backup, MySQL's
+// protocol) can't be loaded into `into`; empty when it can. MariaDB and
+// MySQL load each other's; PostgreSQL loads only PostgreSQL's (D29).
+[[nodiscard]] std::string database_family_mismatch(std::string_view made, std::string_view into);
+
 // The versions floserver-backup.json records, from the folder's floserver.json.
 [[nodiscard]] nlohmann::json backup_versions(const std::filesystem::path& dir);
 
@@ -206,6 +214,34 @@ private:
 [[nodiscard]] bool prepare_sql_for_load(const std::filesystem::path& in, const std::filesystem::path& main,
                                         const std::filesystem::path& extras, const std::string& database,
                                         bool& has_extras, std::string& error);
+
+// A PostgreSQL backup's SQL (pg_dump's plain format) made ready for psql
+// (D29). FloServer's own first line, "\restrict <a random key>", turns off
+// every psql command of its own (\!, \copy, \i, \set...) for the rest of
+// the file: only "\unrestrict <that key>" would turn them on, and the
+// backup can't know it. So a backup can't make psql run a program or read
+// a file, whatever it holds. The dump's own "\restrict <key>" in its
+// header, and the "\unrestrict <key>" that ends it, are taken out (psql
+// would refuse them); nothing else is changed: COPY's rows can start with
+// a backslash. The database is emptied by the service before the load.
+class PgLoadWriter {
+public:
+    [[nodiscard]] bool open(const std::filesystem::path& main, std::string& error);
+    [[nodiscard]] bool feed(std::string_view piece, std::string& error);
+    [[nodiscard]] bool finish(std::string& error);
+
+private:
+    void flush_line();
+    std::ofstream main_;
+    std::filesystem::path main_path_;
+    std::string pending_;
+    bool in_header_ = true;  // only blank lines and "--" comments so far
+    std::string dump_key_;   // the dump's own \restrict key, once seen
+    bool passing_ = false;   // a long line, written on as it comes
+};
+// The same from a file.
+[[nodiscard]] bool prepare_pg_sql_for_load(const std::filesystem::path& in, const std::filesystem::path& main,
+                                           std::string& error);
 
 // The commands that bring back what a backup left out, in the project's
 // folder with its own runtimes (the terminal shims): composer install,

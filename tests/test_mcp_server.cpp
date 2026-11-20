@@ -917,6 +917,44 @@ TEST_CASE("mcp: floserver.json is read only as the project's own plain file") {
     }
 }
 
+TEST_CASE("mcp: a PostgreSQL project's database, its server and floserver.json (D29)") {
+    FakeBackend backend;
+    fill_busy(backend);
+    json& shop = backend.results["projects.list"]["projects"][0];
+    shop["database"] = "postgresql-18";
+    shop["database_name"] = project_database_name("my-shop");
+    backend.results["databases.list"]["servers"].push_back(
+        {{"family", "postgresql"}, {"series", "18"}, {"version", "18.7"}, {"port", 5433}, {"state", "sleeping"},
+         {"connections", 0}, {"projects", json::array({"shop"})}});
+    mcp::Server server(backend);
+    for (const char* config : {R"({"python": "3.12", "database": "postgresql-18"})", R"({"postgresql": "18"})"}) {
+        backend.files["/home/me/sites/shop"] = config;
+        const json r = call_tool(server, "project_info", {{"name", "shop"}});
+        INFO(r.dump(2));
+        const json& db = r["structuredContent"]["database"];
+        CHECK(db["engine"] == "postgresql");
+        CHECK(db["version"] == "18");
+        CHECK(db["port"] == 5433);
+        CHECK(db["server"] == "sleeping");
+        CHECK(db["database"] == "my_shop");
+        CHECK(db["user"] == "my_shop");
+        CHECK_FALSE(db.contains("password"));
+        // Its own words, not "(set, not valid)".
+        const json& own = r["structuredContent"]["floserver_json"];
+        if (own.contains("database")) {
+            CHECK(own["database"] == "postgresql-18");
+        } else {
+            CHECK(own["postgresql"] == "18");
+        }
+    }
+    const json status = call_tool(server, "service_status")["structuredContent"];
+    bool found = false;
+    for (const json& d : status["databases"]) {
+        found = found || (d["engine"] == "postgresql" && d["port"] == 5433);
+    }
+    CHECK(found);
+}
+
 TEST_CASE("mcp: MySQL's names as its server has them, and Bun and Deno") {
     FakeBackend backend;
     fill_busy(backend);
