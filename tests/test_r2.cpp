@@ -28,11 +28,28 @@ constexpr const char* kEmptySha = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b9
 
 const R2Key kKey{std::string(32, 'a'), std::string(32, 'b'), std::string(64, 'c')};
 
+std::string decode(std::string_view t) {
+    std::string out;
+    for (std::size_t i = 0; i < t.size(); ++i) {
+        if (t[i] == '%' && i + 2 < t.size()) {
+            out += static_cast<char>(std::stoi(std::string(t.substr(i + 1, 2)), nullptr, 16));
+            i += 2;
+        } else {
+            out += t[i];
+        }
+    }
+    return out;
+}
+
 class FakeR2 final : public core::HttpTransport {
 public:
     std::map<std::string, std::string> objects;  // path ("/floserver-cdn/...") -> body
     std::vector<std::string> log;                // "METHOD path?query"
-    int fail_parts = 0;                          // parts to answer 500 first
+    int fail_parts = 0;                          // parts to answer with fail_status first
+    int fail_status = 500;
+    int fail_puts = 0;                           // single PUTs to answer 503 first
+    bool no_bucket = false;
+    std::atomic<bool>* cancel_flag = nullptr;  // set (and the part dropped) when a part is sent
     bool complete_with_error = false;
 
     core::HttpReply get(const std::string&, const core::HttpLimits&, const core::HttpBody&) override { return {}; }
@@ -61,14 +78,58 @@ public:
         }
         CHECK(auth);
         CHECK(sha == core::to_hex(core::sha256(body)));  // what was signed is what came
+        // The signature again, from the request as sent: the URL must be what was signed.
+        {
+            SigV4Request again;
+            again.method = req.method;
+            again.path = path;
+            std::string_view q = query;
+            while (!q.empty()) {
+                const auto amp = q.find('&');
+                const std::string_view part = q.substr(0, amp);
+                const auto eq = part.find('=');
+                again.query.emplace_back(decode(part.substr(0, eq)),
+                                         eq == std::string_view::npos ? "" : decode(part.substr(eq + 1)));
+                q = amp == std::string_view::npos ? "" : q.substr(amp + 1);
+            }
+            again.headers["host"] = kKey.account_id + ".r2.cloudflarestorage.com";
+            std::string authorization;
+            std::string date;
+            for (const auto& [k, v] : req.headers) {
+                if (k == "Authorization") {
+                    authorization = v;
+                } else {
+                    std::string lower = k;
+                    std::transform(lower.begin(), lower.end(), lower.begin(),
+                                   [](char c) { return static_cast<char>(std::tolower(static_cast<unsigned char>(c))); });
+                    again.headers[lower] = v;
+                    date = lower == "x-amz-date" ? v : date;
+                }
+            }
+            again.payload_sha256 = sha;
+            CHECK(authorization ==
+                  sigv4_authorization(again, date, "auto", "s3", kKey.access_key_id, kKey.secret));
+            CHECK(decode(path).starts_with("/floserver-cdn/"));
+        }
+        if (no_bucket) {
+            r.status = 404;
+            r.body = "<Error><Code>NoSuchBucket</Code><Message>The specified bucket does not exist.</Message></Error>";
+            return r;
+        }
         if (req.method == "HEAD") {
-            const auto it = objects.find(path);
+            const auto it = objects.find(decode(path));
             r.status = it == objects.end() ? 404 : 200;
             if (it != objects.end()) {
                 r.headers.emplace_back("Content-Length", std::to_string(it->second.size()));
             }
         } else if (req.method == "PUT" && query.empty()) {
-            objects[path] = body;
+            if (fail_puts > 0) {
+                --fail_puts;
+                r.status = 503;
+                return r;
+            }
+            objects[decode(path)] = body;
+            content_types[decode(path)] = content_type_of(req);
             r.status = 200;
         } else if (req.method == "POST" && query == "uploads") {
             r.status = 200;
@@ -76,9 +137,16 @@ public:
         } else if (req.method == "PUT") {
             std::smatch m;
             REQUIRE(std::regex_match(query, m, std::regex("partNumber=(\\d+)&uploadId=up1")));
+            ++part_tries;
+            if (cancel_flag != nullptr) {
+                *cancel_flag = true;
+                r.status = 0;
+                r.error = "cancelled";
+                return r;
+            }
             if (fail_parts > 0) {
                 --fail_parts;
-                r.status = 500;
+                r.status = fail_status;
                 return r;
             }
             parts[std::stoi(m[1])] = body;
@@ -95,7 +163,7 @@ public:
             for (const auto& [n, p] : parts) {
                 all += p;
             }
-            objects[path] = all;
+            objects[decode(path)] = all;
         } else if (req.method == "DELETE" && query == "uploadId=up1") {
             aborted = true;
             r.status = 204;
@@ -105,6 +173,16 @@ public:
         return r;
     }
 
+    static std::string content_type_of(const core::HttpRequest& req) {
+        for (const auto& [k, v] : req.headers) {
+            if (k == "Content-Type") {
+                return v;
+            }
+        }
+        return {};
+    }
+    std::map<std::string, std::string> content_types;
+    int part_tries = 0;
     std::map<int, std::string> parts;
     std::string completed;
     bool aborted = false;
@@ -274,4 +352,72 @@ TEST_CASE("r2: upload_files never overwrites, and counts a same-size file as the
         CHECK(r2.objects.at("/floserver-cdn/deno/2.6.0/a.zip") == "different");
         CHECK(!r2.objects.contains("/floserver-cdn/deno/2.6.0/b.zip"));
     }
+}
+
+TEST_CASE("r2: a name with '+', a space and non-ASCII is signed as sent") {
+    FakeR2 r2;
+    R2Bucket b = bucket(r2);
+    const test_util::TempDir dir;
+    write(dir.path() / "f.zip", "x");
+    std::string error;
+    REQUIRE(b.put_file("test/1.0/a+b c\xc3\xa9.zip", dir.path() / "f.zip", error));
+    CHECK(r2.objects.contains("/floserver-cdn/test/1.0/a+b c\xc3\xa9.zip"));
+    CHECK(r2.log.back() == "PUT /floserver-cdn/test/1.0/a%2Bb%20c%C3%A9.zip");
+    CHECK(r2.content_types.at("/floserver-cdn/test/1.0/a+b c\xc3\xa9.zip") == "application/zip");
+}
+
+TEST_CASE("r2: retries only what may go better") {
+    FakeR2 r2;
+    R2Bucket b = bucket(r2);
+    const test_util::TempDir dir;
+    write(dir.path() / "f.zip", "x");
+    std::string error;
+    SUBCASE("a single PUT after a 503") {
+        r2.fail_puts = 1;
+        CHECK(b.put_file("t/1/f.zip", dir.path() / "f.zip", error));
+    }
+    SUBCASE("a part refused with 403: not sent again") {
+        const fs::path big = dir.path() / "big.zip";
+        write(big, "h");
+        fs::resize_file(big, R2Bucket::kMultipartFrom + 1);
+        r2.fail_parts = 5;
+        r2.fail_status = 403;
+        CHECK(!b.put_file("t/1/big.zip", big, error));
+        CHECK(r2.part_tries == 1);
+        CHECK(r2.aborted);
+    }
+    SUBCASE("Stop during a part: aborted, said as stopped") {
+        const fs::path big = dir.path() / "big.zip";
+        write(big, "h");
+        fs::resize_file(big, R2Bucket::kMultipartFrom + 1);
+        std::atomic<bool> cancel{false};
+        r2.cancel_flag = &cancel;
+        CHECK(!b.put_file("t/1/big.zip", big, error, &cancel));
+        CHECK(error == "stopped");
+        CHECK(r2.part_tries == 1);
+        CHECK(r2.aborted);
+    }
+}
+
+TEST_CASE("r2: a bucket that isn't there isn't 'not there'") {
+    FakeR2 r2;
+    r2.no_bucket = true;
+    R2Bucket b = bucket(r2);
+    std::string error;
+    CHECK(!b.size_of("manifest.json", error));
+    CHECK(error.find("NoSuchBucket") != std::string::npos);
+}
+
+TEST_CASE("r2: upload_files stopping half way says what went up") {
+    FakeR2 r2;
+    R2Bucket b = bucket(r2);
+    const test_util::TempDir dir;
+    write(dir.path() / "bun/1.3.14/bun-windows-x64.zip", "regular");
+    write(dir.path() / "bun/1.3.14/bun-windows-x64-baseline.zip", "baseline");
+    r2.objects["/floserver-cdn/bun/1.3.14/bun-windows-x64-baseline.zip"] = "other size";
+    const UploadResult u =
+        upload_files(b, {"bun/1.3.14/bun-windows-x64.zip", "bun/1.3.14/bun-windows-x64-baseline.zip"}, dir.path());
+    CHECK(u.uploaded == std::vector<std::string>{"bun/1.3.14/bun-windows-x64.zip"});
+    CHECK(u.conflict);
+    CHECK(!u.problem.empty());
 }

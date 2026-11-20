@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <array>
 #include <cwctype>
+#include <memory>
+#include <thread>
 
 namespace floserver::publisher {
 
@@ -26,6 +28,12 @@ constexpr COLORREF kRed = RGB(0xB3, 0x26, 0x1E);
 constexpr COLORREF kGreen = RGB(0x0F, 0x6B, 0x2E);
 
 enum : int { IdAccount = 400, IdKeyId, IdSecret, IdTest, IdSave, IdForget, IdCancel };
+constexpr UINT kMsgTested = WM_APP + 30;  // lParam: TestResult*
+
+struct TestResult {
+    std::string error;
+    bool manifest_there = false;
+};
 
 std::string field(HWND h) {
     const int n = GetWindowTextLengthW(h);
@@ -49,6 +57,10 @@ public:
     KeyWindow(KeyWindow&&) = delete;
     KeyWindow& operator=(KeyWindow&&) = delete;
     ~KeyWindow() {
+        if (tester_.joinable()) {
+            // It holds only copies; its answer to the closed window is dropped.
+            tester_.detach();
+        }
         for (HGDIOBJ o : {static_cast<HGDIOBJ>(font_), static_cast<HGDIOBJ>(bold_), static_cast<HGDIOBJ>(bg_)}) {
             if (o != nullptr) {
                 DeleteObject(o);
@@ -114,7 +126,7 @@ public:
         secret_ = make(L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL | ES_PASSWORD, IdSecret, 16, 260, 528, 24, font_,
                        WS_EX_CLIENTEDGE);
         status_ = make(L"STATIC", L"", SS_LEFT | SS_NOPREFIX, -1, 16, 294, 528, 36, font_);
-        make(L"BUTTON", L"Test", WS_TABSTOP | BS_PUSHBUTTON, IdTest, 16, 342, 90, 30, font_);
+        test_ = make(L"BUTTON", L"Test", WS_TABSTOP | BS_PUSHBUTTON, IdTest, 16, 342, 90, 30, font_);
         forget_ = make(L"BUTTON", L"Forget the key", WS_TABSTOP | BS_PUSHBUTTON, IdForget, 114, 342, 120, 30, font_);
         make(L"BUTTON", L"Save", WS_TABSTOP | BS_DEFPUSHBUTTON, IdSave, 356, 342, 90, 30, font_);
         make(L"BUTTON", L"Cancel", WS_TABSTOP | BS_PUSHBUTTON, IdCancel, 454, 342, 90, 30, font_);
@@ -172,8 +184,24 @@ private:
             return 1;
         }
         case WM_CLOSE:
+        case WM_DESTROY:
             done_ = true;
             return 0;
+        case kMsgTested: {
+            const std::unique_ptr<TestResult> r(int_to_ptr<TestResult*>(lp));
+            if (tester_.joinable()) {
+                tester_.join();
+            }
+            EnableWindow(test_, TRUE);
+            if (r->error.empty()) {
+                say(r->manifest_there ? L"The key works: R2 answered for floserver-cdn (manifest.json is there)."
+                                      : L"The key works: R2 answered for floserver-cdn.",
+                    false, true);
+            } else {
+                say(L"R2 refused it: " + widen(r->error), true, true);
+            }
+            return 0;
+        }
         case WM_COMMAND:
             switch (LOWORD(wp)) {
             case IdCancel:
@@ -219,31 +247,30 @@ private:
         return k;
     }
 
+    // On a worker: a slow network mustn't freeze the window.
     void test() {
+        if (tester_.joinable()) {
+            return;
+        }
         const auto k = typed();
         if (!k) {
             return;
         }
         say(L"Asking R2…", false, false);
-        UpdateWindow(status_);
-        const HCURSOR before = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
-        auto http = core::make_system_transport();
-        std::string error;
-        std::optional<std::uint64_t> size;
-        if (http) {
-            mt::R2Bucket bucket(*http, *k);
-            size = bucket.size_of("manifest.json", error);
-        } else {
-            error = "no HTTPS on this computer";
-        }
-        SetCursor(before);
-        if (error.empty()) {
-            say(size ? L"The key works: R2 answered for floserver-cdn (manifest.json is there)."
-                     : L"The key works: R2 answered for floserver-cdn.",
-                false, true);
-        } else {
-            say(L"R2 refused it: " + widen(error), true, true);
-        }
+        EnableWindow(test_, FALSE);
+        HWND target = hwnd_;
+        tester_ = std::thread([target, key = *k] {
+            auto r = std::make_unique<TestResult>();
+            if (auto http = core::make_system_transport()) {
+                mt::R2Bucket bucket(*http, key);
+                r->manifest_there = bucket.size_of("manifest.json", r->error).has_value();
+            } else {
+                r->error = "no HTTPS on this computer";
+            }
+            if (PostMessageW(target, kMsgTested, 0, reinterpret_cast<LPARAM>(r.get())) != FALSE) {
+                (void)r.release();
+            }
+        });
     }
 
     void save() {
@@ -268,7 +295,9 @@ private:
 
     HWND owner_;
     HWND hwnd_ = nullptr;
-    HWND account_ = nullptr, key_id_ = nullptr, secret_ = nullptr, status_ = nullptr, forget_ = nullptr;
+    HWND account_ = nullptr, key_id_ = nullptr, secret_ = nullptr, status_ = nullptr, forget_ = nullptr,
+         test_ = nullptr;
+    std::thread tester_;
     HFONT font_ = nullptr, bold_ = nullptr;
     HBRUSH bg_ = nullptr;
     COLORREF status_color_ = kText;

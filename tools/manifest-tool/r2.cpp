@@ -334,7 +334,7 @@ std::optional<std::uint64_t> R2Bucket::size_of(const std::string& object, std::s
     c.object = object;
     c.max_time = std::chrono::seconds{30};
     const core::HttpResponse r = call(c, error, cancel);
-    if (r.status == 404) {
+    if (r.status == 404 && r.body.find("NoSuchBucket") == std::string::npos) {
         return std::nullopt;
     }
     if (r.status != 200) {
@@ -352,6 +352,11 @@ std::optional<std::uint64_t> R2Bucket::size_of(const std::string& object, std::s
     }
     return size;
 }
+
+namespace {
+// Worth sending again: no answer, or the server's own trouble.
+bool retryable(const core::HttpResponse& r) { return r.status == 0 || r.status >= 500; }
+}  // namespace
 
 bool R2Bucket::put_file(const std::string& object, const fs::path& file, std::string& error,
                         const std::atomic<bool>* cancel, const std::function<void(const R2Progress&)>& progress) {
@@ -375,7 +380,14 @@ bool R2Bucket::put_file(const std::string& object, const fs::path& file, std::st
         c.file = &file;
         c.size = total;
         c.max_time = std::chrono::hours{1};
-        const core::HttpResponse r = call(c, error, cancel, tell);
+        core::HttpResponse r;
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            error.clear();
+            r = call(c, error, cancel, tell);
+            if (r.status == 200 || !retryable(r) || (cancel != nullptr && cancel->load())) {
+                break;
+            }
+        }
         if (r.status == 200) {
             return true;
         }
@@ -425,7 +437,7 @@ bool R2Bucket::put_file(const std::string& object, const fs::path& file, std::st
         for (int attempt = 0; attempt < 2; ++attempt) {
             error.clear();
             r = call(p, error, cancel, [&](std::uint64_t sent) { tell(base + sent); });
-            if (r.status == 200 || (cancel != nullptr && cancel->load())) {
+            if (r.status == 200 || !retryable(r) || (cancel != nullptr && cancel->load())) {
                 break;
             }
         }
@@ -491,6 +503,7 @@ UploadResult upload_files(R2Bucket& bucket, const std::vector<std::string>& cdn_
                 result.already.push_back(path);
                 continue;
             }
+            result.conflict = true;
             result.problem = path + " is already on R2 with a different size (" + std::to_string(*there) +
                              " bytes, this one " + std::to_string(size) +
                              "): not overwritten, as lists people have point at it";

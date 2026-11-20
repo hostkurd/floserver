@@ -107,6 +107,9 @@ struct UploadResult {
     std::vector<std::string> uploaded;  // sent now
     std::vector<std::string> already;   // there before, same size
     std::string problem;
+    // R2 has another file at one of these paths: never to be uploaded by
+    // hand either (that would overwrite it).
+    bool conflict = false;
 };
 [[nodiscard]] UploadResult upload_files(
     R2Bucket& bucket, const std::vector<std::string>& cdn_paths, const std::filesystem::path& folder,

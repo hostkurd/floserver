@@ -500,6 +500,16 @@ LRESULT UpdatesWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
         return DefWindowProcW(gone, msg, wp, lp);
     }
     case WM_CLOSE:
+        if (downloading_) {
+            // Its result would come to a hidden window: ask.
+            if (MessageBoxW(hwnd_, uploading_ ? L"Stop getting and uploading the ticked versions?"
+                                              : L"Stop downloading the ticked versions?",
+                            L"FloServer Publisher", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) {
+                return 0;
+            }
+            cancel_ = true;
+            SetWindowTextW(status_, L"Stopping…");
+        }
         ShowWindow(hwnd_, SW_HIDE);  // kept, with its rows, until the Publisher closes
         return 0;
     case kMsgAsking: {
@@ -679,12 +689,30 @@ void UpdatesWindow::download(bool upload) {
                 done->problems.emplace_back();
                 done->stages.push_back(Stage::Uploaded);
                 done->all_there.push_back(up.uploaded.empty());
+            } else if (up.conflict) {
+                // R2 has another file there: neither uploaded nor listed, and
+                // not in the upload steps (they'd overwrite it). Kept here to look at.
+                done->problems.push_back(up.problem);
+                done->stages.push_back(Stage::None);
+                done->all_there.push_back(false);
+                for (const std::string& p : got.cdn_paths) {
+                    std::erase(done->cdn_paths, p);
+                }
             } else {
-                // Kept here for uploading by hand; Publish checks them either way.
+                // What did go up leaves here; the rest stays for uploading by
+                // hand. Publish checks them either way.
                 done->problems.push_back(cancel_ ? std::string("stopped") : up.problem);
                 done->stages.push_back(Stage::Downloaded);
                 done->all_there.push_back(false);
-                done->manual.insert(done->manual.end(), got.cdn_paths.begin(), got.cdn_paths.end());
+                for (const std::string& p : got.cdn_paths) {
+                    const bool on_r2 = std::find(up.uploaded.begin(), up.uploaded.end(), p) != up.uploaded.end() ||
+                                       std::find(up.already.begin(), up.already.end(), p) != up.already.end();
+                    if (on_r2) {
+                        remove_with_folders(folder, folder / core::path_from_utf8(p));
+                    } else {
+                        done->manual.push_back(p);
+                    }
+                }
             }
         }
         done->stopped = done->stopped || cancel_;
@@ -699,6 +727,9 @@ void UpdatesWindow::download(bool upload) {
 }
 
 void UpdatesWindow::fetched(FetchDone& done) {
+    if (!IsWindowVisible(hwnd_)) {
+        ShowWindow(hwnd_, SW_SHOW);  // closed while it ran: what came of it is shown
+    }
     int uploaded = 0;
     int downloaded = 0;
     int failed = 0;
@@ -730,7 +761,9 @@ void UpdatesWindow::fetched(FetchDone& done) {
             rows_[i].ticked = false;
             break;
         case Stage::None:
-            outcome_[i] = L"Not downloaded: " + widen(problem);
+            outcome_[i] = (done.upload && problem.find("already on R2") != std::string::npos ? L"Not uploaded: "
+                                                                                              : L"Not downloaded: ") +
+                          widen(problem);
             outcome_ok_[i] = false;
             ++failed;
             break;
