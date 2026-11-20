@@ -57,7 +57,8 @@ struct FetchResult {
 
 // Downloads `plan`'s files into `folder` (<folder>/<cdn path>), checking
 // each against its official checksum where one is published. A file that
-// doesn't match is deleted and named in the problem.
+// doesn't match is deleted and named in the problem. All of a plan or none:
+// on a problem, the files already written for it are deleted too.
 [[nodiscard]] FetchResult fetch_files(core::HttpTransport& http, const FetchPlan& plan,
                                       const std::filesystem::path& folder, const std::atomic<bool>* cancel = nullptr,
                                       const std::function<void(const FetchProgress&)>& progress = {});
@@ -70,8 +71,10 @@ struct FetchResult {
                                               std::string& error, const std::atomic<bool>* cancel = nullptr);
 
 // upload-steps.txt for a Download only folder: what to upload where, with
-// the Wrangler commands for the bucket.
-[[nodiscard]] std::string upload_steps(const std::vector<std::string>& cdn_paths);
+// the Wrangler commands for the bucket. A file in `folder` over Wrangler's
+// 300 MiB is listed apart, for an S3 client.
+[[nodiscard]] std::string upload_steps(const std::vector<std::string>& cdn_paths,
+                                       const std::filesystem::path& folder = {});
 
 // D34.5: the fetched files added to the Publisher's next list, each one
 // replacing the older versions of its series there (the same runtime,

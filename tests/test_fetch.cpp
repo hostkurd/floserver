@@ -11,6 +11,7 @@
 #include "floserver/core/zip_write.h"
 
 #include <doctest/doctest.h>
+#include <miniz.h>
 
 #include <fstream>
 #include <sstream>
@@ -36,6 +37,30 @@ std::string slurp(const fs::path& p) {
     std::ostringstream s;
     s << in.rdbuf();
     return s.str();
+}
+
+const std::vector<std::string> kEdbNames = {
+    "pgsql/bin/postgres.exe", "pgsql/bin/initdb.exe",   "pgsql/bin/pg_ctl.exe",        "pgsql/bin/psql.exe",
+    "pgsql/bin/pg_dump.exe",  "pgsql/bin/libpq.dll",    "pgsql/share/postgres.bki",    "pgsql/lib/plpgsql.dll",
+    "pgsql/include/libpq-fe.h", "pgsql/pgAdmin 4/runtime/pgAdmin4.exe"};
+
+// EDB's zip as zip64 (miniz copies such entries only into a zip64 archive).
+void write_zip64(const fs::path& file, const std::vector<std::string>& names) {
+    mz_zip_archive z{};
+    REQUIRE(mz_zip_writer_init_heap_v2(&z, 0, 0, MZ_ZIP_FLAG_WRITE_ZIP64) != MZ_FALSE);
+    for (const std::string& n : names) {
+        const std::string body = "contents of " + n;
+        REQUIRE(mz_zip_writer_add_mem(&z, n.c_str(), body.data(), body.size(), MZ_DEFAULT_COMPRESSION) != MZ_FALSE);
+    }
+    void* buf = nullptr;
+    std::size_t size = 0;
+    REQUIRE(mz_zip_writer_finalize_heap_archive(&z, &buf, &size) != MZ_FALSE);
+    {
+        std::ofstream out(file, std::ios::binary);
+        out.write(static_cast<const char*>(buf), static_cast<std::streamsize>(size));
+    }
+    mz_free(buf);
+    mz_zip_writer_end(&z);
 }
 
 // A zip's first bytes, as zip_there() looks for.
@@ -66,7 +91,7 @@ TEST_CASE("fetch: plan_fetch names each runtime's official download and its CDN 
         const FetchPlan p = plan_fetch(http, row("php", "8.5.13"), none);
         REQUIRE(p.files.size() == 1);
         CHECK(p.files[0].cdn_path == "php/8.5.13/php-8.5.13-1-nts-Win32-vs17-x64.zip");
-        CHECK(plan_fetch(http, row("php", "8.5.1"), none).problem.find("doesn't name") != std::string::npos);
+        CHECK(plan_fetch(http, row("php", "8.5.1"), none).problem.find("don't name") != std::string::npos);
     }
 
     SUBCASE("Apache: the link on Apache Lounge's page") {
@@ -159,6 +184,35 @@ TEST_CASE("fetch: fetch_files writes each file at its CDN path, checked against 
     }
 }
 
+TEST_CASE("fetch: a version is fetched whole or not at all") {
+    FakeTransport http;
+    const test_util::TempDir dir;
+    FetchPlan plan;
+    plan.title = "Deno 2.6.0";
+    const std::string base = "https://github.com/denoland/deno/releases/download/v2.6.0/";
+    // Two files of one version (as Bun's two builds); the second one fails.
+    plan.files = {{base + "deno-x86_64-pc-windows-msvc.zip", "deno/2.6.0/deno-x86_64-pc-windows-msvc.zip"},
+                  {base + "missing.zip", "deno/2.6.0/missing.zip"}};
+    http.serve(plan.files[0].url, {200, "deno"});
+    http.serve(base + "deno-x86_64-pc-windows-msvc.zip.sha256sum", {200, hex("deno") + "  deno-x86_64-pc-windows-msvc.zip\n"});
+    http.serve(plan.files[1].url, {404, ""});
+    const FetchResult r = fetch_files(http, plan, dir.path());
+    CHECK(!r.problem.empty());
+    CHECK(r.cdn_paths.empty());
+    CHECK(!fs::exists(dir.path() / "deno"));  // the first file and its folders went too
+}
+
+TEST_CASE("fetch: PHP's zip found in the archives once a newer patch is out") {
+    FakeTransport http;
+    http.serve("https://downloads.php.net/~windows/releases/sha256sum.txt", {200, "aa *php-8.4.16-nts-Win32-vs17-x64.zip\n"});
+    http.serve("https://downloads.php.net/~windows/releases/archives/sha256sum.txt",
+               {200, "bb *php-8.4.15-nts-Win32-vs17-x64.zip\n"});
+    const FetchPlan p = plan_fetch(http, row("php", "8.4.15"), {});
+    REQUIRE(p.problem.empty());
+    REQUIRE(p.files.size() == 1);
+    CHECK(p.files[0].url == "https://downloads.php.net/~windows/releases/archives/php-8.4.15-nts-Win32-vs17-x64.zip");
+}
+
 TEST_CASE("fetch: the PostgreSQL server zip holds EDB's server files, copied as they are") {
     const test_util::TempDir dir;
     const fs::path edb = dir.path() / "edb.zip";
@@ -193,6 +247,29 @@ TEST_CASE("fetch: the PostgreSQL server zip holds EDB's server files, copied as 
     for (const auto& [name, h] : *ours) {
         CHECK(name.find("pgAdmin") == std::string::npos);
         CHECK(name.find("/doc/") == std::string::npos);
+    }
+
+    SUBCASE("a zip64 zip from EDB") {
+        const fs::path z64 = dir.path() / "edb64.zip";
+        write_zip64(z64, kEdbNames);
+        const fs::path out64 = dir.path() / "server64.zip";
+        REQUIRE(make_postgresql_server_zip(z64, out64, error));
+        std::string e3;
+        std::string e4;
+        const auto a = floserver::core::zip_file_hashes(out64, e3);
+        const auto b = floserver::core::zip_file_hashes(z64, e4);
+        REQUIRE(a);
+        REQUIRE(b);
+        CHECK(a->size() == 9);
+        CHECK(made_from_problem(*a, *b, rules.required, rules.kept).empty());
+    }
+
+    SUBCASE("the server zip can't be written: a reason, not a quiet failure") {
+        const fs::path blocker = dir.path() / "a-file";
+        std::ofstream(blocker) << "x";
+        error.clear();
+        CHECK(!make_postgresql_server_zip(edb, blocker / "server.zip", error));
+        CHECK(!error.empty());
     }
 
     SUBCASE("not EDB's binaries zip: refused, nothing left") {

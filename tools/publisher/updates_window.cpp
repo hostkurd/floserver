@@ -602,7 +602,7 @@ void UpdatesWindow::download() {
         done->stopped = done->stopped || cancel_;
         if (!done->cdn_paths.empty()) {
             std::ofstream steps(folder / L"upload-steps.txt", std::ios::binary | std::ios::trunc);
-            steps << mt::upload_steps(done->cdn_paths);
+            steps << mt::upload_steps(done->cdn_paths, folder);
         }
         if (PostMessageW(target, kMsgFetched, 0, reinterpret_cast<LPARAM>(done.get())) != FALSE) {
             (void)done.release();

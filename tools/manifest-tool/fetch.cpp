@@ -26,6 +26,7 @@ using core::Version;
 
 constexpr std::uint64_t kMaxFile = std::uint64_t{2} * 1024 * 1024 * 1024;  // as Publish's limit
 constexpr std::size_t kMaxText = std::size_t{8} * 1024 * 1024;
+constexpr std::uint64_t kWranglerMax = std::uint64_t{300} * 1024 * 1024;  // "files up to 300 MiB"
 
 bool stopped(const std::atomic<bool>* cancel) { return cancel != nullptr && cancel->load(); }
 
@@ -186,7 +187,15 @@ bool make_postgresql_server_zip(const fs::path& edb_zip, const fs::path& out, st
     mz_zip_archive writer{};
     writer.m_pWrite = zip_write;
     writer.m_pIO_opaque = &file;
-    bool ok = file.is_open() && mz_zip_writer_init(&writer, 0) != MZ_FALSE;
+    // A zip64 source copies only into a zip64 archive (miniz refuses otherwise).
+    const mz_uint flags = mz_zip_is_zip64(&reader) != MZ_FALSE ? MZ_ZIP_FLAG_WRITE_ZIP64 : 0;
+    bool ok = file.is_open();
+    if (!ok) {
+        error = "can't write " + core::path_to_utf8(part);
+    } else if (mz_zip_writer_init_v2(&writer, 0, flags) == MZ_FALSE) {
+        error = "can't start the server zip";
+        ok = false;
+    }
     std::set<std::string> names;
     const mz_uint count = mz_zip_reader_get_num_files(&reader);
     for (mz_uint i = 0; ok && i < count; ++i) {
@@ -230,6 +239,10 @@ bool make_postgresql_server_zip(const fs::path& edb_zip, const fs::path& out, st
     mz_zip_writer_end(&writer);
     mz_zip_reader_end(&reader);
     file.close();
+    if (ok && file.fail()) {
+        error = "can't finish the server zip (is the disk full?)";
+        ok = false;
+    }
     if (ok) {
         fs::rename(part, out, ec);
         if (ec) {
@@ -255,17 +268,23 @@ FetchPlan plan_fetch(core::HttpTransport& http, const UpdateRow& row,
     const auto simple = [&](const std::string& base, const std::string& file) { add(base + file, file); };
     std::string error;
     if (r == "php") {
-        // Its name: with a rebuild number or without, vs16 or vs17.
-        const std::string url = "https://downloads.php.net/~windows/releases/sha256sum.txt";
-        if (const auto sums = get_text(http, url, cancel, error)) {
-            const std::regex re("php-" + regex_escape(v) + R"((-\d+)?-nts-Win32-vs1[67]-x64\.zip)");
-            if (const auto file = find(*sums, re)) {
-                simple("https://downloads.php.net/~windows/releases/", *file);
-            } else {
-                plan.problem = url + " doesn't name PHP " + v + "'s Windows NTS x64 zip";
+        // Its name: with a rebuild number or without, vs16 or vs17. The
+        // current releases first, then the archives (where it goes once a
+        // newer patch is out).
+        const std::regex re("php-" + regex_escape(v) + R"((-\d+)?-nts-Win32-vs1[67]-x64\.zip)");
+        for (const std::string base : {"https://downloads.php.net/~windows/releases/",
+                                       "https://downloads.php.net/~windows/releases/archives/"}) {
+            if (const auto sums = get_text(http, base + "sha256sum.txt", cancel, error)) {
+                if (const auto file = find(*sums, re)) {
+                    plan.files.clear();
+                    simple(base, *file);
+                    plan.problem.clear();
+                    break;
+                }
+                plan.problem = "php.net's checksum lists don't name PHP " + v + "'s Windows NTS x64 zip";
+            } else if (plan.problem.empty()) {
+                plan.problem = error;
             }
-        } else {
-            plan.problem = error;
         }
     } else if (r == "mariadb") {
         simple("https://archive.mariadb.org/mariadb-" + v + "/winx64-packages/", "mariadb-" + v + "-winx64.zip");
@@ -297,7 +316,7 @@ FetchPlan plan_fetch(core::HttpTransport& http, const UpdateRow& row,
         // Apache Lounge's name carries its build stamp and compiler.
         const std::string page = "https://www.apachelounge.com/download/";
         if (const auto html = get_text(http, page, cancel, error)) {
-            const std::regex re("href=\"([^\"]*/(httpd-" + regex_escape(v) + R"(-\d+-[Ww]in64-VS1[78]\.zip))\")");
+            const std::regex re("href=\"([^\"]*/(httpd-" + regex_escape(v) + R"(-\d+-Win64-VS1[78]\.zip))\")");
             const auto href = find(*html, re, 1);
             const auto file = find(*html, re, 2);
             if (href && file) {
@@ -377,7 +396,9 @@ FetchPlan plan_fetch(core::HttpTransport& http, const UpdateRow& row,
                 missing.push_back(s);
             }
         }
-        if (plan.files.empty()) {
+        if (series.empty()) {
+            plan.problem = "there's no PHP in the next list to build phpredis for";
+        } else if (plan.files.empty()) {
             plan.problem = "PECL has no Windows builds of phpredis " + v + " yet";
         } else if (!missing.empty()) {
             plan.note = "no Windows build yet for PHP";
@@ -421,7 +442,7 @@ FetchResult fetch_files(core::HttpTransport& http, const FetchPlan& plan, const 
             const bool made = make_postgresql_server_zip(edb, target, error, cancel);
             fs::remove(edb, ec);
             if (!made) {
-                result.problem = error;
+                result.problem = error.empty() ? "the server zip couldn't be made" : error;
                 break;
             }
         } else {
@@ -446,19 +467,50 @@ FetchResult fetch_files(core::HttpTransport& http, const FetchPlan& plan, const 
         }
         result.cdn_paths.push_back(f.cdn_path);
     }
+    if (!result.problem.empty() || result.cdn_paths.size() != plan.files.size()) {
+        // All of a version or none: half of Bun's builds mustn't replace the old ones.
+        if (result.problem.empty()) {
+            result.problem = "not every file was written";
+        }
+        for (const FetchFile& f : plan.files) {
+            const fs::path target = folder / core::path_from_utf8(f.cdn_path);
+            std::error_code ec;
+            fs::remove(target, ec);
+            // And the folders made for it, while empty, up to `folder`.
+            for (fs::path d = target.parent_path(); d != folder && d.has_relative_path(); d = d.parent_path()) {
+                if (!fs::is_empty(d, ec) || ec || !fs::remove(d, ec)) {
+                    break;
+                }
+            }
+        }
+        result.cdn_paths.clear();
+    }
     return result;
 }
 
-std::string upload_steps(const std::vector<std::string>& cdn_paths) {
+std::string upload_steps(const std::vector<std::string>& cdn_paths, const fs::path& folder) {
     std::string out =
         "Upload these files to the floserver-cdn bucket, each at the path shown (the same as its place in this "
         "folder),\r\nthen press Publish in FloServer Publisher: it checks every file from the CDN before signing.\r\n\r\n"
         "With Wrangler, from this folder (npx wrangler login once first):\r\n\r\n";
+    std::vector<std::string> big;
     for (const std::string& p : cdn_paths) {
+        std::error_code ec;
+        if (!folder.empty() && fs::file_size(folder / core::path_from_utf8(p), ec) > kWranglerMax && !ec) {
+            big.push_back(p);
+            continue;
+        }
         std::string local = p;
         std::replace(local.begin(), local.end(), '/', '\\');
         out.append("npx wrangler r2 object put floserver-cdn/").append(p).append(" --file \"").append(local).append(
             "\" --remote\r\n");
+    }
+    if (!big.empty()) {
+        out += "\r\nOver 300 MiB, which Wrangler and the dashboard can't upload: use an S3 client with an R2 key "
+               "(rclone, or aws s3 cp --endpoint-url https://<account id>.r2.cloudflarestorage.com):\r\n\r\n";
+        for (const std::string& p : big) {
+            out.append("  ").append(p).append("\r\n");
+        }
     }
     return out;
 }
@@ -470,6 +522,11 @@ ListChange add_to_list(std::vector<PublishFile> files, const std::vector<std::st
         const auto nv = Version::parse(n.version);
         if (!n.listable || !nv) {
             change.problems.push_back(n.problem.empty() ? path + ": not a runtime version" : n.problem);
+            continue;
+        }
+        // Checked before anything older is taken out for it.
+        if (const AddResult alone = new_file(path, kCdn, {}); !alone.file) {
+            change.problems.push_back(alone.error);
             continue;
         }
         const std::string series = update_series(n.runtime, n.version);
