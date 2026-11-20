@@ -364,17 +364,29 @@ TEST_CASE("go live: a PUT whose answer was lost is judged by what R2 holds") {
     CHECK_FALSE(s.rolled_back);
     CHECK(sig_run.cloud.objects["manifest.json.sig"] == sig(11));
 
-    // The list landed but its PUT seemed to fail: the pair may be mixed;
-    // running it again finishes it.
+    // The list landed but its PUT seemed to fail: on to the signature.
     Run list_run;
     list_run.cloud.lose_replies["manifest.json"] = 2;
-    const GoLiveResult l = list_run.go();
+    CHECK(list_run.go().live);
+    CHECK(list_run.cloud.objects["manifest.json.sig"] == sig(11));
+
+    // The list's fate can't be told: it stops, says so, and a second run finishes it.
+    Run unknown;
+    unknown.cloud.refuse_puts["manifest.json"] = 1;
+    unknown.cloud.on_request = [&](const std::string& r) {
+        if (r == "PUT manifest.json") {
+            unknown.cloud.blind = true;
+        }
+    };
+    const GoLiveResult l = unknown.go();
     CHECK(l.mixed);
     CHECK_FALSE(l.uploaded);
     CHECK(l.problem.find("may have been uploaded") != std::string::npos);
     CHECK(l.problem.find("Go live again") != std::string::npos);
-    CHECK(list_run.go().live);
-    CHECK(list_run.cloud.objects["manifest.json.sig"] == sig(11));
+    CHECK(std::count(unknown.cloud.log.begin(), unknown.cloud.log.end(), "PUT manifest.json.sig") == 0);
+    unknown.cloud.blind = false;
+    unknown.cloud.on_request = nullptr;
+    CHECK(unknown.go().live);
 
     // The signature's fate can't be told: the new list stays (putting the
     // old one back could be the mismatch), and it says so.

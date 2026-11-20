@@ -770,6 +770,11 @@ LRESULT Publisher::handle(UINT msg, WPARAM wp, LPARAM lp) {
                                  MB_YESNO | MB_ICONQUESTION) != IDYES) {
             return 0;
         }
+        if (busy_) {
+            // The two list files are never left half sent: say why closing waits.
+            SetWindowTextW(publish_, L"Finishing the upload…");
+            UpdateWindow(hwnd_);
+        }
         stop_worker();
         DestroyWindow(hwnd_);
         return 0;
@@ -1240,7 +1245,7 @@ void go_live_step(HWND target, Outcome& out, floserver::core::HttpTransport& htt
         return;
     }
     out.steps.at(kGoLive) = StepState::Failed;
-    out.details.at(kGoLive) = r.mixed ? "Half uploaded: upload manifest.json.sig by hand now"
+    out.details.at(kGoLive) = r.mixed ? "R2 may have half the pair: press Go live again now"
                               : r.uploaded ? "Uploaded, but the CDN doesn't show it yet"
                                            : "Not uploaded";
     out.error = r.problem + (r.note.empty() ? "" : "\n\n" + r.note);

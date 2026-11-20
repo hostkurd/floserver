@@ -177,16 +177,21 @@ GoLiveResult go_live(core::HttpTransport& http, R2Bucket& bucket, const GoLiveIn
         say("Uploading manifest.json…");
         if (!bucket.put_text(kList, in.manifest_json, error)) {
             const auto landed = holds(kList, in.manifest_json);
-            if (!landed || *landed) {
-                // The new list may be on R2 with the old signature.
+            if (!landed) {
+                // The new list may be on R2 with the old signature; sending
+                // the new signature over a list that may be the old one could
+                // be the mismatch itself.
                 out.mixed = true;
                 out.problem = "manifest.json may have been uploaded (" + error +
                               "), so R2 may have the new list with the old signature, which FloServer refuses. "
                               "Press Go live again now, or upload both by hand (upload-steps.txt).";
                 return out;
             }
-            out.problem = "manifest.json wasn't uploaded (" + error + "). R2 still has the old list.";
-            return out;
+            if (!*landed) {
+                out.problem = "manifest.json wasn't uploaded (" + error + "). R2 still has the old list.";
+                return out;
+            }
+            // It landed; the answer was lost. On to the signature.
         }
     }
     if (!sig_there) {
