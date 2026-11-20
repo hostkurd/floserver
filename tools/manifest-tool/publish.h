@@ -150,7 +150,16 @@ struct CheckContext {
     std::map<std::string, std::optional<std::string>> sums_cache;  // url -> text
     // MadeFrom downloads both zips here for a moment; empty: the system's temp folder.
     std::filesystem::path scratch;
+    std::string sums_from;  // the checksum list official_checksum() last found a file in
 };
+
+// The official SHA-256 of the file at `cdn_path`, for a runtime whose project
+// publishes checksum lists (OfficialSource::Kind::Sums: php.net, MariaDB,
+// nodejs.org...). Nothing with `why_not` empty for the others (Publish
+// compares those with the original); nothing with `why_not` set when the
+// list can't be read or doesn't name the file.
+[[nodiscard]] std::optional<std::string> official_checksum(CheckContext& ctx, const std::string& cdn_path,
+                                                           std::string& why_not);
 
 // Checks one file and sets its state, detail, and (new files) size and sha256.
 void check_file(CheckContext& ctx, PublishFile& file);

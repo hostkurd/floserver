@@ -4,6 +4,9 @@
 // runtime's official site what it offers now (updates.h) and lists, per
 // series, what's newer than the next list: an Update (ticked), a New series
 // (your choice) or Up to date, and why a site couldn't be checked.
+// "Download only" gets the ticked ones from their official sites into a
+// folder laid out as the CDN, with the upload steps, and adds them to the
+// next list (D34.3, manual upload).
 
 #include "updates.h"
 
@@ -12,6 +15,7 @@
 #include <commctrl.h>
 
 #include <atomic>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -19,6 +23,8 @@
 #include <vector>
 
 namespace floserver::publisher {
+
+struct FetchDone;  // what a Download only run did
 
 class UpdatesWindow {
 public:
@@ -33,6 +39,9 @@ public:
     // the versions in the next list.
     void open(HWND owner, std::map<std::string, std::vector<std::string>> listed);
     [[nodiscard]] HWND hwnd() const { return hwnd_; }
+    // Called with the CDN paths downloaded; returns what to tell the user
+    // about the next list (or why they couldn't be added).
+    std::function<std::wstring(const std::vector<std::string>& cdn_paths)> on_fetched;
 
 private:
     static LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
@@ -42,12 +51,15 @@ private:
     void check();
     void stop_worker();
     void fill();
+    void download();
+    void fetched(FetchDone& done);
+    void set_buttons();
     LRESULT custom_draw(NMLVCUSTOMDRAW* cd) const;
     [[nodiscard]] int px(int dip) const { return MulDiv(dip, static_cast<int>(dpi_), 96); }
 
     HWND hwnd_ = nullptr;
     HWND heading_ = nullptr, hint_ = nullptr, list_ = nullptr, status_ = nullptr;
-    HWND keep_answers_ = nullptr, check_again_ = nullptr, get_ = nullptr, close_ = nullptr;
+    HWND keep_answers_ = nullptr, check_again_ = nullptr, download_ = nullptr, get_ = nullptr, close_ = nullptr;
     HFONT font_ = nullptr, heading_font_ = nullptr;
     HBRUSH bg_ = nullptr;
     UINT dpi_ = 96;
@@ -57,7 +69,10 @@ private:
     std::string saved_to_;  // where the sites' answers were kept, when asked
     std::thread worker_;
     std::atomic<bool> cancel_{false};
-    bool busy_ = false;
+    bool busy_ = false;         // checking
+    bool downloading_ = false;  // Download only
+    std::vector<std::wstring> outcome_;  // per row: what Download only did ("" before)
+    std::vector<bool> outcome_ok_;
     bool filling_ = false;  // fill() sets the ticks: its notifications aren't the user's
     UINT dpi_before_ = 96;  // for the columns at a DPI change
 };

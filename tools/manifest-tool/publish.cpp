@@ -650,6 +650,44 @@ std::string made_from_problem(const std::vector<std::pair<std::string, ZipFileHa
     return {};
 }
 
+std::optional<std::string> official_checksum(CheckContext& ctx, const std::string& cdn_path, std::string& why_not) {
+    const OfficialSource source = official_source(cdn_path);
+    why_not.clear();
+    if (source.kind != OfficialSource::Kind::Sums) {
+        return std::nullopt;
+    }
+    std::string fetch_error;
+    bool listed_nowhere = true;
+    for (const std::string& sums_url : source.urls) {
+        auto cached = ctx.sums_cache.find(sums_url);
+        if (cached == ctx.sums_cache.end()) {
+            std::string error;
+            auto text = get_text(ctx.http, sums_url, kMaxSumsBytes, ctx.cancel, error);
+            if (cancelled(ctx.cancel)) {
+                why_not = "Stopped";
+                return std::nullopt;
+            }
+            if (!text) {
+                // Not cached: the next run asks again.
+                fetch_error = error;
+                listed_nowhere = false;
+                continue;
+            }
+            cached = ctx.sums_cache.emplace(sums_url, std::move(text)).first;
+        }
+        if (const std::optional<std::string>& sums = cached->second; sums.has_value()) {
+            if (auto official = find_official_hash(sums.value(), source.name, source.powershell_print)) {
+                ctx.sums_from = sums_url;
+                return official;
+            }
+        }
+    }
+    why_not = listed_nowhere ? "Its official checksum list (" + host_of(source.urls.front()) + ") doesn't name " +
+                                   source.name + ". Check the file name and version"
+                             : "Can't read the official checksum list: " + fetch_error;
+    return std::nullopt;
+}
+
 void check_file(CheckContext& ctx, PublishFile& file) {
     file.state = CheckState::NotRun;
     file.detail.clear();
@@ -734,38 +772,13 @@ void check_file(CheckContext& ctx, PublishFile& file) {
     std::string from;
     std::string why_not;
     if (source.kind == OfficialSource::Kind::Sums) {
-        std::string fetch_error;
-        bool listed_nowhere = true;
-        for (const std::string& sums_url : source.urls) {
-            auto cached = ctx.sums_cache.find(sums_url);
-            if (cached == ctx.sums_cache.end()) {
-                std::string error;
-                auto text = get_text(ctx.http, sums_url, kMaxSumsBytes, ctx.cancel, error);
-                if (cancelled(ctx.cancel)) {
-                    file.detail = "Stopped";
-                    return;
-                }
-                if (!text) {
-                    // Not cached: the next run asks again.
-                    fetch_error = error;
-                    listed_nowhere = false;
-                    continue;
-                }
-                cached = ctx.sums_cache.emplace(sums_url, std::move(text)).first;
-            }
-            if (const std::optional<std::string>& sums = cached->second; sums.has_value()) {
-                official = find_official_hash(sums.value(), source.name, source.powershell_print);
-                if (official) {
-                    from = host_of(sums_url);
-                    break;
-                }
-            }
+        official = official_checksum(ctx, file.path, why_not);
+        if (cancelled(ctx.cancel)) {
+            file.detail = "Stopped";
+            return;
         }
-        if (!official) {
-            why_not = listed_nowhere
-                          ? "Its official checksum list (" + host_of(source.urls.front()) +
-                                ") doesn't name " + source.name + ". Check the file name and version"
-                          : "Can't read the official checksum list: " + fetch_error;
+        if (official) {
+            from = host_of(ctx.sums_from);
         }
     } else if (source.kind == OfficialSource::Kind::Original) {
         // Each address in turn (MySQL's archive after its current downloads).
