@@ -23,7 +23,7 @@ namespace floserver::manifest_tool {
 
 // One series as a site offers it now: its newest version.
 struct UpstreamVersion {
-    std::string series;   // "8.5", "24", "18"; empty for a runtime with one series (Bun, Mailpit...)
+    std::string series;   // "8.5", "24", "18", Bun's "1.3"; empty for a runtime with one series (Mailpit...)
     std::string version;  // "8.5.13"
     bool operator==(const UpstreamVersion&) const = default;
 };
@@ -36,8 +36,8 @@ struct FinderAnswer {
 };
 
 // The series a runtime's version belongs to, as D34 compares them:
-// Node and PostgreSQL "24", "18"; Bun, Deno, Mailpit, Garnet, phpMyAdmin
-// and phpredis "" (one series); the others "8.5", "11.4", "1.30".
+// Node and PostgreSQL "24", "18"; Deno, Mailpit, Garnet, phpMyAdmin and
+// phpredis "" (one series); the others "8.5", "11.4", "1.30", Bun "1.3".
 [[nodiscard]] std::string update_series(std::string_view runtime, std::string_view version);
 
 // --- parsers: a site's answer -> the newest version of each series --------

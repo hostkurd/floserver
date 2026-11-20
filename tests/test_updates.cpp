@@ -252,3 +252,14 @@ TEST_CASE("updates: every site asked once, a failed one doesn't stop the others"
     }
     CHECK(updates == 4);  // MariaDB 11.8 and 11.4, .NET, MySQL
 }
+
+TEST_CASE("updates: GitHub's latest release comes with its series (Bun's minor)") {
+    FakeTransport http;
+    http.serve("https://api.github.com/repos/oven-sh/bun/releases/latest",
+               {200, R"({"tag_name":"bun-v1.4.5","prerelease":false,"draft":false})"});
+    http.serve("https://api.github.com/repos/axllent/mailpit/releases/latest",
+               {200, R"({"tag_name":"v1.34.0","prerelease":false,"draft":false})"});
+    const auto found = find_updates(http, {{"bun", {"1.3.14"}}, {"mailpit", {"1.33.0"}}});
+    CHECK(found.at("bun").versions == V{{"1.4", "1.4.5"}});
+    CHECK(found.at("mailpit").versions == V{{"", "1.34.0"}});
+}
