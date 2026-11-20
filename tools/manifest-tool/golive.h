@@ -3,8 +3,11 @@
 // D34.6: after signing, the Publisher puts the new list live itself:
 //   1. reads the list on R2, which must still be the one it replaces (or
 //      already the new one, when an earlier try got half way);
-//   2. uploads manifest.json, then manifest.json.sig; if the second fails,
-//      the old manifest.json goes back, so R2 never keeps a mixed pair;
+//   2. uploads manifest.json, then manifest.json.sig; if the second surely
+//      failed, the old manifest.json goes back, so R2 keeps a matching pair.
+//      A PUT whose answer was lost is judged by reading the object back;
+//      when that can't be told either, it says so ("mixed"), and running it
+//      again finishes the job;
 //   3. purges both from Cloudflare's cache, with a token allowed to purge
 //      the floserver.org zone only (Q2), when one is saved;
 //   4. reads the live list from the CDN until it shows the new sequence.
@@ -69,7 +72,7 @@ struct GoLiveOptions {
     std::function<void(std::chrono::seconds)> sleep;  // tests don't wait
     // What it's doing, for the window.
     std::function<void(const std::string&)> say;
-    // Stops before the upload or while checking; never between the two files.
+    // Stops before the upload, the purge or while checking; never between the two files.
     const std::atomic<bool>* cancel = nullptr;
 };
 
@@ -77,8 +80,8 @@ struct GoLiveResult {
     bool uploaded = false;  // both files are on R2
     bool purged = false;
     bool live = false;      // the CDN shows the new sequence
-    // The signature failed and the old manifest.json couldn't go back:
-    // R2 has the new list with the old signature. Upload both by hand now.
+    // R2 may have the new list with the old signature (or the reverse):
+    // run go_live again, or upload by hand, now.
     bool mixed = false;
     bool rolled_back = false;  // the signature failed; R2 has the old pair again
     std::int64_t seen_sequence = 0;

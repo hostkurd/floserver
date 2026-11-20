@@ -2,6 +2,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <regex>
 #include <thread>
 
@@ -162,10 +163,28 @@ GoLiveResult go_live(core::HttpTransport& http, R2Bucket& bucket, const GoLiveIn
     }
     const bool sig_there = old_sig && *old_sig == in.signature;
 
-    // 2. The pair: the list, then its signature.
+    // 2. The pair: the list, then its signature. A PUT that seems to fail
+    // may still have landed (the answer was lost), so what R2 holds decides.
+    const auto holds = [&](const char* object, const std::string& bytes) -> std::optional<bool> {
+        std::string ignored;
+        const auto now_there = bucket.get_text(object, kMaxList, ignored, nullptr);
+        if (!ignored.empty()) {
+            return std::nullopt;  // can't tell
+        }
+        return now_there && *now_there == bytes;
+    };
     if (!list_there) {
         say("Uploading manifest.json…");
         if (!bucket.put_text(kList, in.manifest_json, error)) {
+            const auto landed = holds(kList, in.manifest_json);
+            if (!landed || *landed) {
+                // The new list may be on R2 with the old signature.
+                out.mixed = true;
+                out.problem = "manifest.json may have been uploaded (" + error +
+                              "), so R2 may have the new list with the old signature, which FloServer refuses. "
+                              "Press Go live again now, or upload both by hand (upload-steps.txt).";
+                return out;
+            }
             out.problem = "manifest.json wasn't uploaded (" + error + "). R2 still has the old list.";
             return out;
         }
@@ -174,18 +193,28 @@ GoLiveResult go_live(core::HttpTransport& http, R2Bucket& bucket, const GoLiveIn
         say("Uploading manifest.json.sig…");
         if (!bucket.put_text(kSig, in.signature, error)) {
             const std::string why = error;
-            // The old list goes back, so its old signature matches it again.
-            if (!list_there && bucket.put_text(kList, *old_list, error)) {
-                out.rolled_back = true;
-                out.problem = "manifest.json.sig wasn't uploaded (" + why +
-                              "), so the old manifest.json was put back: R2 has the old list, as before.";
-            } else {
-                out.mixed = true;
-                out.problem = "manifest.json.sig wasn't uploaded (" + why +
-                              "). R2 now has the new manifest.json with the old signature, which FloServer "
-                              "refuses: upload manifest.json.sig by hand now (upload-steps.txt).";
+            const auto landed = holds(kSig, in.signature);
+            if (landed != true) {
+                // Surely not there: the old list goes back, so its old
+                // signature matches it again. If that can't be told, putting
+                // the old list back could be the mismatch, so it stays.
+                if (landed == false && !list_there &&
+                    (bucket.put_text(kList, *old_list, error) || holds(kList, *old_list) == true)) {
+                    out.rolled_back = true;
+                    out.problem = "manifest.json.sig wasn't uploaded (" + why +
+                                  "), so the old manifest.json was put back: R2 has the old list, as before.";
+                    if (o.purge) {
+                        (void)purge_cache(http, *o.purge, list_urls(o.cdn), o.cancel);
+                    }
+                } else {
+                    out.mixed = true;
+                    out.problem = "manifest.json.sig wasn't uploaded (" + why +
+                                  "). R2 may have the new manifest.json with the old signature, which FloServer "
+                                  "refuses. Press Go live again now, or upload manifest.json.sig by hand "
+                                  "(upload-steps.txt).";
+                }
+                return out;
             }
-            return out;
         }
     }
     out.uploaded = true;
@@ -193,7 +222,7 @@ GoLiveResult go_live(core::HttpTransport& http, R2Bucket& bucket, const GoLiveIn
     // 3. Out of Cloudflare's cache.
     if (o.purge) {
         say("Purging the cache…");
-        const std::string why = purge_cache(http, *o.purge, list_urls(o.cdn), nullptr);
+        const std::string why = purge_cache(http, *o.purge, list_urls(o.cdn), o.cancel);
         out.purged = why.empty();
         if (!out.purged) {
             out.note = "The cache wasn't purged (" + why + ").";
@@ -204,11 +233,14 @@ GoLiveResult go_live(core::HttpTransport& http, R2Bucket& bucket, const GoLiveIn
 
     // 4. What FloServer users get.
     for (int i = 0; i < o.checks && o.read_live; ++i) {
-        if (i > 0) {
-            sleep(o.wait);
-        }
         if (stopped(o.cancel)) {
             break;
+        }
+        if (i > 0) {
+            sleep(o.wait);
+            if (stopped(o.cancel)) {
+                break;
+            }
         }
         say(i == 0 ? "Checking the live list…" : "Checking the live list again (" + std::to_string(i + 1) + ")…");
         const LiveResult live = o.read_live();
@@ -220,13 +252,18 @@ GoLiveResult go_live(core::HttpTransport& http, R2Bucket& bucket, const GoLiveIn
             }
         }
     }
-    const auto waited = std::chrono::duration_cast<std::chrono::seconds>(o.wait * (o.checks - 1)).count();
+    if (stopped(o.cancel)) {
+        out.problem = "Uploaded; stopped before the CDN showed sequence " + std::to_string(in.sequence) +
+                      ". Press Check live.";
+        return out;
+    }
+    const auto waited = std::chrono::duration_cast<std::chrono::seconds>(o.wait * std::max(o.checks - 1, 0)).count();
     out.problem = "Uploaded, but the CDN " +
                   (out.seen_sequence > 0 ? "still shows sequence " + std::to_string(out.seen_sequence)
                                          : std::string("didn't give a list that opens")) +
-                  (stopped(o.cancel) ? " (stopped)" : " after " + std::to_string(waited) + " seconds") +
-                  ". Purge manifest.json and manifest.json.sig from the cache by hand (Copy purge URLs), then "
-                  "press Check live.";
+                  " after " + std::to_string(waited) +
+                  " seconds. Purge manifest.json and manifest.json.sig from the cache by hand (Copy purge URLs), "
+                  "then press Check live.";
     return out;
 }
 

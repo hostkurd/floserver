@@ -379,7 +379,7 @@ std::optional<std::string> R2Bucket::get_text(const std::string& object, std::si
     Call c;
     c.method = "GET";
     c.object = object;
-    c.max_time = std::chrono::seconds{60};
+    c.max_time = std::chrono::seconds{30};
     // One byte more than allowed, so a bigger object is seen as too big.
     c.max_reply = max_bytes + 1;
     core::HttpResponse r = call(c, error, cancel);
@@ -406,7 +406,7 @@ bool R2Bucket::put_text(const std::string& object, const std::string& text, std:
     c.object = object;
     c.content_type = content_type(object);
     c.text = text;
-    c.max_time = std::chrono::seconds{120};
+    c.max_time = std::chrono::seconds{30};
     core::HttpResponse r;
     for (int attempt = 0; attempt < 2; ++attempt) {
         error.clear();

@@ -7,6 +7,7 @@
 #include <doctest/doctest.h>
 #include <nlohmann/json.hpp>
 
+#include <functional>
 #include <map>
 
 using namespace floserver::manifest_tool;
@@ -26,6 +27,10 @@ public:
     std::map<std::string, int> fail_puts;        // object -> PUTs to answer 503 first
     std::map<std::string, int> refuse_puts;      // object -> PUTs to answer 403 first
     int list_puts_allowed = -1;                  // refuse manifest.json PUTs after this many (-1: never)
+    std::map<std::string, int> lose_replies;     // object -> PUTs stored, but answered with no reply
+    std::map<std::string, int> drop_puts;        // object -> PUTs lost before R2 (no reply, not stored)
+    bool blind = false;                          // GETs get no reply
+    std::function<void(const std::string& request)> on_request;  // "PUT manifest.json.sig"
     std::vector<std::string> log;                // "PUT manifest.json", "PURGE"
     int purge_status = 200;
     std::string purge_reply = R"({"success":true,"errors":[],"messages":[],"result":{"id":"x"}})";
@@ -64,6 +69,13 @@ public:
         REQUIRE(req.url.starts_with(prefix));
         const std::string object = req.url.substr(prefix.size());
         log.push_back(req.method + " " + object);
+        if (on_request) {
+            on_request(log.back());
+        }
+        if (req.method == "GET" && blind) {
+            r.error = "timed out";
+            return r;
+        }
         if (req.method == "GET") {
             const auto it = objects.find(object);
             r.status = it == objects.end() ? 404 : 200;
@@ -72,6 +84,17 @@ public:
                 r.body.resize(req.max_reply);
             }
         } else if (req.method == "PUT") {
+            if (drop_puts[object] > 0) {
+                --drop_puts[object];
+                r.error = "connection reset";
+                return r;
+            }
+            if (lose_replies[object] > 0) {
+                --lose_replies[object];
+                objects[object] = body;
+                r.error = "timed out";
+                return r;
+            }
             if (fail_puts[object] > 0) {
                 --fail_puts[object];
                 r.status = 503;
@@ -195,7 +218,6 @@ TEST_CASE("go live: a failed signature puts the old list back") {
     CHECK(r.problem.find("old manifest.json was put back") != std::string::npos);
     CHECK(run.cloud.objects["manifest.json"] == list(10));
     CHECK(run.cloud.objects["manifest.json.sig"] == sig(10));
-    CHECK(std::count(run.cloud.log.begin(), run.cloud.log.end(), "PURGE") == 0);
 }
 
 TEST_CASE("go live: when the old list can't go back either, it says the pair is mixed") {
@@ -206,7 +228,7 @@ TEST_CASE("go live: when the old list can't go back either, it says the pair is 
     CHECK(r.mixed);
     CHECK_FALSE(r.rolled_back);
     CHECK_FALSE(r.uploaded);
-    CHECK(r.problem.find("by hand now") != std::string::npos);
+    CHECK(r.problem.find("Go live again now") != std::string::npos);
     CHECK(run.cloud.objects["manifest.json"] == list(11));
     CHECK(run.cloud.objects["manifest.json.sig"] == sig(10));
 }
@@ -331,4 +353,77 @@ TEST_CASE("go live: purge token and list checks") {
     CHECK(list_urls("https://cdn.floserver.org") ==
           std::vector<std::string>{"https://cdn.floserver.org/manifest.json",
                                    "https://cdn.floserver.org/manifest.json.sig"});
+}
+
+TEST_CASE("go live: a PUT whose answer was lost is judged by what R2 holds") {
+    // The signature landed: carry on.
+    Run sig_run;
+    sig_run.cloud.lose_replies["manifest.json.sig"] = 2;
+    const GoLiveResult s = sig_run.go();
+    CHECK(s.live);
+    CHECK_FALSE(s.rolled_back);
+    CHECK(sig_run.cloud.objects["manifest.json.sig"] == sig(11));
+
+    // The list landed but its PUT seemed to fail: the pair may be mixed;
+    // running it again finishes it.
+    Run list_run;
+    list_run.cloud.lose_replies["manifest.json"] = 2;
+    const GoLiveResult l = list_run.go();
+    CHECK(l.mixed);
+    CHECK_FALSE(l.uploaded);
+    CHECK(l.problem.find("may have been uploaded") != std::string::npos);
+    CHECK(l.problem.find("Go live again") != std::string::npos);
+    CHECK(list_run.go().live);
+    CHECK(list_run.cloud.objects["manifest.json.sig"] == sig(11));
+
+    // The signature's fate can't be told: the new list stays (putting the
+    // old one back could be the mismatch), and it says so.
+    Run blind;
+    blind.cloud.refuse_puts["manifest.json.sig"] = 1;
+    blind.cloud.on_request = [&](const std::string& r) {
+        if (r == "PUT manifest.json.sig") {
+            blind.cloud.blind = true;
+        }
+    };
+    const GoLiveResult b = blind.go();
+    CHECK(b.mixed);
+    CHECK_FALSE(b.rolled_back);
+    CHECK(blind.cloud.objects["manifest.json"] == list(11));
+    CHECK(std::count(blind.cloud.log.begin(), blind.cloud.log.end(), "PUT manifest.json") == 1);
+    blind.cloud.blind = false;
+    blind.cloud.on_request = nullptr;
+    CHECK(blind.go().live);
+}
+
+TEST_CASE("go live: no answer at all is tried once more") {
+    Run run;
+    run.cloud.drop_puts["manifest.json"] = 1;
+    run.cloud.drop_puts["manifest.json.sig"] = 1;
+    CHECK(run.go().live);
+    CHECK(std::count(run.cloud.log.begin(), run.cloud.log.end(), "PUT manifest.json") == 2);
+    CHECK(std::count(run.cloud.log.begin(), run.cloud.log.end(), "PUT manifest.json.sig") == 2);
+}
+
+TEST_CASE("go live: a rollback is purged too, when there's a token") {
+    Run run;
+    run.cloud.refuse_puts["manifest.json.sig"] = 1;
+    const GoLiveResult r = run.go();
+    CHECK(r.rolled_back);
+    CHECK(std::count(run.cloud.log.begin(), run.cloud.log.end(), "PURGE") == 1);
+}
+
+TEST_CASE("go live: stopping while it checks the CDN says it was uploaded") {
+    Run run;
+    std::atomic<bool> cancel{false};
+    run.options.cancel = &cancel;
+    run.cloud.cache_stuck = true;
+    run.options.read_live = [&] {
+        cancel = true;
+        return run.cloud.read_live();
+    };
+    const GoLiveResult r = run.go();
+    CHECK(r.uploaded);
+    CHECK_FALSE(r.live);
+    CHECK(r.problem.find("Uploaded; stopped before the CDN showed sequence 11") != std::string::npos);
+    CHECK(run.slept == 0);
 }

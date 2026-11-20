@@ -25,6 +25,7 @@
 #include "win_util.h"
 #include "floserver/core/builtin.h"
 #include "floserver/core/http.h"
+#include "floserver/core/manifest.h"
 
 #include <windows.h>
 #include <commctrl.h>
@@ -1537,10 +1538,16 @@ void Publisher::go_live_again() {
     };
     const auto list = read(last_folder_ / L"manifest.json");
     const auto sig = read(last_folder_ / L"manifest.json.sig");
-    if (!list || !sig || mt::list_sequence(*list) != signed_sequence_) {
+    // The pair in the folder must still be the one signed here: an edited
+    // file would go up and never open.
+    floserver::core::ManifestCheck check;
+    check.trusted_keys = floserver::core::builtin_manifest_keys();
+    check.now = now_utc();
+    if (!list || !sig || mt::list_sequence(*list) != signed_sequence_ ||
+        !floserver::core::open_manifest(*list, *sig, check).manifest) {
         MessageBoxW(hwnd_,
                     (L"Can't read sequence " + std::to_wstring(signed_sequence_) + L" from " +
-                     last_folder_.wstring() + L". Was the folder changed?")
+                     last_folder_.wstring() + L", or it doesn't open with FloServer's key. Was the folder changed?")
                         .c_str(),
                     L"Not uploaded", MB_OK | MB_ICONWARNING);
         return;

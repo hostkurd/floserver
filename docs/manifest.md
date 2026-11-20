@@ -163,11 +163,23 @@ steps 2 to 6 below in one window:
    - builds the list (live sequence + 1, 90 days, built-in templates), signs
      it and checks FloServer's built-in key opens it;
    - writes `manifest.json`, `manifest.json.sig` and `upload-steps.txt` to
-     `Documents\FloServer Publisher\<date> sequence <N>` and opens the folder.
-4. Upload both files to the top of the bucket, then press **Check live**: it
-   must show the new sequence. If it still shows the old one, the cache rule
-   is missing: purge both URLs (**Copy purge URLs**; Caching -> Configuration
-   -> Purge cache -> Custom purge) and add the rule.
+     `Documents\FloServer Publisher\<date> sequence <N>`;
+   - **goes live** (D34.6) when an R2 key is saved (**R2 key…**: an R2 API
+     token with Object Read & Write on `floserver-cdn` only). It reads R2's
+     `manifest.json` and stops unless it's the live list being replaced. It
+     uploads the list, then its signature; if the signature surely failed,
+     the old list goes back. It purges both from the cache when a purge
+     token is saved (**Purge token…**: Zone -> Cache Purge -> Purge on
+     floserver.org only, with the zone's ID), then reads the CDN until it
+     shows the new sequence. Both keys stay in Windows Credential Manager on
+     that PC.
+4. If Go live didn't finish (no key saved then, a failed upload, or the CDN
+   still shows the old list), press **Go live** under that step: it sends
+   only what R2 is missing. Without a key, upload both files to the top of
+   the bucket (the folder opens for that), then press **Check live**: it must
+   show the new sequence. If it still shows the old one, the cache rule is
+   missing: purge both URLs (**Copy purge URLs**; Caching -> Configuration ->
+   Purge cache -> Custom purge) and add the rule.
 
 ### By hand
 
