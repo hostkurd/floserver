@@ -2009,7 +2009,7 @@ bool DatabaseService::run_project_tool(const std::string& project, bool dump, co
                                 pg_load_args(login->database, path_to_utf8(input.filename())), work, {}, cancel, error);
             // What the backup's SQL set on its role goes, loaded or not.
             std::string reset_error;
-            if (!server->run_sql(pg_reset_role_sql(login->user), reset_error) && ok) {
+            if (!server->run_sql(pg_reset_role_sql(login->user, login->database), reset_error) && ok) {
                 refusal = {"database_failed", reset_error};
                 return false;
             }

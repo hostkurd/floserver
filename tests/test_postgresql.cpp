@@ -225,6 +225,7 @@ TEST_CASE("PostgreSQL's backup programs: pg_dump and psql's load (D29.8)") {
     CHECK(pg_empty_database_sql("my_shop", "my_shop") ==
           "DROP DATABASE IF EXISTS \"my_shop\" WITH (FORCE);\n" + pg_reset_role_sql("my_shop"));
     CHECK(pg_empty_database_sql("a\"b", "r").starts_with("DROP DATABASE IF EXISTS \"a\"\"b\" WITH (FORCE);\n"));
+    CHECK(pg_reset_role_sql("r", "d").find("' IN DATABASE ' || quote_ident('d')") != std::string::npos);
     CHECK(pg_reset_role_sql("it's") == "SELECT 'ALTER ROLE ' || quote_ident('it''s') || ' RESET ALL' WHERE EXISTS "
                                        "(SELECT FROM pg_roles WHERE rolname = 'it''s')\\gexec\n");
 
@@ -579,8 +580,10 @@ TEST_CASE("a project's PostgreSQL database: made, logged in to, asleep when idle
 
         // A backup that sets its role's defaults (here: every session read-only) doesn't
         // keep them, whether its load works or fails.
-        for (const std::string& tail : {std::string(), std::string("SELECT broken(;\n")}) {
+        // (COMMIT: kept even though the load then fails; IN DATABASE: its settings in its own database.)
+        for (const std::string& tail : {std::string(), std::string("COMMIT;\nSELECT broken(;\n")}) {
             test_util::write_file(work / "sets.sql", "ALTER ROLE CURRENT_USER SET default_transaction_read_only = on;\n"
+                                                     "ALTER ROLE CURRENT_USER IN DATABASE my_shop SET work_mem = '64kB';\n"
                                                      "CREATE TABLE fine (a int);\n" +
                                                          tail);
             REQUIRE(prepare_pg_sql_for_load(work / "sets.sql", load, error));
@@ -589,6 +592,7 @@ TEST_CASE("a project's PostgreSQL database: made, logged in to, asleep when idle
                   "off");
             CHECK(pg_query(bin, port, "my_shop", after->password, "my_shop", "CREATE TABLE w (b int); DROP TABLE w") ==
                   "");
+            CHECK(pg_query(bin, port, "my_shop", after->password, "my_shop", "SHOW work_mem") == "8MB");
         }
         // Its role still logs in with the password FloServer keeps.
         CHECK(pg_query(bin, port, "my_shop", after->password, "my_shop", "SELECT 1") == "1");

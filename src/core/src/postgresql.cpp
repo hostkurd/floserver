@@ -229,10 +229,17 @@ std::string pg_empty_database_sql(const std::string& database, const std::string
     return "DROP DATABASE IF EXISTS " + pg_identifier(database) + " WITH (FORCE);\n" + pg_reset_role_sql(role);
 }
 
-std::string pg_reset_role_sql(const std::string& role) {
-    // The role may be gone (removed meanwhile): nothing to reset then.
-    return "SELECT 'ALTER ROLE ' || quote_ident(" + pg_string(role) +
-           ") || ' RESET ALL' WHERE EXISTS (SELECT FROM pg_roles WHERE rolname = " + pg_string(role) + ")\\gexec\n";
+std::string pg_reset_role_sql(const std::string& role, const std::string& database) {
+    // The role (or the database) may be gone (removed meanwhile): nothing to reset then.
+    const std::string exists = "EXISTS (SELECT FROM pg_roles WHERE rolname = " + pg_string(role) + ")";
+    std::string sql = "SELECT 'ALTER ROLE ' || quote_ident(" + pg_string(role) + ") || ' RESET ALL' WHERE " + exists +
+                      "\\gexec\n";
+    if (!database.empty()) {
+        sql += "SELECT 'ALTER ROLE ' || quote_ident(" + pg_string(role) + ") || ' IN DATABASE ' || quote_ident(" +
+               pg_string(database) + ") || ' RESET ALL' WHERE " + exists +
+               " AND EXISTS (SELECT FROM pg_database WHERE datname = " + pg_string(database) + ")\\gexec\n";
+    }
+    return sql;
 }
 
 bool pg_load_file_restricted(const fs::path& file) {

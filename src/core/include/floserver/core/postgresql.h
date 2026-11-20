@@ -128,8 +128,9 @@ inline constexpr std::string_view kPostgreSqlSettingsFile = "floserver.conf";
 // settings (ALTER ROLE ... SET, which a backup's SQL may run, and which
 // outlive the database) are reset with it.
 [[nodiscard]] std::string pg_empty_database_sql(const std::string& database, const std::string& role);
-// The same for the role alone, after a load.
-[[nodiscard]] std::string pg_reset_role_sql(const std::string& role);
+// The same for the role alone, after a load; with `database`, its settings
+// in that database too (ALTER ROLE ... IN DATABASE ... SET).
+[[nodiscard]] std::string pg_reset_role_sql(const std::string& role, const std::string& database = {});
 // The file starts with backup.h's PgLoadWriter's own line ("\restrict"
 // and 48 hex digits): psql's own commands are off in it. Checked again just
 // before psql runs it, so SQL prepared for another family never reaches psql.
