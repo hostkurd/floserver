@@ -287,6 +287,21 @@ TEST_CASE("fetch: the PostgreSQL server zip holds EDB's server files, copied as 
     }
 }
 
+TEST_CASE("fetch: add_to_list keeps Bun 1.3 when 1.4 comes (a series each)") {
+    std::vector<PublishFile> files;
+    for (const char* p : {"bun/1.3.14/bun-windows-x64.zip", "bun/1.3.14/bun-windows-x64-baseline.zip"}) {
+        PublishFile f;
+        f.path = p;
+        f.published = true;
+        files.push_back(f);
+    }
+    const ListChange c = add_to_list(files, {"bun/1.4.5/bun-windows-x64.zip", "bun/1.4.5/bun-windows-x64-baseline.zip"});
+    CHECK(c.problems.empty());
+    CHECK(c.added.size() == 2);
+    CHECK(c.left_out.empty());
+    CHECK(c.files.size() == 4);
+}
+
 TEST_CASE("fetch: upload_steps gives a Wrangler command per file") {
     const std::string s = upload_steps({"node/24.23.0/node-v24.23.0-win-x64.zip"});
     CHECK(s.find("npx wrangler r2 object put floserver-cdn/node/24.23.0/node-v24.23.0-win-x64.zip "

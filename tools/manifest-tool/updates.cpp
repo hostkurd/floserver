@@ -110,7 +110,12 @@ std::string update_series(std::string_view runtime, std::string_view version) {
     if (runtime == "node" || runtime == "postgresql") {
         return first_parts(version, 1);
     }
-    if (runtime == "bun" || runtime == "deno" || runtime == "mailpit" || runtime == "garnet" ||
+    if (runtime == "bun") {
+        // A project names its Bun as "1.3" (D31), and 1.4 can change what it
+        // runs: a new minor is a new series, for you to choose, not an update.
+        return first_parts(version, 2);
+    }
+    if (runtime == "deno" || runtime == "mailpit" || runtime == "garnet" ||
         runtime == "phpmyadmin" || runtime == "php-redis") {
         return {};
     }
@@ -523,8 +528,8 @@ std::map<std::string, FinderAnswer> find_updates(core::HttpTransport& http,
         }
         return text;
     };
-    const auto one = [](std::optional<std::string> v) {
-        return v ? std::vector<UpstreamVersion>{{"", *v}} : std::vector<UpstreamVersion>{};
+    const auto one = [](std::string_view runtime, std::optional<std::string> v) {
+        return v ? std::vector<UpstreamVersion>{{update_series(runtime, *v), *v}} : std::vector<UpstreamVersion>{};
     };
     for (const auto& [runtime, versions] : listed) {
         if (cancel != nullptr && cancel->load()) {
@@ -564,7 +569,7 @@ std::map<std::string, FinderAnswer> find_updates(core::HttpTransport& http,
             via("https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest", parse_python_release);
         } else if (runtime == "phpmyadmin") {
             via("https://www.phpmyadmin.net/home_page/version.json",
-                [&](std::string_view t) { return one(parse_phpmyadmin_version(t)); });
+                [&](std::string_view t) { return one(runtime, parse_phpmyadmin_version(t)); });
         } else if (runtime == "mysql") {
             // dev.mysql.com doesn't answer programs reliably: Oracle's download
             // server is asked for the next 8.4 patches' zips instead.
@@ -603,7 +608,7 @@ std::map<std::string, FinderAnswer> find_updates(core::HttpTransport& http,
                 }
             }
         } else if (runtime == "php-redis") {
-            via("https://pecl.php.net/rest/r/redis/stable.txt", [&](std::string_view t) { return one(parse_pecl_stable(t)); });
+            via("https://pecl.php.net/rest/r/redis/stable.txt", [&](std::string_view t) { return one(runtime, parse_pecl_stable(t)); });
         } else if (runtime == "dotnet") {
             // Garnet's runtime: the channel of the listed one ("10.0").
             const std::string channel = versions.empty() ? std::string("10.0") : update_series("dotnet", versions.front());
@@ -643,7 +648,7 @@ std::map<std::string, FinderAnswer> find_updates(core::HttpTransport& http,
                 continue;
             }
             via("https://api.github.com/repos/" + g->second.first + "/releases/latest",
-                [&](std::string_view t) { return one(parse_github_latest(t, g->second.second)); });
+                [&](std::string_view t) { return one(runtime, parse_github_latest(t, g->second.second)); });
         }
         if (read && got.empty() && a.problem.empty()) {
             a.problem = a.source + ": no version could be read from its answer (the site may have changed)";
