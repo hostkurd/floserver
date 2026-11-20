@@ -26,6 +26,8 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace floserver::core {
 
@@ -51,6 +53,29 @@ struct HttpLimits {
     const std::atomic<bool>* cancel = nullptr;
 };
 
+// Any method, with headers and a body, for the Publisher's uploads (D34.4).
+// Redirects aren't followed. The reply's body is kept whatever its status,
+// up to `max_reply` bytes (an error answer explains itself).
+struct HttpRequest {
+    std::string method;
+    std::string url;
+    std::vector<std::pair<std::string, std::string>> headers;  // Host and Content-Length are added
+    std::uint64_t body_size = 0;
+    // Fills `out` with the body's next bytes and returns how many, called
+    // until body_size bytes came; 0 before that ends the request (a read error).
+    std::function<std::size_t(std::span<std::uint8_t> out)> source;
+    std::size_t max_reply = std::size_t{1024} * 1024;
+};
+
+struct HttpResponse {
+    int status = 0;  // 0: no reply, `error` says why
+    std::string error;
+    std::vector<std::pair<std::string, std::string>> headers;
+    std::string body;
+    // The first header of that name, ignoring case.
+    [[nodiscard]] std::optional<std::string> header(std::string_view name) const;
+};
+
 class HttpTransport {
 public:
     HttpTransport() = default;
@@ -64,6 +89,10 @@ public:
     // `limits` returns status 0 with `error` set.
     [[nodiscard]] virtual HttpReply get(const std::string& url, const HttpLimits& limits,
                                         const HttpBody& body) = 0;
+
+    // Sends `request` (http.h's rules for https and timeouts). Transports
+    // that only download answer with an error.
+    [[nodiscard]] virtual HttpResponse send(const HttpRequest& request, const HttpLimits& limits);
 };
 
 // The platform's transport, or nothing where there isn't one yet.
