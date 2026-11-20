@@ -10,7 +10,7 @@
 //      with the checksum their project publishes;
 //   3. build the next list (live sequence + 1, 90 days) from those results;
 //   4. sign it (signing.h).
-// Uploading (to the R2 bucket behind the CDN) stays by hand.
+// Putting the signed list live (R2 upload, cache purge, Check live) is golive.h.
 //
 // FloServer's own installer (app/<x.y.z>/FloServer-<x.y.z>-x64.msi, the
 // list's "app", Q5) is one of the files: checked by hand, as Apache is

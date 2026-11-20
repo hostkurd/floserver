@@ -1,19 +1,24 @@
 // FloServer Publisher (D18): makes the next signed runtime list in one go.
 // For HostKurd's release routine, not shipped to users. English only.
 //
-// The user uploads runtime files to the bucket by hand, adds their CDN paths
-// here and presses Publish: the files are checked (publish.h), the next list
-// is built and signed with the key file picked for this run, and
-// manifest.json + manifest.json.sig are written to a dated folder under
-// Documents\FloServer Publisher. Uploading them to the R2 bucket stays by
-// hand; a Cloudflare cache rule keeps manifest.json* out of the cache.
+// New runtime files come from Check for updates (D34) or are uploaded by
+// hand and added by their CDN paths. Publish checks every file (publish.h),
+// builds the next list and signs it with the key file picked for this run,
+// and writes manifest.json + manifest.json.sig to a dated folder under
+// Documents\FloServer Publisher. With an R2 key saved it then puts them live
+// (D34.6, golive.h): uploads both, purges them from Cloudflare's cache when a
+// purge token is saved, and reads the CDN until it shows the new sequence.
+// Without a key, uploading them stays by hand.
 //
 // The key file's path is kept only while the window is open; its contents
 // are read just before signing and wiped right after.
 
 #include "build.h"
 #include "fetch.h"
+#include "golive.h"
 #include "publish.h"
+#include "purge_token.h"
+#include "r2_key.h"
 #include "signing.h"
 #include "templates_json.h"
 #include "updates_window.h"
@@ -57,6 +62,11 @@ constexpr UINT kMsgProgress = WM_APP + 3;  // wParam: row, lParam: bytes (capped
 constexpr UINT kMsgDone = WM_APP + 4;      // lParam: Outcome*
 constexpr UINT kMsgStep = WM_APP + 5;      // wParam: step being worked on
 constexpr UINT kMsgPhase = WM_APP + 6;     // wParam: row, lParam: mt::CheckPhase
+constexpr UINT kMsgSay = WM_APP + 7;       // lParam: std::string* (what Go live is doing)
+
+// Check files, Build the list, Sign, Save, Go live.
+constexpr std::size_t kSteps = 5;
+constexpr std::size_t kGoLive = 4;
 
 enum Id : int {
     IdCheckLive = 100,
@@ -71,7 +81,10 @@ enum Id : int {
     IdOpenFolder,
     IdCopyPaths,
     IdUpdates,
-    IdDot0 = 200,  // four step dots
+    IdR2Key,
+    IdPurgeToken,
+    IdGoLive,
+    IdDot0 = 200,  // the step dots
 };
 
 constexpr COLORREF kWindowBg = RGB(0xF3, 0xF3, 0xF3);
@@ -91,9 +104,11 @@ constexpr COLORREF kGrayBg = RGB(0xF0, 0xF0, 0xF0);
 enum class StepState : std::uint8_t { Waiting, Working, Done, Failed };
 
 struct Outcome {
-    std::array<StepState, 4> steps{};
-    std::array<std::string, 4> details;
+    std::array<StepState, kSteps> steps{};
+    std::array<std::string, kSteps> details;
     std::string error;  // shown in a message box when set
+    bool live = false;   // the CDN shows the new list
+    bool mixed = false;  // R2 has the new list with the old signature
     fs::path folder;    // where the files went, when published
     std::int64_t sequence = 0;
     std::vector<mt::PublishFile> files;
@@ -206,7 +221,11 @@ private:
     void remove_selected();
     void choose_key();
     void publish();
+    void go_live_again();
+    void reset_idle_go_live();
+    [[nodiscard]] bool list_pending() const;
     void stop_worker();
+    [[nodiscard]] static std::array<std::string, kSteps> idle_details();
 
     void on_live(std::unique_ptr<mt::LiveResult> live);
     void on_done(std::unique_ptr<Outcome> outcome);
@@ -227,9 +246,10 @@ private:
     HWND files_heading_ = nullptr, files_hint_ = nullptr, path_ = nullptr, add_ = nullptr, list_ = nullptr;
     HWND remove_ = nullptr, accept_ = nullptr, detail_ = nullptr;
     HWND steps_heading_ = nullptr;
-    std::array<HWND, 4> dots_{}, step_titles_{}, step_details_{};
+    std::array<HWND, kSteps> dots_{}, step_titles_{}, step_details_{};
     HWND choose_key_ = nullptr, key_name_ = nullptr, publish_ = nullptr;
     HWND open_folder_ = nullptr, copy_paths_ = nullptr;
+    HWND r2_key_ = nullptr, purge_token_ = nullptr, go_live_ = nullptr;
 
     UINT dpi_ = 96;
     std::unique_ptr<std::remove_pointer_t<HFONT>, floserver::ui::win::GdiDeleter> font_, bold_, heading_, mono_;
@@ -242,8 +262,8 @@ private:
     int working_row_ = -1;
     std::uint64_t working_bytes_ = 0;
     mt::CheckPhase working_phase_ = mt::CheckPhase::Download;
-    std::array<StepState, 4> steps_{};
-    std::array<std::string, 4> step_details_text_;
+    std::array<StepState, kSteps> steps_{};
+    std::array<std::string, kSteps> step_details_text_;
     fs::path key_file_;
     fs::path last_folder_;
     bool live_busy_ = false;
@@ -272,15 +292,15 @@ bool Publisher::create(HINSTANCE instance, int show) {
     }
     hwnd_ = CreateWindowExW(WS_EX_CONTROLPARENT, wc.lpszClassName, L"FloServer Publisher",
                             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
-                            980, 660, nullptr, nullptr, instance, this);
+                            980, 720, nullptr, nullptr, instance, this);
     if (hwnd_ == nullptr) {
         return false;
     }
     dpi_ = GetDpiForWindow(hwnd_);
     make_fonts();
     create_controls();
-    // 980 x 660 at this window's DPI, client area.
-    RECT r{0, 0, px(980), px(660)};
+    // 980 x 720 at this window's DPI, client area (five steps, D34.6).
+    RECT r{0, 0, px(980), px(720)};
     AdjustWindowRectExForDpi(&r, WS_OVERLAPPEDWINDOW, FALSE, WS_EX_CONTROLPARENT, dpi_);
     SetWindowPos(hwnd_, nullptr, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER);
     layout();
@@ -364,22 +384,24 @@ void Publisher::create_controls() {
     detail_ = make(L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, IdDetail, font_.get());
 
     steps_heading_ = label(L"Publish", heading_.get());
-    const std::array<const wchar_t*, 4> titles = {L"Check files", L"Build the list", L"Sign", L"Files to upload"};
-    for (std::size_t i = 0; i < 4; ++i) {
+    const std::array<const wchar_t*, kSteps> titles = {L"Check files", L"Build the list", L"Sign", L"Save",
+                                                       L"Go live"};
+    for (std::size_t i = 0; i < kSteps; ++i) {
         dots_.at(i) = make(L"STATIC", L"", SS_OWNERDRAW, IdDot0 + static_cast<int>(i), bold_.get());
         step_titles_.at(i) = label(titles.at(i), bold_.get());
         step_details_.at(i) = label(L"", font_.get());
     }
-    step_details_text_ = {"New files are compared with their official checksums; the others must still be served",
-                          "Next sequence, expires in 90 days, with the built-in templates",
-                          "The key is read, used and forgotten",
-                          "manifest.json and manifest.json.sig in a dated folder, opened for you"};
+    step_details_text_ = idle_details();
     choose_key_ = make(L"BUTTON", L"Choose key file…", WS_TABSTOP | BS_PUSHBUTTON, IdChooseKey, font_.get());
     key_name_ = label(L"", font_.get(), SS_ENDELLIPSIS);
     open_folder_ = make(L"BUTTON", L"Open folder", WS_TABSTOP | BS_PUSHBUTTON, IdOpenFolder, font_.get());
     copy_paths_ = make(L"BUTTON", L"Copy purge URLs", WS_TABSTOP | BS_PUSHBUTTON, IdCopyPaths, font_.get());
     ShowWindow(open_folder_, SW_HIDE);
     ShowWindow(copy_paths_, SW_HIDE);
+    r2_key_ = make(L"BUTTON", L"R2 key…", WS_TABSTOP | BS_PUSHBUTTON, IdR2Key, font_.get());
+    purge_token_ = make(L"BUTTON", L"Purge token…", WS_TABSTOP | BS_PUSHBUTTON, IdPurgeToken, font_.get());
+    go_live_ = make(L"BUTTON", L"Go live", WS_TABSTOP | BS_PUSHBUTTON, IdGoLive, bold_.get());
+    ShowWindow(go_live_, SW_HIDE);
     publish_ = make(L"BUTTON", L"Publish", WS_TABSTOP | BS_PUSHBUTTON, IdPublish, bold_.get());
     update_steps();
 }
@@ -442,7 +464,7 @@ void Publisher::layout() {
     const int sw = steps_w - px(32);
     put(steps_heading_, sx, body_top + px(12), sw, px(24));
     int y = body_top + px(44);
-    for (std::size_t i = 0; i < 4; ++i) {
+    for (std::size_t i = 0; i < kSteps; ++i) {
         put(dots_.at(i), sx, y + px(1), px(22), px(22));
         put(step_titles_.at(i), sx + px(32), y + px(2), sw - px(32), px(20));
         // Height for the detail's text at this width.
@@ -465,6 +487,15 @@ void Publisher::layout() {
             put(open_folder_, sx + px(32), y, px(100), px(28));
             put(copy_paths_, sx + px(32) + px(108), y, sw - px(32) - px(108), px(28));
             y += px(36);
+        }
+        if (i == kGoLive) {
+            put(r2_key_, sx + px(32), y, px(100), px(28));
+            put(purge_token_, sx + px(32) + px(108), y, px(110), px(28));
+            y += px(36);
+            if (IsWindowVisible(go_live_)) {
+                put(go_live_, sx + px(32), y, sw - px(32), px(28));
+                y += px(36);
+            }
         }
         y += px(6);
     }
@@ -578,7 +609,7 @@ LRESULT Publisher::handle(UINT msg, WPARAM wp, LPARAM lp) {
         if (ctl == live_value_ && !live_error_.empty()) {
             color = kRed;
         }
-        for (std::size_t i = 0; i < 4; ++i) {
+        for (std::size_t i = 0; i < kSteps; ++i) {
             if (ctl == step_details_.at(i) && steps_.at(i) == StepState::Failed) {
                 color = kRed;
             }
@@ -591,7 +622,7 @@ LRESULT Publisher::handle(UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_DRAWITEM: {
         const auto* di = int_to_ptr<const DRAWITEMSTRUCT*>(lp);
-        if (di->CtlID >= IdDot0 && di->CtlID < IdDot0 + 4) {
+        if (di->CtlID >= IdDot0 && di->CtlID < IdDot0 + static_cast<int>(kSteps)) {
             draw_dot(di);
             return TRUE;
         }
@@ -643,6 +674,17 @@ LRESULT Publisher::handle(UINT msg, WPARAM wp, LPARAM lp) {
         }
         case IdChooseKey:
             choose_key();
+            return 0;
+        case IdR2Key:
+            (void)floserver::publisher::ask_r2_key(hwnd_);
+            reset_idle_go_live();
+            return 0;
+        case IdPurgeToken:
+            (void)floserver::publisher::ask_purge_token(hwnd_);
+            reset_idle_go_live();
+            return 0;
+        case IdGoLive:
+            go_live_again();
             return 0;
         case IdPublish:
             if (busy_) {
@@ -705,8 +747,14 @@ LRESULT Publisher::handle(UINT msg, WPARAM wp, LPARAM lp) {
         working_bytes_ = 0;
         update_row(working_row_);
         return 0;
+    case kMsgSay: {
+        const std::unique_ptr<std::string> text(int_to_ptr<std::string*>(lp));
+        step_details_text_.at(kGoLive) = *text;
+        update_steps();
+        return 0;
+    }
     case kMsgStep:
-        for (std::size_t i = 0; i < 4; ++i) {
+        for (std::size_t i = 0; i < kSteps; ++i) {
             if (i == wp) {
                 steps_.at(i) = StepState::Working;
             }
@@ -874,7 +922,7 @@ void Publisher::update_steps() {
     } else {
         SetWindowTextW(steps_heading_, L"Publish");
     }
-    for (std::size_t i = 0; i < 4; ++i) {
+    for (std::size_t i = 0; i < kSteps; ++i) {
         SetWindowTextW(step_details_.at(i), widen(step_details_text_.at(i)).c_str());
         InvalidateRect(dots_.at(i), nullptr, TRUE);
         InvalidateRect(step_titles_.at(i), nullptr, TRUE);
@@ -886,7 +934,7 @@ void Publisher::update_steps() {
 
 void Publisher::set_busy(bool busy) {
     busy_ = busy;
-    for (HWND h : {check_live_, path_, add_, choose_key_}) {
+    for (HWND h : {check_live_, path_, add_, choose_key_, r2_key_, purge_token_, go_live_}) {
         EnableWindow(h, busy ? FALSE : TRUE);
     }
     EnableWindow(publish_, TRUE);
@@ -1018,6 +1066,9 @@ void Publisher::on_live(std::unique_ptr<mt::LiveResult> live) {
     }
     files_ = std::move(next);
     fill_list();
+    if (!list_pending()) {
+        ShowWindow(go_live_, SW_HIDE);
+    }
 
     const std::string summary = "Sequence " + std::to_string(live_->sequence) + " · " +
                                 std::to_string(live_->runtimes.size()) + " runtimes · " +
@@ -1095,16 +1146,41 @@ void Publisher::remove_selected() {
     reset_steps();
 }
 
+std::array<std::string, kSteps> Publisher::idle_details() {
+    std::string go_live;
+    if (!floserver::publisher::load_r2_key()) {
+        go_live = "No R2 key: you upload the two files yourself";
+    } else if (!floserver::publisher::load_purge_token()) {
+        go_live = "Uploads both to R2 and checks the CDN; no purge token, so no purge";
+    } else {
+        go_live = "Uploads both to R2, purges them from the cache and checks the CDN";
+    }
+    return {"New files are compared with their official checksums; the others must still be served",
+            "Next sequence, expires in 90 days, with the built-in templates", "The key is read, used and forgotten",
+            "manifest.json and manifest.json.sig in a dated folder", go_live};
+}
+
+// After a key changed: what Go live will do, while nothing has been run.
+void Publisher::reset_idle_go_live() {
+    if (steps_.at(kGoLive) == StepState::Waiting && !IsWindowVisible(go_live_)) {
+        step_details_text_.at(kGoLive) = idle_details().at(kGoLive);
+        update_steps();
+    }
+}
+
 void Publisher::reset_steps() {
     steps_.fill(StepState::Waiting);
-    step_details_text_ = {"New files are compared with their official checksums; the others must still be served",
-                          "Next sequence, expires in 90 days, with the built-in templates",
-                          "The key is read, used and forgotten",
-                          "manifest.json and manifest.json.sig in a dated folder"};
+    step_details_text_ = idle_details();
     ShowWindow(open_folder_, SW_HIDE);
     ShowWindow(copy_paths_, SW_HIDE);
+    // A list made here that isn't live yet can still be put live.
+    if (!list_pending()) {
+        ShowWindow(go_live_, SW_HIDE);
+    }
     update_steps();
 }
+
+bool Publisher::list_pending() const { return signed_sequence_ > 0 && (!live_ || live_->sequence < signed_sequence_); }
 
 void Publisher::choose_key() {
     std::array<wchar_t, MAX_PATH * 4> file{};
@@ -1130,9 +1206,49 @@ void Publisher::stop_worker() {
     }
 }
 
+// The keys Go live uses, read on the window's thread before a run.
+struct GoLiveKeys {
+    std::optional<mt::R2Key> r2;
+    std::optional<mt::PurgeToken> purge;
+};
+
+// D34.6, step 5 of Publish and the Go live button: upload, purge, check.
+void go_live_step(HWND target, Outcome& out, floserver::core::HttpTransport& http, const GoLiveKeys& keys,
+                  const mt::GoLiveInput& input, const std::atomic<bool>& cancel) {
+    PostMessageW(target, kMsgStep, kGoLive, 0);
+    mt::R2Bucket bucket(http, *keys.r2);
+    mt::GoLiveOptions options;
+    options.purge = keys.purge;
+    options.cancel = &cancel;
+    options.read_live = [&] {
+        return mt::fetch_live_list(http, mt::kCdn, floserver::core::builtin_manifest_keys(), now_utc(), &cancel);
+    };
+    options.say = [target](const std::string& text) {
+        auto copy = std::make_unique<std::string>(text);
+        if (PostMessageW(target, kMsgSay, 0, reinterpret_cast<LPARAM>(copy.get())) != FALSE) {
+            (void)copy.release();
+        }
+    };
+    const mt::GoLiveResult r = mt::go_live(http, bucket, input, options);
+    out.live = r.live;
+    out.mixed = r.mixed;
+    if (r.live) {
+        out.steps.at(kGoLive) = StepState::Done;
+        out.details.at(kGoLive) = "Live: the CDN shows sequence " + std::to_string(input.sequence) +
+                                  (r.purged ? " · cache purged" : " · " + r.note);
+        return;
+    }
+    out.steps.at(kGoLive) = StepState::Failed;
+    out.details.at(kGoLive) = r.mixed ? "Half uploaded: upload manifest.json.sig by hand now"
+                              : r.uploaded ? "Uploaded, but the CDN doesn't show it yet"
+                                           : "Not uploaded";
+    out.error = r.problem + (r.note.empty() ? "" : "\n\n" + r.note);
+}
+
 // The whole run, on the worker thread. Reports rows and steps as it goes.
 std::unique_ptr<Outcome> run_publish(HWND target, std::vector<mt::PublishFile> files, std::int64_t live_sequence,
-                                     const fs::path& key_file, const std::atomic<bool>& cancel) {
+                                     const fs::path& key_file, const GoLiveKeys& keys,
+                                     const std::atomic<bool>& cancel) {
     auto out = std::make_unique<Outcome>();
     out->steps.fill(StepState::Waiting);
     const auto fail = [&](std::size_t step, std::string detail, std::string error = {}) {
@@ -1292,6 +1408,8 @@ std::unique_ptr<Outcome> run_publish(HWND target, std::vector<mt::PublishFile> f
     std::string steps_text =
         "FloServer runtime list, sequence " + std::to_string(signed_list.sequence) + ", made " +
         mt::format_utc_time(now) + "\r\n" + out->details.at(1) + "\r\n\r\n" +
+        "If the Publisher's Go live step has a tick, it's done: nothing to do here.\r\n" +
+        "Otherwise press Go live in the Publisher, or by hand:\r\n" +
         "1. Upload manifest.json and manifest.json.sig together to the top of the R2 bucket\r\n"
         "   floserver-cdn (Cloudflare -> R2 -> floserver-cdn -> Upload), replacing the old pair.\r\n"
         "2. Press Check live in FloServer Publisher: it must show sequence " +
@@ -1308,10 +1426,16 @@ std::unique_ptr<Outcome> run_publish(HWND target, std::vector<mt::PublishFile> f
         return fail(3, "Can't write the files to " + narrow(folder.wstring()));
     }
     out->steps.at(3) = StepState::Done;
-    out->details.at(3) = "Saved in Documents\\FloServer Publisher\\" + narrow(folder.filename().wstring()) +
-                         ". Upload both to the top of the R2 bucket floserver-cdn, then press Check live.";
+    out->details.at(3) = "Saved in Documents\\FloServer Publisher\\" + narrow(folder.filename().wstring());
     out->folder = folder;
     out->sequence = signed_list.sequence;
+
+    if (!keys.r2) {
+        out->details.at(kGoLive) = "No R2 key: upload both by hand (upload-steps.txt), or save a key and press Go live";
+        return out;
+    }
+    go_live_step(target, *out, *http, keys,
+                 {*built.manifest_json, *signed_list.signature_file, signed_list.sequence, live_sequence}, cancel);
     return out;
 }
 
@@ -1336,8 +1460,9 @@ void Publisher::publish() {
     if (signed_sequence_ > live_->sequence) {
         MessageBoxW(hwnd_,
                     (L"Sequence " + std::to_wstring(signed_sequence_) +
-                     L" was already made in this window. Upload it to the R2 bucket, then press Check live; it "
-                     L"must show that sequence before the next one is made.\n\nIf you won't upload it, delete "
+                     L" was already made in this window. Press Go live (or upload it to the R2 bucket by hand), "
+                     L"then Check live; it must show that sequence before the next one is made.\n\nIf you won't "
+                     L"upload it, delete "
                      L"its folder in Documents\\FloServer Publisher and open the Publisher again.")
                         .c_str(),
                     L"Not published", MB_OK | MB_ICONWARNING);
@@ -1375,14 +1500,75 @@ void Publisher::publish() {
     stop_worker();
     cancel_ = false;
     steps_.fill(StepState::Waiting);
-    step_details_text_ = {"Checking…", "", "", ""};
+    step_details_text_ = {"Checking…", "", "", "", ""};
     ShowWindow(open_folder_, SW_HIDE);
     ShowWindow(copy_paths_, SW_HIDE);
+    ShowWindow(go_live_, SW_HIDE);
     set_busy(true);
     update_steps();
     HWND target = hwnd_;
-    worker_ = std::thread([target, files = files_, sequence = live_->sequence, key = key_file_, this] {
-        auto outcome = run_publish(target, files, sequence, key, cancel_);
+    GoLiveKeys keys{floserver::publisher::load_r2_key(), floserver::publisher::load_purge_token()};
+    worker_ = std::thread([target, files = files_, sequence = live_->sequence, key = key_file_, keys, this] {
+        auto outcome = run_publish(target, files, sequence, key, keys, cancel_);
+        PostMessageW(target, kMsgDone, 0, reinterpret_cast<LPARAM>(outcome.release()));
+    });
+}
+
+// D34.6: the Go live button, for the list this window made when it didn't
+// go live (no key then, or a failed upload).
+void Publisher::go_live_again() {
+    if (busy_ || live_busy_ || last_folder_.empty() || signed_sequence_ == 0) {
+        return;
+    }
+    GoLiveKeys keys{floserver::publisher::load_r2_key(), floserver::publisher::load_purge_token()};
+    if (!keys.r2) {
+        keys.r2 = floserver::publisher::ask_r2_key(hwnd_);
+        if (!keys.r2) {
+            return;
+        }
+        keys.purge = floserver::publisher::load_purge_token();
+    }
+    const auto read = [](const fs::path& p) -> std::optional<std::string> {
+        std::ifstream in(p, std::ios::binary);
+        if (!in) {
+            return std::nullopt;
+        }
+        return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    };
+    const auto list = read(last_folder_ / L"manifest.json");
+    const auto sig = read(last_folder_ / L"manifest.json.sig");
+    if (!list || !sig || mt::list_sequence(*list) != signed_sequence_) {
+        MessageBoxW(hwnd_,
+                    (L"Can't read sequence " + std::to_wstring(signed_sequence_) + L" from " +
+                     last_folder_.wstring() + L". Was the folder changed?")
+                        .c_str(),
+                    L"Not uploaded", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    stop_worker();
+    cancel_ = false;
+    steps_.at(kGoLive) = StepState::Waiting;
+    step_details_text_.at(kGoLive) = "Starting…";
+    ShowWindow(go_live_, SW_HIDE);
+    set_busy(true);
+    update_steps();
+    auto start = std::make_unique<Outcome>();
+    start->steps = steps_;
+    start->details = step_details_text_;
+    start->folder = last_folder_;
+    start->sequence = signed_sequence_;
+    start->files = files_;
+    HWND target = hwnd_;
+    worker_ = std::thread([target, out = start.release(), keys, input = mt::GoLiveInput{*list, *sig, signed_sequence_,
+                                                                                    signed_sequence_ - 1},
+                           this] {
+        std::unique_ptr<Outcome> outcome(out);
+        if (auto http = floserver::core::make_system_transport()) {
+            go_live_step(target, *outcome, *http, keys, input, cancel_);
+        } else {
+            outcome->steps.at(kGoLive) = StepState::Failed;
+            outcome->details.at(kGoLive) = "No HTTPS on this computer";
+        }
         PostMessageW(target, kMsgDone, 0, reinterpret_cast<LPARAM>(outcome.release()));
     });
 }
@@ -1397,24 +1583,33 @@ void Publisher::on_done(std::unique_ptr<Outcome> outcome) {
     }
     fill_list();
     steps_ = outcome->steps;
-    const std::array<std::string, 4> idle = {"", "Next sequence, expires in 90 days, with the built-in templates",
-                                             "The key is read, used and forgotten",
-                                             "manifest.json and manifest.json.sig in a dated folder"};
-    for (std::size_t i = 0; i < 4; ++i) {
-        step_details_text_.at(i) = outcome->details.at(i).empty() ? idle.at(i) : outcome->details.at(i);
+    const std::array<std::string, kSteps> idle = idle_details();
+    for (std::size_t i = 0; i < kSteps; ++i) {
+        step_details_text_.at(i) = outcome->details.at(i).empty() ? (i == 0 ? std::string() : idle.at(i))
+                                                                  : outcome->details.at(i);
     }
     set_busy(false);
     if (!outcome->folder.empty()) {
+        const bool new_folder = outcome->folder != last_folder_;
         last_folder_ = outcome->folder;
         signed_sequence_ = outcome->sequence;
         ShowWindow(open_folder_, SW_SHOW);
         ShowWindow(copy_paths_, SW_SHOW);
         SetWindowTextW(copy_paths_, L"Copy purge URLs");
-        ShellExecuteW(hwnd_, L"explore", last_folder_.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        // Go live again: always the way to finish a list that isn't live.
+        ShowWindow(go_live_, outcome->live ? SW_HIDE : SW_SHOW);
+        // The folder is for uploading by hand; once live there's nothing to do in it.
+        if (!outcome->live && new_folder) {
+            ShellExecuteW(hwnd_, L"explore", last_folder_.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        }
     }
     update_steps();
     if (!outcome->error.empty()) {
-        MessageBoxW(hwnd_, widen(outcome->error).c_str(), L"Not published", MB_OK | MB_ICONWARNING);
+        MessageBoxW(hwnd_, widen(outcome->error).c_str(),
+                    outcome->mixed ? L"Finish the upload now" : L"Not published", MB_OK | MB_ICONWARNING);
+    }
+    if (outcome->live) {
+        check_live();  // the next list starts from the one just published
     }
 }
 

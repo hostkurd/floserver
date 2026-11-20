@@ -316,6 +316,7 @@ core::HttpResponse R2Bucket::call(const Call& c, std::string& error, const std::
             return n;
         };
     }
+    req.max_reply = c.max_reply;
     core::HttpLimits limits;
     limits.max_time = c.max_time;
     limits.cancel = cancel;
@@ -370,6 +371,58 @@ std::string R2Bucket::check(const std::atomic<bool>* cancel) {
         return {};
     }
     return error.empty() ? s3_error(r) : error;
+}
+
+std::optional<std::string> R2Bucket::get_text(const std::string& object, std::size_t max_bytes,
+                                               std::string& error, const std::atomic<bool>* cancel) {
+    error.clear();
+    Call c;
+    c.method = "GET";
+    c.object = object;
+    c.max_time = std::chrono::seconds{60};
+    // One byte more than allowed, so a bigger object is seen as too big.
+    c.max_reply = max_bytes + 1;
+    core::HttpResponse r = call(c, error, cancel);
+    if (r.status == 404) {
+        error.clear();
+        return std::nullopt;
+    }
+    if (r.status != 200) {
+        if (error.empty()) {
+            error = "R2 couldn't give " + object + ": " + s3_error(r);
+        }
+        return std::nullopt;
+    }
+    if (r.body.size() > max_bytes) {
+        error = object + " on R2 is bigger than " + std::to_string(max_bytes) + " bytes";
+        return std::nullopt;
+    }
+    return std::move(r.body);
+}
+
+bool R2Bucket::put_text(const std::string& object, const std::string& text, std::string& error) {
+    Call c;
+    c.method = "PUT";
+    c.object = object;
+    c.content_type = content_type(object);
+    c.text = text;
+    c.max_time = std::chrono::seconds{120};
+    core::HttpResponse r;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        error.clear();
+        // Not stoppable: half of a list pair mustn't be left because of a click.
+        r = call(c, error, nullptr);
+        if (r.status == 200 || !retryable(r)) {
+            break;
+        }
+    }
+    if (r.status == 200) {
+        return true;
+    }
+    if (error.empty()) {
+        error = "R2 refused " + object + ": " + s3_error(r);
+    }
+    return false;
 }
 
 bool R2Bucket::put_file(const std::string& object, const fs::path& file, std::string& error,
