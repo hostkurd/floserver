@@ -177,6 +177,9 @@ private:
         if (msg == WM_NCCREATE) {
             const auto* cs = int_to_ptr<const CREATESTRUCTW*>(lp);
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(cs->lpCreateParams));
+            // Before CreateWindowExW returns: messages during creation go to
+            // DefWindowProcW(hwnd_), which must be this window, or it fails.
+            static_cast<KeyWindow*>(cs->lpCreateParams)->hwnd_ = hwnd;
         }
         auto* self = int_to_ptr<KeyWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
         return self == nullptr ? DefWindowProcW(hwnd, msg, wp, lp) : self->handle(msg, wp, lp);

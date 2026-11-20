@@ -112,6 +112,9 @@ struct UpdateRow {
 // Asks every runtime's site (the runtimes in `listed`). `progress` is told
 // each runtime as it starts. `save_dir`, when set, keeps each site's answer
 // there (to send when a parser needs fixing).
+// How many runtimes find_updates() asks about for `listed` (for a progress bar).
+[[nodiscard]] std::size_t runtimes_to_ask(const std::map<std::string, std::vector<std::string>>& listed);
+
 [[nodiscard]] std::map<std::string, FinderAnswer> find_updates(
     core::HttpTransport& http, const std::map<std::string, std::vector<std::string>>& listed,
     const std::atomic<bool>* cancel = nullptr, const std::function<void(std::string_view runtime)>& progress = {},
