@@ -773,7 +773,7 @@ LRESULT Publisher::handle(UINT msg, WPARAM wp, LPARAM lp) {
         if (busy_) {
             // The two list files are never left half sent: say why closing waits.
             SetWindowTextW(publish_, L"Finishing the upload…");
-            UpdateWindow(hwnd_);
+            RedrawWindow(publish_, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
         }
         stop_worker();
         DestroyWindow(hwnd_);
