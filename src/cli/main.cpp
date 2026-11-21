@@ -1775,7 +1775,15 @@ int env(const std::vector<std::string>& args) {
 // mail.status's "inbox_missing" names nginx: nothing serves the inbox until it's installed.
 bool inbox_needs_nginx(const nlohmann::json& st) {
     const auto it = st.find("inbox_missing");
-    return it != st.end() && it->is_array() && std::find(it->begin(), it->end(), "nginx") != it->end();
+    if (it == st.end() || !it->is_array()) {
+        return false;
+    }
+    for (const nlohmann::json& m : *it) {
+        if (m.is_string() && m.get<std::string>() == "nginx") {
+            return true;
+        }
+    }
+    return false;
 }
 
 // True for http(s)://mail.localhost followed by '/', ':' or nothing: the

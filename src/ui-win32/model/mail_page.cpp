@@ -90,7 +90,9 @@ std::optional<MailStatus> mail_status_from_reply(const json& reply) {
     s.inbox_served = flag_of(reply, "inbox_served", true);
     s.inbox_blocked_by = mail_plain_subject(text_of(reply, "inbox_blocked_by"), 80);
     if (const auto it = reply.find("inbox_missing"); it != reply.end() && it->is_array()) {
-        s.inbox_needs_nginx = std::find(it->begin(), it->end(), "nginx") != it->end();
+        for (const json& m : *it) {
+            s.inbox_needs_nginx = s.inbox_needs_nginx || (m.is_string() && m.get<std::string>() == "nginx");
+        }
     }
     s.unread = count_of(reply, "unread");
     s.total = count_of(reply, "total");
