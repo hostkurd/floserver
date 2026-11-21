@@ -70,6 +70,16 @@ TEST_CASE("mail.status is read, with the defaults for what's missing") {
     CHECK(s->settings.php);
     CHECK_FALSE(s->settings.keep_running);
     CHECK(s->settings.max == 500);
+    CHECK_FALSE(s->inbox_needs_nginx);
+
+    // "inbox_missing" naming nginx: the window says why the inbox isn't served.
+    auto waiting = status_reply();
+    waiting["inbox_served"] = false;
+    waiting["inbox_missing"] = json::array({"nginx"});
+    const auto w = mail_status_from_reply(waiting);
+    REQUIRE(w);
+    CHECK_FALSE(w->inbox_served);
+    CHECK(w->inbox_needs_nginx);
 
     // Not installed, whatever else it says.
     const auto none = mail_status_from_reply(json::parse(R"({"installed": false, "state": "running"})"));
@@ -133,6 +143,13 @@ TEST_CASE("mail: the state's words, the lines of the page") {
           "https://mail.localhost isn't served: the project “mail” has that address. Rename the project to use it.");
     s.inbox_blocked_by.clear();
     CHECK(mail_not_served_text(s, Lang::En) == "https://mail.localhost isn't served right now.");
+    // No nginx: the reason, and where to install it.
+    s.inbox_needs_nginx = true;
+    CHECK(mail_not_served_text(s, Lang::En) ==
+          "https://mail.localhost isn't served: nginx isn't installed. Install it in Runtimes.");
+    CHECK_FALSE(mail_not_served_text(s, Lang::Ar).empty());
+    CHECK_FALSE(mail_not_served_text(s, Lang::Ku).empty());
+    s.inbox_needs_nginx = false;
     s.installed = false;
     CHECK(mail_not_served_text(s, Lang::En).empty());
 }

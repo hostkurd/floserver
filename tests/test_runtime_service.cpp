@@ -590,3 +590,106 @@ TEST_CASE("Bun installs the build that fits the CPU: AVX2 the regular zip, other
                        .dump());
     }
 }
+
+TEST_CASE("Mailpit and phpMyAdmin bring nginx when there's none: it serves the inbox and phpMyAdmin") {
+    const World w;
+    const std::string mailpit = make_zip("mailpit.exe", "MZ mailpit");
+    const std::string nginx = make_zip("nginx.exe", "MZ nginx");
+    const nlohmann::json doc = {{"schema", 1},
+                                {"sequence", 9},
+                                {"expires", "2026-12-01T00:00:00Z"},
+                                {"runtimes",
+                                 {w.entry("mailpit", "1.34.0", mailpit), w.entry("nginx", "1.30.7", nginx),
+                                  w.entry("nginx", "1.28.2", nginx)}}};
+    const std::string bytes = doc.dump();
+    w.transport->serve(kSource.manifest_url, {200, bytes});
+    w.transport->serve(kSource.signature_url, {200, kKey.sign(bytes, kKeyId)});
+    w.transport->serve("https://cdn.example.org/mailpit/1.34.0.zip", {200, mailpit});
+    w.transport->serve("https://cdn.example.org/nginx/1.30.7.zip", {200, nginx});
+    w.transport->serve("https://cdn.example.org/nginx/1.28.2.zip", {200, nginx});
+    RuntimeService s(w.config(), w.transport);
+    ServiceRefusal refusal;
+
+    const auto id = s.install("mailpit", "", refusal);
+    REQUIRE_MESSAGE(id.has_value(), refusal.message);
+    const auto job = wait_for(s, *id);
+    INFO(job.dump(2));
+    CHECK(job["state"] == "done");
+    CHECK(job["version"] == "1.34.0");
+    CHECK(job["message"].get<std::string>().find("nginx 1.30.7 is installed too") != std::string::npos);
+    CHECK(job["total"] == job["received"]);
+    const fs::path root = w.tmp.path() / "runtimes";
+    CHECK(read_file(root / "mailpit" / "1.34.0" / "mailpit.exe") == "MZ mailpit");
+    CHECK(read_file(root / "nginx" / "1.30.7" / "nginx.exe") == "MZ nginx");  // the newest
+    CHECK_FALSE(fs::exists(root / "nginx" / "1.28.2"));
+
+    // With an nginx installed, no other one comes along.
+    ServiceRefusal gone;
+    REQUIRE_MESSAGE(s.remove("mailpit", "1.34.0", gone), gone.message);
+    const auto again = s.install("mailpit", "", refusal);
+    REQUIRE(again);
+    const auto job2 = wait_for(s, *again);
+    CHECK(job2["state"] == "done");
+    CHECK(job2["message"].get<std::string>().find("nginx") == std::string::npos);
+    CHECK(w.transport->requests("https://cdn.example.org/nginx/1.30.7.zip") == 1);
+}
+
+TEST_CASE("Mailpit is still installed when the list has no nginx, and the message says so") {
+    const World w;
+    const std::string mailpit = make_zip("mailpit.exe", "MZ mailpit");
+    const nlohmann::json doc = {{"schema", 1},
+                                {"sequence", 9},
+                                {"expires", "2026-12-01T00:00:00Z"},
+                                {"runtimes", {w.entry("mailpit", "1.34.0", mailpit)}}};
+    const std::string bytes = doc.dump();
+    w.transport->serve(kSource.manifest_url, {200, bytes});
+    w.transport->serve(kSource.signature_url, {200, kKey.sign(bytes, kKeyId)});
+    w.transport->serve("https://cdn.example.org/mailpit/1.34.0.zip", {200, mailpit});
+    RuntimeService s(w.config(), w.transport);
+    ServiceRefusal refusal;
+    const auto id = s.install("mailpit", "", refusal);
+    REQUIRE(id);
+    const auto job = wait_for(s, *id);
+    CHECK(job["state"] == "done");
+    CHECK(job["message"].get<std::string>().find("has no nginx") != std::string::npos);
+}
+
+TEST_CASE("phpMyAdmin brings nginx too; a failed nginx download is noted and the progress still adds up") {
+    const World w;
+    const std::string pma = make_zip("index.php", "<?php");
+    const std::string nginx = make_zip("nginx.exe", "MZ nginx");
+    auto pma_entry = w.entry("phpmyadmin", "5.2.3", pma, "any");
+    const nlohmann::json doc = {{"schema", 1},
+                                {"sequence", 9},
+                                {"expires", "2026-12-01T00:00:00Z"},
+                                {"runtimes", {pma_entry, w.entry("nginx", "1.30.7", nginx)}}};
+    const std::string bytes = doc.dump();
+    w.transport->serve(kSource.manifest_url, {200, bytes});
+    w.transport->serve(kSource.signature_url, {200, kKey.sign(bytes, kKeyId)});
+    w.transport->serve("https://cdn.example.org/phpmyadmin/5.2.3.zip", {200, pma});
+    w.transport->serve("https://cdn.example.org/nginx/1.30.7.zip", {404, ""});  // nginx fails first
+    RuntimeService s(w.config(), w.transport);
+    ServiceRefusal refusal;
+
+    const auto id = s.install("phpmyadmin", "", refusal);
+    REQUIRE_MESSAGE(id.has_value(), refusal.message);
+    const auto job = wait_for(s, *id);
+    INFO(job.dump(2));
+    CHECK(job["state"] == "done");
+    CHECK(job["message"].get<std::string>().find("nginx couldn't be installed") != std::string::npos);
+    CHECK(job["total"] == job["received"]);
+    const fs::path root = w.tmp.path() / "runtimes";
+    CHECK(fs::exists(root / "phpmyadmin" / "5.2.3"));
+    CHECK_FALSE(fs::exists(root / "nginx"));
+
+    // Asked again, nginx comes along this time.
+    w.transport->serve("https://cdn.example.org/nginx/1.30.7.zip", {200, nginx});
+    const auto again = s.install("phpmyadmin", "", refusal);
+    REQUIRE(again);
+    const auto job2 = wait_for(s, *again);
+    INFO(job2.dump(2));
+    CHECK(job2["state"] == "done");
+    CHECK(job2["message"].get<std::string>().find("nginx 1.30.7 is installed too") != std::string::npos);
+    CHECK(read_file(root / "nginx" / "1.30.7" / "nginx.exe") == "MZ nginx");
+    CHECK(job2["total"] == job2["received"]);
+}

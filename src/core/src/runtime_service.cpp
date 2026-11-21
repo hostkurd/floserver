@@ -689,6 +689,10 @@ void RuntimeService::run(Job& job) {
     // can't run without it) and phpredis for each PHP series; for a PHP
     // while Garnet is installed, its series' phpredis.
     std::optional<RuntimeFile> dotnet;
+    // Mailpit's inbox and phpMyAdmin are served by nginx: with no nginx at
+    // all, it comes first. A failure is only noted (Mailpit still catches
+    // mail; both are served once nginx is installed).
+    std::optional<RuntimeFile> web;
     std::vector<RuntimeFile> extras;  // phpredis builds: a failure is only noted
     std::vector<std::string> notes;
     const auto add_php_redis = [&](const std::string& series) {
@@ -715,7 +719,17 @@ void RuntimeService::run(Job& job) {
         for (const std::string& series : installed_php_series(installed_now)) {
             add_php_redis(series);
         }
-    } else if (job.name == "php" && newest_garnet(installed_now) != nullptr) {
+    } else if (job.name == kMailpitRuntime || job.name == "phpmyadmin") {
+        const bool have_nginx = std::any_of(installed_now.begin(), installed_now.end(),
+                                            [](const InstalledRuntime& r) { return r.name == "nginx"; });
+        if (!have_nginx) {
+            web = pick_entry(cached->manifest, "nginx", config_.platform, "", "", avx2);
+            if (!web) {
+                notes.push_back("the runtime list has no nginx, so " + job.name + " isn't served until nginx is installed");
+            }
+        }
+    }
+    if (job.name == "php" && newest_garnet(installed_now) != nullptr) {
         const auto v = Version::parse(entry->version);
         if (v && v->parts().size() >= 2) {
             add_php_redis(std::to_string(v->parts()[0]) + "." + std::to_string(v->parts()[1]));
@@ -726,7 +740,7 @@ void RuntimeService::run(Job& job) {
     {
         const std::lock_guard lock(jobs_mutex_);
         job.version = entry->version;
-        job.total = (main_installed ? 0 : entry->size) + (dotnet ? dotnet->size : 0);
+        job.total = (main_installed ? 0 : entry->size) + (dotnet ? dotnet->size : 0) + (web ? web->size : 0);
         for (const RuntimeFile& r : extras) {
             job.total += r.size;
         }
@@ -747,6 +761,19 @@ void RuntimeService::run(Job& job) {
             return;
         }
         base += dotnet->size;
+    }
+    if (web) {
+        if (fetch_install(job, *web, base, error)) {
+            notes.push_back("nginx " + web->version + " is installed too, to serve it");
+            base += web->size;
+        } else if (cancelled()) {
+            return;
+        } else {
+            notes.push_back("nginx couldn't be installed (" + error + "), so it isn't served until nginx is installed");
+            const std::lock_guard lock(jobs_mutex_);
+            job.total -= web->size;  // not coming: the progress still ends at its total
+            job.received = base;
+        }
     }
     std::string done_message;
     if (main_installed) {
