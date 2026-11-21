@@ -1321,7 +1321,7 @@ struct Service {
     }
 
     // Mailpit (D27), protocol.h:
-    //   mail.status -> MailService::status() with "inbox_url" and "inbox_served" from the web service;
+    //   mail.status -> MailService::status() with "inbox_url", "inbox_served" and "inbox_missing"? from the web service;
     //   mail.set {php?, notices?, keep_running?, max?} -> {"ok": true};
     //   mail.test {to?} -> {"ok": true}; mail.clear -> {"ok": true};
     //   mail.env {name} -> {"env": [[key, value]...], "env_file"}: a project's mail lines alone
@@ -1338,6 +1338,14 @@ struct Service {
             bool served = false;
             out["inbox_url"] = inbox_address(served);
             out["inbox_served"] = served;
+            // What the inbox waits for (["nginx"]): the window and flo mail say why.
+            if (!served && web) {
+                const json inbox = web->status().value("mail", json());
+                if (inbox.is_object() && inbox.contains("missing") && inbox.at("missing").is_array() &&
+                    !inbox.at("missing").empty()) {
+                    out["inbox_missing"] = inbox.at("missing");
+                }
+            }
             return protocol::make_result(r.id, out);
         }
         if (r.method == "mail.recent") {

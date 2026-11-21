@@ -20,7 +20,8 @@
 //                    "emails_kept"? (why not: another Mailpit version is still installed)}
 //   mail.status      {} -> {"installed", "version"?, "state": "not_installed"|"asleep"|"starting"|
 //                    "running"|"failed", "error"?, "smtp_port", "inbox_url", "inbox_served",
-//                    "inbox_blocked_by"? (the project named "mail"), "unread", "total",
+//                    "inbox_blocked_by"? (the project named "mail"), "inbox_missing"? (["nginx"]:
+//                    nginx isn't installed, so nothing serves the inbox), "unread", "total",
 //                    "size_bytes" (mailpit.db on disk), "notice_seq" (+1 each time an SMTP
 //                    connection that delivered email ends), "latest"?: {"subject", "to",
 //                    "new_in_batch"} (cleaned, at most 200 characters each), "settings": {"php",

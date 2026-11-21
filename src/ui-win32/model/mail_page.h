@@ -49,6 +49,7 @@ struct MailStatus {
     bool installed = false;
     MailState state = MailState::NotInstalled;
     bool inbox_served = true;
+    bool inbox_needs_nginx = false;  // "inbox_missing" names nginx: nothing serves the inbox until it's installed
     // The last mail.status failed: these numbers are from before and aren't shown.
     bool stale = false;
 };

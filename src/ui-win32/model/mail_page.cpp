@@ -89,6 +89,9 @@ std::optional<MailStatus> mail_status_from_reply(const json& reply) {
     }
     s.inbox_served = flag_of(reply, "inbox_served", true);
     s.inbox_blocked_by = mail_plain_subject(text_of(reply, "inbox_blocked_by"), 80);
+    if (const auto it = reply.find("inbox_missing"); it != reply.end() && it->is_array()) {
+        s.inbox_needs_nginx = std::find(it->begin(), it->end(), "nginx") != it->end();
+    }
     s.unread = count_of(reply, "unread");
     s.total = count_of(reply, "total");
     s.size_bytes = count_of(reply, "size_bytes");
@@ -196,7 +199,7 @@ std::string mail_not_served_text(const MailStatus& status, Lang lang) {
     }
     const std::string address = mail_inbox_address(status);
     if (status.inbox_blocked_by.empty()) {
-        return fill(lang, Str::MailNotServedNoWhy, {address});
+        return fill(lang, status.inbox_needs_nginx ? Str::MailNeedsNginx : Str::MailNotServedNoWhy, {address});
     }
     // A project's name is typed text: it follows its own first letter.
     const std::string who = is_rtl(lang) ? isolate_auto(status.inbox_blocked_by) : status.inbox_blocked_by;

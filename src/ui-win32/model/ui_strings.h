@@ -785,6 +785,7 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     MailEnvNote,
     MailNotServed,          // {0}: "https://mail.localhost", {1}: the project that has the address
     MailNotServedNoWhy,     // {0}: "https://mail.localhost"
+    MailNeedsNginx,         // {0}: "https://mail.localhost"; nginx isn't installed, so nothing serves it
     MailCopied,
     MailOptions,
     MailPhp,

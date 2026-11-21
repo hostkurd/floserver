@@ -1774,6 +1774,12 @@ int env(const std::vector<std::string>& args) {
 
 // True for http(s)://mail.localhost followed by '/', ':' or nothing: the
 // only address `flo mail open` hands to the browser.
+// mail.status's "inbox_missing" names nginx: nothing serves the inbox until it's installed.
+bool inbox_needs_nginx(const nlohmann::json& st) {
+    const auto it = st.find("inbox_missing");
+    return it != st.end() && it->is_array() && std::find(it->begin(), it->end(), "nginx") != it->end();
+}
+
 bool is_inbox_url(const std::string& url) {
     for (const char* start : {"http://mail.localhost", "https://mail.localhost"}) {
         const std::string_view s(start);
@@ -1840,6 +1846,8 @@ int mail(const std::vector<std::string>& args) {
         if (!st.value("inbox_served", false)) {
             if (st.contains("inbox_blocked_by")) {
                 std::cout << "   (not served: the project " << printable(st, "inbox_blocked_by") << " has this address)";
+            } else if (inbox_needs_nginx(st)) {
+                std::cout << "   (not served: nginx isn't installed; flo install nginx)";
             } else {
                 std::cout << "   (not served yet)";
             }
@@ -1858,7 +1866,8 @@ int mail(const std::vector<std::string>& args) {
             std::cerr << "The inbox isn't served"
                       << (st.contains("inbox_blocked_by")
                               ? ": the project " + printable(st, "inbox_blocked_by") + " has the address mail.localhost"
-                              : std::string(" yet; try again in a few seconds"))
+                          : inbox_needs_nginx(st) ? std::string(": nginx isn't installed. Install it with: flo install nginx")
+                                                  : std::string(" yet; try again in a few seconds"))
                       << "\n";
             return 1;
         }
