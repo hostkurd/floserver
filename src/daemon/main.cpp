@@ -1088,6 +1088,23 @@ struct Service {
             return protocol::make_error(r.id, "no_data_folder",
                                         "FloServer can't find a folder to keep its settings in (LOCALAPPDATA or HOME)");
         }
+        // A PostgreSQL project: phpMyAdmin can't open it, and nothing is started to find that out.
+        if (const std::string project = string_param(r.params, "project"); !project.empty() && projects) {
+            core::ServiceRefusal ignored;
+            if (const auto list = projects->list(ignored)) {
+                for (const json& p : (*list)["projects"]) {
+                    if (p.value("name", std::string()) != project || !p.contains("path") || !p.at("path").is_string()) {
+                        continue;
+                    }
+                    const auto dir = core::path_from_utf8(p.at("path").get<std::string>());
+                    const auto parsed = core::read_project_config_file(core::Project{project, dir, true, false, {}});
+                    if (parsed.config && parsed.config->database &&
+                        !core::mysql_protocol_family(parsed.config->database->family)) {
+                        return protocol::make_error(r.id, "not_mysql", core::phpmyadmin_not_mysql_message());
+                    }
+                }
+            }
+        }
         const json status = web->status();
         const json pma = status.contains("phpmyadmin") ? status.at("phpmyadmin") : json();
         if (!pma.is_object()) {

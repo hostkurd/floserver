@@ -193,6 +193,9 @@ struct PhpMyAdminLoginRequest {
 // password); a project's user and database are made as its own login makes
 // them; config.inc.php is brought up to date and a token made. The link for
 // phpMyAdmin at `address`, or nothing (with `refusal`).
+// Why a PostgreSQL project has no phpMyAdmin, and what to use instead.
+[[nodiscard]] std::string phpmyadmin_not_mysql_message();
+
 [[nodiscard]] std::optional<std::string> phpmyadmin_login(DatabaseService& databases, PhpMyAdminConfigWriter& writer,
                                                           const std::filesystem::path& data, std::string_view address,
                                                           const PhpMyAdminLoginRequest& request, ServiceRefusal& refusal);

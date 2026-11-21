@@ -522,7 +522,15 @@ MainWindow::PanelGeometry MainWindow::panel_geometry(HDC dc) const {
         // PostgreSQL: phpMyAdmin can't open it, so the tools that can.
         const std::string& db = !row->database.empty() ? row->database : row->wants.database;
         if (!database_opens_in_phpmyadmin(db)) {
-            g.pg_tools = {x0, y, x1, y + px(32)};  // two lines at most
+            // As tall as its words need: Arabic and Kurdish can take three lines.
+            const std::wstring said = w(text(lang_, Str::PanelPgTools));
+            RECT need{0, 0, x1 - x0, 0};
+            {
+                const win::Selected selected(dc, fonts_.caption.get());
+                DrawTextW(dc, said.c_str(), static_cast<int>(said.size()), &need,
+                          DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL | (rtl_ ? UINT{DT_RTLREADING} : 0U));
+            }
+            g.pg_tools = {x0, y, x1, y + std::max(px(16), static_cast<int>(need.bottom - need.top))};
             y = g.pg_tools.bottom + px(kPanelGap);
             g.content_h = y + panel_scroll_ - static_cast<int>(g.content.top);
             return g;
