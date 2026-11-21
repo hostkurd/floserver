@@ -1780,7 +1780,6 @@ bool inbox_needs_nginx(const nlohmann::json& st) {
 
 // True for http(s)://mail.localhost followed by '/', ':' or nothing: the
 // only address `flo mail open` hands to the browser.
-
 bool is_inbox_url(const std::string& url) {
     for (const char* start : {"http://mail.localhost", "https://mail.localhost"}) {
         const std::string_view s(start);
