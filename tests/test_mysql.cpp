@@ -113,6 +113,13 @@ TEST_CASE("MySQL's my.ini: no X Protocol, no binary log, 127.0.0.1 only, its own
     CHECK(std::find(args.begin(), args.end(), "--bind-address=127.0.0.1") != args.end());
     const auto margs = mariadb_command_line_guards(m, 33100);
     CHECK(std::find(margs.begin(), margs.end(), "--loose-mysqlx=OFF") == margs.end());
+    // Windows: no monitor process, so the pid file names the process FloServer started.
+#ifdef _WIN32
+    CHECK(std::find(args.begin(), args.end(), "--no-monitor") != args.end());
+#else
+    CHECK(std::find(args.begin(), args.end(), "--no-monitor") == args.end());
+#endif
+    CHECK(std::find(margs.begin(), margs.end(), "--no-monitor") == margs.end());  // MariaDB has no such option
 }
 
 TEST_CASE("MySQL's SQL: root on 127.0.0.1 and ::1, no mysql.global_priv, caching_sha2 kept") {

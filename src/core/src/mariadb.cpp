@@ -307,6 +307,14 @@ std::vector<std::string> mariadb_command_line_guards(const MariaDbFiles& files, 
     }
     if (files.family == kMySqlFamily) {
         args.emplace_back("--loose-mysqlx=OFF");
+#ifdef _WIN32
+        // MySQL 8 on Windows otherwise starts a monitor process (for SQL
+        // RESTART) that runs the real server as its child: the pid file then
+        // names the child, never the process FloServer started, and the start
+        // never counts as ready (found on a real PC, 22 Nov). FloServer
+        // restarts the server itself.
+        args.emplace_back("--no-monitor");
+#endif
     }
     return args;
 }
