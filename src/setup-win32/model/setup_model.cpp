@@ -55,6 +55,20 @@ SetupMode decide_setup_mode(const std::optional<Product>& installed, const Produ
     return compare_versions(installed->version, ours.version) > 0 ? SetupMode::Newer : SetupMode::Update;
 }
 
+std::vector<SetupAction> setup_actions(SetupMode mode) {
+    switch (mode) {
+        case SetupMode::Install:
+            return {};
+        case SetupMode::Update:
+            return {SetupAction::Update, SetupAction::Remove};
+        case SetupMode::Reinstall:
+            return {SetupAction::Repair, SetupAction::Remove};
+        case SetupMode::Newer:
+            return {SetupAction::Remove};
+    }
+    return {};
+}
+
 bool licence_needed(SetupMode mode, std::string_view accepted_sha256, std::string_view ours_sha256) {
     if (mode == SetupMode::Install) {
         return true;
