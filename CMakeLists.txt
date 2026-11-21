@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 
 project(FloServer
-    VERSION 0.1.0
+    VERSION 0.9.0
     DESCRIPTION "Tiny local development environment for PHP, Node.js and databases"
     LANGUAGES C CXX)
 
