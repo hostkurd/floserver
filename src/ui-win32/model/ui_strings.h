@@ -355,6 +355,7 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     SettingsTools,
     PmaOpen,
     PmaOpenProject,
+    PanelPgTools,  // a PostgreSQL project's Database tab, in place of Open in phpMyAdmin
     PmaNotInstalled,
     PmaOpening,
     PmaStarting,             // {0}: the server, "MariaDB 11.8", "MySQL 8.4"

@@ -519,8 +519,23 @@ MainWindow::PanelGeometry MainWindow::panel_geometry(HDC dc) const {
         g.db_detail = {x0 + px(12), y + px(28), g.copy_env.left - px(12), y + px(46)};
         y = g.db_box.bottom + px(kPanelGap);
         // Open in phpMyAdmin: the project's own login, its database only.
-        const DatabaseServerState server = database_server(
-            snap_.databases, !row->database.empty() ? row->database : row->wants.database);
+        // PostgreSQL: phpMyAdmin can't open it, so the tools that can.
+        const std::string& db = !row->database.empty() ? row->database : row->wants.database;
+        if (!database_opens_in_phpmyadmin(db)) {
+            // As tall as its words need: Arabic and Kurdish can take three lines.
+            const std::wstring said = w(text(lang_, Str::PanelPgTools));
+            RECT need{0, 0, x1 - x0, 0};
+            {
+                const win::Selected selected(dc, fonts_.caption.get());
+                DrawTextW(dc, said.c_str(), static_cast<int>(said.size()), &need,
+                          DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL | (rtl_ ? UINT{DT_RTLREADING} : 0U));
+            }
+            g.pg_tools = {x0, y, x1, y + std::max(px(16), static_cast<int>(need.bottom - need.top))};
+            y = g.pg_tools.bottom + px(kPanelGap);
+            g.content_h = y + panel_scroll_ - static_cast<int>(g.content.top);
+            return g;
+        }
+        const DatabaseServerState server = database_server(snap_.databases, db);
         const int pw = std::max({Canvas::measure(dc, w(text(lang_, Str::PmaOpenProject)), fonts_.caption.get(), rtl_),
                                  Canvas::measure(dc, w(text(lang_, Str::PmaOpening)), fonts_.caption.get(), rtl_),
                                  Canvas::measure(dc, w(phpmyadmin_busy_text(database_server_title(server), {}, lang_)),
@@ -1532,6 +1547,10 @@ void MainWindow::paint_panel(Canvas& c, HDC dc, bool text_pass) const {
             c.text(g.pma_hint, w(text(lang_, Str::PmaNotInstalled)), fonts_.caption.get(), p.text_subtle, Align::Start,
                    false);
         }
+    }
+
+    if (g.pg_tools.right > g.pg_tools.left) {
+        c.paragraph(g.pg_tools, w(text(lang_, Str::PanelPgTools)), fonts_.caption.get(), p.text_subtle);
     }
 
     if (g.mcp_title.right > g.mcp_title.left) {

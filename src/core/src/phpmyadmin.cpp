@@ -474,6 +474,11 @@ std::string signon_url(std::string_view address, std::string_view token, std::st
            "&lang=" + phpmyadmin_lang(lang);
 }
 
+std::string phpmyadmin_not_mysql_message() {
+    return "phpMyAdmin works with MariaDB and MySQL only. To look at a PostgreSQL database, connect pgAdmin or "
+           "DBeaver with the project's login (Copy .env lines)";
+}
+
 std::optional<std::string> phpmyadmin_login(DatabaseService& databases, PhpMyAdminConfigWriter& writer,
                                             const fs::path& data, std::string_view address,
                                             const PhpMyAdminLoginRequest& request, ServiceRefusal& refusal) {
@@ -484,6 +489,11 @@ std::optional<std::string> phpmyadmin_login(DatabaseService& databases, PhpMyAdm
     if (!request.project.empty()) {
         auto own = databases.project_login(request.project, refusal, true);  // asked for now: a failed start is tried again
         if (!own) {
+            return std::nullopt;
+        }
+        // phpMyAdmin speaks MySQL's protocol only: a PostgreSQL project gets the tools that fit.
+        if (!mysql_protocol_family(own->family)) {
+            refusal = {"not_mysql", phpmyadmin_not_mysql_message()};
             return std::nullopt;
         }
         // Its series and family: the server on its port.

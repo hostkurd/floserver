@@ -594,6 +594,7 @@ void MainWindow::add_panel_access(AccessTree& t) const {
         add(std::move(pma), g.pma);
         words("pma-hint", std::string(text(lang_, Str::PmaNotInstalled)), g.pma_hint);
     }
+    words("pg-tools", std::string(text(lang_, Str::PanelPgTools)), g.pg_tools);
 
     // The log: the lines shown, one element each.
     if (height_of(g.log_box) > px(kLogLineH)) {

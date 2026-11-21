@@ -1860,3 +1860,13 @@ TEST_CASE("PostgreSQL in the window's model (D29): the pickers, shared sites, Ru
     REQUIRE(g->rows.size() == 1);
     CHECK(g->rows[0].usage.find("5432") != std::string::npos);
 }
+
+TEST_CASE("phpMyAdmin opens MariaDB and MySQL databases, never PostgreSQL ones") {
+    CHECK(database_opens_in_phpmyadmin("mariadb-11.4"));
+    CHECK(database_opens_in_phpmyadmin("mysql-8.4"));
+    CHECK(database_opens_in_phpmyadmin("11.4"));  // an older floserver.json: MariaDB
+    CHECK(database_opens_in_phpmyadmin(""));
+    CHECK_FALSE(database_opens_in_phpmyadmin("postgresql-18"));
+    CHECK_FALSE(database_opens_in_phpmyadmin("PostgreSQL-17"));
+    CHECK(text(Lang::En, Str::PanelPgTools) == std::string("To look at the data, connect pgAdmin or DBeaver with the login above."));
+}

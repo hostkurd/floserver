@@ -713,6 +713,11 @@ DatabaseServerState database_server(const json& databases, std::string_view data
     return {};
 }
 
+bool database_opens_in_phpmyadmin(std::string_view database) {
+    const std::size_t dash = database.find('-');
+    return dash == std::string_view::npos || lower_ascii(database.substr(0, dash)) != "postgresql";
+}
+
 std::string database_server_title(const DatabaseServerState& server) {
     return server.series.empty() ? std::string() : runtime_label(server.family) + " " + server.series;
 }
