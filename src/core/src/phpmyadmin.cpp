@@ -486,6 +486,13 @@ std::optional<std::string> phpmyadmin_login(DatabaseService& databases, PhpMyAdm
         if (!own) {
             return std::nullopt;
         }
+        // phpMyAdmin speaks MySQL's protocol only: a PostgreSQL project gets the tools that fit.
+        if (!mysql_protocol_family(own->family)) {
+            refusal = {"not_mysql", "phpMyAdmin works with MariaDB and MySQL only. To look at this PostgreSQL "
+                                    "database, connect pgAdmin or DBeaver to 127.0.0.1:" +
+                                        std::to_string(own->port) + " with the project's login (Copy .env lines)"};
+            return std::nullopt;
+        }
         // Its series and family: the server on its port.
         const json status = databases.status();
         if (status.contains("servers") && status.at("servers").is_array()) {
