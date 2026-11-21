@@ -355,6 +355,9 @@ private:
         if (!updating()) {
             return {L"Licence", L"Install", L"Done"};
         }
+        if (facts_.mode == setup::SetupMode::Newer) {
+            return {};  // nothing to install: only Remove
+        }
         return {licence ? L"Licence" : L"Choose", repairing() ? L"Repair" : L"Update", L"Done"};
     }
 
@@ -389,7 +392,8 @@ private:
         start_page(steps(true), 0);
         std::wstring sub = L"Please read the terms before you install FloServer.";
         if (updating()) {
-            sub = facts_.licence_changed ? L"The licence has changed since you last accepted it. Please read it before you update."
+            sub = facts_.licence_changed ? (repairing() ? L"The licence has changed since you last accepted it. Please read it before you repair."
+                                                        : L"The licence has changed since you last accepted it. Please read it before you update.")
                                          : L"The terms you accepted when you installed FloServer.";
         }
         heading(L"Licence agreement", sub);
@@ -471,7 +475,7 @@ private:
             default:
                 heading(L"A newer FloServer is installed",
                         L"FloServer " + old_version + L" is on this PC, newer than this setup (" + new_version +
-                            L"). To go back to " + new_version + L", remove it first.");
+                            L"). To go back to " + new_version + L", remove it, then run this setup again.");
                 break;
         }
         int top = 172;
@@ -513,7 +517,7 @@ private:
             }
             set_default_button(kInstall);
         } else {
-            set_default_button(kRemoveApp);
+            set_default_button(kCancel);  // Remove only: never by a stray Enter
         }
         const int x = look::kContentR - 96;
         add_button(kCancel, {x, look::kButtonY, x + 96, look::kButtonY + look::kButtonH}, L"Cancel",
@@ -694,7 +698,15 @@ private:
     // does the clean-up, then Windows' uninstall). If its FloServer.exe is
     // gone, Windows Installer's own uninstall instead. This setup closes.
     void start_removal() {
-        const std::wstring exe = setup::install_folder() + L"\\FloServer.exe";
+        // Where Windows' Settings -> Apps has it (InstallLocation), else the default folder.
+        std::wstring folder = installed_location();
+        if (folder.empty()) {
+            folder = setup::install_folder();
+        }
+        while (!folder.empty() && (folder.back() == L'\\' || folder.back() == L'/')) {
+            folder.pop_back();
+        }
+        const std::wstring exe = folder + L"\\FloServer.exe";
         std::wstring command;
         std::wstring program;
         if (GetFileAttributesW(exe.c_str()) != INVALID_FILE_ATTRIBUTES) {
@@ -710,8 +722,9 @@ private:
         si.cb = sizeof si;
         PROCESS_INFORMATION pi{};
         if (program.empty() ||
-            CreateProcessW(program.c_str(), command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi) ==
-                FALSE) {
+            CreateProcessW(program.c_str(), command.data(), nullptr, nullptr, FALSE, 0, nullptr,
+                           GetFileAttributesW(folder.c_str()) != INVALID_FILE_ATTRIBUTES ? folder.c_str() : nullptr, &si,
+                           &pi) == FALSE) {
             show_problem(L"FloServer's uninstall didn't open",
                          L"Remove FloServer in Windows' Settings \u2192 Apps \u2192 Installed apps instead.",
                          static_cast<int>(ERROR_INSTALL_FAILURE));
@@ -722,6 +735,21 @@ private:
         CloseHandle(pi.hProcess);
         exit_code_ = 0;
         DestroyWindow(hwnd());
+    }
+
+    // InstallLocation of FloServer's entry in Settings -> Apps (installer/FloServer.wxs).
+    [[nodiscard]] static std::wstring installed_location() {
+        std::wstring value(MAX_PATH * 4, L'\0');
+        DWORD bytes = static_cast<DWORD>(value.size() * sizeof(wchar_t));
+        if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\FloServer",
+                         L"InstallLocation", RRF_RT_REG_SZ, nullptr, value.data(), &bytes) != ERROR_SUCCESS) {
+            return {};
+        }
+        value.resize(bytes / sizeof(wchar_t));
+        while (!value.empty() && value.back() == L'\0') {
+            value.pop_back();
+        }
+        return value;
     }
 
     void cancel_install() {
@@ -793,7 +821,7 @@ private:
         if (error.empty()) {
             error = setup::error_words(result);
         }
-        show_problem(updating() ? L"FloServer wasn't updated" : L"FloServer wasn't installed",
+        show_problem(!updating() ? L"FloServer wasn't installed" : repairing() ? L"FloServer wasn't repaired" : L"FloServer wasn't updated",
                      error + L"\n\nWindows put back everything it had changed. If it happens again, run "
                              L"the setup with --log setup.log and send us the file.",
                      static_cast<int>(result));
