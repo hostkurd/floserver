@@ -765,12 +765,15 @@ void RuntimeService::run(Job& job) {
     if (web) {
         if (fetch_install(job, *web, base, error)) {
             notes.push_back("nginx " + web->version + " is installed too, to serve it");
+            base += web->size;
         } else if (cancelled()) {
             return;
         } else {
             notes.push_back("nginx couldn't be installed (" + error + "), so it isn't served until nginx is installed");
+            const std::lock_guard lock(jobs_mutex_);
+            job.total -= web->size;  // not coming: the progress still ends at its total
+            job.received = base;
         }
-        base += web->size;
     }
     std::string done_message;
     if (main_installed) {

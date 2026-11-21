@@ -372,6 +372,13 @@ struct Service {
     void after_install(const std::string& name, const std::string& version) const noexcept {
         namespace core = floserver::core;
         replace_older_mailpit(name, version);
+        // phpMyAdmin may have brought nginx with it: served now, not at the next reload.
+        if (name == core::kPhpMyAdminRuntime && web) {
+            try {
+                (void)web->reload();
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the supervisor's next reload serves it
+            }
+        }
         if (!redis || !runtimes || !data) {
             return;
         }
@@ -1221,9 +1228,17 @@ struct Service {
     // The inbox's address: where nginx serves it (`served`), else where it
     // will be with the web ports and HTTPS as they are now.
     [[nodiscard]] std::string inbox_address(bool& served) const {
+        json missing;
+        return inbox_address(served, missing);
+    }
+
+    // `missing`: what the inbox waits for (["nginx"]), from the same web status.
+    [[nodiscard]] std::string inbox_address(bool& served, json& missing) const {
         namespace core = floserver::core;
         const json status = web ? web->status() : json::object();
         const json inbox = status.contains("mail") ? status.at("mail") : json();
+        missing = inbox.is_object() && inbox.contains("missing") && inbox.at("missing").is_array() ? inbox.at("missing")
+                                                                                                  : json();
         std::string address = inbox.is_object() ? inbox.value("address", std::string()) : std::string();
         served = !address.empty();
         if (address.empty()) {
@@ -1336,15 +1351,12 @@ struct Service {
         if (r.method == "mail.status") {
             json out = mail->status();
             bool served = false;
-            out["inbox_url"] = inbox_address(served);
+            json missing;
+            out["inbox_url"] = inbox_address(served, missing);
             out["inbox_served"] = served;
             // What the inbox waits for (["nginx"]): the window and flo mail say why.
-            if (!served && web) {
-                const json inbox = web->status().value("mail", json());
-                if (inbox.is_object() && inbox.contains("missing") && inbox.at("missing").is_array() &&
-                    !inbox.at("missing").empty()) {
-                    out["inbox_missing"] = inbox.at("missing");
-                }
+            if (!served && missing.is_array() && !missing.empty()) {
+                out["inbox_missing"] = std::move(missing);
             }
             return protocol::make_result(r.id, out);
         }

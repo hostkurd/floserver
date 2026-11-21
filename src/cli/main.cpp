@@ -1772,13 +1772,14 @@ int env(const std::vector<std::string>& args) {
     return 0;
 }
 
-// True for http(s)://mail.localhost followed by '/', ':' or nothing: the
-// only address `flo mail open` hands to the browser.
 // mail.status's "inbox_missing" names nginx: nothing serves the inbox until it's installed.
 bool inbox_needs_nginx(const nlohmann::json& st) {
     const auto it = st.find("inbox_missing");
     return it != st.end() && it->is_array() && std::find(it->begin(), it->end(), "nginx") != it->end();
 }
+
+// True for http(s)://mail.localhost followed by '/', ':' or nothing: the
+// only address `flo mail open` hands to the browser.
 
 bool is_inbox_url(const std::string& url) {
     for (const char* start : {"http://mail.localhost", "https://mail.localhost"}) {
