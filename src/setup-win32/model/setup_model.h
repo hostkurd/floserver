@@ -33,6 +33,19 @@ enum class SetupMode : std::uint8_t {
 };
 [[nodiscard]] SetupMode decide_setup_mode(const std::optional<Product>& installed, const Product& ours);
 
+// When FloServer is installed already, the setup opens on a choice (asked
+// for 21 Nov 2026): what it offers, in order, the first one the main one.
+//   Update:  an older version is installed; updating also repairs it.
+//   Repair:  this very version is installed; its files and settings in
+//            Windows are written again (Windows Installer's reinstall).
+//   Remove:  FloServer's own uninstall screens, as Windows' Settings ->
+//            Apps opens them (the user chooses what else to delete).
+// An older installed version isn't offered a repair: Windows keeps only a
+// stripped copy of its installer, so a repair could miss files; Update
+// writes every file anyway. A newer installed version is offered only Remove.
+enum class SetupAction : std::uint8_t { Update, Repair, Remove };
+[[nodiscard]] std::vector<SetupAction> setup_actions(SetupMode mode);
+
 // The licence screen first: always for a new install; for an update or a
 // reinstall only when the licence accepted last time (its SHA-256, hex, as
 // the setup wrote it) isn't this one.

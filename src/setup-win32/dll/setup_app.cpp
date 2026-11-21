@@ -6,12 +6,16 @@
 // user, no admin): what it installs and removes doesn't change.
 //
 //   new install:     Licence -> Installing -> Done
-//   older installed: Update (or Licence first, when it changed) -> Installing -> Done
-//   same build:      Install again -> Installing -> Done
-//   newer installed: says so, nothing else
+//   installed:       Choose (asked for 21 Nov 2026, setup_actions()):
+//     older:  Update (Licence first, when it changed) -> Installing -> Done, or Remove
+//     same:   Repair (the same) -> Installing -> Done, or Remove
+//     newer:  says so; Remove only
+//   Remove opens FloServer's own uninstall screens (FloServer.exe --uninstall,
+//   as Windows' Settings -> Apps does) and closes this setup.
 //
 // English only (D21). Quiet installs with no window (for CI and companies),
-// accepting the licence as msiexec /qn does.
+// accepting the licence as msiexec /qn does; quietly, a newer installed
+// version is left as it is (ERROR_PRODUCT_VERSION).
 
 #include "common.h"
 #include "floserver/setup_api.h"
@@ -73,6 +77,7 @@ enum : int {
     kOpenNow,
     kClose,
     kNext,
+    kRemoveApp,
 };
 
 std::string sha256_hex(std::span<const std::uint8_t> data) {
@@ -294,7 +299,8 @@ void open_floserver() {
 
 // --- the window ---
 
-enum class Page : std::uint8_t { Licence, Update, Installing, Done, Problem };
+// Choose: FloServer is installed already (Update or Repair, and Remove).
+enum class Page : std::uint8_t { Licence, Choose, Installing, Done, Problem };
 
 struct Facts {
     setup::SetupMode mode = setup::SetupMode::Install;
@@ -304,6 +310,7 @@ struct Facts {
     std::span<const std::uint8_t> licence;
     std::string licence_sha256;
     bool licence_changed = false;  // an update whose licence isn't the one accepted last time
+    bool licence_first = false;    // read before an update or repair (changed, or none recorded)
     std::wstring msi;
     std::wstring log;
 };
@@ -343,11 +350,15 @@ public:
 
 private:
     [[nodiscard]] bool updating() const { return facts_.mode != setup::SetupMode::Install; }
+    [[nodiscard]] bool repairing() const { return facts_.mode == setup::SetupMode::Reinstall; }
     [[nodiscard]] std::vector<std::wstring> steps(bool licence) const {
         if (!updating()) {
             return {L"Licence", L"Install", L"Done"};
         }
-        return {licence ? L"Licence" : L"Check", L"Update", L"Done"};
+        if (facts_.mode == setup::SetupMode::Newer) {
+            return {};  // nothing to install: only Remove
+        }
+        return {licence ? L"Licence" : L"Choose", repairing() ? L"Repair" : L"Update", L"Done"};
     }
 
     void heading(std::wstring_view title, std::wstring_view sub) {
@@ -362,8 +373,8 @@ private:
             case Page::Licence:
                 build_licence();
                 break;
-            case Page::Update:
-                build_update();
+            case Page::Choose:
+                build_choose();
                 break;
             case Page::Installing:
                 build_installing();
@@ -381,7 +392,8 @@ private:
         start_page(steps(true), 0);
         std::wstring sub = L"Please read the terms before you install FloServer.";
         if (updating()) {
-            sub = facts_.licence_changed ? L"The licence has changed since you last accepted it. Please read it before you update."
+            sub = facts_.licence_changed ? (repairing() ? L"The licence has changed since you last accepted it. Please read it before you repair."
+                                                        : L"The licence has changed since you last accepted it. Please read it before you update.")
                                          : L"The terms you accepted when you installed FloServer.";
         }
         heading(L"Licence agreement", sub);
@@ -423,7 +435,7 @@ private:
                    look::ButtonKind::Secondary);
         x -= 10 + 96;
         add_button(kInstall, {x, look::kButtonY, x + 96, look::kButtonY + look::kButtonH},
-                   updating() ? L"Update" : L"Install", look::ButtonKind::Primary, accepted_);
+                   !updating() ? L"Install" : repairing() ? L"Repair" : L"Update", look::ButtonKind::Primary, accepted_);
         if (from_update_) {
             x -= 10 + 96;
             add_button(kBack, {x, look::kButtonY, x + 96, look::kButtonY + look::kButtonH}, L"Back",
@@ -433,50 +445,90 @@ private:
         set_cancel_button(kCancel);
     }
 
-    void build_update() {
+    // One card per action: what it does, and its own button.
+    void action_card(int top, std::wstring_view title, std::wstring_view text, int id, std::wstring_view button,
+                     look::ButtonKind kind) {
+        constexpr int kCardH = 88;
+        constexpr int kButtonW = 112;
+        add_card({look::kContentX, top, look::kContentR, top + kCardH}, look::kWhite, look::kBorder);
+        add_text({look::kContentX + 18, top + 14, look::kContentR - kButtonW - 36, top + 36}, title,
+                 look::TextKind::BodyBold);
+        add_text({look::kContentX + 18, top + 38, look::kContentR - kButtonW - 36, top + kCardH - 8}, text,
+                 look::TextKind::Note, look::kWhite, look::kText2);
+        const int y = top + (kCardH - look::kButtonH) / 2;
+        add_button(id, {look::kContentR - 18 - kButtonW, y, look::kContentR - 18, y + look::kButtonH}, button, kind);
+    }
+
+    void build_choose() {
         start_page(steps(false), 0);
         const std::wstring old_version = facts_.installed ? widen(facts_.installed->version) : L"";
         const std::wstring new_version = widen(facts_.ours.version);
-        const bool again = facts_.mode == setup::SetupMode::Reinstall;
-        if (again) {
-            heading(L"Install FloServer again",
-                    L"FloServer " + new_version + L" is already installed. This installs the same version again.");
+        switch (facts_.mode) {
+            case setup::SetupMode::Update:
+                heading(L"FloServer is installed", L"FloServer " + old_version + L" is on this PC, and this setup has " +
+                                                       new_version + L". What would you like to do?");
+                break;
+            case setup::SetupMode::Reinstall:
+                heading(L"FloServer is installed",
+                        L"FloServer " + new_version + L", the version in this setup, is on this PC. What would you like to do?");
+                break;
+            default:
+                heading(L"A newer FloServer is installed",
+                        L"FloServer " + old_version + L" is on this PC, newer than this setup (" + new_version +
+                            L"). To go back to " + new_version + L", remove it, then run this setup again.");
+                break;
+        }
+        int top = 172;
+        bool main_action = false;
+        for (const setup::SetupAction action : setup::setup_actions(facts_.mode)) {
+            switch (action) {
+                case setup::SetupAction::Update:
+                    action_card(top, L"Update to " + new_version,
+                                L"Your projects, databases and settings stay as they are. This also repairs FloServer.",
+                                kInstall, L"Update", look::ButtonKind::Primary);
+                    main_action = true;
+                    break;
+                case setup::SetupAction::Repair:
+                    action_card(top, L"Repair",
+                                L"Writes FloServer's programs, Start menu entry and Path again. Projects, databases "
+                                L"and settings stay.",
+                                kInstall, L"Repair", look::ButtonKind::Primary);
+                    main_action = true;
+                    break;
+                case setup::SetupAction::Remove:
+                    action_card(top, L"Remove FloServer",
+                                L"Opens FloServer's uninstall, where you choose whether to delete databases and "
+                                L"settings too.",
+                                kRemoveApp, L"Remove\u2026", look::ButtonKind::Secondary);
+                    break;
+            }
+            top += 88 + 12;
+        }
+        if (main_action) {
+            add_mark(look::kContentX, top + 6, look::MarkKind::Info);
+            add_text({look::kContentX + 24, top + 4, look::kContentR, top + 24},
+                     facts_.licence_changed ? L"The licence has changed since you accepted it: you'll read it first."
+                     : facts_.licence_first ? L"You'll read the licence first."
+                                            : L"The licence hasn't changed since you accepted it.",
+                     look::TextKind::Note, look::kWhite, look::kMuted);
+            if (!facts_.licence_first) {
+                add_button(kReadLicence, {look::kContentX + 22, top + 26, look::kContentX + 160, top + 50},
+                           L"Read the licence", look::ButtonKind::Link);
+            }
+            set_default_button(kInstall);
         } else {
-            heading(L"Update FloServer",
-                    L"FloServer " + old_version + L" is installed. This updates it to " + new_version + L".");
+            set_default_button(kCancel);  // Remove only: never by a stray Enter
         }
-        add_card({look::kContentX, 172, look::kContentR, 316}, look::kWhite, look::kBorder);
-        add_text({look::kContentX + 18, 186, look::kContentR - 18, 208}, L"What happens", look::TextKind::BodyBold);
-        const std::array<std::wstring_view, 3> lines{
-            L"Running projects stop for a moment, then start again.",
-            L"Your projects, databases and settings stay as they are.",
-            L"FloServer opens again by itself when it's done.",
-        };
-        int y = 216;
-        for (const std::wstring_view line : lines) {
-            add_mark(look::kContentX + 16, y, look::MarkKind::Done);
-            add_text({look::kContentX + 46, y + 1, look::kContentR - 18, y + 22}, line, look::TextKind::Body, look::kWhite,
-                     look::kText2);
-            y += 30;
-        }
-        add_mark(look::kContentX, 336, look::MarkKind::Info);
-        add_text({look::kContentX + 24, 334, look::kContentR, 354}, L"The licence hasn't changed since you accepted it.",
-                 look::TextKind::Note, look::kWhite, look::kMuted);
-        add_button(kReadLicence, {look::kContentX + 22, 356, look::kContentX + 160, 380}, L"Read the licence",
-                   look::ButtonKind::Link);
-        int x = look::kContentR - 96;
+        const int x = look::kContentR - 96;
         add_button(kCancel, {x, look::kButtonY, x + 96, look::kButtonY + look::kButtonH}, L"Cancel",
                    look::ButtonKind::Secondary);
-        x -= 10 + 120;
-        add_button(kInstall, {x, look::kButtonY, x + 120, look::kButtonY + look::kButtonH},
-                   again ? L"Install again" : L"Update", look::ButtonKind::Primary);
-        set_default_button(kInstall);
         set_cancel_button(kCancel);
     }
 
     void build_installing() {
         start_page(steps(page_from_licence_), 1);
-        heading(updating() ? L"Updating FloServer" : L"Installing FloServer", L"This takes a few seconds.");
+        heading(!updating() ? L"Installing FloServer" : repairing() ? L"Repairing FloServer" : L"Updating FloServer",
+                L"This takes a few seconds.");
         status_ = add_text({look::kContentX, 176, look::kContentR - 60, 196}, status_text(), look::TextKind::Note,
                            look::kWhite, look::kText);
         percent_ = add_text({look::kContentR - 60, 176, look::kContentR, 196}, percent_text(), look::TextKind::Note,
@@ -507,7 +559,8 @@ private:
     void build_done() {
         start_page(steps(page_from_licence_), 3);
         add_mark(look::kContentX, 112, look::MarkKind::BigCheck);
-        add_text({look::kContentX, 186, look::kContentR, 224}, updating() ? L"FloServer is up to date" : L"FloServer is ready",
+        add_text({look::kContentX, 186, look::kContentR, 224},
+                 !updating() ? L"FloServer is ready" : repairing() ? L"FloServer is repaired" : L"FloServer is up to date",
                  look::TextKind::Heading);
         std::wstring sub = updating()
                                ? L"FloServer " + widen(facts_.ours.version) + L" is installed. Your projects, databases and settings are as they were."
@@ -584,15 +637,26 @@ private:
                 break;
             case kBack:
                 from_update_ = false;
-                page_ = Page::Update;
+                page_ = Page::Choose;
                 rebuild();
                 break;
             case kInstall:
                 if (page_ == Page::Licence && !checked(kAccept)) {
                     return;
                 }
+                // A changed licence is read before the update or repair starts.
+                if (page_ == Page::Choose && facts_.licence_first) {
+                    from_update_ = true;
+                    accepted_ = false;
+                    page_ = Page::Licence;
+                    rebuild();
+                    return;
+                }
                 page_from_licence_ = page_ == Page::Licence;
                 start_install();
+                break;
+            case kRemoveApp:
+                start_removal();
                 break;
             case kCancel:
                 if (page_ == Page::Installing) {
@@ -624,10 +688,68 @@ private:
             cancel_install();  // closes once Windows Installer has put things back
             return false;
         }
-        if (page_ == Page::Licence || page_ == Page::Update) {
+        if (page_ == Page::Licence || page_ == Page::Choose) {
             exit_code_ = static_cast<int>(ERROR_INSTALL_USEREXIT);  // closed before installing
         }
         return true;
+    }
+
+    // Remove: FloServer's own uninstall screens (FloServer.exe --uninstall
+    // does the clean-up, then Windows' uninstall). If its FloServer.exe is
+    // gone, Windows Installer's own uninstall instead. This setup closes.
+    void start_removal() {
+        // Where Windows' Settings -> Apps has it (InstallLocation), else the default folder.
+        std::wstring folder = installed_location();
+        if (folder.empty()) {
+            folder = setup::install_folder();
+        }
+        while (!folder.empty() && (folder.back() == L'\\' || folder.back() == L'/')) {
+            folder.pop_back();
+        }
+        const std::wstring exe = folder + L"\\FloServer.exe";
+        std::wstring command;
+        std::wstring program;
+        if (GetFileAttributesW(exe.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            program = exe;
+            command = L"\"" + exe + L"\" --uninstall";
+        } else if (facts_.installed) {
+            wchar_t system[MAX_PATH]{};
+            GetSystemDirectoryW(system, MAX_PATH);
+            program = std::wstring(system) + L"\\msiexec.exe";
+            command = L"\"" + program + L"\" /x " + widen(facts_.installed->code);
+        }
+        STARTUPINFOW si{};
+        si.cb = sizeof si;
+        PROCESS_INFORMATION pi{};
+        if (program.empty() ||
+            CreateProcessW(program.c_str(), command.data(), nullptr, nullptr, FALSE, 0, nullptr,
+                           GetFileAttributesW(folder.c_str()) != INVALID_FILE_ATTRIBUTES ? folder.c_str() : nullptr, &si,
+                           &pi) == FALSE) {
+            show_problem(L"FloServer's uninstall didn't open",
+                         L"Remove FloServer in Windows' Settings \u2192 Apps \u2192 Installed apps instead.",
+                         static_cast<int>(ERROR_INSTALL_FAILURE));
+            return;
+        }
+        AllowSetForegroundWindow(pi.dwProcessId);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        exit_code_ = 0;
+        DestroyWindow(hwnd());
+    }
+
+    // InstallLocation of FloServer's entry in Settings -> Apps (installer/FloServer.wxs).
+    [[nodiscard]] static std::wstring installed_location() {
+        std::wstring value(MAX_PATH * 4, L'\0');
+        DWORD bytes = static_cast<DWORD>(value.size() * sizeof(wchar_t));
+        if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\FloServer",
+                         L"InstallLocation", RRF_RT_REG_SZ, nullptr, value.data(), &bytes) != ERROR_SUCCESS) {
+            return {};
+        }
+        value.resize(bytes / sizeof(wchar_t));
+        while (!value.empty() && value.back() == L'\0') {
+            value.pop_back();
+        }
+        return value;
     }
 
     void cancel_install() {
@@ -699,7 +821,7 @@ private:
         if (error.empty()) {
             error = setup::error_words(result);
         }
-        show_problem(updating() ? L"FloServer wasn't updated" : L"FloServer wasn't installed",
+        show_problem(!updating() ? L"FloServer wasn't installed" : repairing() ? L"FloServer wasn't repaired" : L"FloServer wasn't updated",
                      error + L"\n\nWindows put back everything it had changed. If it happens again, run "
                              L"the setup with --log setup.log and send us the file.",
                      static_cast<int>(result));
@@ -759,19 +881,16 @@ FLOSERVER_SETUP_API int __stdcall floserver_setup_run(const FloSetupRunArgs* arg
         facts.mode = setup::decide_setup_mode(facts.installed, facts.ours);
         const std::string accepted = narrow(accepted_licence());
         facts.licence_changed = !accepted.empty() && accepted != facts.licence_sha256;
-        if (facts.mode == setup::SetupMode::Newer) {
-            problem_code = static_cast<int>(ERROR_PRODUCT_VERSION);
-            problem_heading = L"A newer FloServer is installed";
-            problem_text = L"FloServer " + widen(facts.installed->version) +
-                           L" is already installed, which is newer than this setup (" + widen(facts.ours.version) +
-                           L"). To go back to " + widen(facts.ours.version) +
-                           L", remove FloServer first in Windows' Settings \u2192 Apps.";
-        }
+        facts.licence_first = setup::licence_needed(facts.mode, accepted, facts.licence_sha256);
     }
 
     if (args->quiet != 0) {
         if (!problem_heading.empty()) {
             return problem_code;
+        }
+        // Quietly there's no choice to offer: a newer version stays.
+        if (facts.mode == setup::SetupMode::Newer) {
+            return static_cast<int>(ERROR_PRODUCT_VERSION);
         }
         setup::MsiRun run;
         const UINT result = setup::msi_install(facts.msi, setup::msi_properties(facts.mode), facts.log, run);
@@ -792,13 +911,13 @@ FLOSERVER_SETUP_API int __stdcall floserver_setup_run(const FloSetupRunArgs* arg
     }
     int code = 0;
     {
-        const bool licence_first = setup::licence_needed(facts.mode, narrow(accepted_licence()), facts.licence_sha256);
         const setup::SetupMode mode = facts.mode;
         SetupWindow window(setup::dll_instance(), std::move(facts));
         if (!problem_heading.empty()) {
             window.show_problem(problem_heading, problem_text, problem_code);
         } else {
-            window.start_at(mode == setup::SetupMode::Install || licence_first ? Page::Licence : Page::Update);
+            // Installed already: the choice first (a changed licence is read after it).
+            window.start_at(mode == setup::SetupMode::Install ? Page::Licence : Page::Choose);
         }
         if (window.create(args->show)) {
             MSG m{};

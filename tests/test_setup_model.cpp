@@ -40,6 +40,14 @@ TEST_CASE("setup: what it does depends on what's installed") {
     CHECK(decide_setup_mode(Product{"{AAAAAAAA-0000-0000-0000-000000000003}", "0.3.0"}, ours) == SetupMode::Newer);
 }
 
+TEST_CASE("setup: what it offers when FloServer is installed already") {
+    using A = SetupAction;
+    CHECK(setup_actions(SetupMode::Install).empty());
+    CHECK(setup_actions(SetupMode::Update) == std::vector<A>{A::Update, A::Remove});
+    CHECK(setup_actions(SetupMode::Reinstall) == std::vector<A>{A::Repair, A::Remove});
+    CHECK(setup_actions(SetupMode::Newer) == std::vector<A>{A::Remove});
+}
+
 TEST_CASE("setup: the licence again only when it changed") {
     CHECK(licence_needed(SetupMode::Install, "abc", "abc"));
     CHECK_FALSE(licence_needed(SetupMode::Update, "abc", "abc"));
