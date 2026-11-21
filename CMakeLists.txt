@@ -18,6 +18,15 @@ option(FLOSERVER_BUILD_TOOLS "Build the release tools (manifest signing)" ON)
 
 include(cmake/CodeRules.cmake)
 
+# The Windows manifests are plain files the .rc files take as they are, so
+# their version is written by hand: stop here if it isn't project()'s.
+foreach(manifest src/ui-win32/FloServer.manifest src/setup-win32/launcher/launcher.manifest)
+    file(READ ${PROJECT_SOURCE_DIR}/${manifest} manifest_text)
+    if(NOT manifest_text MATCHES "name=\"HostKurd\\.[A-Za-z.]+\" version=\"${PROJECT_VERSION}\\.0\"")
+        message(FATAL_ERROR "${manifest}: set its assemblyIdentity version to ${PROJECT_VERSION}.0")
+    endif()
+endforeach()
+
 # The shipped programs sit side by side in bin/, as they will when installed,
 # so the CLI and the window find floserverd next to them.
 set(FLOSERVER_BIN_DIR ${PROJECT_BINARY_DIR}/bin)
