@@ -857,10 +857,25 @@ private:
         const auto deadline = Clock::now() + start_limit_;
         bool ready = false;
         std::string login_error;
+        std::string waiting_for;  // the last check that didn't pass: said if the start fails
         while (Clock::now() < deadline && process->running()) {
             const auto pid = read_small_file(files_.pid_file, 64);
-            if (pid && std::to_string(process->pid()) == std::string(pid->substr(0, pid->find_first_of("\r\n")))) {
+            const std::string named = pid ? std::string(pid->substr(0, pid->find_first_of("\r\n"))) : std::string();
+            // Ours: the pid file names the process FloServer started, or (MySQL
+            // on Windows can fork a monitor whose child is the server) the
+            // port's listener is in its job, which holds everything it started.
+            const bool ours = !named.empty() && (named == std::to_string(process->pid()) ||
+                                                 process->listener_owner(internal_, false) == ListenerOwner::Child);
+            if (!ours) {
+                waiting_for = named.empty() ? "no pid file yet"
+                                            : "the pid file names process " + named + ", not " +
+                                                  std::to_string(process->pid()) + ", and port " +
+                                                  std::to_string(internal_) + " isn't its";
+            }
+            if (ours) {
+                waiting_for = "nothing answers on port " + std::to_string(internal_);
                 if (const auto s = connect_loopback(internal_)) {
+                    waiting_for.clear();
                     close_socket(*s);
                     login_error.clear();
                     if (run_tool(files_.client, {"--batch", "--connect-timeout=10"}, *root, probe, 30s, login_error)) {
@@ -898,7 +913,12 @@ private:
             if (!login_error.empty() && process->running()) {
                 error = "root can't log in to " + title() + ": " + login_error;
             } else {
-                error = path_to_utf8(files_.server.stem()) + " didn't start: " + start_errors(log_from, o.output_log);
+                // Which check never passed comes first: the log alone can say "ready".
+                const std::string why = !process->running() ? "it stopped"
+                                        : waiting_for.empty() ? "no answer in time"
+                                                              : "no answer in time, " + waiting_for;
+                error = path_to_utf8(files_.server.stem()) + " didn't start (" + why + "): " +
+                        start_errors(log_from, o.output_log);
             }
             shut_down(*process);
             return nullptr;
