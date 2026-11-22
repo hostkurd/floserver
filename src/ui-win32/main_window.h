@@ -217,7 +217,6 @@ private:
         RECT copy_env{};  // empty when the project has no database
         RECT pma{};       // Open in phpMyAdmin
         RECT pma_hint{};  // Download phpMyAdmin in Settings → Runtimes, when it isn't installed
-        RECT pg_tools{};  // a PostgreSQL project: pgAdmin or DBeaver, in place of phpMyAdmin
         RECT keep_title{};
         RECT keep_detail{};
         RECT keep_switch{};

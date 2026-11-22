@@ -1,6 +1,7 @@
 // The window's model (src/ui-win32/model): words, rows, addresses, colours.
 
 #include "model/apache_page.h"
+#include "model/database_page.h"
 #include "model/php_page.h"
 #include "model/ports_page.h"
 #include "model/runtimes_page.h"
@@ -887,6 +888,20 @@ TEST_CASE("Settings > Runtimes: phpMyAdmin in the Tools card, with how it's serv
     CHECK_FALSE(is_phpmyadmin_url("https://phpmyadmin.localhost:/x"));
     CHECK_FALSE(is_phpmyadmin_url("file:///C:/x"));
     CHECK_FALSE(is_phpmyadmin_url(""));
+    // Adminer (D35): the same, for its own address only.
+    CHECK(is_adminer_url("https://adminer.localhost/?floserver_token=ab&lang=en"));
+    CHECK(is_adminer_url("http://adminer.localhost:8080/?floserver_token=ab"));
+    CHECK_FALSE(is_adminer_url("https://phpmyadmin.localhost/x"));
+    CHECK_FALSE(is_adminer_url("https://adminer.localhost.evil.example/x"));
+    CHECK_FALSE(is_adminer_url("https://adminer.localhost:x@evil.example/x"));
+    CHECK_FALSE(is_phpmyadmin_url("https://adminer.localhost/x"));
+    CHECK(tool_installed({{"adminer", {"5.4.1"}}}, "adminer"));
+    CHECK_FALSE(tool_installed({{"phpmyadmin", {"5.2.3"}}}, "adminer"));
+    CHECK(phpmyadmin_busy_text("PostgreSQL 18", "running", Lang::En, Str::AdminerOpening) == "Opening Adminer…");
+    CHECK(phpmyadmin_busy_text("PostgreSQL 18", "sleeping", Lang::En, Str::AdminerOpening) == "Starting PostgreSQL 18…");
+    CHECK(adminer_line({{"name_taken", true}, {"problem", "x"}}, Lang::En).find("adminer.localhost") != std::string::npos);
+    CHECK(adminer_line({{"problem", "nginx says no"}}, Lang::En) == "nginx says no");
+    CHECK(adminer_line(json(), Lang::En).empty());
     CHECK(lang_code(Lang::Ku) == "ku");
     CHECK(lang_code(Lang::Ar) == "ar");
     CHECK(lang_code(Lang::En) == "en");
@@ -899,6 +914,7 @@ TEST_CASE("new project names") {
     CHECK(free_project_name("php-app", rows) == "php-app-3");
     CHECK(free_project_name("blog", rows) == "blog");
     CHECK(free_project_name("phpmyadmin", rows) == "phpmyadmin-2");  // phpMyAdmin's address
+    CHECK(free_project_name("adminer", rows) == "adminer-2");  // Adminer's address
     CHECK(is_project_name("my-shop2"));
     CHECK_FALSE(is_project_name("My Shop"));
     CHECK_FALSE(is_project_name("-shop"));
@@ -1861,12 +1877,16 @@ TEST_CASE("PostgreSQL in the window's model (D29): the pickers, shared sites, Ru
     CHECK(g->rows[0].usage.find("5432") != std::string::npos);
 }
 
-TEST_CASE("phpMyAdmin opens MariaDB and MySQL databases, never PostgreSQL ones") {
-    CHECK(database_opens_in_phpmyadmin("mariadb-11.4"));
-    CHECK(database_opens_in_phpmyadmin("mysql-8.4"));
-    CHECK(database_opens_in_phpmyadmin("11.4"));  // an older floserver.json: MariaDB
-    CHECK(database_opens_in_phpmyadmin(""));
-    CHECK_FALSE(database_opens_in_phpmyadmin("postgresql-18"));
-    CHECK_FALSE(database_opens_in_phpmyadmin("PostgreSQL-17"));
-    CHECK(text(Lang::En, Str::PanelPgTools) == std::string("To look at the data, connect pgAdmin or DBeaver with the login above."));
+TEST_CASE("phpMyAdmin opens MariaDB and MySQL databases, Adminer PostgreSQL ones") {
+    CHECK(db_tool_for_database("mariadb-11.4").runtime == "phpmyadmin");
+    CHECK(db_tool_for_database("mysql-8.4").runtime == "phpmyadmin");
+    CHECK(db_tool_for_database("11.4").runtime == "phpmyadmin");  // an older floserver.json: MariaDB
+    CHECK(db_tool_for_database("").runtime == "phpmyadmin");
+    CHECK(db_tool_for_database("postgresql-18").runtime == "adminer");
+    CHECK(db_tool_for_database("PostgreSQL-17").runtime == "adminer");
+    CHECK(db_tool_for_database("postgresql-18").method == "adminer.login");
+    CHECK(db_tool_for_database("mysql-8.4").method == "phpmyadmin.login");
+    CHECK(db_tool("postgresql").open_project == Str::AdminerOpenProject);
+    CHECK(text(Lang::En, Str::AdminerOpenProject) == std::string("Open in Adminer"));
+    CHECK(text(Lang::En, Str::AdminerOpenFailed) == std::string("Adminer couldn't be opened: {0}"));
 }

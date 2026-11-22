@@ -49,6 +49,22 @@ struct DbEngine {
 [[nodiscard]] std::string_view db_ini_name(std::string_view family);
 // Whether phpMyAdmin can open the family's servers (MySQL's protocol only).
 [[nodiscard]] bool db_has_phpmyadmin(std::string_view family);
+
+// The browser tool for a family's databases (D35): phpMyAdmin for MariaDB
+// and MySQL, Adminer for PostgreSQL. Its runtime, its login request, and
+// the words of its buttons.
+struct DbTool {
+    std::string_view runtime;  // "phpmyadmin", "adminer"
+    std::string_view method;   // "phpmyadmin.login", "adminer.login"
+    Str open;                  // "Open phpMyAdmin" (a server, as root or postgres)
+    Str open_project;          // "Open in phpMyAdmin" (a project's own login)
+    Str not_installed;         // "Download phpMyAdmin in Settings → Runtimes"
+    Str opening;               // "Opening phpMyAdmin…"
+    Str open_failed;           // "phpMyAdmin couldn't be opened: {0}"
+};
+[[nodiscard]] const DbTool& db_tool(std::string_view family);
+// The same for a project's database ("postgresql-17" → Adminer).
+[[nodiscard]] const DbTool& db_tool_for_database(std::string_view database);
 // "MySQL" for "mysql"; the family itself for anything else.
 [[nodiscard]] std::string db_engine_title(std::string_view family);
 // "MySQL 8.4": what the window calls one server.

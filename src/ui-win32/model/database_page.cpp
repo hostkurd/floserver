@@ -121,6 +121,23 @@ std::string_view db_ini_name(std::string_view family) { return family == "postgr
 
 bool db_has_phpmyadmin(std::string_view family) { return family == "mariadb" || family == "mysql"; }
 
+const DbTool& db_tool(std::string_view family) {
+    static constexpr DbTool kPhpMyAdmin{"phpmyadmin",       "phpmyadmin.login",    Str::PmaOpen,
+                                        Str::PmaOpenProject, Str::PmaNotInstalled, Str::PmaOpening,
+                                        Str::PmaOpenFailed};
+    static constexpr DbTool kAdminer{"adminer",                "adminer.login",           Str::AdminerOpen,
+                                     Str::AdminerOpenProject,  Str::AdminerNotInstalled,  Str::AdminerOpening,
+                                     Str::AdminerOpenFailed};
+    return family == "postgresql" ? kAdminer : kPhpMyAdmin;
+}
+
+const DbTool& db_tool_for_database(std::string_view database) {
+    std::string family(database.substr(0, database.find('-')));
+    std::transform(family.begin(), family.end(), family.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    return db_tool(family);
+}
+
 std::string db_engine_title(std::string_view family) {
     for (const DbEngine& e : db_engines()) {
         if (e.family == family) {

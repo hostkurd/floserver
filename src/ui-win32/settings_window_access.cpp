@@ -331,7 +331,7 @@ AccessNode SettingsWindow::access_node(const Hit& hit) const {
         case Part::DbSetPassword:
             return button(connected_ && !root_busy_);
         case Part::DbPhpMyAdmin:
-            return button(connected_ && !pma_busy_ && phpmyadmin_installed(installed_));
+            return button(connected_ && !pma_busy_ && tool_installed(installed_, db_tool(db_family_).runtime));
         case Part::DbDiscard:
             return button(!db_changes_.empty() && !db_saving_);
         case Part::DbSave:

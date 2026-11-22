@@ -92,6 +92,20 @@ TEST_CASE("first run: the newest of each series is offered, in the approved orde
     CHECK(offers[6].always);
     CHECK(offers[1].what == Str::FirstRunWhatMariadb);
 
+    // Adminer (D35): offered after phpMyAdmin, not ticked; any version, the newest.
+    json with_tools = kReply;
+    with_tools["available"].push_back({{"name", "phpmyadmin"}, {"version", "5.2.3"}, {"variant", ""}, {"size", 15000000}});
+    with_tools["available"].push_back({{"name", "adminer"}, {"version", "5.4.1"}, {"variant", ""}, {"size", 500000}});
+    with_tools["available"].push_back({{"name", "adminer"}, {"version", "5.4.2"}, {"variant", ""}, {"size", 500000}});
+    const std::vector<FirstRunOffer> tools = first_run_offers(with_tools);
+    REQUIRE(tools.size() == 9);
+    CHECK(tools[5].name == "phpmyadmin");
+    CHECK(tools[6].name == "adminer");
+    CHECK(tools[6].version == "5.4.2");
+    CHECK(tools[6].what == Str::FirstRunWhatAdminer);
+    CHECK_FALSE(tools[6].ticked);
+    CHECK(tools[7].name == "apache");
+
     // No list (none fetched yet): nothing is offered.
     CHECK(first_run_offers(json::parse(R"({"list": null, "available": []})")).empty());
     CHECK(first_run_offers(json::array()).empty());

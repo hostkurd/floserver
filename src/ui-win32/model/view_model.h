@@ -212,8 +212,6 @@ struct DatabaseServerState {
 [[nodiscard]] DatabaseServerState database_server(const nlohmann::json& databases, std::string_view database);
 // "MySQL 8.4"; empty when there's no server.
 [[nodiscard]] std::string database_server_title(const DatabaseServerState& server);
-// phpMyAdmin opens MariaDB and MySQL databases only: not "postgresql-18".
-[[nodiscard]] bool database_opens_in_phpmyadmin(std::string_view database);
 
 struct LogLine {
     std::string time;    // "19:41:02"

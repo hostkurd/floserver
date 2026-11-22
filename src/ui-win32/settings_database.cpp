@@ -175,7 +175,7 @@ bool SettingsWindow::on_db_answers(const Snapshot& snap) {
             db_saving_ = false;
             set_db_read_only(false);
         }
-        if (answer.method == "phpmyadmin.login") {
+        if (answer.method == "phpmyadmin.login" || answer.method == "adminer.login") {
             pma_busy_ = false;
         }
         // A late answer for a version (or an engine's tab) the user has left: dropped, errors too.
@@ -254,10 +254,11 @@ bool SettingsWindow::on_db_answers(const Snapshot& snap) {
                 root_shown_ = std::move(password);
             }
             wipe(password);
-        } else if (answer.method == "phpmyadmin.login") {
+        } else if (answer.method == "phpmyadmin.login" || answer.method == "adminer.login") {
             // The main window opened the link; only a refusal comes here.
             if (!answer.error.empty() || !answer.reply) {
-                show_message(fill(lang_, Str::PmaOpenFailed, {answer.error}), true);
+                const Str failed = answer.method == "adminer.login" ? Str::AdminerOpenFailed : Str::PmaOpenFailed;
+                show_message(fill(lang_, failed, {answer.error}), true);
             }
         } else if (answer.method == "database.root_set") {
             root_busy_ = false;
@@ -680,18 +681,16 @@ void SettingsWindow::layout_db(HDC dc, Geometry& g, int x0, int x1, int y) const
     // Root access.
     top = y + px(14);
     dg.root_card = {x0, y, x1, y};
-    // Open phpMyAdmin (as root, on this series) beside the title; PostgreSQL's
-    // tab names tools that speak its protocol instead (D29).
-    const bool pma = db_has_phpmyadmin(db_family_);
-    if (pma) {
-        const int pma_w = std::max({button_w(Str::PmaOpen), button_w(Str::PmaOpening),
-                                    measure(fill(lang_, Str::PmaStarting, {db_title()}), fonts_.button.get()) + px(24)});
-        dg.pma = {std::max(cx0, cx1 - pma_w), top, cx1, top + px(kControlH)};
-    }
-    dg.root_title = {cx0, top, pma ? std::max(cx0, static_cast<int>(dg.pma.left) - px(kGap)) : cx1, top + px(kControlH)};
+    // Open phpMyAdmin (as root, on this series) beside the title; on
+    // PostgreSQL's tab Open Adminer, as postgres (D35).
+    const DbTool& tool = db_tool(db_family_);
+    const int pma_w = std::max({button_w(tool.open), button_w(tool.opening),
+                                measure(fill(lang_, Str::PmaStarting, {db_title()}), fonts_.button.get()) + px(24)});
+    dg.pma = {std::max(cx0, cx1 - pma_w), top, cx1, top + px(kControlH)};
+    dg.root_title = {cx0, top, std::max(cx0, static_cast<int>(dg.pma.left) - px(kGap)), top + px(kControlH)};
     yy = top + px(kControlH) + px(4);
-    if (!pma || !phpmyadmin_installed(installed_)) {
-        const int hh = std::max(px(kNoteH), text_height(dc, w(text(lang_, pma ? Str::PmaNotInstalled : Str::DbPgTools)),
+    if (!tool_installed(installed_, tool.runtime)) {
+        const int hh = std::max(px(kNoteH), text_height(dc, w(text(lang_, tool.not_installed)),
                                                         fonts_.caption.get(), avail, rtl_));
         dg.pma_hint = {cx0, yy, cx1, yy + hh};
         yy += hh + px(4);
@@ -927,12 +926,13 @@ void SettingsWindow::on_db_click(const Hit& hit) {
             break;
         case Part::DbPhpMyAdmin:
             // One request; the window opens the link it answers with.
-            if (db_ && connected_ && !pma_busy_ && phpmyadmin_installed(installed_)) {
+            if (const DbTool& tool = db_tool(db_family_);
+                db_ && connected_ && !pma_busy_ && tool_installed(installed_, tool.runtime)) {
                 pma_busy_ = true;
                 clear_toast();
                 json params = db_params(db_family_, db_series_);
                 params["lang"] = std::string(lang_code(lang_));
-                worker_.database_call("phpmyadmin.login", params, "settings");
+                worker_.database_call(std::string(tool.method), params, "settings");
                 relayout();
             }
             break;
@@ -1095,7 +1095,8 @@ void SettingsWindow::paint_db_shapes(Canvas& c) const {
         c.round_rect(dg.root_card, pxf(8), p.card, p.card_border, border);
         button(Part::DbRootShow, dg.root_show, connected_ || !root_shown_.empty());
         button(Part::DbRootCopy, dg.root_copy, connected_ && !root_busy_);
-        button(Part::DbPhpMyAdmin, dg.pma, connected_ && !pma_busy_ && phpmyadmin_installed(installed_));
+        button(Part::DbPhpMyAdmin, dg.pma,
+               connected_ && !pma_busy_ && tool_installed(installed_, db_tool(db_family_).runtime));
         {
             const Hit hit{Part::DbNewPassword, -1, -1};
             const FieldEdit* edit = edit_of(hit);
@@ -1245,15 +1246,16 @@ void SettingsWindow::paint_db_text(Canvas& c) const {
     label(dg.root_copy, Str::DbCopy, connected_ && !root_busy_);
     {
         // While it waits: "Starting MariaDB 11.8…" until the server runs.
-        const bool enabled = connected_ && !pma_busy_ && phpmyadmin_installed(installed_);
-        const std::string busy = phpmyadmin_busy_text(db_title(), db_server_.state, lang_);
+        const DbTool& tool = db_tool(db_family_);
+        const bool enabled = connected_ && !pma_busy_ && tool_installed(installed_, tool.runtime);
+        const std::string busy = phpmyadmin_busy_text(db_title(), db_server_.state, lang_, tool.opening);
         if (!is_empty(dg.pma)) {
-            c.text(dg.pma, w(pma_busy_ ? std::string_view(busy) : text(lang_, Str::PmaOpen)), fonts_.button.get(),
+            c.text(dg.pma, w(pma_busy_ ? std::string_view(busy) : text(lang_, tool.open)), fonts_.button.get(),
                    enabled ? p.text : p.button_disabled_text, Align::Center, false);
         }
     }
     if (!is_empty(dg.pma_hint)) {
-        c.paragraph(dg.pma_hint, w(text(lang_, db_has_phpmyadmin(db_family_) ? Str::PmaNotInstalled : Str::DbPgTools)),
+        c.paragraph(dg.pma_hint, w(text(lang_, db_tool(db_family_).not_installed)),
                     fonts_.caption.get(), p.text_subtle);
     }
     c.text(dg.new_label, w(text(lang_, Str::DbNewPassword)), fonts_.caption.get(), p.text_subtle, Align::Start, false);

@@ -625,12 +625,13 @@ void MainWindow::on_destroy() {
     PostQuitMessage(0);
 }
 
-// phpmyadmin.login's answers, from the panel and from Settings → Database:
-// the link is opened in the browser here. A refusal is shown where it was
-// asked (the panel's here; Settings' stays in the list for it).
+// phpmyadmin.login's and adminer.login's answers, from the panel and from
+// Settings → Database: the link is opened in the browser here. A refusal is
+// shown where it was asked (the panel's here; Settings' stays in the list for it).
 void MainWindow::open_phpmyadmin_links(std::vector<Snapshot::DbAnswer>& answers) {
     for (auto it = answers.begin(); it != answers.end();) {
-        if (it->method != "phpmyadmin.login") {
+        const bool adminer = it->method == "adminer.login";
+        if (it->method != "phpmyadmin.login" && !adminer) {
             ++it;
             continue;
         }
@@ -643,14 +644,14 @@ void MainWindow::open_phpmyadmin_links(std::vector<Snapshot::DbAnswer>& answers)
             it->reply->at("url").is_string()) {
             url = it->reply->at("url").get<std::string>();
         }
-        // Only phpMyAdmin's own address is ever opened.
-        const bool ours = is_phpmyadmin_url(url);
+        // Only the tool's own address is ever opened.
+        const bool ours = adminer ? is_adminer_url(url) : is_phpmyadmin_url(url);
         if (ours) {
             ShellExecuteW(hwnd_, L"open", w(url).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         }
         if (panel) {
             if (!ours) {
-                show_notice(fill(lang_, Str::PmaOpenFailed, {it->error}), true);
+                show_notice(fill(lang_, adminer ? Str::AdminerOpenFailed : Str::PmaOpenFailed, {it->error}), true);
             }
             it = answers.erase(it);
         } else {

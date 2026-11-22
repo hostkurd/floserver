@@ -53,6 +53,8 @@ constexpr std::array kOffers{
     OfferSpec{"bun", "", Str::FirstRunWhatBun, false, false},
     OfferSpec{"deno", "", Str::FirstRunWhatDeno, false, false},
     OfferSpec{"phpmyadmin", "5.2", Str::FirstRunWhatPma, false, false},
+    // D35: offered, not ticked; PostgreSQL itself is installed later, in Settings.
+    OfferSpec{"adminer", "", Str::FirstRunWhatAdminer, false, false},
     OfferSpec{"apache", "2.4", Str::FirstRunWhatApache, false, false},
     OfferSpec{"nginx", "", Str::FirstRunWhatNginx, true, true},
 };
