@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <regex>
 
 using namespace floserver::core;
 namespace fs = std::filesystem;
@@ -445,4 +446,25 @@ TEST_CASE("MySQL's root check counts only what the init file is responsible for"
     CHECK(init.rfind("DROP USER IF EXISTS ''@'localhost', ''@'127.0.0.1', ''@'%';") ==
           init.size() - std::string("DROP USER IF EXISTS ''@'localhost', ''@'127.0.0.1', ''@'%';\n").size());
     CHECK(sql.find("'localhost', '127.0.0.1', '::1'") != std::string::npos);
+}
+
+TEST_CASE("The signon script accepts every session name FloServer gives a server (MySQL's broke one-click login)") {
+    const test_util::TempDir tmp;
+    const auto script = phpmyadmin_signon_script(phpmyadmin_paths(tmp.path()));
+    REQUIRE(script);
+    // Each name check in the script, as written there.
+    const std::regex check(R"(/\^(FloServerSignon_[^$]+)\$/D)");
+    std::vector<std::string> patterns;
+    for (auto it = std::sregex_iterator(script->begin(), script->end(), check); it != std::sregex_iterator(); ++it) {
+        patterns.push_back((*it)[1].str());
+    }
+    REQUIRE(patterns.size() == 2);  // the sign-out loop and the token's session
+    for (const std::string& pattern : patterns) {
+        const std::regex name("^" + pattern + "$");
+        CHECK(std::regex_match(signon_session_name("11.4"), name));
+        CHECK(std::regex_match(signon_session_name("10.11"), name));
+        CHECK(std::regex_match(signon_session_name("8.4", kMySqlFamily), name));
+        CHECK(std::regex_match(signon_session_name("9.10", kMySqlFamily), name));
+        CHECK_FALSE(std::regex_match(std::string("FloServerSignon_../x"), name));
+    }
 }

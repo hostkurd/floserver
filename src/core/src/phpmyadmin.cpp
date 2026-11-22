@@ -120,6 +120,8 @@ std::string phpmyadmin_lang(std::string_view code) {
     return "en";
 }
 
+// The signon script checks a session name against FloServerSignon_[a-z0-9_]{1,40}
+// (in its sign-out loop and its token check): keep the two in step.
 std::string signon_session_name(std::string_view series, std::string_view family) {
     std::string name = "FloServerSignon_";
     if (family != kMariaDbFamily) {
@@ -276,7 +278,7 @@ session_save_path(FLOSERVER_SESSIONS);
 // Sign out: forget every FloServer login, then phpMyAdmin shows its own form.
 if (isset($_GET['logout'])) {
     foreach ($_COOKIE as $name => $value) {
-        if (!is_string($name) || !preg_match('/^FloServerSignon_[0-9_]{1,32}$/D', $name)) {
+        if (!is_string($name) || !preg_match('/^FloServerSignon_[a-z0-9_]{1,40}$/D', $name)) {
             continue;
         }
         if (is_string($value) && preg_match('/^[A-Za-z0-9,-]{1,128}$/D', $value)) {
@@ -314,7 +316,7 @@ if (
     !is_array($login)
     || !is_int($login['expires'] ?? null) || $login['expires'] < time()
     || !is_int($login['server'] ?? null) || $login['server'] < 1
-    || !is_string($login['session'] ?? null) || !preg_match('/^FloServerSignon_[0-9_]{1,32}$/D', $login['session'])
+    || !is_string($login['session'] ?? null) || !preg_match('/^FloServerSignon_[a-z0-9_]{1,40}$/D', $login['session'])
     || !is_string($login['user'] ?? null) || $login['user'] === ''
     || !is_string($login['password'] ?? null)
     || !is_string($login['host'] ?? null)
