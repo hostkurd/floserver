@@ -80,6 +80,16 @@ struct NginxPhpMyAdmin {
     std::optional<NginxTls> tls;
 };
 
+// Adminer (adminer.h, D35) at adminer.localhost: only FloServer's own
+// <data>/adminer/index.php runs (it includes the install); every other path
+// is a 404. With `tls` the http port only redirects.
+struct NginxAdminer {
+    std::filesystem::path index;           // <data>/adminer/index.php
+    std::vector<Port> php_ports;           // its pool
+    std::filesystem::path php_access_log;  // the pool's idle log
+    std::optional<NginxTls> tls;
+};
+
 // Mailpit's inbox (mailpit.h) at mail.localhost: everything forwarded to
 // the port the service holds for it (mail_service.h), with the inbox's
 // password added as an Authorization header from `auth_include`, an
@@ -108,6 +118,7 @@ struct NginxSpec {
     std::vector<NginxSite> sites;
     std::optional<NginxShared> shared;
     std::optional<NginxPhpMyAdmin> phpmyadmin;
+    std::optional<NginxAdminer> adminer;
     std::optional<NginxMail> mail;
 };
 

@@ -561,7 +561,8 @@ json project_summary(const json& p) {
 }  // namespace
 
 bool read_only_method(std::string_view method) {
-    // Not redis.password, databases.login, shared.login, database.root, phpmyadmin.login, mail.env: they give secrets.
+    // Not redis.password, databases.login, shared.login, database.root, phpmyadmin.login, adminer.login, mail.env:
+    // they give secrets.
     static constexpr std::array<std::string_view, 9> kAllowed = {"status",       "projects.list", "projects.log",
                                                                  "runtimes.list", "web.status",   "databases.list",
                                                                  "mail.status",  "mail.recent", "redis.status"};
@@ -1582,6 +1583,9 @@ json Server::call_tool(const std::string& name, const json& args, std::string_vi
             }
             if (const json pma = field(*web, "phpmyadmin"); pma.is_object() && !text_of(pma, "address").empty()) {
                 w["phpmyadmin"] = text_of(pma, "address");
+            }
+            if (const json adm = field(*web, "adminer"); adm.is_object() && !text_of(adm, "address").empty()) {
+                w["adminer"] = text_of(adm, "address");
             }
             out["web"] = std::move(w);
             for (const json& pool : array_at(*web, "pools")) {

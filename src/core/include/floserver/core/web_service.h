@@ -112,6 +112,7 @@ public:
     //    "shared": the same for shared sites, or null,
     //    "phpmyadmin": the same for phpMyAdmin with its "version" (and "name_taken": true when a
     //                  project has its address), or null when it isn't installed,
+    //    "adminer": the same for Adminer (D35), or null when it isn't installed,
     //    "mail": {"address"? (Mailpit's inbox, https://mail.localhost), "problem"?, "missing"?,
     //             "name_taken"?: true} or null when Mailpit isn't installed,
     //    "error"?: "..."}
@@ -237,6 +238,10 @@ private:
     std::string phpmyadmin_files_;
     // Writes them when they changed; false (with `error`) when they can't be.
     [[nodiscard]] bool write_phpmyadmin_files_locked(const std::filesystem::path& install, std::string& error);
+    // Adminer's index.php as last written (D35), and the same for it.
+    std::string adminer_files_;
+    [[nodiscard]] bool write_adminer_files_locked(const std::filesystem::path& install, const std::string& version,
+                                                  std::string& error);
     // Settings > Apache: the config the shared Apache gets now, the last
     // text `httpd -t` accepted and refused, why, and the last choices it accepted.
     std::string apache_text_;

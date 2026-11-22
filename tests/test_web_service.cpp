@@ -8,6 +8,7 @@
 
 #ifndef _WIN32
 
+#include "floserver/core/adminer.h"
 #include "floserver/core/apache_settings.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/phpmyadmin.h"
@@ -58,8 +59,9 @@ void fake_runtime(const fs::path& data, const std::string& name, const std::stri
                               .dump());
 }
 
-// GET over plain http; the whole reply, headers and all, or "" when it couldn't connect.
-std::string get_raw(Port port, const std::string& host, const std::string& path = "/", const std::string& headers = "") {
+// GET (or `method` with `body`) over plain http; the whole reply, headers and all, or "" when it couldn't connect.
+std::string get_raw(Port port, const std::string& host, const std::string& path = "/", const std::string& headers = "",
+                    const std::string& method = "GET", const std::string& body = "") {
     const int s = socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
@@ -71,7 +73,11 @@ std::string get_raw(Port port, const std::string& host, const std::string& path 
         close(s);
         return "";
     }
-    const std::string req = "GET " + path + " HTTP/1.0\r\nHost: " + host + "\r\n" + headers + "\r\n";  // no chunked replies
+    std::string req = method + " " + path + " HTTP/1.0\r\nHost: " + host + "\r\n" + headers;  // no chunked replies
+    if (!body.empty()) {
+        req += "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: " + std::to_string(body.size()) + "\r\n";
+    }
+    req += "\r\n" + body;
     (void)send(s, req.data(), req.size(), 0);
     std::string resp;
     char buf[4096];  // NOLINT(modernize-avoid-c-arrays)
@@ -1463,6 +1469,135 @@ echo $server['auth_type'], ' ', $s['PMA_single_signon_user'] ?? '-', ' ', $s['PM
     CHECK(served.at("name_taken").get<bool>());
     CHECK_FALSE(served.contains("address"));
     CHECK(eventually([&] { return get(http, host) == "200 the project"; }));
+    web.stop();
+}
+
+TEST_CASE("Adminer with real nginx and php-cgi: FloServer's index.php, PostgreSQL only, one-click login (D35)") {
+    const auto nginx = tool("FLOSERVER_TEST_NGINX", "/usr/sbin/nginx");
+    const auto php = tool("FLOSERVER_TEST_PHP_CGI", "/usr/bin/php-cgi");
+    if (!nginx || !php) {
+        MESSAGE("nginx or php-cgi isn't installed here; skipped");
+        return;
+    }
+    const test_util::TempDir tmp;
+    const fs::path data = tmp.path() / "data";
+    install_test_nginx(data, *nginx);
+    fake_runtime(data, "php", "8.3.6", "nts");
+    fs::create_symlink(*php, runtimes_dir(data) / "php" / "8.3.6" / "php-cgi");
+    // A fake Adminer: it makes FloServer's adminer_object() and prints what it was handed.
+    fake_runtime(data, "adminer", "5.4.1", "");
+    const fs::path install = runtimes_dir(data) / "adminer" / "5.4.1";
+    test_util::write_file(install / "adminer-5.4.1.php", R"PHP(<?php
+namespace Adminer;
+class Adminer { public function name() { return 'base'; } }
+$a = \adminer_object();
+$auth = $_POST['auth'] ?? null;
+echo $a->name(), ' ', $_SERVER['REQUEST_METHOD'], ' ', $auth === null ? '-' : json_encode($auth), ' ',
+    $_COOKIE['adminer_lang'] ?? '-', ' ', json_encode($_GET);
+)PHP");
+    std::error_code ec;
+    fs::permissions(tmp.path(), fs::perms::others_read | fs::perms::others_exec, fs::perm_options::add, ec);
+
+    const AppConfig app;
+    std::string error;
+    REQUIRE(save_app_config(app_config_file(data), app, error));
+    const auto ports = pick_web_ports([](Port p) { return p > 1024 && can_listen_on_loopback(p); });
+    REQUIRE(ports);
+    CertStore certs(data);
+    WebServiceConfig config;
+    config.first_app_internal_port = test_util::app_port_base();
+    config.data_dir = data;
+    config.fixed_ports = WebPorts{static_cast<Port>(ports->http + 24000), static_cast<Port>(ports->https + 24000), true};
+    config.reload_every = 1s;
+    WebService web(config, certs);
+    web.start();
+    const Port http = config.fixed_ports->http;
+    const std::string host = "adminer.localhost";
+    REQUIRE(eventually([&] {
+        const nlohmann::json s = web.status().at("adminer");
+        return s.is_object() && s.contains("address") &&
+               s.at("address").get<std::string>() == "http://adminer.localhost:" + std::to_string(http);
+    }));
+    CHECK(web.status().at("adminer").at("version").get<std::string>() == "5.4.1");
+
+    const AdminerPaths paths = adminer_paths(data);
+    test_util::write_file(paths.servers, adminer_servers_json({5432}));
+    const auto token_for = [&](Port port, std::optional<std::string> db) {
+        AdminerLogin l;
+        l.user = db ? *db : "postgres";
+        l.password = db ? "shop-pass" : "pg-pass";
+        l.port = port;
+        l.database = std::move(db);
+        std::string e;
+        auto token = create_adminer_token(paths.tokens, l, std::chrono::system_clock::now(), e);
+        REQUIRE_MESSAGE(token, e);
+        return *token;
+    };
+
+    // Opened directly: Adminer itself (its own login form), through FloServer's index.php.
+    CHECK(eventually([&] { return get(http, host, "/") == "200 Adminer GET - - []"; }));
+    CHECK(get(http, host, "/index.php?pgsql=127.0.0.1%3A5432&username=shop") ==
+          "200 Adminer GET - - {\"pgsql\":\"127.0.0.1:5432\",\"username\":\"shop\"}");
+    // Nothing else is served: not the install, not FloServer's files.
+    CHECK(get(http, host, "/adminer-5.4.1.php").starts_with("404 "));
+    CHECK(get(http, host, "/servers.json").starts_with("404 "));
+    CHECK(get(http, host, "/tokens/").starts_with("404 "));
+
+    // A token signs in once: Adminer's own login, filled in, with the language.
+    const std::string token = token_for(5432, std::string("shop"));
+    const std::string reply = get_raw(http, host, "/?floserver_token=" + token + "&lang=ar");
+    CHECK(reply.starts_with("HTTP/1.1 200"));
+    CHECK(reply.substr(reply.find("\r\n\r\n") + 4) ==
+          "Adminer POST {\"driver\":\"pgsql\",\"server\":\"127.0.0.1:5432\",\"username\":\"shop\","
+          "\"password\":\"shop-pass\",\"db\":\"shop\",\"permanent\":\"\"} ar []");
+    CHECK(header_of(reply, "Set-Cookie").starts_with("adminer_lang=ar"));
+    CHECK(fs::is_empty(paths.tokens));  // claimed and deleted
+
+    const auto refused = [&](const std::string& path, const std::string& why) {
+        const std::string r = get(http, host, path);
+        INFO(path << " -> " << r);
+        return r.starts_with("403 ") && r.find(why) != std::string::npos;
+    };
+    // Used, malformed, or for a server that isn't FloServer's: refused.
+    CHECK(refused("/?floserver_token=" + token, "expired or was already used"));
+    CHECK(refused("/?floserver_token=" + std::string(64, 'g'), "expired or was already used"));
+    CHECK(refused("/?floserver_token[]=x", "expired or was already used"));
+    CHECK(refused("/?floserver_token=" + token_for(5999, std::nullopt), "expired or was already used"));
+    // The superuser's token: no database.
+    const std::string root = get_raw(http, host, "/?floserver_token=" + token_for(5432, std::nullopt) + "&lang=xx");
+    CHECK(root.substr(root.find("\r\n\r\n") + 4) ==
+          "Adminer POST {\"driver\":\"pgsql\",\"server\":\"127.0.0.1:5432\",\"username\":\"postgres\","
+          "\"password\":\"pg-pass\",\"db\":\"\",\"permanent\":\"\"} - []");
+    // PostgreSQL only, FloServer's servers only.
+    CHECK(refused("/?server=127.0.0.1%3A3306&username=root", "PostgreSQL"));
+    CHECK(refused("/?sqlite=&username=x", "PostgreSQL"));
+    CHECK(refused("/?pgsql=10.0.0.5%3A5432&username=x", "one of FloServer"));
+    CHECK(refused("/?pgsql=127.0.0.1%3A5999&username=x", "one of FloServer"));
+    const std::string other = get_raw(http, host, "/", "", "POST",
+                                      "auth%5Bdriver%5D=pgsql&auth%5Bserver%5D=10.0.0.5%3A5432&auth%5Busername%5D=x"
+                                      "&auth%5Bpassword%5D=y");
+    CHECK(other.starts_with("HTTP/1.1 403"));
+    const std::string mysql = get_raw(http, host, "/", "", "POST",
+                                      "auth%5Bdriver%5D=server&auth%5Bserver%5D=127.0.0.1%3A5432&auth%5Busername%5D=x"
+                                      "&auth%5Bpassword%5D=y");
+    CHECK(mysql.starts_with("HTTP/1.1 403"));
+    const std::string ours = get_raw(http, host, "/", "", "POST",
+                                     "auth%5Bdriver%5D=pgsql&auth%5Bserver%5D=127.0.0.1%3A5432&auth%5Busername%5D=x"
+                                     "&auth%5Bpassword%5D=y");
+    CHECK(ours.starts_with("HTTP/1.1 200"));
+
+    // A project called adminer keeps the address; Adminer says why it isn't served.
+    {
+        AppConfig with;
+        const fs::path dir = tmp.path() / "adminer-project";
+        fs::create_directories(dir);
+        with.projects.push_back(Project{"adminer", dir, false, false, nlohmann::json::object()});
+        REQUIRE(save_app_config(app_config_file(data), with, error));
+    }
+    const nlohmann::json status = web.reload();
+    REQUIRE(status.at("adminer").is_object());
+    CHECK(status.at("adminer").at("state").get<std::string>() == "problem");
+    CHECK(status.at("adminer").at("name_taken").get<bool>());
     web.stop();
 }
 
