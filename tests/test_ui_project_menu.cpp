@@ -299,6 +299,8 @@ TEST_CASE("rename question: the help follows what's typed (D22)") {
     CHECK(said("xn--store") == "The name can't start with xn--.");
     CHECK(said("blog") == "There's already a project called blog.");
     CHECK(said("phpmyadmin") == "phpmyadmin is kept for phpMyAdmin.");
+    CHECK(said("adminer") == "adminer is kept for Adminer.");
+    CHECK(said("mail") == "mail is kept for Mailpit's inbox.");
 
     // Its database keeps its name: said in a grey note.
     ProjectRow with_db = row;

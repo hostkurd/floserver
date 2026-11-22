@@ -921,7 +921,7 @@ private:
     std::map<std::string, std::optional<std::string>> pending_use_;  // ServiceWorker::use_key -> value
     std::map<std::string, int> outstanding_;    // commands not yet finished, per ServiceWorker key
     std::map<std::string, bool> installing_;    // Download clicked; the worker hasn't reported yet
-    bool pma_busy_ = false;  // the panel's phpmyadmin.login is on its way
+    bool pma_busy_ = false;  // the panel's phpmyadmin.login or adminer.login is on its way
     struct Removing {
         bool drop = false;   // with its database
         bool trash = false;  // and then its folder to the Recycle Bin

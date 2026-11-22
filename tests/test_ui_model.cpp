@@ -817,6 +817,28 @@ TEST_CASE("Settings > Runtimes: downloads") {
     CHECK_FALSE(is_project_name("_settings"));
 }
 
+TEST_CASE("Settings > Runtimes: Adminer in the Tools card after phpMyAdmin, served on its newest") {
+    json reply = runtimes_reply();
+    reply["installed"].push_back({{"name", "phpmyadmin"}, {"version", "5.2.3"}, {"variant", ""}, {"folder", "5.2.3"},
+                                  {"used_by", json::array()}});
+    for (const char* v : {"5.4.1", "5.4.2"}) {
+        reply["installed"].push_back({{"name", "adminer"}, {"version", v}, {"variant", ""}, {"folder", v},
+                                      {"used_by", json::array()}});
+        reply["available"].push_back({{"name", "adminer"}, {"version", v}, {"variant", ""}, {"size", 500000}});
+    }
+    reply["adminer"] = {{"address", "https://adminer.localhost"}, {"version", "5.4.2"}, {"run", "sleeping"}};
+    const RuntimesPage page = runtimes_page(reply, nullptr, json(), Lang::En);
+    const auto tools = std::find_if(page.groups.begin(), page.groups.end(),
+                                    [](const RuntimeGroup& g) { return g.title == "Tools"; });
+    REQUIRE(tools != page.groups.end());
+    REQUIRE(tools->rows.size() == 3);
+    CHECK(tools->rows[0].label == "phpMyAdmin 5.2.3");
+    CHECK(tools->rows[1].label == "Adminer 5.4.2");
+    CHECK(tools->rows[1].usage == "Opens at https://adminer.localhost");
+    CHECK(tools->rows[2].label == "Adminer 5.4.1");
+    CHECK(tools->rows[2].usage.find("adminer.localhost") == std::string::npos);
+}
+
 TEST_CASE("Settings > Runtimes: phpMyAdmin in the Tools card, with how it's served") {
     json reply = runtimes_reply();
     reply["installed"].push_back({{"name", "phpmyadmin"}, {"version", "5.2.3"}, {"variant", ""}, {"folder", "5.2.3"},

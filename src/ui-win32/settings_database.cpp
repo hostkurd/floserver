@@ -1036,7 +1036,7 @@ void SettingsWindow::paint_db_shapes(Canvas& c) const {
         const DbActions actions = db_actions(db_server_);
         const auto button = [&](Part part, const RECT& r, bool enabled) {
             if (is_empty(r)) {
-                return;  // PostgreSQL's tab has no phpMyAdmin button
+                return;  // a button this page doesn't show
             }
             const Hit hit{part, -1, -1};
             paint_button(c, r, hover_ == hit && enabled, is_focused(hit), enabled);

@@ -701,7 +701,8 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     RenameTooLong,
     RenameXn,
     RenameTaken,          // {0}: the name
-    RenameReserved,       // {0}: the name ("phpmyadmin")
+    RenameReserved,       // {0}: the name ("phpmyadmin"), {1}: the tool ("phpMyAdmin")
+    RenameReservedMail,   // {1} of RenameReserved for "mail"
     RenameFolder,
     RenameFolderNote,     // {0}: the folder now, {1}: its new name
     RenameDatabaseNote,   // {0}: its database, "my_shop"

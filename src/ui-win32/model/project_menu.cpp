@@ -1,6 +1,9 @@
 #include "model/project_menu.h"
 
+#include "floserver/core/adminer.h"
+#include "floserver/core/mailpit.h"
 #include "floserver/core/mariadb.h"
+#include "floserver/core/phpmyadmin.h"
 #include "floserver/core/project_registry.h"
 
 #include <algorithm>
@@ -125,8 +128,12 @@ std::optional<std::string> rename_problem(const ProjectRow& row, std::string_vie
     if (const auto problem = core::project_name_problem(name)) {
         return std::string(text(lang, name.starts_with("xn--") ? Str::RenameXn : Str::RenameRule));
     }
-    if (name == "phpmyadmin") {
-        return fill(lang, Str::RenameReserved, {name});
+    // Kept for the tools' addresses: phpmyadmin, mail and adminer .localhost.
+    if (core::reserved_project_name(name)) {
+        const std::string what = name == core::kMailHostName      ? std::string(text(lang, Str::RenameReservedMail))
+                                 : name == core::kAdminerHostName ? std::string("Adminer")
+                                                                  : std::string("phpMyAdmin");
+        return fill(lang, Str::RenameReserved, {name, what});
     }
     const bool taken = std::any_of(rows.begin(), rows.end(),
                                    [&](const ProjectRow& r) { return r.name == name && r.name != row.name; });
