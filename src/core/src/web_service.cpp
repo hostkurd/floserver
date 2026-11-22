@@ -8,6 +8,7 @@
 #include "floserver/core/nginx_config.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/mailpit.h"
+#include "floserver/core/adminer.h"
 #include "floserver/core/phpmyadmin.h"
 #include "floserver/core/process.h"
 #include "floserver/core/project_registry.h"
@@ -332,6 +333,29 @@ bool WebService::write_phpmyadmin_files_locked(const fs::path& install, std::str
         return false;
     }
     phpmyadmin_files_ = std::move(key);
+    return true;
+}
+
+bool WebService::write_adminer_files_locked(const fs::path& install, const std::string& version, std::string& error) {
+    const AdminerPaths paths = adminer_paths(config_.data_dir);
+    const fs::path file = adminer_file(install, version);
+    std::error_code ec;
+    if (!fs::is_regular_file(file, ec)) {
+        error = "Adminer's file is missing: " + path_to_utf8(file) + "; download Adminer again in Settings → Runtimes";
+        return false;
+    }
+    const auto script = adminer_index_script(paths, file);
+    if (!script) {
+        error = "Adminer's folder path can't be written into PHP: " + path_to_utf8(paths.dir);
+        return false;
+    }
+    if (*script == adminer_files_ && fs::is_regular_file(paths.index, ec)) {
+        return true;
+    }
+    if (!ensure_adminer_dirs(paths, error) || !write_file_atomically(paths.index, *script, error)) {
+        return false;
+    }
+    adminer_files_ = *script;
     return true;
 }
 
@@ -913,6 +937,56 @@ void WebService::reload_locked() {
         phpmyadmin_files_.clear();  // installed again later: written again
     }
 
+    // Adminer (D35): the same, its index.php in the data folder.
+    std::optional<NginxAdminer> adminer_spec;
+    if (plan.adminer) {
+        const PlannedSite& p = *plan.adminer;
+        Site site;
+        site.version = plan.adminer_version;
+        if (p.state == SiteState::Problem) {
+            site.state_override = "problem";
+            site.problem = p.problem;
+            site.name_taken = find_project(*app, kAdminerHostName) != nullptr;
+        } else if (p.state == SiteState::NeedsDownload) {
+            site.state_override = "needs_download";
+            site.missing = p.missing;
+        } else if (nginx == nullptr) {
+            site.state_override = "needs_download";
+            site.missing = {"nginx"};
+        } else {
+            const PhpPool& pool = plan.pools.at(*p.pool);
+            std::string why;
+            if (const auto e = pool_errors.find(pool.key); e != pool_errors.end()) {
+                why = e->second;
+            } else if (!write_adminer_files_locked(p.doc_root, plan.adminer_version, why) && why.empty()) {
+                why = "Adminer's files can't be written";
+            }
+            if (!why.empty()) {
+                site.state_override = "problem";
+                site.problem = why;
+            } else {
+                NginxAdminer ns;
+                ns.index = adminer_paths(config_.data_dir).index;
+                ns.php_ports = pool.ports;
+                ns.php_access_log = pools.at(pool.key)->access_log();
+                if (tls_) {
+                    std::string cert_error;
+                    if (const auto cert = certs_.ensure_site(std::string(kAdminerHostName), cert_error)) {
+                        ns.tls = NginxTls{cert->certificate, cert->key};
+                    } else {
+                        error_ = "no certificate for Adminer: " + cert_error;
+                    }
+                }
+                site.pool_key = pool.key;
+                site.address = ns.tls ? "https" : "http";
+                adminer_spec = std::move(ns);
+            }
+        }
+        sites[std::string(kAdminerSiteName)] = site;
+    } else {
+        adminer_files_.clear();
+    }
+
     // Mailpit's inbox, when it's installed: mail.localhost.
     std::optional<NginxMail> mail_spec;
     if (const auto inbox = config_.mail_inbox ? config_.mail_inbox() : std::nullopt) {
@@ -943,7 +1017,7 @@ void WebService::reload_locked() {
         sites[std::string(kMailSiteName)] = site;
     }
 
-    if (serve.empty() && !shared_spec && !pma_spec && !mail_spec) {
+    if (serve.empty() && !shared_spec && !pma_spec && !adminer_spec && !mail_spec) {
         stop_nginx_locked();  // nothing to serve: free the ports and the memory
         pools_ = std::move(pools);
         replace_apps_locked(std::move(apps));
@@ -1004,6 +1078,10 @@ void WebService::reload_locked() {
             site.address = site.address.empty()
                                ? std::string()
                                : site_address(std::string(kPhpMyAdminHostName), use, site.address == "https");
+        } else if (name == kAdminerSiteName) {
+            site.address = site.address.empty()
+                               ? std::string()
+                               : site_address(std::string(kAdminerHostName), use, site.address == "https");
         } else if (name == kMailSiteName) {
             site.address = site.address.empty()
                                ? std::string()
@@ -1053,6 +1131,7 @@ void WebService::reload_locked() {
     }
     spec.shared = std::move(shared_spec);
     spec.phpmyadmin = std::move(pma_spec);
+    spec.adminer = std::move(adminer_spec);
     spec.mail = std::move(mail_spec);
     // The id comes from the config itself, so the same config has the same
     // id and an unchanged one still compares equal.
@@ -1268,6 +1347,7 @@ json WebService::status_locked() const {
     json sites = json::object();
     json shared = nullptr;
     json phpmyadmin = nullptr;
+    json adminer = nullptr;
     json mail = nullptr;
     for (const auto& [name, s] : sites_) {
         json j = json::object();
@@ -1310,6 +1390,12 @@ json WebService::status_locked() const {
                 j["name_taken"] = true;
             }
             phpmyadmin = std::move(j);
+        } else if (name == kAdminerSiteName) {
+            j["version"] = s.version;
+            if (s.name_taken) {
+                j["name_taken"] = true;
+            }
+            adminer = std::move(j);
         } else if (name == kMailSiteName) {
             if (s.name_taken) {
                 j["name_taken"] = true;
@@ -1355,6 +1441,8 @@ json WebService::status_locked() const {
                 {"shared", shared},
                 // phpMyAdmin: null when it isn't installed.
                 {"phpmyadmin", phpmyadmin},
+                // Adminer (D35): null when it isn't installed.
+                {"adminer", adminer},
                 // Mailpit's inbox: null when it isn't installed.
                 {"mail", mail},
                 // How long a project waits for a request before it sleeps (the window says it).

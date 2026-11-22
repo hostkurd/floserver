@@ -131,6 +131,10 @@ struct WebPlan {
     // newest installed PHP. A Problem when a project has its address.
     std::optional<PlannedSite> phpmyadmin;
     std::string phpmyadmin_version;
+    // Adminer (adminer.h, D35), named kAdminerSiteName, the same way: doc_root
+    // is the install; PHP from a pool of its own with pgsql and pdo_pgsql on.
+    std::optional<PlannedSite> adminer;
+    std::string adminer_version;
     std::vector<PhpPool> pools;      // in order of first use
     std::vector<AppSpec> apps;       // in list order
     // The newest installed Apache, when a project needs it.

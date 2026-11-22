@@ -689,7 +689,7 @@ void RuntimeService::run(Job& job) {
     // can't run without it) and phpredis for each PHP series; for a PHP
     // while Garnet is installed, its series' phpredis.
     std::optional<RuntimeFile> dotnet;
-    // Mailpit's inbox and phpMyAdmin are served by nginx: with no nginx at
+    // Mailpit's inbox, phpMyAdmin and Adminer are served by nginx: with no nginx at
     // all, it comes first. A failure is only noted (Mailpit still catches
     // mail; both are served once nginx is installed).
     std::optional<RuntimeFile> web;
@@ -719,7 +719,7 @@ void RuntimeService::run(Job& job) {
         for (const std::string& series : installed_php_series(installed_now)) {
             add_php_redis(series);
         }
-    } else if (job.name == kMailpitRuntime || job.name == "phpmyadmin") {
+    } else if (job.name == kMailpitRuntime || job.name == "phpmyadmin" || job.name == "adminer") {
         const bool have_nginx = std::any_of(installed_now.begin(), installed_now.end(),
                                             [](const InstalledRuntime& r) { return r.name == "nginx"; });
         if (!have_nginx) {

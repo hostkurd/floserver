@@ -8,6 +8,7 @@
 #include "floserver/core/nginx_config.h"
 #include "floserver/core/paths.h"
 #include "floserver/core/mailpit.h"
+#include "floserver/core/adminer.h"
 #include "floserver/core/phpmyadmin.h"
 #include "floserver/core/plain_file.h"
 #include "floserver/core/shared_sites.h"
@@ -184,6 +185,8 @@ std::size_t add_to_pool(WebPlan& plan, const InstalledRuntime& php, PhpIniSettin
     std::string key = "php-" + php.version + php_settings_key(settings);
     if (site == kPhpMyAdminSiteName) {
         key += "-phpmyadmin";  // always a pool of its own, whatever a project's settings
+    } else if (site == kAdminerSiteName) {
+        key += "-adminer";
     }
     auto it = std::find_if(plan.pools.begin(), plan.pools.end(), [&key](const PhpPool& p) { return p.key == key; });
     if (it == plan.pools.end()) {
@@ -311,6 +314,48 @@ void plan_phpmyadmin(WebPlan& plan, const AppConfig& config, const std::vector<I
     site.pool = add_to_pool(plan, *php, std::move(settings), site.name, false);
     site.state = SiteState::Ready;
     plan.phpmyadmin = std::move(site);
+}
+
+// Adminer (D35): its own pool on the newest PHP, with PostgreSQL's
+// extensions on (Adminer reaches PostgreSQL through pgsql or PDO_PgSQL).
+void plan_adminer(WebPlan& plan, const AppConfig& config, const std::vector<InstalledRuntime>& installed,
+                  PhpSettingsSource& php_settings) {
+    const InstalledRuntime* adminer = best_installed(installed, std::string(kAdminerRuntime), "");
+    if (adminer == nullptr) {
+        return;  // not installed: not served
+    }
+    PlannedSite site;
+    site.name = std::string(kAdminerSiteName);
+    site.dir = adminer->dir;
+    site.doc_root = adminer->dir;
+    plan.adminer_version = adminer->version;
+    if (find_project(config, kAdminerHostName) != nullptr) {
+        site.state = SiteState::Problem;
+        site.problem = "the project " + std::string(kAdminerHostName) + " has the address " +
+                       std::string(kAdminerHostName) + ".localhost, so Adminer can't use it";
+        plan.adminer = std::move(site);
+        return;
+    }
+    const InstalledRuntime* php = best_installed(installed, "php", "");
+    if (php == nullptr) {
+        site.state = SiteState::NeedsDownload;
+        site.missing.emplace_back("php");
+        plan.adminer = std::move(site);
+        return;
+    }
+    PhpIniSettings settings = php_settings(*php, nullptr);
+    for (const char* ext : {"pdo_pgsql", "pgsql"}) {
+        settings.removed.erase(std::remove(settings.removed.begin(), settings.removed.end(), ext), settings.removed.end());
+        if (std::find(settings.extensions.begin(), settings.extensions.end(), ext) == settings.extensions.end()) {
+            settings.extensions.emplace_back(ext);
+        }
+    }
+    std::sort(settings.extensions.begin(), settings.extensions.end());
+    settings.project_ini["display_errors"] = "Off";
+    settings.project_ini["display_startup_errors"] = "Off";
+    site.pool = add_to_pool(plan, *php, std::move(settings), site.name, false);
+    site.state = SiteState::Ready;
+    plan.adminer = std::move(site);
 }
 
 }  // namespace
@@ -497,6 +542,7 @@ WebPlan plan_sites(const AppConfig& config, const ConfigReader& read_config,
     }
     plan_shared(plan, config, installed, default_php, php_settings);
     plan_phpmyadmin(plan, config, installed, php_settings);
+    plan_adminer(plan, config, installed, php_settings);
     return plan;
 }
 
@@ -580,7 +626,7 @@ std::map<std::string, std::vector<std::string>> runtime_users(const AppConfig& c
     };
     for (const PhpPool& pool : plan.pools) {
         for (const std::string& site : pool.sites) {
-            if (site == kPhpMyAdminSiteName) {
+            if (site == kPhpMyAdminSiteName || site == kAdminerSiteName) {
                 continue;  // it moves to the next newest PHP when this one goes
             }
             use("php", pool.php_dir, site);

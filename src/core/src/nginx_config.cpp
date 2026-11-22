@@ -2,6 +2,7 @@
 
 #include "floserver/core/mailpit.h"
 #include "floserver/core/project_registry.h"
+#include "floserver/core/adminer.h"
 #include "floserver/core/phpmyadmin.h"
 #include "floserver/core/project_config.h"
 #include "floserver/core/request_log.h"
@@ -80,7 +81,7 @@ public:
         const bool any_tls = std::any_of(spec_.sites.begin(), spec_.sites.end(),
                                          [](const NginxSite& s) { return s.tls.has_value(); }) ||
                              (spec_.shared && spec_.shared->tls) || (spec_.phpmyadmin && spec_.phpmyadmin->tls) ||
-                             (spec_.mail && spec_.mail->tls);
+                             (spec_.adminer && spec_.adminer->tls) || (spec_.mail && spec_.mail->tls);
         // One upstream per pool: a php-cgi worker on each port, requests
         // spread over them. A worker that sleeps still has its port held by
         // the service, so a connection never fails; max_fails=0 keeps nginx
@@ -96,6 +97,11 @@ public:
         if (spec_.phpmyadmin) {
             NginxSite s;
             s.php_ports = spec_.phpmyadmin->php_ports;
+            with_shared.push_back(std::move(s));
+        }
+        if (spec_.adminer) {
+            NginxSite s;
+            s.php_ports = spec_.adminer->php_ports;
             with_shared.push_back(std::move(s));
         }
         for (const NginxSite& site : with_shared) {
@@ -197,6 +203,9 @@ public:
             return std::nullopt;
         }
         if (spec_.phpmyadmin && !write_phpmyadmin(*spec_.phpmyadmin)) {
+            return std::nullopt;
+        }
+        if (spec_.adminer && !write_adminer(*spec_.adminer)) {
             return std::nullopt;
         }
         if (spec_.mail && !write_mail(*spec_.mail)) {
@@ -380,6 +389,70 @@ private:
             }
         }
         out_ << "        }\n";
+    }
+
+    // Adminer at adminer.localhost (D35): FloServer's index.php only.
+    bool write_adminer(const NginxAdminer& adm) {
+        const auto index = path(adm.index);
+        if (!index) {
+            return false;
+        }
+        if (adm.php_ports.empty()) {
+            error_ = "Adminer has no PHP pool";
+            return false;
+        }
+        std::optional<std::string> idle_log;
+        if (!adm.php_access_log.empty()) {
+            idle_log = path(adm.php_access_log);
+            if (!idle_log) {
+                return false;
+            }
+        }
+        std::optional<std::string> cert;
+        std::optional<std::string> key;
+        if (adm.tls) {
+            cert = path(adm.tls->certificate);
+            key = path(adm.tls->key);
+            if (!cert || !key) {
+                return false;
+            }
+        }
+        const std::string name(kAdminerHostName);
+        out_ << "\n    # Adminer\n";
+        if (adm.tls) {
+            out_ << "    server {\n";
+            listen(spec_.ports.http, "");
+            out_ << "        server_name " << name << ".localhost;\n"
+                 << "        return 302 " << site_address(name, spec_.ports, true) << "$request_uri;\n"
+                 << "    }\n";
+        }
+        out_ << "    server {\n";
+        if (adm.tls) {
+            listen(spec_.ports.https, spec_.http2_directive ? " ssl" : " ssl http2");
+            out_ << (spec_.http2_directive ? "        http2 on;\n" : "")
+                 << "        ssl_certificate " << *cert << ";\n"
+                 << "        ssl_certificate_key " << *key << ";\n";
+        } else {
+            listen(spec_.ports.http, "");
+        }
+        out_ << "        server_name " << name << ".localhost;\n"
+             << "        add_header Referrer-Policy no-referrer always;\n"
+             << "        location ~ ^/(index\\.php)?$ {\n"
+             << "            include " << fastcgi_params_ << ";\n"
+             << "            fastcgi_param SCRIPT_FILENAME " << *index << ";\n"
+             << "            fastcgi_param SCRIPT_NAME /index.php;\n"
+             << (adm.tls ? "            fastcgi_param HTTPS on;\n" : "")
+             << "            fastcgi_pass " << upstream_name(adm.php_ports) << ";\n"
+             << "            fastcgi_read_timeout 300s;\n";
+        if (idle_log) {
+            out_ << "            access_log " << *idle_log << " floserver_idle;\n";
+        }
+        out_ << "        }\n"
+             << "        location / {\n"
+             << "            return 404;\n"
+             << "        }\n"
+             << "    }\n";
+        return true;
     }
 
     // phpMyAdmin at phpmyadmin.localhost.

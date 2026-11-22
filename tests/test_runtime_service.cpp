@@ -693,3 +693,34 @@ TEST_CASE("phpMyAdmin brings nginx too; a failed nginx download is noted and the
     CHECK(read_file(root / "nginx" / "1.30.7" / "nginx.exe") == "MZ nginx");
     CHECK(job2["total"] == job2["received"]);
 }
+
+TEST_CASE("Adminer brings nginx when there's none, as phpMyAdmin does (D35)") {
+    const World w;
+    const std::string adminer = "<?php // adminer";
+    const std::string nginx = make_zip("nginx.exe", "MZ nginx");
+    const nlohmann::json doc = {{"schema", 1},
+                                {"sequence", 9},
+                                {"expires", "2026-12-01T00:00:00Z"},
+                                {"runtimes", {[&] {
+                                                  auto e = w.entry("adminer", "5.4.1", adminer, "any");
+                                                  e["archive"] = "file";
+                                                  e["urls"] = {"https://cdn.example.org/adminer/5.4.1/adminer-5.4.1.php"};
+                                                  return e;
+                                              }(),
+                                              w.entry("nginx", "1.30.7", nginx)}}};
+    const std::string bytes = doc.dump();
+    w.transport->serve(kSource.manifest_url, {200, bytes});
+    w.transport->serve(kSource.signature_url, {200, kKey.sign(bytes, kKeyId)});
+    w.transport->serve("https://cdn.example.org/adminer/5.4.1/adminer-5.4.1.php", {200, adminer});
+    w.transport->serve("https://cdn.example.org/nginx/1.30.7.zip", {200, nginx});
+    RuntimeService s(w.config(), w.transport);
+    ServiceRefusal refusal;
+    const auto id = s.install("adminer", "", refusal);
+    REQUIRE_MESSAGE(id.has_value(), refusal.message);
+    const auto job = wait_for(s, *id);
+    INFO(job.dump(2));
+    CHECK(job["state"] == "done");
+    CHECK(job["message"].get<std::string>().find("nginx 1.30.7 is installed too") != std::string::npos);
+    CHECK(fs::exists(w.tmp.path() / "runtimes" / "nginx" / "1.30.7"));
+    CHECK(read_file(w.tmp.path() / "runtimes" / "adminer" / "5.4.1" / "adminer-5.4.1.php") == adminer);
+}

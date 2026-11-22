@@ -5,6 +5,7 @@
 // the projects (nginx and the PHP pools that sleep when idle), and the
 // app's own updates (downloaded here, installed by the window).
 
+#include "floserver/core/adminer.h"
 #include "floserver/core/apache_settings.h"
 #include "floserver/core/backup_service.h"
 #include "floserver/core/builtin_templates.h"
@@ -372,8 +373,8 @@ struct Service {
     void after_install(const std::string& name, const std::string& version) const noexcept {
         namespace core = floserver::core;
         replace_older_mailpit(name, version);
-        // phpMyAdmin may have brought nginx with it: served now, not at the next reload.
-        if (name == core::kPhpMyAdminRuntime && web) {
+        // phpMyAdmin or Adminer may have brought nginx with it: served now, not at the next reload.
+        if ((name == core::kPhpMyAdminRuntime || name == core::kAdminerRuntime) && web) {
             try {
                 (void)web->reload();
             } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the supervisor's next reload serves it
@@ -480,10 +481,11 @@ struct Service {
                 if (const auto defaults = projects->defaults(ignored)) {
                     out["defaults"] = *defaults;
                 }
-                // Tools: how phpMyAdmin is served (its address, or why not).
+                // Tools: how phpMyAdmin and Adminer are served (their addresses, or why not).
                 if (web) {
                     const json status = web->status();
                     out["phpmyadmin"] = status.contains("phpmyadmin") ? status.at("phpmyadmin") : json();
+                    out["adminer"] = status.contains("adminer") ? status.at("adminer") : json();
                     out["mail"] = status.contains("mail") ? status.at("mail") : json();
                 }
             }
@@ -1099,7 +1101,7 @@ struct Service {
         if (const std::string project = string_param(r.params, "project"); !project.empty() && projects) {
             core::ServiceRefusal ignored;
             if (const auto list = projects->list(ignored)) {
-                for (const json& p : (*list)["projects"]) {
+                for (const json& p : list->value("projects", json::array())) {
                     if (p.value("name", std::string()) != project || !p.contains("path") || !p.at("path").is_string()) {
                         continue;
                     }
@@ -1143,6 +1145,65 @@ struct Service {
         // of its own, and each client has its own thread here.
         core::ServiceRefusal refusal;
         const auto url = core::phpmyadmin_login(*databases, *phpmyadmin, *data, address, ask, refusal);
+        if (!url) {
+            return protocol::make_error(r.id, refusal.code, refusal.message);
+        }
+        return protocol::make_result(r.id, {{"url", *url}});
+    }
+
+    // adminer.login {"project"} | {"series"} (D35): a one-click link into
+    // Adminer for a PostgreSQL project (its own login) or server (as postgres).
+    [[nodiscard]] std::string adminer_request(const protocol::Request& r) const {
+        namespace core = floserver::core;
+        if (!web || !databases || !data) {
+            return protocol::make_error(r.id, "no_data_folder",
+                                        "FloServer can't find a folder to keep its settings in (LOCALAPPDATA or HOME)");
+        }
+        // A MariaDB or MySQL project: phpMyAdmin is its tool, and nothing is started to find that out.
+        if (const std::string project = string_param(r.params, "project"); !project.empty() && projects) {
+            core::ServiceRefusal ignored;
+            if (const auto list = projects->list(ignored)) {
+                for (const json& p : list->value("projects", json::array())) {
+                    if (p.value("name", std::string()) != project || !p.contains("path") || !p.at("path").is_string()) {
+                        continue;
+                    }
+                    const auto dir = core::path_from_utf8(p.at("path").get<std::string>());
+                    const auto parsed = core::read_project_config_file(core::Project{project, dir, true, false, {}});
+                    if (parsed.config && parsed.config->database &&
+                        parsed.config->database->family != core::kPostgreSqlFamily) {
+                        return protocol::make_error(r.id, "not_postgresql", core::adminer_not_postgresql_message());
+                    }
+                }
+            }
+        }
+        const json status = web->status();
+        const json adm = status.contains("adminer") ? status.at("adminer") : json();
+        if (!adm.is_object()) {
+            return protocol::make_error(r.id, "not_installed", "Adminer isn't installed; download it in Settings → Runtimes");
+        }
+        const std::string address =
+            adm.contains("address") && adm.at("address").is_string() ? adm.at("address").get<std::string>() : "";
+        if (address.empty()) {
+            if (adm.contains("missing") && adm.at("missing").is_array() && !adm.at("missing").empty() &&
+                adm.at("missing").front().is_string()) {
+                const std::string missing = adm.at("missing").front().get<std::string>();
+                const std::string name = missing == "php" ? std::string("PHP") : missing;
+                return protocol::make_error(r.id, "not_served",
+                                            "Adminer needs " + name + ", which isn't installed: download " + name +
+                                                " in Settings → Runtimes");
+            }
+            const std::string why = adm.contains("problem") && adm.at("problem").is_string()
+                                        ? adm.at("problem").get<std::string>()
+                                        : std::string("it isn't being served yet; try again in a few seconds");
+            return protocol::make_error(r.id, "not_served", "Adminer can't be opened: " + why);
+        }
+        core::AdminerLoginRequest ask;
+        ask.series = string_param(r.params, "series");
+        ask.project = string_param(r.params, "project");
+        ask.lang = string_param(r.params, "lang");
+        // This may wait for PostgreSQL to start: each client has its own thread here.
+        core::ServiceRefusal refusal;
+        const auto url = core::adminer_login(*databases, *data, address, ask, refusal);
         if (!url) {
             return protocol::make_error(r.id, refusal.code, refusal.message);
         }
@@ -1196,7 +1257,7 @@ struct Service {
                        {"user", login->user},
                        {"password", login->password}};
         if (const auto list = projects->list(refusal)) {
-            for (const json& p : (*list)["projects"]) {
+            for (const json& p : list->value("projects", json::array())) {
                 if (p.value("name", std::string()) == name && p.contains("path")) {
                     const auto dir = core::path_from_utf8(p["path"].get<std::string>());
                     const bool laravel = core::env_style(dir) == core::EnvStyle::Laravel;
@@ -1967,6 +2028,8 @@ struct Service {
                 reply = folders_request(*request);
             } else if (request->method == "phpmyadmin.login") {
                 reply = phpmyadmin_request(*request);
+            } else if (request->method == "adminer.login") {
+                reply = adminer_request(*request);
             } else if (request->method == "redis.status" || request->method == "redis.set" ||
                        request->method == "redis.flush" || request->method == "redis.password") {
                 reply = redis_request(*request);

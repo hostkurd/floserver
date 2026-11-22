@@ -1,5 +1,6 @@
 #include "floserver/core/phpmyadmin.h"
 
+#include "floserver/core/adminer.h"
 #include "floserver/core/crypto.h"
 #include "floserver/core/database_service.h"
 #include "floserver/core/mariadb_settings.h"
@@ -70,11 +71,15 @@ void make_private_dir(const fs::path& dir, std::error_code& ec) {
 
 }  // namespace
 
-bool reserved_project_name(std::string_view name) { return name == kPhpMyAdminHostName || name == kMailHostName; }
+bool reserved_project_name(std::string_view name) {
+    return name == kPhpMyAdminHostName || name == kMailHostName || name == kAdminerHostName;
+}
 
 std::string reserved_name_message(std::string_view name) {
-    return std::string(name) + ".localhost is kept for " +
-           (name == kMailHostName ? "Mailpit's inbox" : "phpMyAdmin") + "; choose another name";
+    const std::string_view what = name == kMailHostName      ? "Mailpit's inbox"
+                                  : name == kAdminerHostName ? "Adminer"
+                                                             : "phpMyAdmin";
+    return std::string(name) + ".localhost is kept for " + std::string(what) + "; choose another name";
 }
 
 PhpMyAdminPaths phpmyadmin_paths(const fs::path& data) {

@@ -57,8 +57,8 @@ inline constexpr std::string_view kSignonScriptName = "floserver-signon.php";
 inline constexpr std::chrono::seconds kSignonTokenLife{60};
 inline constexpr std::size_t kSignonTokenBytes = 32;
 
-// True for names no new project may take: "phpmyadmin", and "mail"
-// (Mailpit's inbox, mailpit.h).
+// True for names no new project may take: "phpmyadmin", "mail" (Mailpit's
+// inbox, mailpit.h) and "adminer" (adminer.h).
 [[nodiscard]] bool reserved_project_name(std::string_view name);
 // Why: "phpmyadmin.localhost is kept for phpMyAdmin; choose another name".
 [[nodiscard]] std::string reserved_name_message(std::string_view name);
@@ -178,6 +178,9 @@ private:
 class DatabaseService;
 struct ServiceRefusal;
 
+// Why a PostgreSQL project has no phpMyAdmin, and what to use instead.
+[[nodiscard]] std::string phpmyadmin_not_mysql_message();
+
 // phpmyadmin.login: what was asked. `series` ("11.4", as root; of `family`,
 // MariaDB when empty) or `project` (its own user, its database only); `lang`
 // is the window's.
@@ -193,9 +196,6 @@ struct PhpMyAdminLoginRequest {
 // password); a project's user and database are made as its own login makes
 // them; config.inc.php is brought up to date and a token made. The link for
 // phpMyAdmin at `address`, or nothing (with `refusal`).
-// Why a PostgreSQL project has no phpMyAdmin, and what to use instead.
-[[nodiscard]] std::string phpmyadmin_not_mysql_message();
-
 [[nodiscard]] std::optional<std::string> phpmyadmin_login(DatabaseService& databases, PhpMyAdminConfigWriter& writer,
                                                           const std::filesystem::path& data, std::string_view address,
                                                           const PhpMyAdminLoginRequest& request, ServiceRefusal& refusal);
