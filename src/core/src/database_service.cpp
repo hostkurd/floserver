@@ -864,18 +864,30 @@ private:
             // Ours: the pid file names the process FloServer started, or (MySQL
             // on Windows can fork a monitor whose child is the server) the
             // port's listener is in its job, which holds everything it started.
-            const bool ours = !named.empty() && (named == std::to_string(process->pid()) ||
-                                                 process->listener_owner(internal_, false) == ListenerOwner::Child);
+            const bool same = !named.empty() && named == std::to_string(process->pid());
+            const ListenerOwner owner =
+                named.empty() || same ? ListenerOwner::Unknown : process->listener_owner(internal_, false);
+            const bool ours = same || owner == ListenerOwner::Child;
             if (!ours) {
-                waiting_for = named.empty() ? "no pid file yet"
-                                            : "the pid file names process " + named + ", not " +
-                                                  std::to_string(process->pid()) + ", and port " +
-                                                  std::to_string(internal_) + " isn't its";
+                const std::string port_said = owner == ListenerOwner::Other
+                                                  ? "another program listens on port "
+                                                  : "no listener of its is seen on port ";
+                if (named.empty()) {
+                    waiting_for = "no pid file yet";
+                } else {
+                    waiting_for = "the pid file names process ";
+                    waiting_for += named;
+                    waiting_for += ", not ";
+                    waiting_for += std::to_string(process->pid());
+                    waiting_for += ", and ";
+                    waiting_for += port_said;
+                    waiting_for += std::to_string(internal_);
+                }
             }
             if (ours) {
                 waiting_for = "nothing answers on port " + std::to_string(internal_);
                 if (const auto s = connect_loopback(internal_)) {
-                    waiting_for.clear();
+                    waiting_for = "root's login check didn't finish";
                     close_socket(*s);
                     login_error.clear();
                     if (run_tool(files_.client, {"--batch", "--connect-timeout=10"}, *root, probe, 30s, login_error)) {
@@ -915,8 +927,8 @@ private:
             } else {
                 // Which check never passed comes first: the log alone can say "ready".
                 const std::string why = !process->running() ? "it stopped"
-                                        : waiting_for.empty() ? "no answer in time"
-                                                              : "no answer in time, " + waiting_for;
+                                        : waiting_for.empty() ? "time ran out"
+                                                              : "time ran out: " + waiting_for;
                 error = path_to_utf8(files_.server.stem()) + " didn't start (" + why + "): " +
                         start_errors(log_from, o.output_log);
             }
