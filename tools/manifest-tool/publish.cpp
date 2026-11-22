@@ -280,7 +280,7 @@ LiveResult fetch_live_list(HttpTransport& http, std::string_view cdn,
 }
 
 std::string runtime_title(std::string_view runtime, std::string_view version, std::string_view variant) {
-    static constexpr std::array<std::pair<std::string_view, std::string_view>, 18> kNames = {{
+    static constexpr std::array<std::pair<std::string_view, std::string_view>, 19> kNames = {{
         {"php", "PHP"},
         {"mariadb", "MariaDB"},
         {"node", "Node.js"},
@@ -290,6 +290,7 @@ std::string runtime_title(std::string_view runtime, std::string_view version, st
         {"wordpress", "WordPress"},
         {"python", "Python"},
         {"phpmyadmin", "phpMyAdmin"},
+        {"adminer", "Adminer"},
         {"mailpit", "Mailpit"},
         {"mysql", "MySQL"},
         {"postgresql", "PostgreSQL"},
@@ -483,6 +484,10 @@ OfficialSource official_source(std::string_view path) {
         // Each download has its own .sha256 next to it: "<hash>  <file>".
         s.kind = Kind::Sums;
         s.urls = {"https://files.phpmyadmin.net/phpMyAdmin/" + v + "/" + p.file + ".sha256"};
+    } else if (p.runtime == "adminer") {
+        // Adminer's releases publish no checksum: the GitHub download itself is compared (D35).
+        s.kind = Kind::Original;
+        s.urls = {"https://github.com/vrana/adminer/releases/download/v" + v + "/" + p.file};
     } else if (p.runtime == "mailpit") {
         // Mailpit's releases have no checksum file (md5sum off, no sha256 in
         // its release workflow), so the GitHub download itself is compared.

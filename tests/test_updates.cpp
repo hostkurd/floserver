@@ -259,7 +259,10 @@ TEST_CASE("updates: GitHub's latest release comes with its series (Bun's minor)"
                {200, R"({"tag_name":"bun-v1.4.5","prerelease":false,"draft":false})"});
     http.serve("https://api.github.com/repos/axllent/mailpit/releases/latest",
                {200, R"({"tag_name":"v1.34.0","prerelease":false,"draft":false})"});
-    const auto found = find_updates(http, {{"bun", {"1.3.14"}}, {"mailpit", {"1.33.0"}}});
+    http.serve("https://api.github.com/repos/vrana/adminer/releases/latest",
+               {200, R"({"tag_name":"v5.4.1","prerelease":false,"draft":false})"});
+    const auto found = find_updates(http, {{"bun", {"1.3.14"}}, {"mailpit", {"1.33.0"}}, {"adminer", {"5.4.0"}}});
     CHECK(found.at("bun").versions == V{{"1.4", "1.4.5"}});
     CHECK(found.at("mailpit").versions == V{{"", "1.34.0"}});
+    CHECK(found.at("adminer").versions == V{{"", "5.4.1"}});  // one version kept, like phpMyAdmin (D35)
 }
