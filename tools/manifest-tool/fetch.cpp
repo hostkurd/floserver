@@ -305,6 +305,8 @@ FetchPlan plan_fetch(core::HttpTransport& http, const UpdateRow& row,
         simple("https://wordpress.org/", "wordpress-" + v + ".zip");
     } else if (r == "phpmyadmin") {
         simple("https://files.phpmyadmin.net/phpMyAdmin/" + v + "/", "phpMyAdmin-" + v + "-all-languages.zip");
+    } else if (r == "adminer") {
+        simple("https://github.com/vrana/adminer/releases/download/v" + v + "/", "adminer-" + v + ".php");
     } else if (r == "mailpit") {
         simple("https://github.com/axllent/mailpit/releases/download/v" + v + "/", "mailpit-windows-amd64.zip");
     } else if (r == "garnet") {

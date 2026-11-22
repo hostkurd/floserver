@@ -23,9 +23,9 @@ using core::Version;
 constexpr std::size_t kMaxAnswer = std::size_t{8} * 1024 * 1024;  // python-build-standalone's release is ~2 MB
 
 // The order the Publisher lists runtimes in (its catalog's), for the rows.
-constexpr std::array<std::string_view, 17> kOrder = {
-    "php",    "mariadb",    "mysql",   "postgresql", "nginx",  "apache",  "composer", "node",     "bun",
-    "deno",   "python",     "wordpress", "phpmyadmin", "mailpit", "garnet", "dotnet",   "php-redis"};
+constexpr std::array<std::string_view, 18> kOrder = {
+    "php",    "mariadb",    "mysql",   "postgresql", "nginx",   "apache",  "composer", "node",   "bun",
+    "deno",   "python",     "wordpress", "phpmyadmin", "adminer", "mailpit", "garnet",   "dotnet", "php-redis"};
 
 std::size_t order_of(std::string_view runtime) {
     const auto it = std::find(kOrder.begin(), kOrder.end(), runtime);
@@ -116,7 +116,7 @@ std::string update_series(std::string_view runtime, std::string_view version) {
         return first_parts(version, 2);
     }
     if (runtime == "deno" || runtime == "mailpit" || runtime == "garnet" ||
-        runtime == "phpmyadmin" || runtime == "php-redis") {
+        runtime == "phpmyadmin" || runtime == "adminer" || runtime == "php-redis") {
         return {};
     }
     return first_parts(version, 2);
@@ -641,6 +641,7 @@ std::map<std::string, FinderAnswer> find_updates(core::HttpTransport& http,
                 {"bun", {"oven-sh/bun", "bun-v"}},
                 {"deno", {"denoland/deno", "v"}},
                 {"mailpit", {"axllent/mailpit", "v"}},
+                {"adminer", {"vrana/adminer", "v"}},
                 {"garnet", {"microsoft/garnet", "v"}},
             };
             const auto g = github.find(runtime);

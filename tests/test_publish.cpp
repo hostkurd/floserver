@@ -382,6 +382,66 @@ TEST_CASE("publisher: Mailpit is compared with its GitHub download and listed fo
     CHECK(floserver::core::runtimes_for(*opened.manifest, "mailpit", "windows-x64").size() == 1);
 }
 
+TEST_CASE("publisher: Adminer is compared with its GitHub download and listed as one PHP file for every platform (D35)") {
+    FakeCdn cdn;
+    const std::string path = "adminer/5.4.1/adminer-5.4.1.php";
+    const std::string body = "<?php // adminer";
+    cdn.http.serve(kTestCdn + "/" + path, {200, body});
+
+    const OfficialSource source = official_source(path);
+    CHECK(source.kind == OfficialSource::Kind::Original);
+    CHECK(source.urls ==
+          std::vector<std::string>{"https://github.com/vrana/adminer/releases/download/v5.4.1/adminer-5.4.1.php"});
+    cdn.http.serve(source.urls.front(), {200, body});
+
+    const AddResult added = new_file(kTestCdn + "/" + path, kTestCdn, cdn.files);
+    REQUIRE_MESSAGE(added.file, added.error);
+    CHECK(added.file->title == "Adminer 5.4.1");
+    PublishFile f = *added.file;
+    CheckContext ctx{cdn.http, kTestCdn};
+    check_file(ctx, f);
+    CHECK(f.state == CheckState::Ok);
+
+    PublishFile bad = *added.file;
+    cdn.http.serve(kTestCdn + "/" + path, {200, "<?php // something else"});
+    check_file(ctx, bad);
+    CHECK(bad.state == CheckState::Failed);
+    cdn.http.serve(kTestCdn + "/" + path, {200, body});
+
+    // Its English-only, MySQL-only and Editor builds aren't listed.
+    CHECK(describe_cdn_path(path).listable);
+    for (const char* other : {"adminer/5.4.1/adminer-5.4.1-en.php", "adminer/5.4.1/adminer-5.4.1-mysql.php",
+                              "adminer/5.4.1/adminer-5.4.1-mysql-en.php", "adminer/5.4.1/editor-5.4.1.php"}) {
+        INFO(other);
+        CHECK_FALSE(describe_cdn_path(other).listable);
+        CHECK(describe_cdn_path(other).problem.find("another build") != std::string::npos);
+    }
+    CHECK_FALSE(describe_cdn_path("adminer/5.4.2/adminer-5.4.1.php").listable);
+
+    cdn.files.push_back(f);
+    const auto now = at("2026-11-22T12:00:00Z");
+    const BuiltList built = build_next_list(kTestCdn, cdn.files, 14, now);
+    REQUIRE_MESSAGE(built.manifest_json, (built.errors.empty() ? "" : built.errors.front()));
+    const auto doc = nlohmann::json::parse(*built.manifest_json);
+    const auto entry = std::find_if(doc.at("runtimes").begin(), doc.at("runtimes").end(),
+                                    [](const nlohmann::json& r) { return r.at("name").get<std::string>() == "adminer"; });
+    REQUIRE(entry != doc.at("runtimes").end());
+    CHECK(entry->at("version").get<std::string>() == "5.4.1");
+    CHECK(entry->at("platform").get<std::string>() == "any");
+    CHECK(entry->at("archive").get<std::string>() == "file");
+    CHECK(entry->at("license").get<std::string>() == "Apache-2.0 OR GPL-2.0-only");
+    CHECK(entry->at("urls") == nlohmann::json::array({kTestCdn + "/" + path, source.urls.front()}));
+
+    floserver::core::ManifestCheck check;
+    check.trusted_keys = cdn.keys();
+    check.now = now;
+    const auto opened = floserver::core::open_manifest(*built.manifest_json, cdn.key.sign(*built.manifest_json, "test-key"),
+                                                       check);
+    REQUIRE(opened.manifest);
+    CHECK(opened.warnings.empty());
+    CHECK(floserver::core::runtimes_for(*opened.manifest, "adminer", "any").size() == 1);
+}
+
 TEST_CASE("publisher: MySQL 8.4 is compared with Oracle's download and listed for Windows (D28)") {
     FakeCdn cdn;
     const std::string path = "mysql/8.4.11/mysql-8.4.11-winx64.zip";
