@@ -103,6 +103,9 @@ foreach (['server', 'sqlite', 'sqlite2', 'oracle', 'mssql', 'mongo', 'elastic', 
         floserver_refuse('In FloServer, Adminer opens PostgreSQL databases. Use phpMyAdmin for MariaDB and MySQL.');
     }
 }
+if (isset($_GET['username']) && !isset($_GET['pgsql'])) {
+    floserver_refuse('In FloServer, Adminer opens PostgreSQL databases. Use phpMyAdmin for MariaDB and MySQL.');
+}
 if (isset($_GET['pgsql']) && !in_array($_GET['pgsql'], $floserver_servers, true)) {
     floserver_refuse('That isn\'t one of FloServer\'s PostgreSQL servers. ' . $open_again);
 }
@@ -111,7 +114,15 @@ if (isset($_POST['auth'])) {
     if (!is_array($auth) || ($auth['driver'] ?? null) !== 'pgsql' || !in_array($auth['server'] ?? null, $floserver_servers, true)) {
         floserver_refuse('Adminer signs in to FloServer\'s PostgreSQL servers only. ' . $open_again);
     }
+    // No "remember me": a kept login would skip FloServer's list of servers.
+    $_POST['auth']['permanent'] = '';
 }
+// Adminer's "remember me" cookie signs in without a form, so it isn't used.
+if (isset($_COOKIE['adminer_permanent'])) {
+    unset($_COOKIE['adminer_permanent']);
+    setcookie('adminer_permanent', '', ['expires' => 1, 'path' => '/']);
+}
+$floserver_one_click = false;
 
 // One click from FloServer: claim the token by renaming its file, so it works once.
 if (isset($_GET['floserver_token'])) {
@@ -155,14 +166,25 @@ if (isset($_GET['floserver_token'])) {
     $_POST = ['auth' => ['driver' => 'pgsql', 'server' => $server, 'username' => $login['user'],
                          'password' => $login['password'], 'db' => $login['db'] ?? '', 'permanent' => '']];
     unset($_GET['floserver_token'], $_GET['lang']);
+    // Adminer goes on to its own address: without the used token in it.
+    $query = http_build_query($_GET, '', '&', PHP_QUERY_RFC3986);
+    $_SERVER['REQUEST_URI'] = explode('?', (string) ($_SERVER['REQUEST_URI'] ?? '/'), 2)[0] . ($query === '' ? '' : '?' . $query);
+    $_SERVER['QUERY_STRING'] = $query;
+    // The token above stands in for the form's own token, which this login has none of.
+    $floserver_one_click = true;
 }
 
 function adminer_object()
 {
     return new class extends \Adminer\Adminer {
-        public function name()
+        public function name(): string
         {
             return 'Adminer';
+        }
+
+        public function verifyLoginToken(): bool
+        {
+            return $GLOBALS['floserver_one_click'] ? false : parent::verifyLoginToken();
         }
     };
 }

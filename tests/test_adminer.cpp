@@ -90,6 +90,15 @@ TEST_CASE("Adminer's index.php: its paths, PostgreSQL only, the token's claim, t
     CHECK(script->find("'server', 'sqlite'") != std::string::npos);  // other drivers refused
     CHECK(script->find("'driver' => 'pgsql'") != std::string::npos);
     CHECK(script->find("@rename($file, $claimed)") != std::string::npos);
+    // Adminer 6's login token is FloServer's own token on a one-click login only.
+    CHECK(script->find("public function verifyLoginToken(): bool") != std::string::npos);
+    CHECK(script->find("$floserver_one_click ? false : parent::verifyLoginToken()") == std::string::npos);
+    CHECK(script->find("$GLOBALS['floserver_one_click'] ? false : parent::verifyLoginToken()") != std::string::npos);
+    // No "remember me" login past the list of servers.
+    CHECK(script->find("unset($_COOKIE['adminer_permanent']);") != std::string::npos);
+    CHECK(script->find("$_POST['auth']['permanent'] = '';") != std::string::npos);
+    // The used token isn't in the address Adminer goes on to.
+    CHECK(script->find("$_SERVER['REQUEST_URI'] = ") != std::string::npos);
     CHECK(script->ends_with("require FLOSERVER_ADMINER;\n"));
     // A path PHP can't hold: no script.
     CHECK_FALSE(adminer_index_script(paths, fs::path("bad\npath.php")));

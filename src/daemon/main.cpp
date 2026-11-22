@@ -481,10 +481,11 @@ struct Service {
                 if (const auto defaults = projects->defaults(ignored)) {
                     out["defaults"] = *defaults;
                 }
-                // Tools: how phpMyAdmin is served (its address, or why not).
+                // Tools: how phpMyAdmin and Adminer are served (their addresses, or why not).
                 if (web) {
                     const json status = web->status();
                     out["phpmyadmin"] = status.contains("phpmyadmin") ? status.at("phpmyadmin") : json();
+                    out["adminer"] = status.contains("adminer") ? status.at("adminer") : json();
                     out["mail"] = status.contains("mail") ? status.at("mail") : json();
                 }
             }
@@ -1100,7 +1101,7 @@ struct Service {
         if (const std::string project = string_param(r.params, "project"); !project.empty() && projects) {
             core::ServiceRefusal ignored;
             if (const auto list = projects->list(ignored)) {
-                for (const json& p : (*list)["projects"]) {
+                for (const json& p : list->value("projects", json::array())) {
                     if (p.value("name", std::string()) != project || !p.contains("path") || !p.at("path").is_string()) {
                         continue;
                     }
@@ -1162,7 +1163,7 @@ struct Service {
         if (const std::string project = string_param(r.params, "project"); !project.empty() && projects) {
             core::ServiceRefusal ignored;
             if (const auto list = projects->list(ignored)) {
-                for (const json& p : (*list)["projects"]) {
+                for (const json& p : list->value("projects", json::array())) {
                     if (p.value("name", std::string()) != project || !p.contains("path") || !p.at("path").is_string()) {
                         continue;
                     }
@@ -1256,7 +1257,7 @@ struct Service {
                        {"user", login->user},
                        {"password", login->password}};
         if (const auto list = projects->list(refusal)) {
-            for (const json& p : (*list)["projects"]) {
+            for (const json& p : list->value("projects", json::array())) {
                 if (p.value("name", std::string()) == name && p.contains("path")) {
                     const auto dir = core::path_from_utf8(p["path"].get<std::string>());
                     const bool laravel = core::env_style(dir) == core::EnvStyle::Laravel;
