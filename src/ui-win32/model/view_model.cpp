@@ -713,11 +713,6 @@ DatabaseServerState database_server(const json& databases, std::string_view data
     return {};
 }
 
-bool database_opens_in_phpmyadmin(std::string_view database) {
-    const std::size_t dash = database.find('-');
-    return dash == std::string_view::npos || lower_ascii(database.substr(0, dash)) != "postgresql";
-}
-
 std::string database_server_title(const DatabaseServerState& server) {
     return server.series.empty() ? std::string() : runtime_label(server.family) + " " + server.series;
 }
@@ -856,6 +851,9 @@ std::string runtime_label(std::string_view name) {
     }
     if (name == "phpmyadmin") {
         return "phpMyAdmin";
+    }
+    if (name == "adminer") {
+        return "Adminer";
     }
     if (name == "garnet") {
         return "Garnet (Redis)";
@@ -1135,9 +1133,9 @@ bool is_project_name(std::string_view name) {
 }
 
 std::string free_project_name(const std::string& base, const std::vector<ProjectRow>& rows) {
-    // "phpmyadmin" is kept for phpMyAdmin (phpmyadmin.localhost).
+    // "phpmyadmin" and "adminer" are kept for the tools (phpmyadmin.localhost, adminer.localhost).
     const auto taken = [&rows](const std::string& n) {
-        return n == "phpmyadmin" ||
+        return n == "phpmyadmin" || n == "adminer" ||
                std::any_of(rows.begin(), rows.end(), [&](const ProjectRow& r) { return r.name == n; });
     };
     if (!taken(base)) {

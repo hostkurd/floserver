@@ -8,6 +8,7 @@
 #include "main_window.h"
 
 #include "main_window_layout.h"
+#include "model/database_page.h"
 #include "model/main_access.h"
 #include "model/pages_access.h"
 #include "model/runtimes_page.h"
@@ -583,18 +584,19 @@ void MainWindow::add_panel_access(AccessTree& t) const {
         add(std::move(copy_env), g.copy_env);
     }
     if (shown(g.pma)) {
-        const DatabaseServerState server =
-            database_server(snap_.databases, !row->database.empty() ? row->database : row->wants.database);
-        const std::string label = pma_busy_ ? phpmyadmin_busy_text(database_server_title(server), server.state, lang_)
-                                            : std::string(text(lang_, Str::PmaOpenProject));
+        const std::string& database = !row->database.empty() ? row->database : row->wants.database;
+        const DbTool& tool = db_tool_for_database(database);
+        const DatabaseServerState server = database_server(snap_.databases, database);
+        const std::string label = pma_busy_ ? phpmyadmin_busy_text(database_server_title(server), server.state, lang_,
+                                                                   tool.opening)
+                                            : std::string(text(lang_, tool.open_project));
         AccessNode pma = button_node(access_id({Part::PanelPhpMyAdmin, -1, p}), label,
-                                     phpmyadmin_installed(snap_.installed) && !pma_busy_ && connected);
+                                     tool_installed(snap_.installed, tool.runtime) && !pma_busy_ && connected);
         pma.focusable = true;
         pma.target = target(Part::PanelPhpMyAdmin, -1);
         add(std::move(pma), g.pma);
-        words("pma-hint", std::string(text(lang_, Str::PmaNotInstalled)), g.pma_hint);
+        words("pma-hint", std::string(text(lang_, tool.not_installed)), g.pma_hint);
     }
-    words("pg-tools", std::string(text(lang_, Str::PanelPgTools)), g.pg_tools);
 
     // The log: the lines shown, one element each.
     if (height_of(g.log_box) > px(kLogLineH)) {

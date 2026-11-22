@@ -122,7 +122,9 @@ bool newest_first(const RuntimeRow& a, const RuntimeRow& b) {
 
 }  // namespace
 
-std::string phpmyadmin_line(const json& served, Lang lang) {
+namespace {
+
+std::string tool_line(const json& served, Lang lang, Str name_taken) {
     if (!served.is_object()) {
         return {};
     }
@@ -130,7 +132,7 @@ std::string phpmyadmin_line(const json& served, Lang lang) {
         return fill(lang, Str::PmaAddress, {address});
     }
     if (served.contains("name_taken") && served["name_taken"].is_boolean() && served["name_taken"].get<bool>()) {
-        return std::string(text(lang, Str::PmaNameTaken));
+        return std::string(text(lang, name_taken));
     }
     for (const json& m : array_of(served, "missing")) {
         if (m.is_string() && m.get<std::string>().starts_with("php")) {
@@ -140,34 +142,51 @@ std::string phpmyadmin_line(const json& served, Lang lang) {
     return text_of(served, "problem");  // the service's words
 }
 
-bool is_phpmyadmin_url(std::string_view url) {
-    for (const std::string_view prefix : {std::string_view("https://phpmyadmin.localhost"),
-                                          std::string_view("http://phpmyadmin.localhost")}) {
-        if (url.starts_with(prefix)) {
-            std::string_view rest = url.substr(prefix.size());
-            if (rest.starts_with(':')) {
-                // A port, digits only: "localhost:x@evil.example" would name another host.
-                rest.remove_prefix(1);
-                const std::size_t digits = std::min(rest.find_first_not_of("0123456789"), rest.size());
-                if (digits == 0 || digits > 5) {
-                    return false;
-                }
-                rest.remove_prefix(digits);
-            }
-            return rest.empty() || rest.front() == '/';
+}  // namespace
+
+std::string phpmyadmin_line(const json& served, Lang lang) { return tool_line(served, lang, Str::PmaNameTaken); }
+
+std::string adminer_line(const json& served, Lang lang) { return tool_line(served, lang, Str::AdminerNameTaken); }
+
+namespace {
+
+// http(s)://<host> followed by '/', ':<port>' or nothing.
+bool is_local_tool_url(std::string_view url, std::string_view host) {
+    for (const std::string_view scheme : {std::string_view("https://"), std::string_view("http://")}) {
+        if (!url.starts_with(scheme) || !url.substr(scheme.size()).starts_with(host)) {
+            continue;
         }
+        std::string_view rest = url.substr(scheme.size() + host.size());
+        if (rest.starts_with(':')) {
+            // A port, digits only: "localhost:x@evil.example" would name another host.
+            rest.remove_prefix(1);
+            const std::size_t digits = std::min(rest.find_first_not_of("0123456789"), rest.size());
+            if (digits == 0 || digits > 5) {
+                return false;
+            }
+            rest.remove_prefix(digits);
+        }
+        return rest.empty() || rest.front() == '/';
     }
     return false;
 }
 
-bool phpmyadmin_installed(const Installed& installed) {
-    const auto it = installed.find("phpmyadmin");
+}  // namespace
+
+bool is_phpmyadmin_url(std::string_view url) { return is_local_tool_url(url, "phpmyadmin.localhost"); }
+
+bool is_adminer_url(std::string_view url) { return is_local_tool_url(url, "adminer.localhost"); }
+
+bool phpmyadmin_installed(const Installed& installed) { return tool_installed(installed, "phpmyadmin"); }
+
+bool tool_installed(const Installed& installed, std::string_view runtime) {
+    const auto it = installed.find(std::string(runtime));
     return it != installed.end() && !it->second.empty();
 }
 
-std::string phpmyadmin_busy_text(std::string_view server, std::string_view state, Lang lang) {
+std::string phpmyadmin_busy_text(std::string_view server, std::string_view state, Lang lang, Str opening) {
     if (server.empty() || state == "running") {
-        return std::string(text(lang, Str::PmaOpening));
+        return std::string(text(lang, opening));
     }
     return fill(lang, Str::PmaStarting, {std::string(server)});
 }
@@ -373,7 +392,7 @@ RuntimesPage runtimes_page(const json& reply, const Installed* installed, const 
     }
 
     // Tools: phpMyAdmin, with how it's served on the newest install's row,
-    // then Mailpit (D27) and Garnet (D30). Full width after Web servers (the user, 1 Nov: a
+    // then Adminer (D35) the same way, Mailpit (D27) and Garnet (D30). Full width after Web servers (the user, 1 Nov: a
     // third card in a row cut its rows off), before Node.js and Python.
     RuntimeGroup tools;
     tools.title = std::string(text(lang, Str::SettingsTools));
@@ -391,6 +410,22 @@ RuntimesPage runtimes_page(const json& reply, const Installed* installed, const 
             row.usage = phpmyadmin_line(served, lang);
         }
         break;  // the newest is the one served
+    }
+    // Adminer (D35), PostgreSQL's, the same way.
+    {
+        std::vector<RuntimeRow> adminer_rows = take_rows("adminer");
+        const json& adm = reply.is_object() && reply.contains("adminer") ? reply["adminer"] : json();
+        bool first = true;
+        for (RuntimeRow& row : adminer_rows) {
+            row.label = "Adminer " + row.label;
+            if (first && row.installed) {
+                if (adm.is_object() && text_of(adm, "version") == row.version) {
+                    row.usage = adminer_line(adm, lang);
+                }
+                first = false;
+            }
+            tools.rows.push_back(std::move(row));
+        }
     }
     for (RuntimeRow& row : take_rows("mailpit")) {
         row.label = "Mailpit " + row.label;

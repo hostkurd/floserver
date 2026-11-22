@@ -1040,7 +1040,7 @@ private:
     std::string db_error_;
     std::string root_shown_;    // root's password, after Show; wiped when hidden or left
     bool root_busy_ = false;    // a root password request is on its way
-    bool pma_busy_ = false;     // phpmyadmin.login is on its way
+    bool pma_busy_ = false;     // phpmyadmin.login or adminer.login is on its way
     std::string password_error_;
     // The port, the my.ini fields, then the new root password; only while the section is shown.
     std::vector<std::unique_ptr<FieldEdit>> db_edits_;

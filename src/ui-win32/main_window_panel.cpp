@@ -7,6 +7,7 @@
 #include "main_window.h"
 
 #include "main_window_layout.h"
+#include "model/database_page.h"
 #include "model/main_access.h"
 #include "model/theme.h"
 #include "model/view_model.h"
@@ -35,6 +36,11 @@ using namespace layout;
 namespace core = floserver::core;
 
 namespace {
+
+// The project's browser tool: phpMyAdmin, or Adminer for PostgreSQL (D35).
+const DbTool& row_db_tool(const ProjectRow& row) {
+    return db_tool_for_database(!row.database.empty() ? row.database : row.wants.database);
+}
 
 constexpr int kFieldLabelH = 16;
 constexpr int kFieldH = 32;
@@ -518,31 +524,19 @@ MainWindow::PanelGeometry MainWindow::panel_geometry(HDC dc) const {
         g.db_title = {x0 + px(12), y + px(9), g.copy_env.left - px(12), y + px(28)};
         g.db_detail = {x0 + px(12), y + px(28), g.copy_env.left - px(12), y + px(46)};
         y = g.db_box.bottom + px(kPanelGap);
-        // Open in phpMyAdmin: the project's own login, its database only.
-        // PostgreSQL: phpMyAdmin can't open it, so the tools that can.
+        // Open in phpMyAdmin (MariaDB, MySQL) or Adminer (PostgreSQL, D35):
+        // the project's own login, its database only.
         const std::string& db = !row->database.empty() ? row->database : row->wants.database;
-        if (!database_opens_in_phpmyadmin(db)) {
-            // As tall as its words need: Arabic and Kurdish can take three lines.
-            const std::wstring said = w(text(lang_, Str::PanelPgTools));
-            RECT need{0, 0, x1 - x0, 0};
-            {
-                const win::Selected selected(dc, fonts_.caption.get());
-                DrawTextW(dc, said.c_str(), static_cast<int>(said.size()), &need,
-                          DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL | (rtl_ ? UINT{DT_RTLREADING} : 0U));
-            }
-            g.pg_tools = {x0, y, x1, y + std::max(px(16), static_cast<int>(need.bottom - need.top))};
-            y = g.pg_tools.bottom + px(kPanelGap);
-            g.content_h = y + panel_scroll_ - static_cast<int>(g.content.top);
-            return g;
-        }
+        const DbTool& tool = db_tool_for_database(db);
         const DatabaseServerState server = database_server(snap_.databases, db);
-        const int pw = std::max({Canvas::measure(dc, w(text(lang_, Str::PmaOpenProject)), fonts_.caption.get(), rtl_),
-                                 Canvas::measure(dc, w(text(lang_, Str::PmaOpening)), fonts_.caption.get(), rtl_),
-                                 Canvas::measure(dc, w(phpmyadmin_busy_text(database_server_title(server), {}, lang_)),
+        const int pw = std::max({Canvas::measure(dc, w(text(lang_, tool.open_project)), fonts_.caption.get(), rtl_),
+                                 Canvas::measure(dc, w(text(lang_, tool.opening)), fonts_.caption.get(), rtl_),
+                                 Canvas::measure(dc, w(phpmyadmin_busy_text(database_server_title(server), {}, lang_,
+                                                                            tool.opening)),
                                                  fonts_.caption.get(), rtl_)}) +
                        px(24);
         g.pma = {x0, y, std::min(x1, x0 + pw), y + px(28)};
-        if (!phpmyadmin_installed(snap_.installed)) {
+        if (!tool_installed(snap_.installed, tool.runtime)) {
             g.pma_hint = {std::min(x1, static_cast<int>(g.pma.right) + px(12)), y, x1, y + px(28)};
         }
         y = g.pma.bottom + px(kPanelGap);
@@ -797,10 +791,11 @@ void MainWindow::on_panel_click(const Hit& hit) {
             break;
         case Part::PanelPhpMyAdmin:
             // One request; on_snapshot() opens the link it answers with.
-            if (worker_ && snap_.link == Link::Connected && !pma_busy_ && phpmyadmin_installed(snap_.installed)) {
+            if (const DbTool& tool = row_db_tool(*selected_row());
+                worker_ && snap_.link == Link::Connected && !pma_busy_ && tool_installed(snap_.installed, tool.runtime)) {
                 dismiss_error();
                 pma_busy_ = true;
-                worker_->database_call("phpmyadmin.login",
+                worker_->database_call(std::string(tool.method),
                                        {{"project", selected_}, {"lang", std::string(lang_code(lang_))}}, "panel");
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
@@ -1437,7 +1432,8 @@ void MainWindow::paint_panel(Canvas& c, HDC dc, bool text_pass) const {
             paint_button(c, g.copy_env, hovered(Part::PanelCopyEnv, -1), focused(Part::PanelCopyEnv, -1));
         }
         if (g.pma.right > g.pma.left) {
-            paint_button(c, g.pma, hovered(Part::PanelPhpMyAdmin, -1) && phpmyadmin_installed(snap_.installed),
+            paint_button(c, g.pma,
+                         hovered(Part::PanelPhpMyAdmin, -1) && tool_installed(snap_.installed, row_db_tool(*row).runtime),
                          focused(Part::PanelPhpMyAdmin, -1));
         }
         if (g.redis_switch.right > g.redis_switch.left) {
@@ -1536,21 +1532,19 @@ void MainWindow::paint_panel(Canvas& c, HDC dc, bool text_pass) const {
         c.text(g.copy_env, w(text(lang_, Str::CopyEnv)), fonts_.caption.get(), p.text, Align::Center, false);
     }
     if (g.pma.right > g.pma.left) {
-        const bool can = phpmyadmin_installed(snap_.installed) && !pma_busy_ && snap_.link == Link::Connected;
+        const DbTool& tool = row_db_tool(*row);
+        const bool can = tool_installed(snap_.installed, tool.runtime) && !pma_busy_ && snap_.link == Link::Connected;
         // While it waits: "Starting MariaDB 11.8…" until the server runs.
         const DatabaseServerState server = database_server(
             snap_.databases, !row->database.empty() ? row->database : row->wants.database);
-        const std::string label = pma_busy_ ? phpmyadmin_busy_text(database_server_title(server), server.state, lang_)
-                                            : std::string(text(lang_, Str::PmaOpenProject));
+        const std::string label = pma_busy_ ? phpmyadmin_busy_text(database_server_title(server), server.state, lang_,
+                                                                   tool.opening)
+                                            : std::string(text(lang_, tool.open_project));
         c.text(g.pma, w(label), fonts_.caption.get(), can ? p.text : p.button_disabled_text, Align::Center, false);
         if (g.pma_hint.right > g.pma_hint.left) {
-            c.text(g.pma_hint, w(text(lang_, Str::PmaNotInstalled)), fonts_.caption.get(), p.text_subtle, Align::Start,
+            c.text(g.pma_hint, w(text(lang_, tool.not_installed)), fonts_.caption.get(), p.text_subtle, Align::Start,
                    false);
         }
-    }
-
-    if (g.pg_tools.right > g.pg_tools.left) {
-        c.paragraph(g.pg_tools, w(text(lang_, Str::PanelPgTools)), fonts_.caption.get(), p.text_subtle);
     }
 
     if (g.mcp_title.right > g.mcp_title.left) {

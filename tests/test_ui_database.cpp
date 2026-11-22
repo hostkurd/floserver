@@ -274,7 +274,7 @@ TEST_CASE("Settings > Database: PostgreSQL's tab once it's installed, with its o
             CHECK(words.find("root") == std::string::npos);
             CHECK(words.find("my.ini") == std::string::npos);
         }
-        CHECK(std::string(text(lang, Str::DbPgTools)).find("pgAdmin") != std::string::npos);
+        CHECK(std::string(text(lang, db_tool("postgresql").open)).find("Adminer") != std::string::npos);
         CHECK(fill(lang, db_str("postgresql", Str::DbPasswordFailed), {"x"}).find('x') != std::string::npos);
     }
     DbSeries pg;

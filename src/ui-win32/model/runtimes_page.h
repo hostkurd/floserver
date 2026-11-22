@@ -82,19 +82,28 @@ inline constexpr int kRuntimeGridMaxColumns = 2;
 // served. Empty when there's nothing to say.
 [[nodiscard]] std::string phpmyadmin_line(const nlohmann::json& served, Lang lang);
 
+// The Tools card's line for Adminer (D35), the same way.
+[[nodiscard]] std::string adminer_line(const nlohmann::json& served, Lang lang);
+
 // Whether phpMyAdmin is installed (the window's poll): "Open phpMyAdmin"
 // buttons are disabled with a hint until it is.
 [[nodiscard]] bool phpmyadmin_installed(const Installed& installed);
+// The same for any runtime: "adminer" (D35's buttons).
+[[nodiscard]] bool tool_installed(const Installed& installed, std::string_view runtime);
 
 // A pressed "Open phpMyAdmin" button: "Starting MariaDB 11.8…" while the
 // server it opens isn't running (it's started first and waited for), else
 // "Opening phpMyAdmin…". `server` is its name ("MySQL 8.4"; empty: not
 // known), `state` databases.list's for it.
-[[nodiscard]] std::string phpmyadmin_busy_text(std::string_view server, std::string_view state, Lang lang);
+// `opening` is the tool's "Opening …" (Adminer's for PostgreSQL).
+[[nodiscard]] std::string phpmyadmin_busy_text(std::string_view server, std::string_view state, Lang lang,
+                                               Str opening = Str::PmaOpening);
 
 // True for http(s)://phpmyadmin.localhost followed by '/', ':' or nothing:
 // the only links phpmyadmin.login's answer may open.
 [[nodiscard]] bool is_phpmyadmin_url(std::string_view url);
+// The same for http(s)://adminer.localhost (adminer.login's answer).
+[[nodiscard]] bool is_adminer_url(std::string_view url);
 
 // After "Check for updates" fails the answer has no list: the versions on
 // offer stay those of `before`, the rest (installed, defaults) is `fresh`'s.

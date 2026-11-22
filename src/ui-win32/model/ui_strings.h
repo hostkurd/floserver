@@ -350,12 +350,17 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     DbPgPasswordFailed,      // {0}: the reason
     DbPgRootReadFailed,      // {0}: the reason
     DbPgPathNotAscii,
-    DbPgTools,               // where MariaDB's tab has phpMyAdmin
     // phpMyAdmin (an optional tool).
     SettingsTools,
     PmaOpen,
     PmaOpenProject,
-    PanelPgTools,  // a PostgreSQL project's Database tab, in place of Open in phpMyAdmin
+    // Adminer (D35): a PostgreSQL project's and server's tool, as phpMyAdmin is MariaDB's and MySQL's.
+    AdminerOpen,
+    AdminerOpenProject,
+    AdminerNotInstalled,
+    AdminerOpening,
+    AdminerOpenFailed,  // {0}: the service's words
+    AdminerNameTaken,
     PmaNotInstalled,
     PmaOpening,
     PmaStarting,             // {0}: the server, "MariaDB 11.8", "MySQL 8.4"
@@ -493,6 +498,7 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     FirstRunWhatMysql,
     FirstRunWhatPython,
     FirstRunWhatPma,
+    FirstRunWhatAdminer,
     FirstRunWhatApache,
     FirstRunWhatNginx,
     FirstRunCertNote,
@@ -695,7 +701,8 @@ enum class Str : std::uint16_t {  // NOLINT(performance-enum-size): with every s
     RenameTooLong,
     RenameXn,
     RenameTaken,          // {0}: the name
-    RenameReserved,       // {0}: the name ("phpmyadmin")
+    RenameReserved,       // {0}: the name ("phpmyadmin"), {1}: the tool ("phpMyAdmin")
+    RenameReservedMail,   // {1} of RenameReserved for "mail"
     RenameFolder,
     RenameFolderNote,     // {0}: the folder now, {1}: its new name
     RenameDatabaseNote,   // {0}: its database, "my_shop"

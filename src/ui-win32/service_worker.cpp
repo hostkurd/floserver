@@ -30,7 +30,7 @@ constexpr std::size_t kLogLines = 60;
 // projects.set waits until nginx serves the change, so it's generous; the
 // window never waits for it, only this thread does.
 constexpr auto kRequestTimeout = 30s;
-// phpmyadmin.login waits for MariaDB to start; its first start sets up the
+// phpmyadmin.login (and adminer.login) waits for its server to start; its first start sets up the
 // data folder too (the service allows 90 s for each).
 constexpr auto kPhpMyAdminTimeout = 200s;
 
@@ -231,7 +231,7 @@ void ServiceWorker::project_php(const std::string& project, const nlohmann::json
     push({Command::Kind::ProjectPhp, project, false, {}, std::nullopt, {}, params});
 }
 void ServiceWorker::database_call(const std::string& method, const nlohmann::json& params, const std::string& purpose) {
-    if (method == "phpmyadmin.login") {
+    if (method == "phpmyadmin.login" || method == "adminer.login") {  // Adminer (D35): PostgreSQL may start first
         start_side_call(method, params, purpose);  // off the polling path: see SideBox
         return;
     }
