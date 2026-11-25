@@ -34,16 +34,25 @@ FloServer is licensed to you, not sold. HostKurd and its licensors own FloServer
 
 5. Third-party software
 
-FloServer doesn't include PHP, databases or web servers. When you choose one, FloServer downloads it from cdn.floserver.org or from its project's official site. Each runtime is someone else's software under its own licence, not this Agreement. FloServer shows the licence before the first download, and HostKurd doesn't change or rebrand them:
+FloServer doesn't include PHP, databases, web servers or tools. When you choose one, FloServer downloads it from cdn.floserver.org or from its project's official site. Each runtime is someone else's software under its own licence, not this Agreement. FloServer shows the licence before the first download, and HostKurd doesn't change or rebrand them:
 
 • PHP (The PHP Group): PHP License 3.01
 • MariaDB (MariaDB Foundation): GNU GPL 2
+• MySQL Community Server (Oracle): GNU GPL 2
+• PostgreSQL, EDB's Windows build (PostgreSQL Global Development Group): PostgreSQL Licence
 • nginx (nginx project): 2-clause BSD
 • Apache HTTP Server, Apache Lounge build (Apache Software Foundation): Apache License 2.0
 • Node.js (OpenJS Foundation): MIT
+• Bun (Oven): MIT
+• Deno (Deno Land): MIT
 • Python (Python Software Foundation): PSF License
 • Composer (Nils Adermann, Jordi Boggiano): MIT
 • phpMyAdmin (phpMyAdmin project): GNU GPL 2
+• Adminer (Jakub Vrána): Apache License 2.0 or GNU GPL 2
+• Mailpit (Ralph Slooten): MIT
+• Garnet (Microsoft): MIT
+• .NET runtime, needed by Garnet (.NET Foundation): MIT
+• phpredis, PHP's Redis extension (PHP Group, PECL): PHP License 3.01
 • WordPress, as a template (WordPress Foundation): GNU GPL 2 or later
 
 FloServer itself contains these open-source libraries, used under their licences: nlohmann/json (MIT), Monocypher (2-clause BSD or CC0) and miniz (MIT). It also contains Microsoft's Visual C++ runtime, under Microsoft's terms for redistributing it. The full notices are in FloServer under Settings > General > Licences.
