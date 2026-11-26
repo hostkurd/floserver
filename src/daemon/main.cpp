@@ -185,7 +185,15 @@ std::unique_ptr<floserver::core::UpdateService> make_updates(
         } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): ignored, the usual delay is used
         }
     }
+#ifdef _WIN32
     return std::make_unique<core::UpdateService>(std::move(config), transport);
+#else
+    // Linux and macOS can download now (D36.6), but their app package and
+    // its update step come later (D36.13); until then app updates say
+    // they aren't available here.
+    (void)transport;
+    return std::make_unique<core::UpdateService>(std::move(config), nullptr);
+#endif
 }
 
 // FLOSERVER_WEB_PORTS ("18080,18443"), FLOSERVER_IDLE_SECONDS and

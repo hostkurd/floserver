@@ -37,6 +37,7 @@ add_library(floserver_core STATIC
     src/integration.cpp
     src/http.cpp
     src/http_windows.cpp
+    src/http_curl.cpp
     src/ipc_common.cpp
     src/ipc_posix.cpp
     src/ipc_windows.cpp
@@ -94,6 +95,15 @@ else()
         target_compile_definitions(floserver_core PRIVATE FLOSERVER_HAVE_OPENSSL)
     else()
         message(WARNING "OpenSSL 3 not found: this build can't make HTTPS certificates")
+    endif()
+    # Downloads (D36.6): libcurl, present on every supported Linux and on
+    # macOS. Without it the build works, but can't download runtimes.
+    find_package(CURL 7.81)
+    if(CURL_FOUND)
+        target_link_libraries(floserver_core PRIVATE CURL::libcurl)
+        target_compile_definitions(floserver_core PRIVATE FLOSERVER_HAVE_CURL)
+    else()
+        message(WARNING "libcurl not found: this build can't download runtimes")
     endif()
 endif()
 floserver_code_rules(floserver_core)
