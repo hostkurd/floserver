@@ -7,6 +7,7 @@ add_executable(floserver_tests
     test_downloader.cpp
     test_encoding.cpp
     test_http_curl.cpp
+    test_child_ledger.cpp
     test_ipc.cpp
     test_main.cpp
     test_manifest.cpp

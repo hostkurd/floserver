@@ -100,6 +100,15 @@ void answer_and_close(std::uintptr_t socket, std::string_view data);
 [[nodiscard]] std::vector<std::size_t> waiting_connections(const std::vector<const LoopbackListener*>& listeners,
                                                            std::chrono::milliseconds limit);
 
+// How the next service ends this child if a service that crashed left it
+// running (the child ledger, macOS and Linux).
+enum class LeftoverStop : std::uint8_t {
+    Group,            // TERM to its whole process group (most programs)
+    LeaderTerm,       // TERM to the program alone (MariaDB/MySQL: a clean shutdown)
+    LeaderInterrupt,  // INT to the program alone (PostgreSQL: a fast shutdown
+                      // that ends its own backends and writes a checkpoint)
+};
+
 struct ChildOptions {
     std::filesystem::path program;  // absolute
     std::vector<std::string> args;
@@ -125,12 +134,32 @@ struct ChildOptions {
     // PostgreSQL (D29), which refuses to run with administrator rights.
     // Elsewhere nothing changes.
     bool restricted_token = false;
+    LeftoverStop leftover_stop = LeftoverStop::Group;
 };
 
 // True when process `pid` exists and runs `program` (compared by the file
 // system's own idea of the same file). Used before signalling a pid read
 // from a file, which may by now belong to someone else.
 [[nodiscard]] bool process_is_program(std::uint32_t pid, const std::filesystem::path& program);
+
+// macOS and Linux: a file listing every running child (the leader of its own
+// process group: pid, start time, program, how to stop it) with the
+// computer's boot id, kept while they run, so a service that ended without
+// stopping them (a crash, a kill -9) ends what it left behind when it starts
+// again. Windows needs none: job objects end children with the service.
+// floserverd sets it once per instance, after it holds the single-instance
+// lock; nothing is recorded before that. Does nothing on Windows.
+void set_child_ledger(const std::filesystem::path& file);
+// Ends each child `file` lists that is still that very process: same boot,
+// same pid and start time, same program, still its group's leader (so a
+// program started later, after a reboot or from a terminal, is never
+// signalled). Each is stopped as its LeftoverStop says, given up to `grace`
+// to end (10 s: under the CLI's 15 s wait for the service; MariaDB and
+// PostgreSQL normally stop well within it, and recover on their next start
+// if not), then its group is killed. Removes the file; returns how many were
+// ended.
+std::size_t sweep_child_ledger(const std::filesystem::path& file,
+                               std::chrono::milliseconds grace = std::chrono::seconds(10));
 
 // Waits until process `pid` is gone; true when it is.
 bool wait_for_process_exit(std::uint32_t pid, std::chrono::milliseconds limit);

@@ -11,6 +11,9 @@
 #include <cstring>
 #include <charconv>
 #include <iterator>
+#include <map>
+#include <optional>
+#include <mutex>
 #include <thread>
 
 #ifdef _WIN32
@@ -38,6 +41,11 @@
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <libproc.h>
+#include <sys/proc_info.h>
+#include <sys/sysctl.h>
+#endif
 extern char** environ;  // NOLINT(readability-redundant-declaration)
 #endif
 
@@ -1084,7 +1092,257 @@ ListenerOwner ChildProcess::listener_owner(Port port, bool ipv6) const {
 struct ChildProcess::Native {
     pid_t pid = -1;
     bool reaped = false;
+    std::uint64_t ledger_id = 0;  // its entry in the child ledger (0: none)
 };
+
+namespace {
+
+// When process `pid` started, in the system's own units (Linux: clock
+// ticks since boot; macOS: microseconds since 1970). Nothing when it's gone.
+std::optional<std::uint64_t> process_start_time(pid_t pid) {
+#ifdef __linux__
+    std::ifstream in("/proc/" + std::to_string(pid) + "/stat");
+    std::string stat;
+    std::getline(in, stat);  // one line
+    const auto close = stat.rfind(')');  // the name may hold spaces and ')'
+    if (close == std::string::npos) {
+        return std::nullopt;
+    }
+    std::istringstream fields(stat.substr(close + 1));
+    std::string field;
+    for (int i = 3; i <= 22 && fields >> field; ++i) {  // field 22: starttime
+        if (i == 22) {
+            std::uint64_t v = 0;
+            const auto [end, ec] = std::from_chars(field.data(), field.data() + field.size(), v);
+            if (ec == std::errc() && end == field.data() + field.size()) {
+                return v;
+            }
+        }
+    }
+    return std::nullopt;
+#elif defined(__APPLE__)
+    proc_bsdinfo info{};
+    if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info)) != static_cast<int>(sizeof(info))) {
+        return std::nullopt;
+    }
+    return static_cast<std::uint64_t>(info.pbi_start_tvsec) * 1000000U + info.pbi_start_tvusec;
+#else
+    (void)pid;
+    return std::nullopt;
+#endif
+}
+
+// What tells this boot of the computer from the last one.
+std::string boot_id() {
+#ifdef __linux__
+    std::ifstream in("/proc/sys/kernel/random/boot_id");
+    std::string id;
+    std::getline(in, id);
+    return id;
+#elif defined(__APPLE__)
+    // Not kern.boottime: that moves when the clock is corrected after boot.
+    std::array<char, 64> id{};
+    std::size_t size = id.size();
+    if (sysctlbyname("kern.bootsessionuuid", id.data(), &size, nullptr, 0) != 0) {
+        return {};
+    }
+    return std::string(id.data());
+#else
+    return {};
+#endif
+}
+
+constexpr std::string_view kLedgerHeader = "floserver-children 1";
+
+struct LedgerEntry {
+    std::uint64_t id = 0;
+    std::uint64_t started = 0;
+    LeftoverStop stop = LeftoverStop::Group;
+    std::filesystem::path program;
+};
+
+char stop_letter(LeftoverStop s) {
+    switch (s) {
+        case LeftoverStop::LeaderTerm:
+            return 't';
+        case LeftoverStop::LeaderInterrupt:
+            return 'i';
+        case LeftoverStop::Group:
+            break;
+    }
+    return 'g';
+}
+
+// The children running now, written to the ledger file on every change.
+// Kept for the life of the process (never destroyed), so a child stopped
+// during static teardown still finds it.
+struct Ledger {
+    std::mutex mutex;
+    std::filesystem::path file;
+    std::string boot;
+    std::map<pid_t, LedgerEntry> children;
+    std::uint64_t next_id = 1;
+
+    // Owner-only, through a temporary file and a rename. No fsync: the file
+    // matters only while this boot lasts (a power cut ends its children).
+    void write_locked() const {
+        if (file.empty()) {
+            return;
+        }
+        std::string text(kLedgerHeader);
+        text += " boot=";
+        text += boot;
+        text += '\n';
+        for (const auto& [pid, e] : children) {
+            text += std::to_string(pid) + ' ' + std::to_string(e.started) + ' ' + stop_letter(e.stop) + ' ' +
+                    path_to_utf8(e.program) + '\n';
+        }
+        std::error_code ec;
+        std::filesystem::create_directories(file.parent_path(), ec);
+        std::filesystem::permissions(file.parent_path(), std::filesystem::perms::owner_all,
+                                     std::filesystem::perm_options::replace, ec);
+        const std::filesystem::path tmp = file.string() + ".next";
+        const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
+        if (fd < 0) {
+            return;  // best effort: a missing entry only means a leftover isn't ended
+        }
+        std::size_t done = 0;
+        while (done < text.size()) {
+            const ssize_t n = ::write(fd, text.data() + done, text.size() - done);
+            if (n <= 0) {
+                break;
+            }
+            done += static_cast<std::size_t>(n);
+        }
+        ::close(fd);
+        if (done == text.size()) {
+            std::filesystem::rename(tmp, file, ec);
+        } else {
+            std::filesystem::remove(tmp, ec);
+        }
+    }
+};
+
+Ledger& ledger() {
+    static auto* const l = new Ledger;  // NOLINT(cppcoreguidelines-owning-memory): never destroyed on purpose
+    return *l;
+}
+
+std::uint64_t ledger_add(pid_t pid, const std::filesystem::path& program, LeftoverStop stop) {
+    Ledger& l = ledger();
+    const std::lock_guard lock(l.mutex);
+    if (l.file.empty()) {
+        return 0;
+    }
+    const auto started = process_start_time(pid);
+    if (!started) {
+        return 0;  // gone already, or nothing to tell it apart by later
+    }
+    std::error_code ec;
+    const auto real = std::filesystem::canonical(program, ec);
+    const std::uint64_t id = l.next_id++;
+    l.children[pid] = LedgerEntry{id, *started, stop, ec ? program : real};
+    l.write_locked();
+    return id;
+}
+
+void ledger_remove(pid_t pid, std::uint64_t id) {
+    if (id == 0) {
+        return;
+    }
+    Ledger& l = ledger();
+    const std::lock_guard lock(l.mutex);
+    const auto it = l.children.find(pid);
+    if (it != l.children.end() && it->second.id == id) {  // a newer child with that pid keeps its entry
+        l.children.erase(it);
+        l.write_locked();
+    }
+}
+
+bool group_alive(pid_t group) { return ::kill(-group, 0) == 0 || errno == EPERM; }
+
+}  // namespace
+
+void set_child_ledger(const std::filesystem::path& file) {
+    Ledger& l = ledger();
+    const std::lock_guard lock(l.mutex);
+    l.file = file;
+    l.boot = boot_id();
+    l.write_locked();
+}
+
+std::size_t sweep_child_ledger(const std::filesystem::path& file, std::chrono::milliseconds grace) {
+    std::ifstream in(file);
+    if (!in) {
+        return 0;
+    }
+    struct Leftover {
+        pid_t pid;
+        LeftoverStop stop;
+    };
+    std::vector<Leftover> found;
+    std::string line;
+    // A ledger from another boot lists only pids that were reused since.
+    const bool same_boot = std::getline(in, line) && !boot_id().empty() &&
+                           line == std::string(kLedgerHeader) + " boot=" + boot_id();
+    while (same_boot && std::getline(in, line) && found.size() < 10000) {
+        std::istringstream fields(line);
+        long pid = 0;
+        std::uint64_t started = 0;
+        char stop = 0;
+        if (!(fields >> pid >> started >> stop) || fields.get() != ' ') {
+            continue;
+        }
+        std::string program;
+        std::getline(fields, program);
+        if (pid <= 1 || pid == static_cast<long>(getpid()) || program.empty()) {
+            continue;
+        }
+        const auto p = static_cast<pid_t>(pid);
+        // The very process the ledger recorded: same start time and program,
+        // and still the leader of its own group.
+        if (process_start_time(p) != started || getpgid(p) != p ||
+            !process_is_program(static_cast<std::uint32_t>(pid), path_from_utf8(program))) {
+            continue;
+        }
+        found.push_back({p, stop == 'i' ? LeftoverStop::LeaderInterrupt
+                            : stop == 't' ? LeftoverStop::LeaderTerm
+                                          : LeftoverStop::Group});
+    }
+    in.close();
+    for (const auto& f : found) {
+        switch (f.stop) {
+            case LeftoverStop::LeaderInterrupt:
+                ::kill(f.pid, SIGINT);
+                break;
+            case LeftoverStop::LeaderTerm:
+                ::kill(f.pid, SIGTERM);
+                break;
+            case LeftoverStop::Group:
+                ::kill(-f.pid, SIGTERM);
+                break;
+        }
+    }
+    const auto deadline = std::chrono::steady_clock::now() + grace;
+    const auto any_alive = [&found] {
+        return std::any_of(found.begin(), found.end(), [](const Leftover& f) { return group_alive(f.pid); });
+    };
+    while (any_alive() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    for (const auto& f : found) {
+        if (group_alive(f.pid)) {
+            ::kill(-f.pid, SIGKILL);
+        }
+    }
+    // As kill() does: the ports and files they held are free on return.
+    for (int i = 0; i < 250 && any_alive(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    std::error_code ec;
+    std::filesystem::remove(file, ec);
+    return found.size();
+}
 
 namespace {
 
@@ -1174,6 +1432,7 @@ std::unique_ptr<ChildProcess> ChildProcess::start(const ChildOptions& o, std::st
     }
     auto native = std::make_unique<Native>();
     native->pid = pid;
+    native->ledger_id = ledger_add(pid, o.program, o.leftover_stop);
     return std::unique_ptr<ChildProcess>(new ChildProcess(std::move(native), static_cast<std::uint32_t>(pid)));
 }
 
@@ -1212,19 +1471,24 @@ void ChildProcess::kill() {
     // they can finish cleanly, then KILL; done only when no member is left,
     // so the ports and files they held are free when this returns.
     const pid_t group = native_->pid;
-    const auto group_alive = [group] { return ::kill(-group, 0) == 0 || errno == EPERM; };
+    if (!running() && !group_alive(group)) {
+        // Ended by itself and reaped: its pid may be someone else's now.
+        ledger_remove(group, native_->ledger_id);
+        return;
+    }
     ::kill(-group, SIGTERM);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    while ((running() || group_alive()) && std::chrono::steady_clock::now() < deadline) {
+    while ((running() || group_alive(group)) && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    if (running() || group_alive()) {
+    if (running() || group_alive(group)) {
         ::kill(-group, SIGKILL);
         (void)wait(std::chrono::seconds(5));
-        for (int i = 0; i < 500 && group_alive(); ++i) {
+        for (int i = 0; i < 500 && group_alive(group); ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
     }
+    ledger_remove(group, native_->ledger_id);
 }
 
 #ifdef __linux__
@@ -1486,6 +1750,10 @@ bool wait_for_process_exit(std::uint32_t pid, std::chrono::milliseconds limit) {
     return gone;
 }
 
+// Job objects end every child with the service (no ledger needed).
+void set_child_ledger(const std::filesystem::path& /*file*/) {}
+std::size_t sweep_child_ledger(const std::filesystem::path& /*file*/, std::chrono::milliseconds /*grace*/) { return 0; }
+
 #else
 
 bool process_is_program(std::uint32_t pid, const std::filesystem::path& program) {
@@ -1498,9 +1766,14 @@ bool process_is_program(std::uint32_t pid, const std::filesystem::path& program)
     std::error_code ec2;
     return std::filesystem::equivalent(exe, program, ec2) ||
            std::filesystem::equivalent(exe, std::filesystem::canonical(program, ec2), ec2);
+#elif defined(__APPLE__)
+    std::array<char, PROC_PIDPATHINFO_MAXSIZE> exe{};
+    if (proc_pidpath(static_cast<int>(pid), exe.data(), static_cast<std::uint32_t>(exe.size())) <= 0) {
+        return false;
+    }
+    std::error_code ec;
+    return std::filesystem::equivalent(std::filesystem::path(exe.data()), program, ec);
 #else
-    // macOS comes with its own stage (D3); until then never signal a pid we
-    // can't identify.
     (void)pid;
     (void)program;
     return false;

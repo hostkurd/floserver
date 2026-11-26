@@ -836,6 +836,7 @@ private:
 
         ChildOptions o;
         o.program = files_.server;
+        o.leftover_stop = LeftoverStop::LeaderTerm;
         o.args = {"--defaults-file=" + path_to_utf8(files_.config.filename())};  // relative: the folder is its cwd
         // After it, so they win over anything in the file.
         for (std::string& a : mariadb_command_line_guards(files_, internal_)) {
@@ -1110,6 +1111,7 @@ private:
         const std::uintmax_t log_from = log_size();
         ChildOptions o;
         o.program = files_.server;
+        o.leftover_stop = LeftoverStop::LeaderInterrupt;
         o.args = postgresql_server_args(files_, internal_);
         o.working_dir = files_.folder;
         o.output_log = files_.error_log;
