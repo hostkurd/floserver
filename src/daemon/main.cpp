@@ -45,6 +45,7 @@
 #include "floserver/core/web_settings.h"
 
 #include <algorithm>
+#include <cctype>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -2283,7 +2284,13 @@ int run(bool spawned, bool& listening) {
     // Now that this is the only copy: end what a copy that crashed left
     // running (nginx, php-cgi, databases...), then keep a record of ours.
     if (const auto data = floserver::core::data_dir()) {
-        const auto ledger = *data / "state" / "children";
+        // One per instance: a dev copy (FLOSERVER_INSTANCE) on the same data
+        // folder never ends the main copy's programs.
+        std::string name = "children-";
+        for (const char c : instance) {
+            name += (std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '-' || c == '_') ? c : '_';
+        }
+        const auto ledger = *data / "state" / name;
         if (const auto ended = floserver::core::sweep_child_ledger(ledger); ended > 0) {
             std::cerr << "floserverd: ended " << ended << " program(s) left running by an earlier copy\n";
         }
