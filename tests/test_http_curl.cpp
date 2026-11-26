@@ -341,7 +341,8 @@ TEST_CASE("the libcurl transport follows http.h's rules") {
 
     SUBCASE("send() refuses a header with a line break, a bad name or a NUL") {
         for (const auto& [k, v] : std::vector<std::pair<std::string, std::string>>{
-                 {"", "x"}, {"Bad:Name", "x"}, {"Bad Name", "x"}, {"X", std::string("a\0b", 3)}}) {
+                 {"", "x"}, {"Bad:Name", "x"}, {"Bad Name", "x"}, {"Bad(Name", "x"}, {"Bad;Name", "x"},
+                 {"X", std::string("a\0b", 3)}}) {
             HttpRequest bad;
             bad.method = "GET";
             bad.url = server->url("/file");

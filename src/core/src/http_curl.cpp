@@ -326,7 +326,11 @@ public:
         curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 0L);
         List headers;
         for (const auto& [k, v] : request.headers) {
-            const bool bad_name = k.empty() || k.find_first_of(std::string_view(":\r\n \t\0", 6)) != std::string::npos;
+            // RFC 9110 token characters only.
+            const bool bad_name = k.empty() || !std::all_of(k.begin(), k.end(), [](char ch) {
+                return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') ||
+                       std::string_view("!#$%&'*+-.^_`|~").find(ch) != std::string_view::npos;
+            });
             const bool bad_value = v.find_first_of(std::string_view("\r\n\0", 3)) != std::string::npos;
             if (bad_name || bad_value) {
                 response.error = "a request header isn't valid";
@@ -335,8 +339,9 @@ public:
             // "Name:" would make curl drop the header; "Name;" sends it empty
             // (a signed header must go out as signed).
             std::string line = k;
-            line += v.empty() ? ";" : ": ";
-            line += v;
+            const bool blank = v.find_first_not_of(" \t") == std::string::npos;
+            line += blank ? ";" : ": ";
+            line += blank ? std::string() : v;
             if (!append(headers, line.c_str())) {
                 response.error = "couldn't start a request";
                 return response;
@@ -395,12 +400,17 @@ private:
         curl_easy_setopt(c, CURLOPT_USERAGENT, agent_.c_str());
         // Chosen by the libcurl that runs, not the one this was built
         // against: the _STR forms only exist from 7.85.
+        bool protocols_set = false;
+#if LIBCURL_VERSION_NUM >= 0x075500  // headers of 7.85.0 or newer
         const curl_version_info_data* info = curl_version_info(CURLVERSION_NOW);
         if (info != nullptr && info->version_num >= 0x075500) {
             ok = ok && curl_easy_setopt(c, CURLOPT_PROTOCOLS_STR, "https") == CURLE_OK;
             ok = ok && curl_easy_setopt(c, CURLOPT_REDIR_PROTOCOLS_STR, "https") == CURLE_OK;
-        } else {
-            // Deprecated from 7.85, still the only form before it.
+            protocols_set = true;
+        }
+#endif
+        if (!protocols_set) {
+            // Deprecated from 7.85, the only form before it.
 #if defined(__GNUC__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
