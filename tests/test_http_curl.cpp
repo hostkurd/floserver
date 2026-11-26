@@ -124,7 +124,8 @@ std::unique_ptr<Server> start_server() {
         "    location = /hop { return 302 /file; }\n"
         "    location = /to-http { return 302 http://127.0.0.1:" + hp + "/; }\n"
         "    location = /loop { return 302 /loop; }\n"
-        "    location = /put { return 201 'stored\\n'; }\n"
+        "    location = /put { return 201 'stored $content_length\\n'; }\n"
+        "    location = /big { return 200 '0123456789abcdefghij'; }\n"
         "  }\n"
         "}\n";
     test_util::write_file(root / "nginx.conf", conf);
@@ -205,10 +206,18 @@ TEST_CASE("the libcurl transport follows http.h's rules") {
         });
         CHECK(r.status == 200);
         CHECK(got == server->body);
+        REQUIRE(r.content_length);
+        CHECK(*r.content_length == server->body.size());
+        CHECK(r.server_date.has_value());
     }
 
     SUBCASE("a redirect to http is refused") {
-        const auto r = http->get(server->url("/to-http"), limits, [](std::span<const std::uint8_t>) { return true; });
+        bool called = false;
+        const auto r = http->get(server->url("/to-http"), limits, [&](std::span<const std::uint8_t>) {
+            called = true;
+            return true;
+        });
+        CHECK_FALSE(called);
         CHECK(r.status == 0);
         CHECK(r.error == "the server redirected to an address that isn't allowed");
     }
@@ -289,9 +298,56 @@ TEST_CASE("the libcurl transport follows http.h's rules") {
         const auto r = http->send(req, limits);
         CHECK(r.error == "");
         CHECK(r.status == 201);
-        CHECK(r.body == "stored\n");
+        CHECK(r.body == "stored 300000\n");
         CHECK(r.header("content-type").has_value());
         CHECK(at == payload.size());
+    }
+
+    SUBCASE("send() sends an empty PUT with Content-Length 0") {
+        HttpRequest req;
+        req.method = "PUT";
+        req.url = server->url("/put");
+        const auto r = http->send(req, limits);
+        CHECK(r.status == 201);
+        CHECK(r.body == "stored 0\n");
+    }
+
+    SUBCASE("send() keeps at most max_reply bytes of the reply") {
+        HttpRequest req;
+        req.method = "GET";
+        req.url = server->url("/big");
+        req.max_reply = 5;
+        const auto r = http->send(req, limits);
+        CHECK(r.status == 200);
+        CHECK(r.body == "01234");
+    }
+
+    SUBCASE("send() refuses a body on GET and a broken upload") {
+        HttpRequest get;
+        get.method = "GET";
+        get.url = server->url("/file");
+        get.body_size = 3;
+        CHECK(http->send(get, limits).error == "a GET request can't carry a body");
+
+        HttpRequest put;
+        put.method = "PUT";
+        put.url = server->url("/put");
+        put.body_size = 10;
+        put.source = [](std::span<std::uint8_t>) { return std::size_t{0}; };
+        const auto r = http->send(put, limits);
+        CHECK(r.status == 0);
+        CHECK(r.error == "the upload couldn't be read");
+    }
+
+    SUBCASE("send() refuses a header with a line break, a bad name or a NUL") {
+        for (const auto& [k, v] : std::vector<std::pair<std::string, std::string>>{
+                 {"", "x"}, {"Bad:Name", "x"}, {"Bad Name", "x"}, {"X", std::string("a\0b", 3)}}) {
+            HttpRequest bad;
+            bad.method = "GET";
+            bad.url = server->url("/file");
+            bad.headers = {{k, v}};
+            CHECK(http->send(bad, limits).error == "a request header isn't valid");
+        }
     }
 
     SUBCASE("send() refuses a header with a line break") {

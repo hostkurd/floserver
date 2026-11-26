@@ -36,6 +36,14 @@ struct ListFreer {
 };
 using List = std::unique_ptr<curl_slist, ListFreer>;
 
+// Adds a line to `list`; on failure the list stays as it was.
+bool append(List& list, const char* line) {
+    curl_slist* old = list.release();
+    curl_slist* grown = curl_slist_append(old, line);
+    list.reset(grown != nullptr ? grown : old);
+    return grown != nullptr;
+}
+
 void global_init() {
     static std::once_flag once;
     std::call_once(once, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
@@ -97,6 +105,7 @@ struct Transfer {
     // get()
     const HttpBody* body = nullptr;
     bool stopped = false;
+    bool body_started = false;  // headers after this are trailers: ignored
     std::optional<std::chrono::sys_seconds> date;
     std::optional<std::uint64_t> length;
     CURL* easy = nullptr;
@@ -129,6 +138,9 @@ std::size_t on_get_header(char* data, std::size_t size, std::size_t count, void*
     auto* t = static_cast<Transfer*>(user);
     const std::size_t n = size * count;
     const std::string_view line(data, n);
+    if (t->body_started) {
+        return n;
+    }
     if (line.starts_with("HTTP/")) {
         t->date.reset();
         t->length.reset();
@@ -167,6 +179,17 @@ std::size_t on_get_body(char* data, std::size_t size, std::size_t count, void* u
     // (its status is reported, its body isn't needed).
     if (status != 200) {
         return 0;
+    }
+    // The address the bytes come from, checked before the first one is
+    // handed over, whatever curl's protocol limits did.
+    if (!t->body_started) {
+        char* effective = nullptr;
+        curl_easy_getinfo(t->easy, CURLINFO_EFFECTIVE_URL, &effective);
+        if (effective == nullptr || !starts_with_https(effective)) {
+            t->ended = "the server redirected to an address that isn't allowed";
+            return 0;
+        }
+        t->body_started = true;
     }
     if (!(*t->body)(std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(data), n))) {
         t->stopped = true;
@@ -237,7 +260,10 @@ public:
         t.body = &body;
         t.easy = easy.get();
         CURL* c = easy.get();
-        common(c, url, limits, t);
+        if (!common(c, url, limits, t)) {
+            reply.error = "this system's libcurl can't keep downloads safe (an option was refused)";
+            return reply;
+        }
         curl_easy_setopt(c, CURLOPT_HTTPGET, 1L);
         curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
         curl_easy_setopt(c, CURLOPT_MAXREDIRS, kMaxRedirects);
@@ -293,34 +319,49 @@ public:
         t.request = &request;
         t.easy = easy.get();
         CURL* c = easy.get();
-        common(c, request.url, limits, t);
+        if (!common(c, request.url, limits, t)) {
+            response.error = "this system's libcurl can't keep requests safe (an option was refused)";
+            return response;
+        }
         curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 0L);
         List headers;
         for (const auto& [k, v] : request.headers) {
-            std::string line = k;
-            line += ": ";
-            line += v;
-            if (line.find_first_of("\r\n") != std::string::npos) {
+            const bool bad_name = k.empty() || k.find_first_of(std::string_view(":\r\n \t\0", 6)) != std::string::npos;
+            const bool bad_value = v.find_first_of(std::string_view("\r\n\0", 3)) != std::string::npos;
+            if (bad_name || bad_value) {
                 response.error = "a request header isn't valid";
                 return response;
             }
-            headers.reset(curl_slist_append(headers.release(), line.c_str()));
+            // "Name:" would make curl drop the header; "Name;" sends it empty
+            // (a signed header must go out as signed).
+            std::string line = k;
+            line += v.empty() ? ";" : ": ";
+            line += v;
+            if (!append(headers, line.c_str())) {
+                response.error = "couldn't start a request";
+                return response;
+            }
         }
         // Large uploads would otherwise wait for "100 Continue" first.
-        headers.reset(curl_slist_append(headers.release(), "Expect:"));
+        if (!append(headers, "Expect:")) {
+            response.error = "couldn't start a request";
+            return response;
+        }
         curl_easy_setopt(c, CURLOPT_HTTPHEADER, headers.get());
+        const bool no_body_method = request.method == "GET" || request.method == "HEAD";
+        if (no_body_method && request.body_size > 0) {
+            response.error = "a " + request.method + " request can't carry a body";
+            return response;
+        }
         if (request.method == "HEAD") {
             curl_easy_setopt(c, CURLOPT_NOBODY, 1L);
-        } else if (request.body_size > 0) {
+        } else if (!no_body_method) {
+            // Every other method sends its body with a Content-Length, 0
+            // included (R2 answers a PUT without one with 411).
             curl_easy_setopt(c, CURLOPT_UPLOAD, 1L);
             curl_easy_setopt(c, CURLOPT_INFILESIZE_LARGE, static_cast<curl_off_t>(request.body_size));
             curl_easy_setopt(c, CURLOPT_READFUNCTION, on_read);
             curl_easy_setopt(c, CURLOPT_READDATA, &t);
-        } else if (request.method == "POST") {
-            curl_easy_setopt(c, CURLOPT_POST, 1L);
-            curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, 0L);
-        }
-        if (request.method != "GET" && request.method != "HEAD") {
             curl_easy_setopt(c, CURLOPT_CUSTOMREQUEST, request.method.c_str());
         }
         curl_easy_setopt(c, CURLOPT_HEADERFUNCTION, on_send_header);
@@ -346,19 +387,33 @@ public:
     }
 
 private:
-    void common(CURL* c, const std::string& url, const HttpLimits& limits, Transfer& t) const {
-        curl_easy_setopt(c, CURLOPT_URL, url.c_str());
+    // The options every transfer gets. False when curl refuses one that
+    // keeps it safe (https only, TLS 1.2+, certificate checks): the request
+    // then isn't made.
+    [[nodiscard]] bool common(CURL* c, const std::string& url, const HttpLimits& limits, Transfer& t) const {
+        bool ok = curl_easy_setopt(c, CURLOPT_URL, url.c_str()) == CURLE_OK;
         curl_easy_setopt(c, CURLOPT_USERAGENT, agent_.c_str());
-#if LIBCURL_VERSION_NUM >= 0x075500  // 7.85.0
-        curl_easy_setopt(c, CURLOPT_PROTOCOLS_STR, "https");
-        curl_easy_setopt(c, CURLOPT_REDIR_PROTOCOLS_STR, "https");
-#else
-        curl_easy_setopt(c, CURLOPT_PROTOCOLS, static_cast<long>(CURLPROTO_HTTPS));
-        curl_easy_setopt(c, CURLOPT_REDIR_PROTOCOLS, static_cast<long>(CURLPROTO_HTTPS));
+        // Chosen by the libcurl that runs, not the one this was built
+        // against: the _STR forms only exist from 7.85.
+        const curl_version_info_data* info = curl_version_info(CURLVERSION_NOW);
+        if (info != nullptr && info->version_num >= 0x075500) {
+            ok = ok && curl_easy_setopt(c, CURLOPT_PROTOCOLS_STR, "https") == CURLE_OK;
+            ok = ok && curl_easy_setopt(c, CURLOPT_REDIR_PROTOCOLS_STR, "https") == CURLE_OK;
+        } else {
+            // Deprecated from 7.85, still the only form before it.
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 #endif
-        curl_easy_setopt(c, CURLOPT_SSLVERSION, static_cast<long>(CURL_SSLVERSION_TLSv1_2));
-        curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 1L);
-        curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 2L);
+            ok = ok && curl_easy_setopt(c, CURLOPT_PROTOCOLS, static_cast<long>(CURLPROTO_HTTPS)) == CURLE_OK;
+            ok = ok && curl_easy_setopt(c, CURLOPT_REDIR_PROTOCOLS, static_cast<long>(CURLPROTO_HTTPS)) == CURLE_OK;
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+        }
+        ok = ok && curl_easy_setopt(c, CURLOPT_SSLVERSION, static_cast<long>(CURL_SSLVERSION_TLSv1_2)) == CURLE_OK;
+        ok = ok && curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 1L) == CURLE_OK;
+        ok = ok && curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 2L) == CURLE_OK;
         curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
         curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, kConnectTimeoutSeconds);
         curl_easy_setopt(c, CURLOPT_LOW_SPEED_LIMIT, kLowSpeedBytes);
@@ -367,14 +422,24 @@ private:
         // flag); this is a backstop a second later.
         const auto seconds = std::max<long>(1, static_cast<long>(limits.max_time.count()) + 1);
         curl_easy_setopt(c, CURLOPT_TIMEOUT, seconds);
-        curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
-        curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, on_progress);
+        ok = ok && curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L) == CURLE_OK;
+        ok = ok && curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, on_progress) == CURLE_OK;
         curl_easy_setopt(c, CURLOPT_XFERINFODATA, &t);
-        curl_easy_setopt(c, CURLOPT_ACCEPT_ENCODING, nullptr);  // bytes as sent: sizes and hashes are of them
+#if LIBCURL_VERSION_NUM >= 0x075700  // 7.87.0
+        // A cancelled transfer doesn't wait for a name lookup that hangs.
+        // (Older libcurl, e.g. Ubuntu 22.04's 7.81, may still wait for it.)
+        curl_easy_setopt(c, CURLOPT_QUICK_EXIT, 1L);
+#endif
+        // Left unset on purpose: bytes arrive as sent (sizes and hashes are
+        // of them), and the only write errors are then the ones our own
+        // callbacks raise, which get() relies on.
+        curl_easy_setopt(c, CURLOPT_ACCEPT_ENCODING, nullptr);
         if (!ca_file_.empty()) {
-            curl_easy_setopt(c, CURLOPT_CAINFO, ca_file_.c_str());
+            ok = ok && curl_easy_setopt(c, CURLOPT_CAINFO, ca_file_.c_str()) == CURLE_OK;
+            curl_easy_setopt(c, CURLOPT_CAPATH, nullptr);
             curl_easy_setopt(c, CURLOPT_NOPROXY, "*");
         }
+        return ok;
     }
 
     std::string ca_file_;
