@@ -45,7 +45,6 @@
 #include <libproc.h>
 #include <sys/proc_info.h>
 #include <sys/sysctl.h>
-#include <sys/time.h>
 #endif
 extern char** environ;  // NOLINT(readability-redundant-declaration)
 #endif
@@ -1141,12 +1140,13 @@ std::string boot_id() {
     std::getline(in, id);
     return id;
 #elif defined(__APPLE__)
-    timeval boot{};
-    std::size_t size = sizeof(boot);
-    if (sysctlbyname("kern.boottime", &boot, &size, nullptr, 0) != 0) {
+    // Not kern.boottime: that moves when the clock is corrected after boot.
+    std::array<char, 64> id{};
+    std::size_t size = id.size();
+    if (sysctlbyname("kern.bootsessionuuid", id.data(), &size, nullptr, 0) != 0) {
         return {};
     }
-    return std::to_string(boot.tv_sec) + "." + std::to_string(boot.tv_usec);
+    return std::string(id.data());
 #else
     return {};
 #endif

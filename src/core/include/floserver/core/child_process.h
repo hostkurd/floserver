@@ -154,10 +154,12 @@ void set_child_ledger(const std::filesystem::path& file);
 // same pid and start time, same program, still its group's leader (so a
 // program started later, after a reboot or from a terminal, is never
 // signalled). Each is stopped as its LeftoverStop says, given up to `grace`
-// to end, then its group is killed. Removes the file; returns how many were
+// to end (10 s: under the CLI's 15 s wait for the service; MariaDB and
+// PostgreSQL normally stop well within it, and recover on their next start
+// if not), then its group is killed. Removes the file; returns how many were
 // ended.
 std::size_t sweep_child_ledger(const std::filesystem::path& file,
-                               std::chrono::milliseconds grace = std::chrono::seconds(30));
+                               std::chrono::milliseconds grace = std::chrono::seconds(10));
 
 // Waits until process `pid` is gone; true when it is.
 bool wait_for_process_exit(std::uint32_t pid, std::chrono::milliseconds limit);
