@@ -14,12 +14,13 @@
 //     true, even while a read is waiting (a server that sends one byte every
 //     29 seconds mustn't hold the service).
 //
-// Windows uses WinHTTP. Other platforms have no transport yet (D3: they come
-// after Windows), so make_system_transport() returns nothing there.
+// Windows uses WinHTTP; Linux and macOS use libcurl (D36.6) when the build
+// found it, and have no transport otherwise.
 
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -97,6 +98,12 @@ public:
 
 // The platform's transport, or nothing where there isn't one yet.
 [[nodiscard]] std::unique_ptr<HttpTransport> make_system_transport();
+
+#ifndef _WIN32
+// For tests: the libcurl transport, trusting only the CA in `ca_file` and
+// going to the server directly (no proxy). Nothing without libcurl.
+[[nodiscard]] std::unique_ptr<HttpTransport> make_test_transport(const std::filesystem::path& ca_file);
+#endif
 
 // "Wed, 28 Oct 2026 19:12:28 GMT" (RFC 9110 IMF-fixdate only).
 [[nodiscard]] std::optional<std::chrono::sys_seconds> parse_http_date(std::string_view text);

@@ -77,8 +77,8 @@ TEST_CASE("the real service starts, answers, refuses a second copy and stops") {
     CHECK_FALSE(unknown->ok);
     CHECK(unknown->error_code == "unknown_method");
 
-    // App updates (Q5): the methods are there; without a transport (not
-    // Windows) they say updates aren't available here.
+    // App updates (Q5): the methods are there; outside Windows (until the
+    // Linux and macOS packages, D36.13) they say updates aren't available here.
     const auto updates = client->call("updates.status");
     REQUIRE(updates.has_value());
     REQUIRE(updates->ok);

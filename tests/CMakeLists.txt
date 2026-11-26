@@ -6,6 +6,7 @@ add_executable(floserver_tests
     test_certificates.cpp
     test_downloader.cpp
     test_encoding.cpp
+    test_http_curl.cpp
     test_ipc.cpp
     test_main.cpp
     test_manifest.cpp

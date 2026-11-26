@@ -613,7 +613,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install tools
-        run: .github/scripts/apt-install.sh ninja-build clang-18 libclang-rt-18-dev libssl-dev nginx-core php-cgi apache2 mariadb-server postgresql-16 && (sudo systemctl stop mariadb apache2 postgresql || true)
+        run: .github/scripts/apt-install.sh ninja-build clang-18 libclang-rt-18-dev libssl-dev libcurl4-openssl-dev nginx-core php-cgi apache2 mariadb-server postgresql-16 && (sudo systemctl stop mariadb apache2 postgresql || true)
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18 -DFLOSERVER_SANITIZE=ON
       - name: Build
@@ -639,7 +639,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install tools
-        run: .github/scripts/apt-install.sh ninja-build libssl-dev nginx-core php-cgi apache2 mariadb-server postgresql-16 && (sudo systemctl stop mariadb apache2 postgresql || true)
+        run: .github/scripts/apt-install.sh ninja-build libssl-dev libcurl4-openssl-dev nginx-core php-cgi apache2 mariadb-server postgresql-16 && (sudo systemctl stop mariadb apache2 postgresql || true)
       # D31: the tests that run a Bun and a Deno dev server for real find
       # them on the PATH (or in FLOSERVER_TEST_BUN_DIR / FLOSERVER_TEST_DENO_DIR);
       # without them those tests skip. Each is one small download.
@@ -667,6 +667,25 @@ jobs:
         run: |
           grep -E 'TEST CASE|ERROR|FATAL|values:|logged:|runtime error|Sanitizer|SUMMARY|AH[0-9]{5}|--- FloServer|Timeout|tests failed' test.log | head -60 |
             while IFS= read -r line; do echo "::error title=floserver_tests::${line}"; done
+      # D36.6: the libcurl transport against the live CDN. The signed list
+      # has no linux-x64 runtimes yet, so this installs Composer (platform
+      # "any"); the list's signature, size and SHA-256 checks run as on Windows.
+      - name: Fetch the runtime list and install Composer from the live CDN
+        shell: bash
+        env:
+          FLOSERVER_DATA_DIR: ${{ runner.temp }}/floserver-data
+          FLOSERVER_INSTANCE: ci
+        run: |
+          set -u
+          fail() { echo "::error title=live install::$1 :: $(echo "$2" | tr '\n' '|' | cut -c1-3000)"; exit 1; }
+          run() { local what="$1"; shift; local out; out=$("$@" 2>&1); local rc=$?; echo "$out"; [ $rc -eq 0 ] || fail "$what (exit $rc)" "$out"; }
+          bin=build/bin
+          run "flo runtimes --refresh" "$bin/flo" runtimes --refresh
+          run "flo install composer" "$bin/flo" install composer
+          phar=$(find "$FLOSERVER_DATA_DIR/runtimes/composer" -name composer.phar | head -1)
+          [ -n "$phar" ] || fail "composer.phar missing" "$(find "$FLOSERVER_DATA_DIR/runtimes" | head -40)"
+          run "flo uninstall composer" "$bin/flo" uninstall composer "$(basename "$(dirname "$phar")")"
+          "$bin/flo" service stop || true
 
   clang-tidy:
     name: clang-tidy
@@ -680,7 +699,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install tools
-        run: .github/scripts/apt-install.sh ninja-build clang-18 clang-tidy-18 libssl-dev
+        run: .github/scripts/apt-install.sh ninja-build clang-18 clang-tidy-18 libssl-dev libcurl4-openssl-dev
       # Files whose preprocessed source, checks and clang-tidy version are
       # unchanged since they last passed aren't checked again
       # (tools/ci/clang_tidy_cache.py). Each run saves its own cache and

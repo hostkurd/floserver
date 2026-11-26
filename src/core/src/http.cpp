@@ -65,8 +65,9 @@ std::optional<std::chrono::sys_seconds> parse_http_date(std::string_view text) {
            std::chrono::seconds{*second};
 }
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(FLOSERVER_HAVE_CURL)
 std::unique_ptr<HttpTransport> make_system_transport() { return nullptr; }
+std::unique_ptr<HttpTransport> make_test_transport(const std::filesystem::path& /*ca_file*/) { return nullptr; }
 #endif
 
 }  // namespace floserver::core
