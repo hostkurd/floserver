@@ -5,6 +5,7 @@
 // the projects (nginx and the PHP pools that sleep when idle), and the
 // app's own updates (downloaded here, installed by the window).
 
+#include "floserver/core/child_process.h"
 #include "floserver/core/adminer.h"
 #include "floserver/core/apache_settings.h"
 #include "floserver/core/backup_service.h"
@@ -2279,6 +2280,15 @@ int run(bool spawned, bool& listening) {
             break;
     }
     listening = true;
+    // Now that this is the only copy: end what a copy that crashed left
+    // running (nginx, php-cgi, databases...), then keep a record of ours.
+    if (const auto data = floserver::core::data_dir()) {
+        const auto ledger = *data / "state" / "children";
+        if (const auto ended = floserver::core::sweep_child_ledger(ledger); ended > 0) {
+            std::cerr << "floserverd: ended " << ended << " program(s) left running by an earlier copy\n";
+        }
+        floserver::core::set_child_ledger(ledger);
+    }
 
     auto service = std::make_shared<Service>();
     std::thread integration_thread;

@@ -11,6 +11,8 @@
 #include <cstring>
 #include <charconv>
 #include <iterator>
+#include <map>
+#include <mutex>
 #include <thread>
 
 #ifdef _WIN32
@@ -38,6 +40,9 @@
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <libproc.h>
+#endif
 extern char** environ;  // NOLINT(readability-redundant-declaration)
 #endif
 
@@ -1088,6 +1093,105 @@ struct ChildProcess::Native {
 
 namespace {
 
+// The children running now (pid -> program), written to the ledger file on
+// every change.
+struct Ledger {
+    std::mutex mutex;
+    std::filesystem::path file;
+    std::map<pid_t, std::filesystem::path> children;
+
+    void write_locked() {
+        if (file.empty()) {
+            return;
+        }
+        std::string text;
+        for (const auto& [pid, program] : children) {
+            text += std::to_string(pid);
+            text += ' ';
+            text += path_to_utf8(program);
+            text += '\n';
+        }
+        std::string error;
+        (void)write_private_file_atomically(file, text, error);  // best effort: the service runs on without it
+    }
+};
+
+Ledger& ledger() {
+    static Ledger l;
+    return l;
+}
+
+void ledger_add(pid_t pid, const std::filesystem::path& program) {
+    Ledger& l = ledger();
+    const std::lock_guard lock(l.mutex);
+    if (l.file.empty()) {
+        return;
+    }
+    l.children[pid] = program;
+    l.write_locked();
+}
+
+void ledger_remove(pid_t pid) {
+    Ledger& l = ledger();
+    const std::lock_guard lock(l.mutex);
+    if (l.children.erase(pid) > 0) {
+        l.write_locked();
+    }
+}
+
+bool group_alive(pid_t group) { return ::kill(-group, 0) == 0 || errno == EPERM; }
+
+}  // namespace
+
+void set_child_ledger(const std::filesystem::path& file) {
+    Ledger& l = ledger();
+    const std::lock_guard lock(l.mutex);
+    l.file = file;
+    l.write_locked();
+}
+
+std::size_t sweep_child_ledger(const std::filesystem::path& file) {
+    std::ifstream in(file);
+    if (!in) {
+        return 0;
+    }
+    std::vector<pid_t> groups;
+    std::string line;
+    while (std::getline(in, line) && groups.size() < 10000) {
+        const auto space = line.find(' ');
+        if (space == std::string::npos) {
+            continue;
+        }
+        long pid = 0;
+        const auto [end, ec] = std::from_chars(line.data(), line.data() + space, pid);
+        if (ec != std::errc() || end != line.data() + space || pid <= 1 || pid == static_cast<long>(getpid())) {
+            continue;
+        }
+        if (process_is_program(static_cast<std::uint32_t>(pid), path_from_utf8(line.substr(space + 1)))) {
+            groups.push_back(static_cast<pid_t>(pid));
+        }
+    }
+    in.close();
+    for (const pid_t g : groups) {
+        ::kill(-g, SIGTERM);
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    const auto any_alive = [&groups] { return std::any_of(groups.begin(), groups.end(), group_alive); };
+    while (any_alive() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    for (const pid_t g : groups) {
+        if (group_alive(g)) {
+            ::kill(-g, SIGKILL);
+        }
+    }
+    std::error_code ec;
+    std::filesystem::remove(file, ec);
+    return groups.size();
+}
+
+namespace {
+
 bool has_name(const std::string& entry, const std::string& name) {
     return entry.size() > name.size() && entry.compare(0, name.size(), name) == 0 && entry[name.size()] == '=';
 }
@@ -1174,6 +1278,7 @@ std::unique_ptr<ChildProcess> ChildProcess::start(const ChildOptions& o, std::st
     }
     auto native = std::make_unique<Native>();
     native->pid = pid;
+    ledger_add(pid, o.program);
     return std::unique_ptr<ChildProcess>(new ChildProcess(std::move(native), static_cast<std::uint32_t>(pid)));
 }
 
@@ -1212,19 +1317,19 @@ void ChildProcess::kill() {
     // they can finish cleanly, then KILL; done only when no member is left,
     // so the ports and files they held are free when this returns.
     const pid_t group = native_->pid;
-    const auto group_alive = [group] { return ::kill(-group, 0) == 0 || errno == EPERM; };
     ::kill(-group, SIGTERM);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    while ((running() || group_alive()) && std::chrono::steady_clock::now() < deadline) {
+    while ((running() || group_alive(group)) && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    if (running() || group_alive()) {
+    if (running() || group_alive(group)) {
         ::kill(-group, SIGKILL);
         (void)wait(std::chrono::seconds(5));
-        for (int i = 0; i < 500 && group_alive(); ++i) {
+        for (int i = 0; i < 500 && group_alive(group); ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
     }
+    ledger_remove(group);
 }
 
 #ifdef __linux__
@@ -1486,6 +1591,10 @@ bool wait_for_process_exit(std::uint32_t pid, std::chrono::milliseconds limit) {
     return gone;
 }
 
+// Job objects end every child with the service (no ledger needed).
+void set_child_ledger(const std::filesystem::path& /*file*/) {}
+std::size_t sweep_child_ledger(const std::filesystem::path& /*file*/) { return 0; }
+
 #else
 
 bool process_is_program(std::uint32_t pid, const std::filesystem::path& program) {
@@ -1498,9 +1607,14 @@ bool process_is_program(std::uint32_t pid, const std::filesystem::path& program)
     std::error_code ec2;
     return std::filesystem::equivalent(exe, program, ec2) ||
            std::filesystem::equivalent(exe, std::filesystem::canonical(program, ec2), ec2);
+#elif defined(__APPLE__)
+    std::array<char, PROC_PIDPATHINFO_MAXSIZE> exe{};
+    if (proc_pidpath(static_cast<int>(pid), exe.data(), static_cast<std::uint32_t>(exe.size())) <= 0) {
+        return false;
+    }
+    std::error_code ec;
+    return std::filesystem::equivalent(std::filesystem::path(exe.data()), program, ec);
 #else
-    // macOS comes with its own stage (D3); until then never signal a pid we
-    // can't identify.
     (void)pid;
     (void)program;
     return false;

@@ -132,6 +132,18 @@ struct ChildOptions {
 // from a file, which may by now belong to someone else.
 [[nodiscard]] bool process_is_program(std::uint32_t pid, const std::filesystem::path& program);
 
+// macOS and Linux: a file listing every child's process group (its leader's
+// pid and program), kept while they run, so a service that ended without
+// stopping them (a crash, a kill -9) ends what it left behind when it starts
+// again. Windows needs none: job objects end children with the service.
+// floserverd sets it once, after it holds the single-instance lock; nothing
+// is recorded before that. Does nothing on Windows.
+void set_child_ledger(const std::filesystem::path& file);
+// Ends (TERM, then KILL) each process group `file` lists whose leader still
+// runs the program it started (process_is_program), then empties the file.
+// The number of groups ended. Never signals a pid that's someone else's now.
+std::size_t sweep_child_ledger(const std::filesystem::path& file);
+
 // Waits until process `pid` is gone; true when it is.
 bool wait_for_process_exit(std::uint32_t pid, std::chrono::milliseconds limit);
 
