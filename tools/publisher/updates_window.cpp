@@ -124,12 +124,13 @@ UpdatesWindow::~UpdatesWindow() {
 
 void UpdatesWindow::open(HWND owner, std::map<std::string, std::vector<std::string>> listed,
                          manifest_tool::ListedBuilds builds) {
-    builds_ = std::move(builds);
-    // The same list as last time: the rows (and their ticks) are kept, no new
-    // check (GitHub allows 60 an hour). A check still running isn't swapped.
-    const bool same = listed == listed_ && !rows_.empty();
+    // The same list as last time (its versions and our builds' numbers): the
+    // rows (and their ticks) are kept, no new check (GitHub allows 60 an
+    // hour). A check still running isn't swapped.
+    const bool same = listed == listed_ && builds == builds_ && !rows_.empty();
     if (!busy_) {
         listed_ = listed;
+        builds_ = std::move(builds);
     }
     if (hwnd_ == nullptr) {
         HINSTANCE inst = GetModuleHandleW(nullptr);
