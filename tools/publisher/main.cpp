@@ -988,7 +988,7 @@ void Publisher::open_updates() {
             return add_fetched(paths, on_r2);
         };
     }
-    updates_.open(hwnd_, std::move(listed));
+    updates_.open(hwnd_, std::move(listed), mt::listed_builds_from_paths(list_paths));
 }
 
 // D34.5: Download only's files into the next list, each replacing the older

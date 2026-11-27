@@ -69,6 +69,7 @@ struct CdnPath {
 // D36.3: runtimes FloServer builds itself, for Linux and macOS, published
 // as GitHub releases of this repository.
 inline constexpr std::string_view kRuntimesRepo = "hostkurd/floserver-runtimes";
+inline constexpr int kMaxBuild = 99999;  // a release's build number: 1 to this, no leading zeros
 struct OurBuild {
     std::string tag;    // "php-8.5.12-2": the release
     std::string asset;  // "php-8.5.12-linux-x64.tar.gz": its file (its checksum is <asset>.sha256)

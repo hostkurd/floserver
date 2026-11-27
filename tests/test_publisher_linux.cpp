@@ -285,11 +285,116 @@ TEST_CASE("publisher linux: the signed list carries our Linux builds beside Wind
 }
 
 TEST_CASE("publisher linux: the same version for Linux is added beside Windows', titled apart") {
-    const std::vector<PublishFile> files = {listed("php/8.5.12/php-8.5.12-1-nts-Win32-vs17-x64.zip")};
+    const AddResult windows_php = new_file("php/8.5.12/php-8.5.12-1-nts-Win32-vs17-x64.zip", "https://cdn.floserver.org", {});
+    REQUIRE(windows_php.file);
+    CHECK(windows_php.file->title == "PHP 8.5.12");
+    const std::vector<PublishFile> files = {*windows_php.file};
     const AddResult linux_php = new_file("php/8.5.12/php-8.5.12-2-linux-x64.tar.gz", "https://cdn.floserver.org", files);
     REQUIRE_MESSAGE(linux_php.file, linux_php.error);
     CHECK(linux_php.file->title == "PHP 8.5.12 (Linux)");
     // A second build of it is the same title: one at a time, as for Windows.
     const std::vector<PublishFile> both = {files[0], *linux_php.file};
     CHECK_FALSE(new_file("php/8.5.12/php-8.5.12-3-linux-x64.tar.gz", "https://cdn.floserver.org", both).file);
+}
+
+TEST_CASE("publisher linux: odd tags and addresses are never taken") {
+    const auto rel = [](const std::string& tag, const std::string& asset, const std::string& url_tag, bool draft = false) {
+        return R"({"tag_name":")" + tag + R"(","draft":)" + (draft ? "true" : "false") + R"(,"prerelease":false,"assets":[{"name":")" +
+               asset + R"(","browser_download_url":"https://github.com/hostkurd/floserver-runtimes/releases/download/)" + url_tag +
+               "/" + asset + R"("}]})";
+    };
+    const std::string a = "php-8.5.12-linux-x64.tar.gz";
+    for (const std::string& doc :
+         {"[" + rel("php-8.5.12-2-evil", a, "php-8.5.12-2-evil") + "]", "[" + rel("php-8.5.12-02", a, "php-8.5.12-02") + "]",
+          "[" + rel("php-8.5.12-99999999999", a, "php-8.5.12-99999999999") + "]",
+          "[" + rel("php-8.5.12-100000", a, "php-8.5.12-100000") + "]", "[" + rel("php-8.5.12-2", a, "php-8.5.12-2", true) + "]",
+          "[" + rel("php-8.5.12-2", a, "php-8.5.12-1") + "]", "[" + rel("php-8.5.012-2", a, "php-8.5.012-2") + "]",
+          "[" + rel("php-redis-8.5.12-2", a, "php-redis-8.5.12-2") + "]"}) {
+        INFO(doc);
+        CHECK_FALSE(find_our_release(doc, "php", "8.5.12", "linux-x64"));
+        CHECK(parse_our_releases(doc, "php", "linux-x64").empty());
+    }
+    // CDN names: no leading zero, no huge build, no build at all.
+    for (const char* path : {"php/8.5.12/php-8.5.12-02-linux-x64.tar.gz", "php/8.5.12/php-8.5.12-123456-linux-x64.tar.gz",
+                             "php/8.5.12/php-8.5.12-0-linux-x64.tar.gz"}) {
+        INFO(path);
+        CHECK_FALSE(describe_cdn_path(path).listable);
+    }
+}
+
+TEST_CASE("publisher linux: a newer build of a listed version is offered") {
+    const std::vector<std::string> paths = {"php/8.5.12/php-8.5.12-1-linux-x64.tar.gz",
+                                            "php/8.5.12/php-8.5.12-1-nts-Win32-vs17-x64.zip"};
+    const auto l = listed_from_paths(paths);
+    const auto builds = listed_builds_from_paths(paths);
+    CHECK(builds.at("php@linux-x64").at("8.5.12") == 1);
+    CHECK_FALSE(builds.contains("php"));
+    std::map<std::string, FinderAnswer> found;
+    found["php"].versions = {{"8.5", "8.5.12"}};
+    found["php@linux-x64"].versions = parse_our_releases(releases_json(), "php", "linux-x64");  // 8.5.12 build 2
+    const auto rows = compare_updates(l, found, builds);
+    const UpdateRow* linux_85 = nullptr;
+    const UpdateRow* windows_85 = nullptr;
+    for (const UpdateRow& r : rows) {
+        if (r.series == "8.5") {
+            (r.runtime == "php" ? windows_85 : linux_85) = &r;
+        }
+    }
+    REQUIRE(linux_85);
+    REQUIRE(windows_85);
+    CHECK(windows_85->kind == UpdateKind::UpToDate);
+    CHECK(linux_85->kind == UpdateKind::Update);
+    CHECK(linux_85->ticked);
+    CHECK(linux_85->detail == "build 2 (the list has build 1)");
+    // Sorted: Windows' PHP rows first, then Linux's, each newest series first.
+    std::vector<std::string> order;
+    order.reserve(rows.size());
+    for (const UpdateRow& r : rows) {
+        order.push_back(r.runtime + " " + r.series);
+    }
+    CHECK(order == std::vector<std::string>{"php 8.5", "php@linux-x64 8.5", "php@linux-x64 8.4"});
+}
+
+TEST_CASE("publisher linux: a key with nothing built yet says so") {
+    FakeTransport http;
+    http.serve(std::string(kReleases), {200, "[]"});
+    const auto found = find_updates(http, {{"php@linux-x64", {}}}, nullptr, {}, "");
+    REQUIRE(found.contains("php@linux-x64"));
+    CHECK(found.at("php@linux-x64").problem.find("has no linux-x64 build of php yet") != std::string::npos);
+}
+
+TEST_CASE("publisher linux: phpredis is planned for Windows' PHP only") {
+    FakeTransport http;
+    UpdateRow row;
+    row.runtime = "php-redis";
+    row.latest = "6.3.0";
+    const FetchPlan p = plan_fetch(http, row, {{"php@linux-x64", {"8.5.12"}}});
+    CHECK(p.problem == "there's no PHP in the next list to build phpredis for");
+}
+
+TEST_CASE("publisher linux: Windows' FloServer takes only its own entries from such a list") {
+    using nlohmann::json;
+    const auto entry = [](const char* platform, const char* url) {
+        return json{{"name", "php"},   {"version", "8.5.12"},    {"platform", platform}, {"variant", "nts"},
+                    {"archive", "zip"}, {"size", 10},            {"sha256", std::string(64, 'a')},
+                    {"license", "PHP-3.01"}, {"urls", json::array({url})}};
+    };
+    json linux_entry = entry("linux-x64", "https://cdn.floserver.org/php/8.5.12/php-8.5.12-2-linux-x64.tar.gz");
+    linux_entry["archive"] = "tar.gz";
+    const json doc = {{"schema", 1},
+                      {"sequence", 30},
+                      {"expires", "2026-12-27T12:00:00Z"},
+                      {"runtimes", json::array({entry("windows-x64", "https://cdn.floserver.org/php/8.5.12/php-8.5.12-1-nts-Win32-vs17-x64.zip"),
+                                                linux_entry})}};
+    const test_util::SigningKey key(7);
+    const std::string bytes = doc.dump();
+    floserver::core::ManifestCheck check;
+    check.trusted_keys = {{"k", key.pub}};
+    check.now = *floserver::core::parse_utc_time("2026-11-27T12:00:00Z");
+    const auto opened = floserver::core::open_manifest(bytes, key.sign(bytes, "k"), check);
+    REQUIRE_MESSAGE(opened.manifest, opened.message);
+    const auto windows = floserver::core::runtimes_for(*opened.manifest, "php", "windows-x64");
+    REQUIRE(windows.size() == 1);
+    CHECK(windows[0].urls[0].ends_with("Win32-vs17-x64.zip"));
+    CHECK(floserver::core::runtimes_for(*opened.manifest, "php", "linux-x64").size() == 1);
 }

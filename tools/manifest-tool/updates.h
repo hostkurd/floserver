@@ -26,6 +26,7 @@ namespace floserver::manifest_tool {
 struct UpstreamVersion {
     std::string series;   // "8.5", "24", "18", Bun's "1.3"; empty for a runtime with one series (Mailpit...)
     std::string version;  // "8.5.13"
+    int build = 0;        // FloServer's own builds (D36.3): the release's build number
     bool operator==(const UpstreamVersion&) const = default;
 };
 
@@ -85,6 +86,7 @@ struct OurRelease {
     std::string tag;   // "php-8.5.12-2"
     std::string url;   // the asset's download address
     std::string file;  // its CDN name: "php-8.5.12-2-linux-x64.tar.gz"
+    int build = 0;
 };
 // The highest build of `runtime` `version` for `platform` in those releases.
 [[nodiscard]] std::optional<OurRelease> find_our_release(std::string_view json, std::string_view runtime,
@@ -110,6 +112,9 @@ inline constexpr std::array<std::string_view, 1> kOtherPlatforms = {"linux-x64"}
 // gets that key too, empty until its first version, so it shows as a new
 // series there.
 [[nodiscard]] std::map<std::string, std::vector<std::string>> listed_from_paths(const std::vector<std::string>& paths);
+// key -> version -> build, for FloServer's own builds in the list.
+using ListedBuilds = std::map<std::string, std::map<std::string, int>>;
+[[nodiscard]] ListedBuilds listed_builds_from_paths(const std::vector<std::string>& paths);
 
 // --- what to show -------------------------------------------------------------
 
@@ -135,8 +140,11 @@ struct UpdateRow {
 // the sites' answers (runtime -> answer). A new series is shown only when
 // it's one FloServer would offer (update_series_wanted()). Sorted as the
 // Publisher lists runtimes, then newest series first.
+// A newer build of a listed version of FloServer's own builds (`builds`) is
+// an Update too.
 [[nodiscard]] std::vector<UpdateRow> compare_updates(const std::map<std::string, std::vector<std::string>>& listed,
-                                                     const std::map<std::string, FinderAnswer>& found);
+                                                     const std::map<std::string, FinderAnswer>& found,
+                                                     const ListedBuilds& builds = {});
 
 // Whether FloServer would offer `series` of `runtime` when the list doesn't
 // have it yet: PHP from 8.2, MariaDB's long-term series from 11.4, MySQL

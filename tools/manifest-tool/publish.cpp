@@ -469,6 +469,8 @@ OfficialSource official_source(std::string_view path) {
         s.kind = Kind::Sums;
         s.name = ours->asset;
         s.urls = {ours->url + ".sha256"};
+    } else if (!p.platform.empty() && p.platform != "windows-x64" && p.platform != "any") {
+        return s;  // Unknown: only our own builds are listed for other platforms so far
     } else if (p.runtime == "php") {
         s.kind = Kind::Sums;
         s.urls = {"https://downloads.php.net/~windows/releases/sha256sum.txt",

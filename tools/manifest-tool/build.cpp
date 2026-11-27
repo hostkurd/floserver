@@ -38,8 +38,9 @@ struct CatalogEntry {
     std::string_view upstream;
 };
 
-// The runtimes FloServer 1.0 knows (Windows x64). Add a row here before
-// publishing a new kind of runtime.
+// The runtimes FloServer knows: Windows x64 (1.0), and FloServer's own
+// Linux builds at the end (D36.3). Add a row here before publishing a new
+// kind of runtime.
 constexpr std::array<CatalogEntry, 21> kCatalog = {{
     {"php", R"(php-{v}(-\d+)?-Win32-vs1[67]-x64\.zip)", "PHP-3.01", "windows-x64", "nts", R"(php-{v}(-\d+)?-nts-Win32-vs1[67]-x64\.zip)",
      "https://downloads.php.net/~windows/releases/archives/{file}"},
@@ -103,8 +104,8 @@ constexpr std::array<CatalogEntry, 21> kCatalog = {{
     // where the project publishes none. The CDN name carries the release's
     // build number: <name>-<v>-<build>-<platform>.tar.gz is the asset
     // <name>-<v>-<platform>.tar.gz of release <name>-<v>-<build>. CDN only.
-    {"php", "", "PHP-3.01", "linux-x64", "nts", R"(php-{v}-\d+-linux-x64\.tar\.gz)", ""},
-    {"nginx", "", "BSD-2-Clause", "linux-x64", "", R"(nginx-{v}-\d+-linux-x64\.tar\.gz)", ""},
+    {"php", "", "PHP-3.01", "linux-x64", "nts", R"(php-{v}-[1-9]\d{0,4}-linux-x64\.tar\.gz)", ""},
+    {"nginx", "", "BSD-2-Clause", "linux-x64", "", R"(nginx-{v}-[1-9]\d{0,4}-linux-x64\.tar\.gz)", ""},
 }};
 
 std::string join(std::initializer_list<std::string_view> parts) {
@@ -323,7 +324,8 @@ std::optional<OurBuild> our_build(const CdnPath& p) {
     const std::string build = p.file.substr(head.size(), p.file.size() - head.size() - tail.size());
     OurBuild b;
     const auto [end, ec] = std::from_chars(build.data(), build.data() + build.size(), b.build);
-    if (ec != std::errc() || end != build.data() + build.size() || b.build < 1) {
+    if (ec != std::errc() || end != build.data() + build.size() || b.build < 1 || b.build > kMaxBuild ||
+        std::to_string(b.build) != build) {
         return std::nullopt;
     }
     b.tag = head + build;
@@ -541,9 +543,12 @@ BuildResult build_manifest(std::string_view report_json, const BuildOptions& opt
         for (const std::string& w : warnings) {
             fail(w);
         }
+        // Templates are made on Windows only so far: a Linux entry doesn't count.
         const auto listed = [&runtimes](const std::string& name) {
-            return std::any_of(runtimes.begin(), runtimes.end(),
-                               [&](const nlohmann::ordered_json& r) { return r.value("name", std::string()) == name; });
+            return std::any_of(runtimes.begin(), runtimes.end(), [&](const nlohmann::ordered_json& r) {
+                const std::string platform = r.value("platform", std::string());
+                return r.value("name", std::string()) == name && (platform == "windows-x64" || platform == "any");
+            });
         };
         for (const ProjectTemplate& t : parsed) {
             // The same list a project job installs from.
