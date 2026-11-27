@@ -63,7 +63,7 @@ jobs:
         run: |
           fail=0
           for name in composer nginx; do
-            read -r url sha < <(jq -r --arg n "$name" '[.runtimes[] | select(.name==$n)][0] | "\(.urls[0]) \(.sha256)"' manifest.json)
+            read -r url sha < <(jq -r --arg n "$name" '[.runtimes[] | select(.name==$n and (.platform=="windows-x64" or .platform=="any"))][0] | "\(.urls[0]) \(.sha256)"' manifest.json)
             curl -fsS --retry 3 -o file.bin "$url"
             got=$(sha256sum file.bin | cut -d' ' -f1)
             if [ "$got" != "$sha" ]; then

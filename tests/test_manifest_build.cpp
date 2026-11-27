@@ -166,7 +166,7 @@ TEST_CASE("files that don't fit the catalog are refused or left out") {
     report["files"][0]["path"] = "php/8.5.11/php-8.5.12-1-nts-Win32-vs17-x64.zip";
     auto r = build_manifest(report.dump(), options());
     CHECK_FALSE(r.manifest_json.has_value());
-    CHECK(has_error_with(r, "doesn't match a php 8.5.11 Windows download"));
+    CHECK(has_error_with(r, "doesn't match a php 8.5.11 download"));
 
     // So does a misspelt name, such as a lower-case "win64".
     report = real_report();

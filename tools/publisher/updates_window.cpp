@@ -122,12 +122,15 @@ UpdatesWindow::~UpdatesWindow() {
     }
 }
 
-void UpdatesWindow::open(HWND owner, std::map<std::string, std::vector<std::string>> listed) {
-    // The same list as last time: the rows (and their ticks) are kept, no new
-    // check (GitHub allows 60 an hour). A check still running isn't swapped.
-    const bool same = listed == listed_ && !rows_.empty();
+void UpdatesWindow::open(HWND owner, std::map<std::string, std::vector<std::string>> listed,
+                         manifest_tool::ListedBuilds builds) {
+    // The same list as last time (its versions and our builds' numbers): the
+    // rows (and their ticks) are kept, no new check (GitHub allows 60 an
+    // hour). A check still running isn't swapped.
+    const bool same = listed == listed_ && builds == builds_ && !rows_.empty();
     if (!busy_) {
         listed_ = listed;
+        builds_ = std::move(builds);
     }
     if (hwnd_ == nullptr) {
         HINSTANCE inst = GetModuleHandleW(nullptr);
@@ -611,9 +614,13 @@ LRESULT UpdatesWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
     case kMsgAsking: {
         const std::unique_ptr<std::string> runtime(int_to_ptr<std::string*>(lp));
         ++asked_;
-        std::string name = mt::runtime_title(*runtime, "", "");
+        const mt::ListKey key = mt::split_list_key(*runtime);
+        std::string name = mt::runtime_title(key.runtime, "", "");
         while (!name.empty() && name.back() == ' ') {
             name.pop_back();
+        }
+        if (!key.platform.empty()) {
+            name += " (" + key.platform + ") build";  // asked from FloServer's runtimes repository
         }
         SetWindowTextW(status_, (L"Asking " + widen(name) + L"'s site (" + std::to_wstring(asked_) + L" of " +
                                  std::to_wstring(std::max(to_ask_, asked_)) + L")…")
@@ -629,7 +636,7 @@ LRESULT UpdatesWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
         }
         busy_ = false;
         asked_ = to_ask_;
-        rows_ = mt::compare_updates(listed_, *found);
+        rows_ = mt::compare_updates(listed_, *found, builds_);
         outcome_.assign(rows_.size(), std::wstring());
         outcome_ok_.assign(rows_.size(), false);
         fill();

@@ -1,5 +1,6 @@
 #include "updates.h"
 
+#include "build.h"
 #include "publish.h"
 
 #include "floserver/core/encoding.h"
@@ -9,6 +10,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <charconv>
 #include <array>
 #include <regex>
 #include <set>
@@ -27,7 +29,8 @@ constexpr std::array<std::string_view, 18> kOrder = {
     "php",    "mariadb",    "mysql",   "postgresql", "nginx",   "apache",  "composer", "node",   "bun",
     "deno",   "python",     "wordpress", "phpmyadmin", "adminer", "mailpit", "garnet",   "dotnet", "php-redis"};
 
-std::size_t order_of(std::string_view runtime) {
+std::size_t order_of(std::string_view key) {
+    const std::string runtime = split_list_key(key).runtime;
     const auto it = std::find(kOrder.begin(), kOrder.end(), runtime);
     return static_cast<std::size_t>(it - kOrder.begin());
 }
@@ -96,17 +99,180 @@ std::vector<std::string> regex_versions(std::string_view text, const std::regex&
 }
 
 // "PostgreSQL 17", "Bun".
-std::string title_of(std::string_view runtime, std::string_view series) {
-    std::string t = runtime_title(runtime, series, "");
+std::string title_of(std::string_view key, std::string_view series) {
+    const ListKey k = split_list_key(key);
+    std::string t = runtime_title(k.runtime, series, "");
     while (!t.empty() && t.back() == ' ') {
         t.pop_back();
+    }
+    if (k.platform.starts_with("linux-")) {
+        t += " (Linux)";
+    } else if (k.platform.starts_with("macos-")) {
+        t += " (macOS)";
     }
     return t;
 }
 
 }  // namespace
 
-std::string update_series(std::string_view runtime, std::string_view version) {
+std::string list_key(std::string_view runtime, std::string_view platform) {
+    if (platform.empty() || platform == "windows-x64" || platform == "any") {
+        return std::string(runtime);
+    }
+    return std::string(runtime) + "@" + std::string(platform);
+}
+
+ListKey split_list_key(std::string_view key) {
+    const auto at = key.find('@');
+    if (at == std::string_view::npos) {
+        return {std::string(key), {}};
+    }
+    return {std::string(key.substr(0, at)), std::string(key.substr(at + 1))};
+}
+
+bool listed_on(std::string_view runtime, std::string_view platform) {
+    return platform == "linux-x64" && (runtime == "php" || runtime == "nginx");
+}
+
+ListedBuilds listed_builds_from_paths(const std::vector<std::string>& paths) {
+    ListedBuilds out;
+    for (const std::string& path : paths) {
+        const CdnPath p = describe_cdn_path(path);
+        if (const auto ours = our_build(p)) {
+            int& b = out[list_key(p.runtime, p.platform)][p.version];
+            b = std::max(b, ours->build);
+        }
+    }
+    return out;
+}
+
+std::map<std::string, std::vector<std::string>> listed_from_paths(const std::vector<std::string>& paths) {
+    std::map<std::string, std::vector<std::string>> listed;
+    for (const std::string& path : paths) {
+        const CdnPath p = describe_cdn_path(path);
+        if (p.listable && p.runtime != kAppFolder) {
+            listed[list_key(p.runtime, p.platform)].push_back(p.version);
+        } else {
+            // Not one the catalog knows: keyed by its folder, as before.
+            const auto a = path.find('/');
+            const auto b = a == std::string::npos ? a : path.find('/', a + 1);
+            if (b != std::string::npos) {
+                listed[path.substr(0, a)].push_back(path.substr(a + 1, b - a - 1));
+            }
+        }
+    }
+    std::vector<std::string> windows;
+    for (const auto& [key, versions] : listed) {
+        if (split_list_key(key).platform.empty()) {
+            windows.push_back(key);
+        }
+    }
+    for (const std::string& runtime : windows) {
+        for (const std::string_view platform : kOtherPlatforms) {
+            if (listed_on(runtime, platform)) {
+                (void)listed[list_key(runtime, platform)];
+            }
+        }
+    }
+    return listed;
+}
+
+namespace {
+
+// "php-8.5.12-2" -> {"8.5.12", 2} for `runtime` "php"; nothing otherwise.
+std::optional<std::pair<std::string, int>> our_tag(std::string_view tag, std::string_view runtime) {
+    const std::string head = std::string(runtime) + "-";
+    if (!tag.starts_with(head)) {
+        return std::nullopt;
+    }
+    const std::string_view rest = tag.substr(head.size());
+    const auto dash = rest.rfind('-');
+    if (dash == std::string_view::npos) {
+        return std::nullopt;
+    }
+    const std::string version(rest.substr(0, dash));
+    const std::string_view build = rest.substr(dash + 1);
+    int b = 0;
+    const auto [end, ec] = std::from_chars(build.data(), build.data() + build.size(), b);
+    const auto v = Version::parse(version);
+    if (ec != std::errc() || end != build.data() + build.size() || b < 1 || b > kMaxBuild ||
+        std::to_string(b) != build || !v || v->to_string() != version) {
+        return std::nullopt;  // also "02" and builds past kMaxBuild
+    }
+    return std::pair{version, b};
+}
+
+}  // namespace
+
+std::optional<OurRelease> find_our_release(std::string_view text, std::string_view runtime, std::string_view version,
+                                           std::string_view platform) {
+    const auto doc = parse_json(text);
+    if (!doc || !doc->is_array()) {
+        return std::nullopt;
+    }
+    const std::string asset = std::string(runtime) + "-" + std::string(version) + "-" + std::string(platform) + ".tar.gz";
+    std::optional<OurRelease> best;
+    int best_build = 0;
+    for (const json& r : *doc) {
+        if (!r.is_object() || r.value("draft", false) || r.value("prerelease", false)) {
+            continue;
+        }
+        const auto t = our_tag(text_of(r, "tag_name"), runtime);
+        if (!t) {
+            continue;
+        }
+        const auto [tag_version, build] = *t;
+        if (tag_version != version || build <= best_build || !r.contains("assets") || !r["assets"].is_array()) {
+            continue;
+        }
+        for (const json& a : r["assets"]) {
+            const std::string url = a.is_object() ? text_of(a, "browser_download_url") : std::string();
+            const std::string want = "https://github.com/" + std::string(kRuntimesRepo) + "/releases/download/" +
+                                     text_of(r, "tag_name") + "/" + asset;
+            if (a.is_object() && text_of(a, "name") == asset && url == want) {
+                best_build = build;
+                best = OurRelease{text_of(r, "tag_name"), url,
+                                  std::string(runtime) + "-" + std::string(version) + "-" + std::to_string(build) +
+                                      "-" + std::string(platform) + ".tar.gz"};
+            }
+        }
+    }
+    if (best) {
+        best->build = best_build;
+    }
+    return best;
+}
+
+std::vector<UpstreamVersion> parse_our_releases(std::string_view text, std::string_view runtime,
+                                                std::string_view platform) {
+    const auto doc = parse_json(text);
+    std::set<std::string> versions;
+    if (doc && doc->is_array()) {
+        for (const json& r : *doc) {
+            if (r.is_object()) {
+                if (const auto t = our_tag(text_of(r, "tag_name"), runtime)) {
+                    versions.insert(t->first);
+                }
+            }
+        }
+    }
+    std::vector<std::string> built;
+    for (const std::string& v : versions) {
+        if (find_our_release(text, runtime, v, platform)) {
+            built.push_back(v);
+        }
+    }
+    std::vector<UpstreamVersion> out = newest_by_series(runtime, built);
+    for (UpstreamVersion& u : out) {
+        const auto found = find_our_release(text, runtime, u.version, platform);
+        u.build = found ? found->build : 0;
+    }
+    return out;
+}
+
+std::string update_series(std::string_view key, std::string_view version) {
+    const std::string runtime_name = split_list_key(key).runtime;
+    const std::string_view runtime = runtime_name;
     if (runtime == "node" || runtime == "postgresql") {
         return first_parts(version, 1);
     }
@@ -321,8 +487,10 @@ std::optional<std::string> parse_pecl_stable(std::string_view text) {
     return Version::parse(v) ? std::optional<std::string>(v) : std::nullopt;
 }
 
-bool update_series_wanted(std::string_view runtime, std::string_view series,
+bool update_series_wanted(std::string_view key, std::string_view series,
                           const std::vector<std::string>& listed_series) {
+    const std::string runtime_name = split_list_key(key).runtime;
+    const std::string_view runtime = runtime_name;
     const auto at_least = [&series](std::string_view floor) {
         const auto s = Version::parse(series);
         const auto f = Version::parse(floor);
@@ -353,7 +521,7 @@ bool update_series_wanted(std::string_view runtime, std::string_view series,
 }
 
 std::vector<UpdateRow> compare_updates(const std::map<std::string, std::vector<std::string>>& listed,
-                                       const std::map<std::string, FinderAnswer>& found) {
+                                       const std::map<std::string, FinderAnswer>& found, const ListedBuilds& builds) {
     std::vector<UpdateRow> out;
     for (const auto& [runtime, versions] : listed) {
         if (order_of(runtime) >= kOrder.size()) {
@@ -413,6 +581,20 @@ std::vector<UpdateRow> compare_updates(const std::map<std::string, std::vector<s
                 seen.insert(u.series);
                 row.listed = h->second;
                 row.kind = newer(u.version, h->second) ? UpdateKind::Update : UpdateKind::UpToDate;
+                if (row.kind == UpdateKind::UpToDate && u.build > 0 && u.version == h->second) {
+                    // Our newer build of the same version (a library fixed in it).
+                    int listed_build = 0;
+                    if (const auto b = builds.find(runtime); b != builds.end()) {
+                        if (const auto v = b->second.find(u.version); v != b->second.end()) {
+                            listed_build = v->second;
+                        }
+                    }
+                    if (u.build > listed_build) {
+                        row.kind = UpdateKind::Update;
+                        row.detail = "build " + std::to_string(u.build) + " (the list has build " +
+                                     std::to_string(listed_build) + ")";
+                    }
+                }
                 row.ticked = row.kind == UpdateKind::Update;
                 if (row.kind == UpdateKind::Update && runtime == "php-redis") {
                     // PECL names the source release; its Windows builds can come later.
@@ -442,8 +624,11 @@ std::vector<UpdateRow> compare_updates(const std::map<std::string, std::vector<s
         }
     }
     std::stable_sort(out.begin(), out.end(), [](const UpdateRow& a, const UpdateRow& b) {
-        if (a.runtime != b.runtime) {
+        if (order_of(a.runtime) != order_of(b.runtime)) {
             return order_of(a.runtime) < order_of(b.runtime);
+        }
+        if (a.runtime != b.runtime) {
+            return a.runtime < b.runtime;  // "php" before "php@linux-x64"
         }
         return newer(a.series, b.series);
     });
@@ -551,7 +736,16 @@ std::map<std::string, FinderAnswer> find_updates(core::HttpTransport& http,
                 read = false;
             }
         };
-        if (runtime == "php") {
+        if (const ListKey k = split_list_key(runtime); !k.platform.empty()) {
+            // D36.3: FloServer's own builds, from its runtimes repository.
+            via("https://api.github.com/repos/" + std::string(kRuntimesRepo) + "/releases?per_page=100",
+                [&](std::string_view t) { return parse_our_releases(t, k.runtime, k.platform); });
+            if (read && got.empty()) {
+                a.problem = std::string(kRuntimesRepo) + " has no " + k.platform + " build of " + k.runtime +
+                            " yet: run its workflow there first";
+                read = false;
+            }
+        } else if (runtime == "php") {
             via("https://downloads.php.net/~windows/releases/sha256sum.txt", parse_php_sums);
         } else if (runtime == "node") {
             via("https://nodejs.org/dist/index.json", parse_node_index);

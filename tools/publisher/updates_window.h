@@ -38,7 +38,7 @@ public:
 
     // Opens the window (or brings it forward) and checks `listed`: runtime ->
     // the versions in the next list.
-    void open(HWND owner, std::map<std::string, std::vector<std::string>> listed);
+    void open(HWND owner, std::map<std::string, std::vector<std::string>> listed, manifest_tool::ListedBuilds builds = {});
     [[nodiscard]] HWND hwnd() const { return hwnd_; }
     // Called with the CDN paths downloaded; returns what to tell the user
     // about the next list (or why they couldn't be added).
@@ -71,6 +71,7 @@ private:
     UINT dpi_ = 96;
 
     std::map<std::string, std::vector<std::string>> listed_;
+    manifest_tool::ListedBuilds builds_;  // our builds' numbers in the list (D36.3)
     std::vector<manifest_tool::UpdateRow> rows_;
     std::string saved_to_;  // where the sites' answers were kept, when asked
     std::thread worker_;

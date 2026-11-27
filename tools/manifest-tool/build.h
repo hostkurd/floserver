@@ -60,10 +60,25 @@ struct CdnPath {
     std::string version;
     std::string file;
     std::string variant;    // the catalog's, such as Bun's "baseline"; php-redis's "php8-4", from the file name
+    std::string platform;   // the catalog's: "windows-x64", "linux-x64", "any"
     bool listable = false;  // the list can carry it
     std::string problem;    // why not, when it can't ("<path>: ...")
 };
 [[nodiscard]] CdnPath describe_cdn_path(std::string_view path);
+
+// D36.3: runtimes FloServer builds itself, for Linux and macOS, published
+// as GitHub releases of this repository.
+inline constexpr std::string_view kRuntimesRepo = "hostkurd/floserver-runtimes";
+inline constexpr int kMaxBuild = 99999;  // a release's build number: 1 to this, no leading zeros
+struct OurBuild {
+    std::string tag;    // "php-8.5.12-2": the release
+    std::string asset;  // "php-8.5.12-linux-x64.tar.gz": its file (its checksum is <asset>.sha256)
+    std::string url;    // the file's download address
+    int build = 0;
+};
+// When `p` (from describe_cdn_path) is one of those builds on the CDN
+// (<name>/<v>/<name>-<v>-<build>-<platform>.tar.gz), where it came from.
+[[nodiscard]] std::optional<OurBuild> our_build(const CdnPath& p);
 
 // FloServer's installer on the CDN: app/<version>/<app_file_name(version)>.
 inline constexpr std::string_view kAppFolder = "app";

@@ -95,6 +95,6 @@ set_tests_properties(floserver_tests PROPERTIES TIMEOUT 300)
 
 # The manifest tool's build logic, when the tools are built.
 if(TARGET floserver_manifest_build)
-    target_sources(floserver_tests PRIVATE test_manifest_build.cpp test_fetch.cpp test_go_live.cpp test_publish.cpp test_r2.cpp test_updates.cpp)
+    target_sources(floserver_tests PRIVATE test_manifest_build.cpp test_fetch.cpp test_go_live.cpp test_publish.cpp test_r2.cpp test_updates.cpp test_publisher_linux.cpp)
     target_link_libraries(floserver_tests PRIVATE floserver_manifest_build)
 endif()
