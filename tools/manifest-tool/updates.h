@@ -10,6 +10,7 @@
 #include "floserver/core/http.h"
 
 #include <atomic>
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -74,6 +75,41 @@ struct FinderAnswer {
 [[nodiscard]] std::optional<std::string> parse_mysql_page(std::string_view html);
 // pecl.php.net/rest/r/redis/stable.txt: the version alone.
 [[nodiscard]] std::optional<std::string> parse_pecl_stable(std::string_view text);
+
+// hostkurd/floserver-runtimes' releases (api.github.com/.../releases), D36.3:
+// the versions of `runtime` with a build for `platform` (a release
+// "<runtime>-<v>-<build>" holding "<runtime>-<v>-<platform>.tar.gz"), by series.
+[[nodiscard]] std::vector<UpstreamVersion> parse_our_releases(std::string_view json, std::string_view runtime,
+                                                              std::string_view platform);
+struct OurRelease {
+    std::string tag;   // "php-8.5.12-2"
+    std::string url;   // the asset's download address
+    std::string file;  // its CDN name: "php-8.5.12-2-linux-x64.tar.gz"
+};
+// The highest build of `runtime` `version` for `platform` in those releases.
+[[nodiscard]] std::optional<OurRelease> find_our_release(std::string_view json, std::string_view runtime,
+                                                         std::string_view version, std::string_view platform);
+
+// --- the list, per runtime and platform (D36.3) -------------------------------
+
+// A Windows or platform-free file's key is its runtime ("php"); another
+// platform's is "<runtime>@<platform>" ("php@linux-x64"): its own rows,
+// finder and files, so Linux's PHP can trail Windows' and the reverse.
+[[nodiscard]] std::string list_key(std::string_view runtime, std::string_view platform);
+struct ListKey {
+    std::string runtime;   // "php"
+    std::string platform;  // "" for Windows and platform-free files
+};
+[[nodiscard]] ListKey split_list_key(std::string_view key);
+// The platforms other than Windows FloServer lists runtimes for, and which
+// runtimes (FloServer's own builds so far).
+inline constexpr std::array<std::string_view, 1> kOtherPlatforms = {"linux-x64"};
+[[nodiscard]] bool listed_on(std::string_view runtime, std::string_view platform);
+// key -> versions for the list's CDN paths (<runtime>/<version>/<file>). A
+// runtime listed for Windows that FloServer also offers on another platform
+// gets that key too, empty until its first version, so it shows as a new
+// series there.
+[[nodiscard]] std::map<std::string, std::vector<std::string>> listed_from_paths(const std::vector<std::string>& paths);
 
 // --- what to show -------------------------------------------------------------
 

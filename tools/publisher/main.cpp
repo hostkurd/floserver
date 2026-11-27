@@ -976,15 +976,13 @@ void Publisher::check_live() {
 
 // D34: what's new upstream for the runtimes in the next list.
 void Publisher::open_updates() {
-    std::map<std::string, std::vector<std::string>> listed;
+    // Per runtime and platform (D36.3): Linux's PHP has rows of its own.
+    std::vector<std::string> list_paths;
+    list_paths.reserve(files_.size());
     for (const mt::PublishFile& f : files_) {
-        // <runtime>/<version>/<file>
-        const auto a = f.path.find('/');
-        const auto b = a == std::string::npos ? a : f.path.find('/', a + 1);
-        if (b != std::string::npos) {
-            listed[f.path.substr(0, a)].push_back(f.path.substr(a + 1, b - a - 1));
-        }
+        list_paths.push_back(f.path);
     }
+    std::map<std::string, std::vector<std::string>> listed = mt::listed_from_paths(list_paths);
     if (!updates_.on_fetched) {
         updates_.on_fetched = [this](const std::vector<std::string>& paths, bool on_r2) {
             return add_fetched(paths, on_r2);

@@ -267,6 +267,25 @@ FetchPlan plan_fetch(core::HttpTransport& http, const UpdateRow& row,
     };
     const auto simple = [&](const std::string& base, const std::string& file) { add(base + file, file); };
     std::string error;
+    if (const ListKey key = split_list_key(row.runtime); !key.platform.empty()) {
+        // D36.3: FloServer's own build, the highest build of this version
+        // in its runtimes repository's releases.
+        plan.files.clear();
+        plan.title = runtime_title(key.runtime, v, "") + (key.platform.starts_with("linux-") ? " (Linux)" : " (macOS)");
+        const std::string releases =
+            "https://api.github.com/repos/" + std::string(kRuntimesRepo) + "/releases?per_page=100";
+        if (const auto text = get_text(http, releases, cancel, error)) {
+            if (const auto found = find_our_release(*text, key.runtime, v, key.platform)) {
+                plan.files.push_back({found->url, key.runtime + "/" + v + "/" + found->file, {}});
+            } else {
+                plan.problem = std::string(kRuntimesRepo) + " has no " + key.platform + " build of " + key.runtime +
+                               " " + v + ": run its workflow there first";
+            }
+        } else {
+            plan.problem = error;
+        }
+        return plan;
+    }
     if (r == "php") {
         // Its name: with a rebuild number or without, vs16 or vs17. The
         // current releases first, then the archives (where it goes once a
@@ -537,11 +556,29 @@ ListChange add_to_list(std::vector<PublishFile> files, const std::vector<std::st
             continue;
         }
         const std::string series = update_series(n.runtime, n.version);
+        const auto n_build = our_build(n);
+        // Our build of a version the list has in a newer build: kept out.
+        const auto newer_build = std::find_if(files.begin(), files.end(), [&](const PublishFile& f) {
+            const CdnPath o = describe_cdn_path(f.path);
+            const auto o_build = our_build(o);
+            return n_build && o_build && o.runtime == n.runtime && o.platform == n.platform &&
+                   o.variant == n.variant && o.version == n.version && o_build->build > n_build->build;
+        });
+        if (newer_build != files.end()) {
+            change.problems.push_back(path + ": the list already has a newer build of it (" + newer_build->path + ")");
+            continue;
+        }
         std::erase_if(files, [&](const PublishFile& f) {
             const CdnPath o = describe_cdn_path(f.path);
             const auto ov = Version::parse(o.version);
-            const bool older = o.listable && ov && o.runtime == n.runtime && o.variant == n.variant &&
-                               update_series(o.runtime, o.version) == series && *ov < *nv;
+            // The same runtime, series, variant and platform (Linux's PHP
+            // 8.5 stays when only Windows' moves on), older; or our older
+            // build of the same version.
+            const bool same_kind = o.listable && ov && o.runtime == n.runtime && o.variant == n.variant &&
+                                   o.platform == n.platform && update_series(o.runtime, o.version) == series;
+            const auto o_build = our_build(o);
+            const bool older_build = n_build && o_build && *ov == *nv && o_build->build < n_build->build;
+            const bool older = same_kind && (*ov < *nv || older_build);
             if (older && f.published) {
                 change.left_out.push_back(f.path);
             }

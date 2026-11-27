@@ -279,6 +279,23 @@ LiveResult fetch_live_list(HttpTransport& http, std::string_view cdn,
     return result;
 }
 
+namespace {
+
+// A file's title in the Publisher: its runtime's, plus the platform for one
+// that isn't Windows' ("PHP 8.5.12 (Linux)" beside "PHP 8.5.12").
+std::string file_title(std::string_view runtime, std::string_view version, std::string_view variant,
+                       std::string_view platform) {
+    std::string t = runtime_title(runtime, version, variant);
+    if (platform.starts_with("linux-")) {
+        t += " (Linux)";
+    } else if (platform.starts_with("macos-")) {
+        t += " (macOS)";
+    }
+    return t;
+}
+
+}  // namespace
+
 std::string runtime_title(std::string_view runtime, std::string_view version, std::string_view variant) {
     static constexpr std::array<std::pair<std::string_view, std::string_view>, 19> kNames = {{
         {"php", "PHP"},
@@ -330,13 +347,13 @@ std::vector<PublishFile> files_from_live(const LiveList& live, std::string_view 
     for (const RuntimeFile& r : live.runtimes) {
         const std::string_view url = r.urls.empty() ? std::string_view() : std::string_view(r.urls.front());
         if (!url.starts_with(prefix)) {
-            notes.push_back(runtime_title(r.name, r.version, r.variant) + " isn't on " + std::string(cdn) +
+            notes.push_back(file_title(r.name, r.version, r.variant, r.platform) + " isn't on " + std::string(cdn) +
                             " and is left out");
             continue;
         }
         PublishFile f;
         f.path = std::string(url.substr(prefix.size()));
-        f.title = runtime_title(r.name, r.version, r.variant);
+        f.title = file_title(r.name, r.version, r.variant, r.platform);
         f.published = true;
         f.size = r.size;
         f.sha256 = to_hex(r.sha256);
@@ -424,14 +441,14 @@ AddResult new_file(std::string_view text, std::string_view cdn,
                            "). The list names one installer: remove it first to replace it.";
             return result;
         }
-        if (f.title == runtime_title(p.runtime, p.version, p.variant)) {
+        if (f.title == file_title(p.runtime, p.version, p.variant, p.platform)) {
             result.error = f.title + " is already in the list (" + f.path + "). Remove it first to replace it.";
             return result;
         }
     }
     PublishFile f;
     f.path = std::string(text);
-    f.title = runtime_title(p.runtime, p.version, p.variant);
+    f.title = file_title(p.runtime, p.version, p.variant, p.platform);
     f.notes_url = std::move(notes);
     result.file = std::move(f);
     return result;
@@ -446,7 +463,13 @@ OfficialSource official_source(std::string_view path) {
     const std::string& v = p.version;
     s.name = p.file;
     using Kind = OfficialSource::Kind;
-    if (p.runtime == "php") {
+    if (const auto ours = our_build(p)) {
+        // D36.3: our build's release has a .sha256 next to each file (its
+        // asset name, without the build number the CDN name carries).
+        s.kind = Kind::Sums;
+        s.name = ours->asset;
+        s.urls = {ours->url + ".sha256"};
+    } else if (p.runtime == "php") {
         s.kind = Kind::Sums;
         s.urls = {"https://downloads.php.net/~windows/releases/sha256sum.txt",
                   "https://downloads.php.net/~windows/releases/archives/sha256sum.txt"};

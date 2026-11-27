@@ -9,6 +9,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <charconv>
 #include <array>
 #include <cstdio>
 #include <initializer_list>
@@ -39,7 +40,7 @@ struct CatalogEntry {
 
 // The runtimes FloServer 1.0 knows (Windows x64). Add a row here before
 // publishing a new kind of runtime.
-constexpr std::array<CatalogEntry, 19> kCatalog = {{
+constexpr std::array<CatalogEntry, 21> kCatalog = {{
     {"php", R"(php-{v}(-\d+)?-Win32-vs1[67]-x64\.zip)", "PHP-3.01", "windows-x64", "nts", R"(php-{v}(-\d+)?-nts-Win32-vs1[67]-x64\.zip)",
      "https://downloads.php.net/~windows/releases/archives/{file}"},
     {"mariadb", "", "GPL-2.0", "windows-x64", "", R"(mariadb-{v}-winx64\.zip)",
@@ -98,6 +99,12 @@ constexpr std::array<CatalogEntry, 19> kCatalog = {{
     // runtime) aren't listed.
     {"deno", R"(deno(?:rt)?-[a-z0-9_]+-[a-z0-9-]+\.zip)", "MIT", "windows-x64", "", R"(deno-x86_64-pc-windows-msvc\.zip)",
      "https://github.com/denoland/deno/releases/download/v{v}/{file}"},
+    // D36.3: FloServer's own builds for Linux (hostkurd/floserver-runtimes),
+    // where the project publishes none. The CDN name carries the release's
+    // build number: <name>-<v>-<build>-<platform>.tar.gz is the asset
+    // <name>-<v>-<platform>.tar.gz of release <name>-<v>-<build>. CDN only.
+    {"php", "", "PHP-3.01", "linux-x64", "nts", R"(php-{v}-\d+-linux-x64\.tar\.gz)", ""},
+    {"nginx", "", "BSD-2-Clause", "linux-x64", "", R"(nginx-{v}-\d+-linux-x64\.tar\.gz)", ""},
 }};
 
 std::string join(std::initializer_list<std::string_view> parts) {
@@ -280,7 +287,7 @@ Classified classify(const std::string& path) {
                                            : ": another build of this release, not listed"});
         } else {
             c.message = join({path, ": the file name doesn't match a ", name, " ", version,
-                              " Windows download; check the name and the version folder"});
+                              " download; check the name and the version folder"});
         }
         return c;
     }
@@ -295,11 +302,35 @@ Classified classify(const std::string& path) {
     } else {
         c.parts.variant = std::string(entry->variant);
     }
+    c.parts.platform = std::string(entry->platform);
     c.entry = &*entry;
     return c;
 }
 
 }  // namespace
+
+std::optional<OurBuild> our_build(const CdnPath& p) {
+    if (!p.listable || (p.runtime != "php" && p.runtime != "nginx") ||
+        (!p.platform.starts_with("linux-") && !p.platform.starts_with("macos-"))) {
+        return std::nullopt;
+    }
+    // <name>-<v>-<build>-<platform>.tar.gz (the catalog row has matched it).
+    const std::string head = p.runtime + "-" + p.version + "-";
+    const std::string tail = "-" + p.platform + ".tar.gz";
+    if (!p.file.starts_with(head) || !p.file.ends_with(tail) || p.file.size() <= head.size() + tail.size()) {
+        return std::nullopt;
+    }
+    const std::string build = p.file.substr(head.size(), p.file.size() - head.size() - tail.size());
+    OurBuild b;
+    const auto [end, ec] = std::from_chars(build.data(), build.data() + build.size(), b.build);
+    if (ec != std::errc() || end != build.data() + build.size() || b.build < 1) {
+        return std::nullopt;
+    }
+    b.tag = head + build;
+    b.asset = p.runtime + "-" + p.version + tail;
+    b.url = join({"https://github.com/", kRuntimesRepo, "/releases/download/", b.tag, "/", b.asset});
+    return b;
+}
 
 std::string app_file_name(std::string_view version) {
     return join({"FloServer-", version, "-x64.msi"});
