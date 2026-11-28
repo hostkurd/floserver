@@ -262,6 +262,13 @@ std::vector<CleanupRow> plan_cleanup(const CleanupInput& input) {
     }
     std::set<std::string> in_use(input.live_paths.begin(), input.live_paths.end());
     in_use.insert(input.next_paths.begin(), input.next_paths.end());
+    // A list signed here that isn't live yet may still go up (Go live, or
+    // by hand): its files are in use too.
+    for (const SavedList& s : input.saved) {
+        if (s.sequence > input.live_sequence) {
+            in_use.insert(s.paths.begin(), s.paths.end());
+        }
+    }
 
     // GPL: a source archive stays while a binary of its runtime and version
     // stays on the CDN: one listed, or one Clean up never offers (another

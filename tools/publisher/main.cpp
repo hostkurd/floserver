@@ -778,8 +778,11 @@ LRESULT Publisher::handle(UINT msg, WPARAM wp, LPARAM lp) {
         on_done(std::unique_ptr<Outcome>(int_to_ptr<Outcome*>(lp)));
         return 0;
     case WM_CLOSE:
-        if (busy_ && MessageBoxW(hwnd_, L"Stop the work in progress and close?", L"FloServer Publisher",
-                                 MB_YESNO | MB_ICONQUESTION) != IDYES) {
+        if ((busy_ || cleanup_.deleting()) &&
+            MessageBoxW(hwnd_,
+                        cleanup_.deleting() ? L"Clean up is deleting files. Stop after the file in hand and close?"
+                                            : L"Stop the work in progress and close?",
+                        L"FloServer Publisher", MB_YESNO | MB_ICONQUESTION) != IDYES) {
             return 0;
         }
         if (busy_) {
@@ -988,6 +991,12 @@ void Publisher::check_live() {
 
 // D34: what's new upstream for the runtimes in the next list.
 void Publisher::open_updates() {
+    if (!updates_.blocked) {
+        updates_.blocked = [this]() -> std::wstring {
+            return cleanup_.deleting() ? L"Clean up is deleting files from R2: get them once it's done."
+                                       : std::wstring();
+        };
+    }
     // Per runtime and platform (D36.3): Linux's PHP has rows of its own.
     std::vector<std::string> list_paths;
     list_paths.reserve(files_.size());
@@ -1006,6 +1015,17 @@ void Publisher::open_updates() {
 // D37: the Clean up window; it asks for the next list's files itself, at
 // each check and again before deleting.
 void Publisher::open_cleanup() {
+    if (!cleanup_.main_busy) {
+        cleanup_.main_busy = [this]() -> std::wstring {
+            if (busy_) {
+                return L"The Publisher is publishing: delete once it's done.";
+            }
+            if (updates_.working()) {
+                return L"Updates is downloading or uploading: delete once it's done.";
+            }
+            return {};
+        };
+    }
     if (!cleanup_.next_paths) {
         cleanup_.next_paths = [this] {
             std::vector<std::string> paths;
@@ -1026,7 +1046,7 @@ std::wstring Publisher::add_fetched(const std::vector<std::string>& cdn_paths, b
     for (const std::string& p : cdn_paths) {
         all += L"\n" + widen(p);
     }
-    if (busy_ || live_busy_) {
+    if (busy_ || live_busy_ || cleanup_.deleting()) {
         return L"The Publisher is busy, so these weren't added to the next list. Add them by hand once it's done "
                L"(upload-steps.txt has the paths):\n" + all;
     }
@@ -1127,6 +1147,11 @@ void Publisher::on_live(std::unique_ptr<mt::LiveResult> live) {
 
 void Publisher::add_path() {
     if (busy_ || live_busy_) {
+        return;
+    }
+    if (cleanup_.deleting()) {
+        MessageBoxW(hwnd_, L"Clean up is deleting files from R2. Add files once it's done.", L"FloServer Publisher",
+                    MB_OK | MB_ICONINFORMATION);
         return;
     }
     const int n = GetWindowTextLengthW(path_);
@@ -1557,6 +1582,11 @@ void Publisher::publish() {
 // go live (no key then, or a failed upload).
 void Publisher::go_live_again() {
     if (busy_ || live_busy_ || last_folder_.empty() || signed_sequence_ == 0) {
+        return;
+    }
+    if (cleanup_.deleting()) {
+        MessageBoxW(hwnd_, L"Clean up is deleting files from R2. Go live once it's done.", L"FloServer Publisher",
+                    MB_OK | MB_ICONINFORMATION);
         return;
     }
     GoLiveKeys keys{floserver::publisher::load_r2_key(), floserver::publisher::load_purge_token()};

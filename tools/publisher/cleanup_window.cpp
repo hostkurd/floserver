@@ -124,8 +124,12 @@ Plan make_plan(core::HttpTransport& http, const mt::R2Key& key, const std::vecto
         return out;
     }
     const auto live_paths = mt::list_paths(*live.list, mt::kCdn);
-    if (!live_paths || live_paths->empty()) {
+    if (!live_paths) {
         out.error = "The live list has a file that isn't on cdn.floserver.org, so what it uses can't be told";
+        return out;
+    }
+    if (live_paths->empty()) {
+        out.error = "The live list has no files";
         return out;
     }
     say(L"Listing the files on R2…");
@@ -166,6 +170,9 @@ fs::path record_path() {
     std::array<wchar_t, 32> stamp{};
     (void)wcsftime(stamp.data(), stamp.size(), L"%Y-%m-%d %H-%M", &local);
     const fs::path folder = publisher_folder();
+    if (folder.empty()) {
+        return {};
+    }
     fs::path p = folder / (std::wstring(L"cleanup ") + stamp.data() + L".txt");
     std::error_code ec;
     for (int n = 2; fs::exists(p, ec) && n < 100; ++n) {
@@ -261,7 +268,7 @@ void CleanupWindow::open(HWND owner) {
     ShowWindow(hwnd_, SW_SHOWNORMAL);
     SetForegroundWindow(hwnd_);
     // Every open reads R2 again: the main window may have published meanwhile.
-    if (!checking_ && !deleting_) {
+    if (!checking_ && !deleting_ && !prompting_) {
         check();
     }
 }
@@ -371,12 +378,17 @@ void CleanupWindow::stop_worker() {
 }
 
 void CleanupWindow::check() {
-    if (checking_ || deleting_) {
+    if (checking_ || deleting_ || prompting_) {
         return;
     }
     std::optional<mt::R2Key> key = load_r2_key();
     if (!key) {
+        prompting_ = true;
         key = ask_r2_key(hwnd_);
+        prompting_ = false;
+        if (hwnd_ == nullptr || checking_ || deleting_) {
+            return;  // closed, or something started, while it asked
+        }
     }
     if (!key) {
         set_text(status_, L"Clean up needs the R2 key (Object Read & Write on floserver-cdn). Press Check again "
@@ -386,6 +398,7 @@ void CleanupWindow::check() {
     stop_worker();
     checking_ = true;
     ran_ = false;
+    ++generation_;
     rows_.clear();
     plan_notes_.clear();
     outcome_.clear();
@@ -494,7 +507,19 @@ void CleanupWindow::ticks_changed() {
             rows_[i].note = plan_notes_[i];
         }
     }
-    mt::tie_sources(rows_);
+    // Rows deleted in a run are gone: they don't hold a source back.
+    std::vector<mt::CleanupRow> present;
+    std::vector<std::size_t> where;
+    for (std::size_t i = 0; i < rows_.size(); ++i) {
+        if (i >= outcome_.size() || outcome_[i] != Outcome::Deleted) {
+            present.push_back(rows_[i]);
+            where.push_back(i);
+        }
+    }
+    mt::tie_sources(present);
+    for (std::size_t k = 0; k < present.size(); ++k) {
+        rows_[where[k]] = std::move(present[k]);
+    }
     for (std::size_t i = 0; i < rows_.size(); ++i) {
         refresh_row(i);
     }
@@ -519,6 +544,9 @@ void CleanupWindow::update_summary() {
     std::size_t kept = 0;
     for (std::size_t i = 0; i < rows_.size(); ++i) {
         const mt::CleanupRow& r = rows_[i];
+        if (i < outcome_.size() && outcome_[i] == Outcome::Deleted) {
+            continue;
+        }
         if (r.kind == mt::CleanupKind::Kept) {
             ++kept;
         } else if (r.kind == mt::CleanupKind::Wait || r.kind == mt::CleanupKind::Unknown) {
@@ -552,8 +580,14 @@ void CleanupWindow::set_buttons() {
 // D37.4: asks, then deletes the ticked rows on the worker after checking
 // everything again.
 void CleanupWindow::delete_selected() {
-    if (checking_ || deleting_) {
+    if (checking_ || deleting_ || prompting_) {
         return;
+    }
+    if (main_busy) {
+        if (const std::wstring why = main_busy(); !why.empty()) {
+            set_text(status_, why.c_str());
+            return;
+        }
     }
     std::vector<std::size_t> picked;
     std::uint64_t bytes = 0;
@@ -575,14 +609,22 @@ void CleanupWindow::delete_selected() {
     }
     const std::optional<mt::PurgeToken> purge = load_purge_token();
 
+    const bool one = picked.size() == 1;
     const std::wstring title = L"Delete " + files_text(picked.size()) + L" (" + size_text(bytes) + L") from floserver-cdn?";
-    std::wstring body = L"This can't be undone. They're in no list now";
-    body += early == 0 ? L", and they left the list more than 7 days ago."
-                       : L". " + std::to_wstring(early) + L" of them" +
-                             L" left the list less than 7 days ago, or when isn't known: a FloServer that read an "
-                             L"older list may still ask for it.";
-    body += purge ? L" They'll also be purged from Cloudflare's cache."
-                  : L" No purge token is saved, so Cloudflare serves cached copies until they expire.";
+    std::wstring body = one ? L"This can't be undone. It's in no list now" : L"This can't be undone. They're in no list now";
+    if (early == 0) {
+        body += one ? L", and it left the list more than 7 days ago." : L", and they left the list more than 7 days ago.";
+    } else {
+        body += one ? L". It" : (early == 1 ? L". 1 of them" : L". " + std::to_wstring(early) + L" of them");
+        body += L" left the list less than 7 days ago, or when isn't known: a FloServer that read an older list may "
+                L"still ask for ";
+        body += early == 1 ? L"it." : L"them.";
+    }
+    if (purge) {
+        body += one ? L" It'll also be purged from Cloudflare's cache." : L" They'll also be purged from Cloudflare's cache.";
+    } else {
+        body += L" No purge token is saved, so Cloudflare serves cached copies until they expire.";
+    }
     const std::array<TASKDIALOG_BUTTON, 2> buttons = {{{IDOK, L"Delete"}, {IDCANCEL, L"Cancel"}}};
     TASKDIALOGCONFIG tdc{};
     tdc.cbSize = sizeof(tdc);
@@ -596,12 +638,27 @@ void CleanupWindow::delete_selected() {
     tdc.pButtons = buttons.data();
     tdc.nDefaultButton = IDCANCEL;
     int pressed = IDCANCEL;
-    if (FAILED(TaskDialogIndirect(&tdc, &pressed, nullptr, nullptr))) {
+    const std::uint64_t asked_on = generation_;
+    prompting_ = true;
+    if (FAILED(TaskDialogIndirect(&tdc, &pressed, nullptr, nullptr)) && hwnd_ != nullptr) {
         pressed = MessageBoxW(hwnd_, (title + L"\n\n" + body).c_str(), L"FloServer Publisher",
                               MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2);
     }
-    if (pressed != IDOK) {
+    prompting_ = false;
+    // Closed, checked again or busy while it asked: the rows asked about may be gone.
+    if (pressed != IDOK || hwnd_ == nullptr || checking_ || deleting_ || generation_ != asked_on) {
         return;
+    }
+    if (main_busy) {
+        if (const std::wstring why = main_busy(); !why.empty()) {
+            set_text(status_, why.c_str());
+            return;
+        }
+    }
+    for (const std::size_t i : picked) {
+        if (i >= rows_.size()) {
+            return;
+        }
     }
 
     stop_worker();
@@ -683,6 +740,9 @@ void CleanupWindow::delete_selected() {
                     } else if (it == fresh.end() || !mt::may_delete(want.path)) {
                         d.problem = "a list uses it now, or it's gone from R2";
                         d.skipped = true;
+                    } else if (want.kind == mt::CleanupKind::Ready && it->second->kind != mt::CleanupKind::Ready) {
+                        d.problem = "it left a list again since the check; press Check again";
+                        d.skipped = true;
                     } else if (it->second->kind == mt::CleanupKind::Kept ||
                                (want.source && binary_stays.contains(folder_of(want.path)))) {
                         d.problem = "a binary in its folder stays, so its source does (GPL)";
@@ -690,7 +750,8 @@ void CleanupWindow::delete_selected() {
                     } else {
                         PostMessageW(target, kMsgWorking, row, 0);
                         std::string error;
-                        if (!bucket.delete_object(want.path, error, &cancel_)) {
+                        // Stop waits for this one: a DELETE cut off may still have happened.
+                        if (!bucket.delete_object(want.path, error, nullptr)) {
                             d.problem = error.empty() ? std::string("not deleted") : error;
                         }
                     }
@@ -727,6 +788,10 @@ void CleanupWindow::delete_selected() {
         // D37.6: the record.
         if (!done.empty()) {
             run->record = record_path();
+        }
+        if (!done.empty() && run->record.empty()) {
+            run->record_problem = "the record couldn't be written (no Documents folder)";
+        } else if (!done.empty()) {
             std::error_code ec;
             fs::create_directories(run->record.parent_path(), ec);
             std::ofstream f(run->record, std::ios::binary | std::ios::trunc);
@@ -780,9 +845,10 @@ void CleanupWindow::ran(const CleanupRun& run) {
         text += L", " + std::to_wstring(run.skipped) + L" not deleted";
     }
     text += L".";
-    if (!run.record.empty()) {
-        text += run.record_problem.empty() ? L" Record: " + run.record.filename().wstring()
-                                           : L" " + widen(run.record_problem) + L".";
+    if (!run.record_problem.empty()) {
+        text += L" But " + widen(run.record_problem) + L".";
+    } else if (!run.record.empty()) {
+        text += L" Record: " + run.record.filename().wstring();
     }
     set_text(status_, text.c_str());
     update_summary();
@@ -964,6 +1030,9 @@ LRESULT CleanupWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
     }
     case kMsgChecked: {
         const std::unique_ptr<CleanupCheck> found(int_to_ptr<CleanupCheck*>(lp));
+        if (!checking_) {
+            return 0;  // not this window's check any more
+        }
         if (worker_.joinable()) {
             worker_.join();
         }
@@ -989,6 +1058,9 @@ LRESULT CleanupWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
     }
     case kMsgRan: {
         const std::unique_ptr<CleanupRun> run(int_to_ptr<CleanupRun*>(lp));
+        if (!deleting_) {
+            return 0;
+        }
         if (worker_.joinable()) {
             worker_.join();
         }

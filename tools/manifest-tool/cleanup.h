@@ -95,7 +95,8 @@ struct CleanupInput {
 // D37.1: one row per object no list uses that is a runtime file, a source
 // archive or a FloServer installer; anything else in the bucket isn't
 // shown. Ready rows first (by path), then Wait, Unknown, Kept. Nothing at
-// all without the live list (live_sequence and live_paths).
+// all without the live list (live_sequence and live_paths). A saved list
+// newer than the live one may still go live, so its files count as in use.
 //
 // When a file left: when the first saved list without it went live. That
 // is the earliest live-at.txt time of that list or a later one, or the

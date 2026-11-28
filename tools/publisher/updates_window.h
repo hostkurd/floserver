@@ -40,6 +40,10 @@ public:
     // the versions in the next list.
     void open(HWND owner, std::map<std::string, std::vector<std::string>> listed, manifest_tool::ListedBuilds builds = {});
     [[nodiscard]] HWND hwnd() const { return hwnd_; }
+    // Downloading or uploading now (Clean up doesn't delete meanwhile).
+    [[nodiscard]] bool working() const { return downloading_; }
+    // Why it mustn't download or upload now (Clean up is deleting), or empty.
+    std::function<std::wstring()> blocked;
     // Called with the CDN paths downloaded; returns what to tell the user
     // about the next list (or why they couldn't be added).
     // `on_r2` says they're uploaded; otherwise they're still to upload by hand.

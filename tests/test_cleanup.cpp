@@ -213,11 +213,17 @@ TEST_CASE("cleanup: when a file left: late uploads, abandoned lists, lists never
     }
     SUBCASE("an abandoned twin of the list that dropped it: the later of the two counts") {
         in.saved = {saved(20, "2026-11-01T00:00:00Z", {kLin8512}), saved(21, "2026-11-10T00:00:00Z", {kLin8513}),
-                    saved(21, "2026-11-26T00:00:00Z", {kLin8513}), saved(22, "2026-11-27T00:00:00Z", {kLin8512})};
+                    saved(21, "2026-11-26T00:00:00Z", {kLin8513})};
         in.objects[0].last_modified = "2026-11-10T00:00:00.000Z";
         m = by_path(plan_cleanup(in));
-        CHECK(*m.at(kLin8512).left == at("2026-11-26T00:00:00Z"));  // 22 never went live: ignored
+        CHECK(*m.at(kLin8512).left == at("2026-11-26T00:00:00Z"));
         CHECK(m.at(kLin8512).kind == CleanupKind::Wait);
+    }
+    SUBCASE("a list signed here but not live yet may still go up: its files aren't offered") {
+        in.wait = days{1};
+        in.saved.push_back(saved(22, "2026-11-27T00:00:00Z", {kLin8512}));
+        m = by_path(plan_cleanup(in));
+        CHECK_FALSE(m.contains(kLin8512));
     }
     SUBCASE("a list missing here after the one that dropped it may have put it back: counts from the live upload") {
         // 10 had it; 11 dropped it (live 1 Nov); 12 (made elsewhere) put it

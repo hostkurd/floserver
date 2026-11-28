@@ -45,6 +45,9 @@ public:
     // The main window's files (the next list): asked at each check, and
     // again when Delete selected is pressed.
     std::function<std::vector<std::string>()> next_paths;
+    // Why the Publisher can't let files be deleted now (publishing, going
+    // live, uploading in Updates), or empty.
+    std::function<std::wstring()> main_busy;
 
 private:
     // What happened to a row in this window's last run.
@@ -90,6 +93,8 @@ private:
     bool deleting_ = false;
     bool filling_ = false;  // ticks set by the window, not the user
     bool ran_ = false;      // the rows show a run's outcome
+    bool prompting_ = false;  // a key prompt or the confirmation is open: no new check meanwhile
+    std::uint64_t generation_ = 0;  // counts the checks, so a confirmation sees rows_ replaced
     std::uint64_t freed_ = 0;
     std::size_t deleted_ = 0;
     std::size_t run_total_ = 0;  // rows in the run going on
