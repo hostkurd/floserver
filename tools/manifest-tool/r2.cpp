@@ -373,6 +373,130 @@ std::string R2Bucket::check(const std::atomic<bool>* cancel) {
     return error.empty() ? s3_error(r) : error;
 }
 
+namespace {
+
+// The five entities S3 listings escape in keys.
+std::string xml_unescape(std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        if (s[i] != '&') {
+            out += s[i];
+            continue;
+        }
+        static constexpr std::array<std::pair<std::string_view, char>, 5> kEntities = {
+            {{"&amp;", '&'}, {"&lt;", '<'}, {"&gt;", '>'}, {"&quot;", '"'}, {"&apos;", '\''}}};
+        bool done = false;
+        for (const auto& [name, c] : kEntities) {
+            if (s.substr(i, name.size()) == name) {
+                out += c;
+                i += name.size() - 1;
+                done = true;
+                break;
+            }
+        }
+        if (!done) {
+            out += '&';
+        }
+    }
+    return out;
+}
+
+}  // namespace
+
+std::optional<std::vector<R2Object>> R2Bucket::list_objects(std::string& error, const std::atomic<bool>* cancel,
+                                                             std::size_t max_objects) {
+    error.clear();
+    std::vector<R2Object> out;
+    std::string token;
+    for (int page = 0; page < 1000; ++page) {
+        Call c;
+        c.method = "GET";
+        c.object = "";  // the bucket itself
+        c.query = {{"list-type", "2"}, {"max-keys", "1000"}};
+        if (!token.empty()) {
+            c.query.emplace_back("continuation-token", token);
+        }
+        c.max_time = std::chrono::seconds{60};
+        c.max_reply = std::size_t{8} * 1024 * 1024;
+        core::HttpResponse r = call(c, error, cancel);
+        if (r.status != 200 && retryable(r) && (cancel == nullptr || !cancel->load())) {
+            error.clear();
+            r = call(c, error, cancel);
+        }
+        if (r.status != 200) {
+            if (error.empty()) {
+                error = "R2 couldn't list the bucket: " + s3_error(r);
+            }
+            return std::nullopt;
+        }
+        std::size_t at = 0;
+        while (true) {
+            const auto a = r.body.find("<Contents>", at);
+            if (a == std::string::npos) {
+                break;
+            }
+            const auto b = r.body.find("</Contents>", a);
+            if (b == std::string::npos) {
+                error = "R2's listing was cut short";
+                return std::nullopt;
+            }
+            const std::string item = r.body.substr(a, b - a);
+            at = b;
+            R2Object o;
+            o.key = xml_unescape(xml_value(item, "Key").value_or(""));
+            const std::string size = xml_value(item, "Size").value_or("");
+            const auto [end, ec] = std::from_chars(size.data(), size.data() + size.size(), o.size);
+            if (o.key.empty() || ec != std::errc() || end != size.data() + size.size()) {
+                error = "R2's listing has an entry without a key or size";
+                return std::nullopt;
+            }
+            o.last_modified = xml_value(item, "LastModified").value_or("");
+            if (out.size() >= max_objects) {
+                error = "the bucket holds more than " + std::to_string(max_objects) + " objects";
+                return std::nullopt;
+            }
+            out.push_back(std::move(o));
+        }
+        if (xml_value(r.body, "IsTruncated").value_or("false") != "true") {
+            return out;
+        }
+        token = xml_unescape(xml_value(r.body, "NextContinuationToken").value_or(""));
+        if (token.empty()) {
+            error = "R2 said the listing goes on but gave no continuation token";
+            return std::nullopt;
+        }
+    }
+    error = "R2's listing didn't end";
+    return std::nullopt;
+}
+
+bool R2Bucket::delete_object(const std::string& object, std::string& error, const std::atomic<bool>* cancel) {
+    error.clear();
+    if (object.empty() || object.starts_with('/')) {
+        error = "not an object name: " + object;
+        return false;
+    }
+    Call c;
+    c.method = "DELETE";
+    c.object = object;
+    c.max_time = std::chrono::seconds{30};
+    core::HttpResponse r = call(c, error, cancel);
+    if (retryable(r) && (cancel == nullptr || !cancel->load())) {
+        error.clear();
+        r = call(c, error, cancel);
+    }
+    // S3 answers 204 whether it was there or not; 404 counts as gone too.
+    if (r.status == 204 || r.status == 200 || r.status == 404) {
+        error.clear();
+        return true;
+    }
+    if (error.empty()) {
+        error = "R2 didn't delete " + object + ": " + s3_error(r);
+    }
+    return false;
+}
+
 std::optional<std::string> R2Bucket::get_text(const std::string& object, std::size_t max_bytes,
                                                std::string& error, const std::atomic<bool>* cancel) {
     error.clear();

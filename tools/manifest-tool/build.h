@@ -62,6 +62,7 @@ struct CdnPath {
     std::string variant;    // the catalog's, such as Bun's "baseline"; php-redis's "php8-4", from the file name
     std::string platform;   // the catalog's: "windows-x64", "linux-x64", "any"
     bool listable = false;  // the list can carry it
+    bool source = false;    // a source archive (.tar.gz/.tar.xz) of a catalog runtime, never listed
     std::string problem;    // why not, when it can't ("<path>: ...")
 };
 [[nodiscard]] CdnPath describe_cdn_path(std::string_view path);

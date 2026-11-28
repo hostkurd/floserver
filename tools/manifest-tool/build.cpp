@@ -284,6 +284,7 @@ Classified classify(const std::string& path) {
                                                           regex_escape(version))));
         if (source || other_build) {
             c.note = true;
+            c.parts.source = source && !other_build;
             c.message = join({path, source ? ": source archive, not listed"
                                            : ": another build of this release, not listed"});
         } else {

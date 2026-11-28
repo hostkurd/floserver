@@ -51,6 +51,10 @@ public:
     bool no_bucket = false;
     std::atomic<bool>* cancel_flag = nullptr;  // set (and the part dropped) when a part is sent
     bool complete_with_error = false;
+    std::size_t list_page = 1000;  // D37.7: objects per listing page
+    int fail_lists = 0;            // listing pages to answer 503 first
+    int fail_deletes = 0;          // deletes to answer delete_status first
+    int delete_status = 403;
 
     core::HttpReply get(const std::string&, const core::HttpLimits&, const core::HttpBody&) override { return {}; }
 
@@ -124,6 +128,41 @@ public:
             r.body = "<ListBucketResult></ListBucketResult>";
             return r;
         }
+        if (req.method == "GET" && path == "/floserver-cdn/" && query.find("max-keys=1000") != std::string::npos) {
+            // D37.7: list_page objects a page; the token says where the next page starts.
+            if (fail_lists > 0) {
+                --fail_lists;
+                r.status = 503;
+                return r;
+            }
+            std::size_t start = 0;
+            if (const auto t = query.find("continuation-token="); t != std::string::npos) {
+                const std::string token = decode(query.substr(t + 19, query.find('&', t) - t - 19));
+                REQUIRE(token.starts_with("next&page="));  // sent unescaped, as given
+                start = std::stoul(token.substr(10));
+            }
+            std::vector<std::pair<std::string, std::string>> all(objects.begin(), objects.end());
+            r.status = 200;
+            r.body = "<ListBucketResult><Name>floserver-cdn</Name>";
+            for (std::size_t i = start; i < std::min(all.size(), start + list_page); ++i) {
+                const std::string key = all[i].first.substr(std::string("/floserver-cdn/").size());
+                std::string escaped;
+                for (const char c : key) {
+                    escaped += c == '&' ? std::string("&amp;") : std::string(1, c);
+                }
+                r.body += "<Contents><Key>" + escaped + "</Key><LastModified>2026-11-20T09:12:44.000Z</LastModified>"
+                          "<ETag>&quot;x&quot;</ETag><Size>" + std::to_string(all[i].second.size()) +
+                          "</Size><StorageClass>STANDARD</StorageClass></Contents>";
+            }
+            const bool more = start + list_page < all.size();
+            r.body += std::string("<IsTruncated>") + (more ? "true" : "false") + "</IsTruncated>";
+            if (more) {
+                r.body += "<NextContinuationToken>next&amp;page=" + std::to_string(start + list_page) +
+                          "</NextContinuationToken>";
+            }
+            r.body += "</ListBucketResult>";
+            return r;
+        }
         if (req.method == "GET" && query.empty()) {
             const auto it = objects.find(decode(path));
             r.status = it == objects.end() ? 404 : 200;
@@ -181,6 +220,15 @@ public:
             objects[decode(path)] = all;
         } else if (req.method == "DELETE" && query == "uploadId=up1") {
             aborted = true;
+            r.status = 204;
+        } else if (req.method == "DELETE" && query.empty()) {
+            if (fail_deletes > 0) {
+                --fail_deletes;
+                r.status = delete_status;
+                r.body = "<Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>";
+                return r;
+            }
+            objects.erase(decode(path));
             r.status = 204;
         } else {
             r.status = 400;
@@ -464,4 +512,60 @@ TEST_CASE("r2: put_text replaces, get_text reads back, and says when it's missin
     r2.no_bucket = true;
     CHECK_FALSE(b.get_text("manifest.json", 100, error));
     CHECK(error.empty());  // a 404 either way; go_live says R2 has no list
+}
+
+TEST_CASE("r2: list_objects reads every page and unescapes keys (D37.7)") {
+    FakeR2 r2;
+    r2.list_page = 2;
+    r2.objects["/floserver-cdn/manifest.json"] = "{}";
+    r2.objects["/floserver-cdn/php/8.5.12/a&b.zip"] = "12345";
+    r2.objects["/floserver-cdn/php/8.5.13/x.zip"] = "1";
+    r2.objects["/floserver-cdn/nginx/1.30.8/n.zip"] = "123";
+    r2.objects["/floserver-cdn/composer/2.11.3/composer.phar"] = "12";
+    R2Bucket b = bucket(r2);
+    std::string error;
+    const auto all = b.list_objects(error);
+    REQUIRE_MESSAGE(all, error);
+    REQUIRE(all->size() == 5);
+    std::map<std::string, std::uint64_t> sizes;
+    for (const R2Object& o : *all) {
+        sizes[o.key] = o.size;
+        CHECK(o.last_modified == "2026-11-20T09:12:44.000Z");
+    }
+    CHECK(sizes.at("php/8.5.12/a&b.zip") == 5);
+    CHECK(sizes.at("manifest.json") == 2);
+    CHECK(std::count_if(r2.log.begin(), r2.log.end(), [](const std::string& l) { return l.find("max-keys=1000") != std::string::npos; }) == 3);
+
+    SUBCASE("a page that fails once is asked again; twice, the listing fails") {
+        r2.fail_lists = 1;
+        CHECK(b.list_objects(error).has_value());
+        r2.fail_lists = 2;
+        CHECK_FALSE(b.list_objects(error).has_value());
+        CHECK(error.find("couldn't list") != std::string::npos);
+    }
+    SUBCASE("more objects than allowed: refused") {
+        CHECK_FALSE(b.list_objects(error, nullptr, 3).has_value());
+        CHECK(error.find("more than 3") != std::string::npos);
+    }
+}
+
+TEST_CASE("r2: delete_object (D37.7)") {
+    FakeR2 r2;
+    r2.objects["/floserver-cdn/php/8.5.12/x.zip"] = "data";
+    R2Bucket b = bucket(r2);
+    std::string error;
+    CHECK(b.delete_object("php/8.5.12/x.zip", error));
+    CHECK(r2.objects.empty());
+    CHECK(b.delete_object("php/8.5.12/x.zip", error));  // already gone counts
+    r2.objects["/floserver-cdn/php/8.5.12/y.zip"] = "data";
+    r2.fail_deletes = 1;
+    CHECK_FALSE(b.delete_object("php/8.5.12/y.zip", error));
+    CHECK(error.find("Access Denied") != std::string::npos);
+    CHECK(r2.objects.size() == 1);
+    r2.fail_deletes = 1;
+    r2.delete_status = 503;
+    CHECK(b.delete_object("php/8.5.12/y.zip", error));  // one retry on 5xx
+    CHECK(r2.objects.empty());
+    CHECK_FALSE(b.delete_object("", error));
+    CHECK_FALSE(b.delete_object("/manifest.json", error));
 }

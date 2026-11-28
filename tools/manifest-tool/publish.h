@@ -88,6 +88,10 @@ struct PublishFile {
 // php-redis says its PHP series ("phpredis 6.3.0 for PHP 8.4").
 [[nodiscard]] std::string runtime_title(std::string_view runtime, std::string_view version,
                                         std::string_view variant = {});
+// A file's title in the Publisher: runtime_title plus the platform for one
+// that isn't Windows' ("PHP 8.5.12 (Linux)" beside "PHP 8.5.12").
+[[nodiscard]] std::string file_title(std::string_view runtime, std::string_view version, std::string_view variant,
+                                     std::string_view platform);
 
 // A new file to add: trims spaces, a leading '/' and a CDN address the user
 // pasted with it. FloServer's installer may have its "What's new" address
