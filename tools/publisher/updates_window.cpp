@@ -40,18 +40,19 @@ enum : int { IdList = 300, IdKeep, IdCheckAgain, IdDownload, IdGet, IdClose, IdK
 
 constexpr COLORREF kWindowBg = RGB(0xF3, 0xF3, 0xF3);
 
-// A label whose text changes: set, then painted again whole, so nothing of
-// the previous text stays (as "26 up to dateeateto date" once did).
-void set_text(HWND label, const wchar_t* text) {
-    SetWindowTextW(label, text);
-    InvalidateRect(label, nullptr, TRUE);
-}
 constexpr COLORREF kText = RGB(0x1B, 0x1B, 0x1B);
 constexpr COLORREF kMuted = RGB(0x5F, 0x5F, 0x5F);
 constexpr COLORREF kBlue = RGB(0x0B, 0x53, 0x94);
 constexpr COLORREF kAmber = RGB(0x7A, 0x4A, 0x00);
 constexpr COLORREF kRed = RGB(0xB3, 0x26, 0x1E);
 constexpr COLORREF kGreen = RGB(0x0F, 0x6B, 0x2E);
+
+// A label whose text changes: set, then painted again whole, so nothing of
+// the previous text stays (as "26 up to dateeateto date" once did).
+void set_text(HWND label, const wchar_t* text) {
+    SetWindowTextW(label, text);
+    InvalidateRect(label, nullptr, TRUE);
+}
 
 // Documents\FloServer Publisher\<what> <date> <time>.
 fs::path dated_folder(const std::wstring& what) {
@@ -362,7 +363,7 @@ void UpdatesWindow::check() {
     outcome_ok_.clear();
     ListView_DeleteAllItems(list_);
     set_buttons();
-    SetWindowTextW(summary_, L"");
+    set_text(summary_, L"");
     set_text(status_, to_ask_ == 1 ? L"Asking the official site…" : L"Asking the official sites…");
     saved_to_.clear();
     if (Button_GetCheck(keep_answers_) == BST_CHECKED) {
