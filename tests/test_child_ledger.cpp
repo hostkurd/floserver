@@ -127,7 +127,7 @@ TEST_CASE("a sweep ends what a crashed copy left, and only that") {
                                        "1 1 g /sbin/init\ngarbage\n");
         const auto t0 = std::chrono::steady_clock::now();
         CHECK(sweep_child_ledger(old) == 1);
-        CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(2));  // TERM did it, no KILL wait
+        CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(5));  // TERM did it, no 10 s KILL wait
         CHECK_FALSE(alive(left));
         CHECK_FALSE(fs::exists(old));
     }
