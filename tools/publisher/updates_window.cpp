@@ -39,12 +39,20 @@ constexpr UINT kMsgFetched = WM_APP + 23;    // lParam: FetchDone*
 enum : int { IdList = 300, IdKeep, IdCheckAgain, IdDownload, IdGet, IdClose, IdKey, IdCheckAll, IdUncheckAll };
 
 constexpr COLORREF kWindowBg = RGB(0xF3, 0xF3, 0xF3);
+
 constexpr COLORREF kText = RGB(0x1B, 0x1B, 0x1B);
 constexpr COLORREF kMuted = RGB(0x5F, 0x5F, 0x5F);
 constexpr COLORREF kBlue = RGB(0x0B, 0x53, 0x94);
 constexpr COLORREF kAmber = RGB(0x7A, 0x4A, 0x00);
 constexpr COLORREF kRed = RGB(0xB3, 0x26, 0x1E);
 constexpr COLORREF kGreen = RGB(0x0F, 0x6B, 0x2E);
+
+// A label whose text changes: set, then painted again whole, so nothing of
+// the previous text stays (as "26 up to dateeateto date" once did).
+void set_text(HWND label, const wchar_t* text) {
+    SetWindowTextW(label, text);
+    InvalidateRect(label, nullptr, TRUE);
+}
 
 // Documents\FloServer Publisher\<what> <date> <time>.
 fs::path dated_folder(const std::wstring& what) {
@@ -171,7 +179,7 @@ void UpdatesWindow::open(HWND owner, std::map<std::string, std::vector<std::stri
     if (!same && !busy_ && !downloading_) {
         check();
     } else if ((busy_ || downloading_) && listed != listed_) {
-        SetWindowTextW(status_, L"The list changed while checking: press Check again when this check ends.");
+        set_text(status_, L"The list changed while checking: press Check again when this check ends.");
     }
 }
 
@@ -355,8 +363,8 @@ void UpdatesWindow::check() {
     outcome_ok_.clear();
     ListView_DeleteAllItems(list_);
     set_buttons();
-    SetWindowTextW(summary_, L"");
-    SetWindowTextW(status_, to_ask_ == 1 ? L"Asking the official site…" : L"Asking the official sites…");
+    set_text(summary_, L"");
+    set_text(status_, to_ask_ == 1 ? L"Asking the official site…" : L"Asking the official sites…");
     saved_to_.clear();
     if (Button_GetCheck(keep_answers_) == BST_CHECKED) {
         const fs::path folder = dated_folder(L"site answers");
@@ -424,8 +432,8 @@ void UpdatesWindow::fill() {
     }
     summary += std::to_wstring(updates) + (updates == 1 ? L" update · " : L" updates · ") + std::to_wstring(fresh) +
                L" new series · " + std::to_wstring(current) + L" up to date";
-    SetWindowTextW(summary_, summary.c_str());
-    SetWindowTextW(status_, updates + fresh > 0
+    set_text(summary_, summary.c_str());
+    set_text(status_, updates + fresh > 0
                                 ? L"Tick what you want, then Get selected (or Download only, to upload by hand)."
                                 : L"Everything in the list is up to date.");
     std::error_code ec;
@@ -521,7 +529,15 @@ LRESULT UpdatesWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_CTLCOLORSTATIC:
     case WM_CTLCOLORBTN: {
         HDC dc = reinterpret_cast<HDC>(wp);  // NOLINT(performance-no-int-to-ptr)
-        SetBkMode(dc, TRANSPARENT);
+        const auto ctl = int_to_ptr<HWND>(lp);
+        if (ctl == summary_ || ctl == status_) {
+            // Text that changes: drawn on the window's colour, so a shorter
+            // text never leaves the old one showing around it.
+            SetBkMode(dc, OPAQUE);
+            SetBkColor(dc, kWindowBg);
+        } else {
+            SetBkMode(dc, TRANSPARENT);
+        }
         SetTextColor(dc, int_to_ptr<HWND>(lp) == hint_ || int_to_ptr<HWND>(lp) == status_ ? kMuted : kText);
         return reinterpret_cast<LRESULT>(bg_);
     }
@@ -563,7 +579,7 @@ LRESULT UpdatesWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
         case IdGet:
             if (downloading_) {
                 cancel_ = true;  // Stop
-                SetWindowTextW(status_, L"Stopping…");
+                set_text(status_, L"Stopping…");
                 EnableWindow(LOWORD(wp) == IdGet ? get_ : download_, FALSE);
             } else {
                 download(LOWORD(wp) == IdGet);
@@ -607,7 +623,7 @@ LRESULT UpdatesWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
                 return 0;  // it finished while you were asked: its result is showing
             }
             cancel_ = true;
-            SetWindowTextW(status_, L"Stopping…");
+            set_text(status_, L"Stopping…");
         }
         ShowWindow(hwnd_, SW_HIDE);  // kept, with its rows, until the Publisher closes
         return 0;
@@ -622,7 +638,7 @@ LRESULT UpdatesWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
         if (!key.platform.empty()) {
             name += " (" + key.platform + ") build";  // asked from FloServer's runtimes repository
         }
-        SetWindowTextW(status_, (L"Asking " + widen(name) + L"'s site (" + std::to_wstring(asked_) + L" of " +
+        set_text(status_, (L"Asking " + widen(name) + L"'s site (" + std::to_wstring(asked_) + L" of " +
                                  std::to_wstring(std::max(to_ask_, asked_)) + L")…")
                                     .c_str());
         show_progress();
@@ -646,7 +662,7 @@ LRESULT UpdatesWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
     case kMsgFetchStep: {
         const std::unique_ptr<std::wstring> text(int_to_ptr<std::wstring*>(lp));
         if (downloading_) {
-            SetWindowTextW(status_, text->c_str());
+            set_text(status_, text->c_str());
         }
         return 0;
     }
@@ -700,7 +716,7 @@ void UpdatesWindow::download(bool upload) {
             key = ask_r2_key(hwnd_);
         }
         if (!key) {
-            SetWindowTextW(status_, L"Get selected needs the R2 key to upload. Without it, use Download only.");
+            set_text(status_, L"Get selected needs the R2 key to upload. Without it, use Download only.");
             return;
         }
     }
@@ -723,7 +739,7 @@ void UpdatesWindow::download(bool upload) {
         outcome_[i].clear();
     }
     InvalidateRect(list_, nullptr, TRUE);
-    SetWindowTextW(status_, L"Starting…");
+    set_text(status_, L"Starting…");
     const fs::path folder = dated_folder(L"downloads");
     HWND target = hwnd_;
     worker_ = std::thread([target, this, folder, picked, rows = std::move(rows), listed = listed_, key] {
@@ -910,7 +926,7 @@ void UpdatesWindow::fetched(FetchDone& done) {
     } else {
         status += L". Press Publish: it checks each file from the CDN.";
     }
-    SetWindowTextW(status_, status.c_str());
+    set_text(status_, status.c_str());
     // The folder was made for this run: without a file in it, it goes.
     bool any_file = false;
     {
