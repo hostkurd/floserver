@@ -2,7 +2,7 @@
 # runtime list. For HostKurd's release routine; not shipped to users.
 enable_language(RC)
 
-add_executable(floserver_publisher WIN32 main.cpp key_window.cpp purge_token.cpp r2_key.cpp updates_window.cpp Publisher.rc)
+add_executable(floserver_publisher WIN32 main.cpp cleanup_window.cpp key_window.cpp purge_token.cpp r2_key.cpp updates_window.cpp Publisher.rc)
 set_target_properties(floserver_publisher PROPERTIES OUTPUT_NAME floserver-publisher)
 target_include_directories(floserver_publisher PRIVATE ${PROJECT_SOURCE_DIR}/src/ui-win32)
 target_link_libraries(floserver_publisher PRIVATE floserver_manifest_build floserver_core

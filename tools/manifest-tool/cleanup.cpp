@@ -122,6 +122,26 @@ std::vector<SavedFolder> saved_folders(const std::filesystem::path& folder, std:
         f.path = it->path();
         f.list.sequence = sequence->get<std::int64_t>();
         f.list.paths = std::move(*paths);
+        // Each entry's SHA-256, under each of its CDN paths.
+        const auto add_sha = [&](const json& entry) {
+            const auto sha = entry.is_object() ? entry.find("sha256") : entry.end();
+            if (sha == entry.end() || !sha->is_string()) {
+                return;
+            }
+            std::vector<std::string> at;
+            (void)add_cdn_urls(entry, cdn, at);
+            for (std::string& p : at) {
+                f.list.sha256[std::move(p)] = sha->get<std::string>();
+            }
+        };
+        if (const auto rs = doc.find("runtimes"); rs != doc.end() && rs->is_array()) {
+            for (const json& r : *rs) {
+                add_sha(r);
+            }
+        }
+        if (const auto app = doc.find("app"); app != doc.end()) {
+            add_sha(*app);
+        }
         std::optional<std::chrono::sys_seconds> made;
         if (const auto steps = read_small(it->path() / "upload-steps.txt", std::size_t{64} * 1024)) {
             // "FloServer runtime list, sequence 12, made 2026-11-25T10:00:00Z"
@@ -273,6 +293,7 @@ std::vector<CleanupRow> plan_cleanup(const CleanupInput& input) {
         std::optional<sys_seconds> known_live;  // no earlier than it went live
         std::set<std::string> paths;
         std::set<std::string> folders;
+        std::map<std::string, std::string> sha256;
     };
     std::map<std::int64_t, Group> by_sequence;
     for (const SavedList& s : input.saved) {
@@ -289,6 +310,7 @@ std::vector<CleanupRow> plan_cleanup(const CleanupInput& input) {
             g.paths.insert(p);
             g.folders.insert(folder_of(p));
         }
+        g.sha256.insert(s.sha256.begin(), s.sha256.end());
     }
     std::vector<Group> groups;
     groups.reserve(by_sequence.size());
@@ -345,6 +367,11 @@ std::vector<CleanupRow> plan_cleanup(const CleanupInput& input) {
         for (std::size_t i = 0; i < groups.size(); ++i) {
             if (p.source ? groups[i].folders.contains(folder) : groups[i].paths.contains(o.key)) {
                 last = i;
+            }
+        }
+        if (last) {
+            if (const auto sha = groups[*last].sha256.find(o.key); sha != groups[*last].sha256.end()) {
+                row.sha256 = sha->second;
             }
         }
         if (!last) {
@@ -457,16 +484,18 @@ std::string cleanup_record(const std::vector<CleanupDone>& done, std::chrono::sy
         if (d.problem.empty()) {
             ++deleted;
             freed += d.size;
-            lines += "deleted  " + d.path + "  (" + std::to_string(d.size) + " bytes)\r\n";
+            lines += "deleted  " + d.path + "  (" + std::to_string(d.size) + " bytes" +
+                     (d.sha256.empty() ? std::string() : ", SHA-256 " + d.sha256) + ")\r\n";
         } else {
-            lines += "FAILED   " + d.path + ": " + d.problem + "\r\n";
+            lines += (d.skipped ? "SKIPPED  " : "FAILED   ") + d.path + ": " + d.problem + "\r\n";
         }
     }
     std::string text = "FloServer Publisher clean-up of the R2 bucket, " + format_utc_time(when) + "\r\n";
     text += std::to_string(deleted) + " of " + std::to_string(done.size()) + " files deleted, " +
             std::to_string(freed) + " bytes freed.\r\n";
-    text += purge_note.empty() ? std::string("Cloudflare's cache: purged (or no purge token saved).\r\n")
-                               : "Cloudflare's cache: " + std::string(purge_note) + "\r\n";
+    if (!purge_note.empty()) {
+        text += "Cloudflare's cache: " + std::string(purge_note) + "\r\n";
+    }
     text += "\r\n" + lines;
     return text;
 }

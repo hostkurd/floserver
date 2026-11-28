@@ -112,8 +112,11 @@ TEST_CASE("cleanup: what's offered, ticked, waited on and kept (D37.1, D37.3)") 
                       at("2026-11-12T11:00:00Z")),
                 saved(10, "2026-11-01T10:00:00Z", {kWin8512, kMaria13, "nginx/1.30.7/nginx-1.30.7.zip", "app/0.9.0/FloServer-0.9.0-x64.msi"}),
                 saved(12, "2026-11-25T10:00:00Z", {kWin8513, kMaria14, "nginx/1.30.8/nginx-1.30.8.zip", "app/0.9.1/FloServer-0.9.1-x64.msi"})};
+    in.saved[1].sha256[kWin8512] = "beef";
     const auto rows = plan_cleanup(in);
     const auto m = by_path(rows);
+    CHECK(m.at(kWin8512).sha256 == "beef");
+    CHECK(m.at(kMaria13).sha256.empty());
 
     // Never offered: listed files, the list itself, anything the catalog doesn't know.
     for (const char* never : {"manifest.json", "manifest.json.sig", "notes/readme.txt", "website/logo.png", kWin8513, kLin8513,
@@ -327,18 +330,23 @@ TEST_CASE("cleanup: purges in batches of 30, and the record") {
     CHECK(purge_deleted(http, token, paths, "https://cdn.floserver.org/").empty());
     CHECK(http.batches == std::vector<std::size_t>{30, 30, 5});
 
-    const std::string rec = cleanup_record({{kWin8512, 36310917, ""}, {kMaria13, 95024126, "R2 didn't delete it: Access Denied"}},
-                                           at("2026-11-28T12:40:00Z"), "");
+    const std::string rec = cleanup_record({{kWin8512, 36310917, std::string(64, 'c'), "", false},
+                                            {kMaria13, 95024126, "", "R2 didn't delete it: Access Denied", false},
+                                            {kMaria14, 5, "", "now in the live or next list", true}},
+                                           at("2026-11-28T12:40:00Z"), "purged");
     CHECK(rec.find("2026-11-28T12:40:00Z") != std::string::npos);
-    CHECK(rec.find("1 of 2 files deleted, 36310917 bytes freed") != std::string::npos);
-    CHECK(rec.find("deleted  " + std::string(kWin8512)) != std::string::npos);
+    CHECK(rec.find("1 of 3 files deleted, 36310917 bytes freed") != std::string::npos);
+    CHECK(rec.find("Cloudflare's cache: purged") != std::string::npos);
+    CHECK(rec.find("deleted  " + std::string(kWin8512) + "  (36310917 bytes, SHA-256 " + std::string(64, 'c') + ")") !=
+          std::string::npos);
+    CHECK(rec.find("SKIPPED  " + std::string(kMaria14) + ": now in the live or next list") != std::string::npos);
     CHECK(rec.find("FAILED   " + std::string(kMaria13) + ": R2 didn't delete it: Access Denied") != std::string::npos);
 }
 
 TEST_CASE("cleanup: read_saved_lists reads the Publisher's signed folders; mark_live") {
     const test_util::TempDir dir;
     const auto list = [](int seq, const char* path) {
-        return R"({"schema":1,"sequence":)" + std::to_string(seq) + R"(,"runtimes":[{"name":"php","urls":["https://cdn.floserver.org/)" +
+        return R"({"schema":1,"sequence":)" + std::to_string(seq) + R"(,"runtimes":[{"name":"php","sha256":"ab12","urls":["https://cdn.floserver.org/)" +
                std::string(path) + R"("]}]})";
     };
     const auto put = [&](const char* folder, const std::string& json, bool sig = true) {
@@ -365,6 +373,7 @@ TEST_CASE("cleanup: read_saved_lists reads the Publisher's signed folders; mark_
     CHECK(lists[0].sequence == 10);
     CHECK(lists[0].made == at("2026-11-01T23:59:59Z"));  // the end of the folder's day
     CHECK(lists[0].paths == std::vector<std::string>{kWin8512});
+    CHECK(lists[0].sha256.at(kWin8512) == "ab12");
     CHECK_FALSE(lists[0].live_at);
     CHECK(lists[1].sequence == 12);
     CHECK(lists[1].made == at("2026-11-25T10:20:30Z"));
