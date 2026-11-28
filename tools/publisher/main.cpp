@@ -1017,8 +1017,8 @@ void Publisher::open_updates() {
 void Publisher::open_cleanup() {
     if (!cleanup_.main_busy) {
         cleanup_.main_busy = [this]() -> std::wstring {
-            if (busy_) {
-                return L"The Publisher is publishing: delete once it's done.";
+            if (busy_ || live_busy_) {
+                return L"The Publisher is busy (publishing or reading the live list): delete once it's done.";
             }
             if (updates_.working()) {
                 return L"Updates is downloading or uploading: delete once it's done.";
@@ -1561,6 +1561,12 @@ void Publisher::publish() {
             return;
         }
     }
+    // Asked again: Clean up may have started while a prompt was open.
+    if (cleanup_.deleting()) {
+        MessageBoxW(hwnd_, L"Clean up is deleting files from R2. Try again once it's done.", L"FloServer Publisher",
+                    MB_OK | MB_ICONINFORMATION);
+        return;
+    }
     stop_worker();
     cancel_ = false;
     steps_.fill(StepState::Waiting);
@@ -1618,6 +1624,12 @@ void Publisher::go_live_again() {
                      last_folder_.wstring() + L", or it doesn't open with FloServer's key. Was the folder changed?")
                         .c_str(),
                     L"Not uploaded", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    // Asked again: Clean up may have started while a prompt was open.
+    if (cleanup_.deleting()) {
+        MessageBoxW(hwnd_, L"Clean up is deleting files from R2. Try again once it's done.", L"FloServer Publisher",
+                    MB_OK | MB_ICONINFORMATION);
         return;
     }
     stop_worker();
