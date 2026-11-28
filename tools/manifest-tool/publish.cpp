@@ -279,10 +279,6 @@ LiveResult fetch_live_list(HttpTransport& http, std::string_view cdn,
     return result;
 }
 
-namespace {
-
-// A file's title in the Publisher: its runtime's, plus the platform for one
-// that isn't Windows' ("PHP 8.5.12 (Linux)" beside "PHP 8.5.12").
 std::string file_title(std::string_view runtime, std::string_view version, std::string_view variant,
                        std::string_view platform) {
     std::string t = runtime_title(runtime, version, variant);
@@ -293,8 +289,6 @@ std::string file_title(std::string_view runtime, std::string_view version, std::
     }
     return t;
 }
-
-}  // namespace
 
 std::string runtime_title(std::string_view runtime, std::string_view version, std::string_view variant) {
     static constexpr std::array<std::pair<std::string_view, std::string_view>, 19> kNames = {{

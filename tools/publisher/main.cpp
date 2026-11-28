@@ -14,6 +14,7 @@
 // are read just before signing and wiped right after.
 
 #include "build.h"
+#include "cleanup.h"
 #include "fetch.h"
 #include "golive.h"
 #include "publish.h"
@@ -1055,6 +1056,8 @@ void Publisher::on_live(std::unique_ptr<mt::LiveResult> live) {
     }
     live_error_.clear();
     live_ = std::move(live->list);
+    // D37: when each saved list was first seen live (lists uploaded by hand too).
+    mt::mark_live_lists(documents_folder() / L"FloServer Publisher", *live_, mt::kCdn, now_utc());
     std::vector<std::string> notes;
     std::vector<mt::PublishFile> next = mt::files_from_live(*live_, mt::kCdn, notes);
     live_notes_ = notes;
@@ -1603,6 +1606,9 @@ void Publisher::on_done(std::unique_ptr<Outcome> outcome) {
         const bool new_folder = outcome->folder != last_folder_;
         last_folder_ = outcome->folder;
         signed_sequence_ = outcome->sequence;
+        if (outcome->live) {
+            (void)mt::mark_live(last_folder_, now_utc());  // D37: Clean up counts from here
+        }
         ShowWindow(open_folder_, SW_SHOW);
         ShowWindow(copy_paths_, SW_SHOW);
         SetWindowTextW(copy_paths_, L"Copy purge URLs");

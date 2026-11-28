@@ -58,6 +58,13 @@ struct R2Progress {
     std::uint64_t total = 0;
 };
 
+// D37.7: an object in the bucket, from a listing.
+struct R2Object {
+    std::string key;            // "php/8.5.12/php-8.5.12-1-nts-Win32-vs17-x64.zip"
+    std::uint64_t size = 0;
+    std::string last_modified;  // as R2 gives it: "2026-11-20T09:12:44.000Z"
+};
+
 class R2Bucket {
 public:
     // `now` gives the signing time (tests fix it).
@@ -80,6 +87,17 @@ public:
     // D34.6: a small object's contents; nullopt with `error` empty when it isn't there.
     [[nodiscard]] std::optional<std::string> get_text(const std::string& object, std::size_t max_bytes,
                                                       std::string& error, const std::atomic<bool>* cancel = nullptr);
+
+    // D37.7: every object in the bucket (1,000 a page, every page). Nothing
+    // with `error` set when a page fails; at most `max_objects`.
+    [[nodiscard]] std::optional<std::vector<R2Object>> list_objects(std::string& error,
+                                                                    const std::atomic<bool>* cancel = nullptr,
+                                                                    std::size_t max_objects = 100000);
+
+    // D37.7: deletes `object`; true when it's gone (already gone counts).
+    // One retry on no answer or 5xx.
+    [[nodiscard]] bool delete_object(const std::string& object, std::string& error,
+                                     const std::atomic<bool>* cancel = nullptr);
 
     // D34.6: one PUT of `text`, with one retry on no answer or 5xx. Unlike
     // upload_files it replaces what's there: for the list and its signature only.
