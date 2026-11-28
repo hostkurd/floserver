@@ -15,6 +15,7 @@
 
 #include "build.h"
 #include "cleanup.h"
+#include "cleanup_window.h"
 #include "fetch.h"
 #include "golive.h"
 #include "publish.h"
@@ -83,6 +84,7 @@ enum Id : int {
     IdOpenFolder,
     IdCopyPaths,
     IdUpdates,
+    IdCleanup,
     IdR2Key,
     IdPurgeToken,
     IdGoLive,
@@ -244,7 +246,7 @@ private:
 
     HWND hwnd_ = nullptr;
     HWND live_label_ = nullptr, live_value_ = nullptr, expires_label_ = nullptr, expires_value_ = nullptr;
-    HWND check_live_ = nullptr, updates_button_ = nullptr;
+    HWND check_live_ = nullptr, updates_button_ = nullptr, cleanup_button_ = nullptr;
     HWND files_heading_ = nullptr, files_hint_ = nullptr, path_ = nullptr, add_ = nullptr, list_ = nullptr;
     HWND remove_ = nullptr, accept_ = nullptr, detail_ = nullptr;
     HWND steps_heading_ = nullptr;
@@ -277,6 +279,8 @@ private:
     std::atomic<bool> cancel_{false};
     bool busy_ = false;
     floserver::publisher::UpdatesWindow updates_;  // D34
+    floserver::publisher::CleanupWindow cleanup_;  // D37
+    void open_cleanup();
 };
 
 // ---- window ----
@@ -360,6 +364,7 @@ void Publisher::create_controls() {
     expires_value_ = label(L"", font_.get(), SS_RIGHT);
     check_live_ = make(L"BUTTON", L"Check live", WS_TABSTOP | BS_PUSHBUTTON, IdCheckLive, font_.get());
     updates_button_ = make(L"BUTTON", L"Check for updates…", WS_TABSTOP | BS_PUSHBUTTON, IdUpdates, font_.get());
+    cleanup_button_ = make(L"BUTTON", L"Clean up…", WS_TABSTOP | BS_PUSHBUTTON, IdCleanup, font_.get());
 
     files_heading_ = label(L"Files in the next list", heading_.get());
     files_hint_ = label(L"After uploading a file to the bucket, add its path", font_.get(), SS_RIGHT);
@@ -430,7 +435,10 @@ void Publisher::layout() {
     const int updates_w = px(150);
     put(updates_button_, top_card_.right - px(16) - button_w - px(8) - updates_w, top_card_.top + px(14), updates_w,
         px(32));
-    const int exp_right = top_card_.right - px(16) - button_w - px(8) - updates_w - px(16);
+    const int cleanup_w = px(100);
+    put(cleanup_button_, top_card_.right - px(16) - button_w - px(8) - updates_w - px(8) - cleanup_w,
+        top_card_.top + px(14), cleanup_w, px(32));
+    const int exp_right = top_card_.right - px(16) - button_w - px(8) - updates_w - px(8) - cleanup_w - px(16);
     put(expires_label_, exp_right - px(260), ty, px(260), px(18));
     put(expires_value_, exp_right - px(260), ty + px(19), px(260), px(20));
     put(live_label_, top_card_.left + px(16), ty, exp_right - px(276) - top_card_.left, px(18));
@@ -568,7 +576,7 @@ LRESULT Publisher::handle(UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_GETMINMAXINFO: {
         auto* mm = int_to_ptr<MINMAXINFO*>(lp);
-        mm->ptMinTrackSize = {px(820), px(560)};
+        mm->ptMinTrackSize = {px(900), px(560)};
         return 0;
     }
     case WM_DPICHANGED: {
@@ -658,6 +666,9 @@ LRESULT Publisher::handle(UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case IdUpdates:
             open_updates();
+            return 0;
+        case IdCleanup:
+            open_cleanup();
             return 0;
         case IdAdd:
             add_path();
@@ -767,8 +778,11 @@ LRESULT Publisher::handle(UINT msg, WPARAM wp, LPARAM lp) {
         on_done(std::unique_ptr<Outcome>(int_to_ptr<Outcome*>(lp)));
         return 0;
     case WM_CLOSE:
-        if (busy_ && MessageBoxW(hwnd_, L"Stop the work in progress and close?", L"FloServer Publisher",
-                                 MB_YESNO | MB_ICONQUESTION) != IDYES) {
+        if ((busy_ || cleanup_.deleting()) &&
+            MessageBoxW(hwnd_,
+                        cleanup_.deleting() ? L"Clean up is deleting files. Stop after the file in hand and close?"
+                                            : L"Stop the work in progress and close?",
+                        L"FloServer Publisher", MB_YESNO | MB_ICONQUESTION) != IDYES) {
             return 0;
         }
         if (busy_) {
@@ -977,6 +991,12 @@ void Publisher::check_live() {
 
 // D34: what's new upstream for the runtimes in the next list.
 void Publisher::open_updates() {
+    if (!updates_.blocked) {
+        updates_.blocked = [this]() -> std::wstring {
+            return cleanup_.deleting() ? L"Clean up is deleting files from R2: get them once it's done."
+                                       : std::wstring();
+        };
+    }
     // Per runtime and platform (D36.3): Linux's PHP has rows of its own.
     std::vector<std::string> list_paths;
     list_paths.reserve(files_.size());
@@ -992,6 +1012,33 @@ void Publisher::open_updates() {
     updates_.open(hwnd_, std::move(listed), mt::listed_builds_from_paths(list_paths));
 }
 
+// D37: the Clean up window; it asks for the next list's files itself, at
+// each check and again before deleting.
+void Publisher::open_cleanup() {
+    if (!cleanup_.main_busy) {
+        cleanup_.main_busy = [this]() -> std::wstring {
+            if (busy_ || live_busy_) {
+                return L"The Publisher is busy (publishing or reading the live list): delete once it's done.";
+            }
+            if (updates_.working()) {
+                return L"Updates is downloading or uploading: delete once it's done.";
+            }
+            return {};
+        };
+    }
+    if (!cleanup_.next_paths) {
+        cleanup_.next_paths = [this] {
+            std::vector<std::string> paths;
+            paths.reserve(files_.size());
+            for (const mt::PublishFile& f : files_) {
+                paths.push_back(f.path);
+            }
+            return paths;
+        };
+    }
+    cleanup_.open(hwnd_);
+}
+
 // D34.5: Download only's files into the next list, each replacing the older
 // versions of its series.
 std::wstring Publisher::add_fetched(const std::vector<std::string>& cdn_paths, bool on_r2) {
@@ -999,7 +1046,7 @@ std::wstring Publisher::add_fetched(const std::vector<std::string>& cdn_paths, b
     for (const std::string& p : cdn_paths) {
         all += L"\n" + widen(p);
     }
-    if (busy_ || live_busy_) {
+    if (busy_ || live_busy_ || cleanup_.deleting()) {
         return L"The Publisher is busy, so these weren't added to the next list. Add them by hand once it's done "
                L"(upload-steps.txt has the paths):\n" + all;
     }
@@ -1100,6 +1147,11 @@ void Publisher::on_live(std::unique_ptr<mt::LiveResult> live) {
 
 void Publisher::add_path() {
     if (busy_ || live_busy_) {
+        return;
+    }
+    if (cleanup_.deleting()) {
+        MessageBoxW(hwnd_, L"Clean up is deleting files from R2. Add files once it's done.", L"FloServer Publisher",
+                    MB_OK | MB_ICONINFORMATION);
         return;
     }
     const int n = GetWindowTextLengthW(path_);
@@ -1450,6 +1502,11 @@ void Publisher::publish() {
     if (busy_ || live_busy_) {
         return;
     }
+    if (cleanup_.deleting()) {
+        MessageBoxW(hwnd_, L"Clean up is deleting files from R2. Publish once it's done.", L"FloServer Publisher",
+                    MB_OK | MB_ICONINFORMATION);
+        return;
+    }
     if (!live_) {
         MessageBoxW(hwnd_, L"The live list hasn't been read. Press Check live first.", L"FloServer Publisher",
                     MB_OK | MB_ICONWARNING);
@@ -1504,6 +1561,12 @@ void Publisher::publish() {
             return;
         }
     }
+    // Asked again: Clean up may have started while a prompt was open.
+    if (cleanup_.deleting()) {
+        MessageBoxW(hwnd_, L"Clean up is deleting files from R2. Try again once it's done.", L"FloServer Publisher",
+                    MB_OK | MB_ICONINFORMATION);
+        return;
+    }
     stop_worker();
     cancel_ = false;
     steps_.fill(StepState::Waiting);
@@ -1525,6 +1588,11 @@ void Publisher::publish() {
 // go live (no key then, or a failed upload).
 void Publisher::go_live_again() {
     if (busy_ || live_busy_ || last_folder_.empty() || signed_sequence_ == 0) {
+        return;
+    }
+    if (cleanup_.deleting()) {
+        MessageBoxW(hwnd_, L"Clean up is deleting files from R2. Go live once it's done.", L"FloServer Publisher",
+                    MB_OK | MB_ICONINFORMATION);
         return;
     }
     GoLiveKeys keys{floserver::publisher::load_r2_key(), floserver::publisher::load_purge_token()};
@@ -1556,6 +1624,12 @@ void Publisher::go_live_again() {
                      last_folder_.wstring() + L", or it doesn't open with FloServer's key. Was the folder changed?")
                         .c_str(),
                     L"Not uploaded", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    // Asked again: Clean up may have started while a prompt was open.
+    if (cleanup_.deleting()) {
+        MessageBoxW(hwnd_, L"Clean up is deleting files from R2. Try again once it's done.", L"FloServer Publisher",
+                    MB_OK | MB_ICONINFORMATION);
         return;
     }
     stop_worker();

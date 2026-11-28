@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -43,6 +44,7 @@ struct SavedList {
     // it went live. Missing for lists from before D37.
     std::optional<std::chrono::sys_seconds> live_at;
     std::vector<std::string> paths;   // list_paths() of it
+    std::map<std::string, std::string> sha256;  // path -> its SHA-256 in the list (D37.6's record)
 };
 
 // Every saved list in `folder` (Documents\FloServer Publisher): each
@@ -77,6 +79,7 @@ struct CleanupRow {
     std::string note;   // why it waits or is kept
     bool ticked = false;
     bool source = false;  // a GPL source archive (see tie_sources)
+    std::string sha256;   // from the last saved list that had it, when known
 };
 
 struct CleanupInput {
@@ -92,7 +95,8 @@ struct CleanupInput {
 // D37.1: one row per object no list uses that is a runtime file, a source
 // archive or a FloServer installer; anything else in the bucket isn't
 // shown. Ready rows first (by path), then Wait, Unknown, Kept. Nothing at
-// all without the live list (live_sequence and live_paths).
+// all without the live list (live_sequence and live_paths). A saved list
+// newer than the live one may still go live, so its files count as in use.
 //
 // When a file left: when the first saved list without it went live. That
 // is the earliest live-at.txt time of that list or a later one, or the
@@ -124,7 +128,9 @@ void tie_sources(std::vector<CleanupRow>& rows);
 struct CleanupDone {
     std::string path;
     std::uint64_t size = 0;
+    std::string sha256;   // when known
     std::string problem;  // empty: deleted
+    bool skipped = false;  // not tried (problem says why)
 };
 [[nodiscard]] std::string cleanup_record(const std::vector<CleanupDone>& done, std::chrono::sys_seconds when,
                                          std::string_view purge_note);

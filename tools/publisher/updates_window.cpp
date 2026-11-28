@@ -709,6 +709,12 @@ void UpdatesWindow::download(bool upload) {
     if (busy_ || downloading_) {
         return;
     }
+    if (blocked) {
+        if (const std::wstring why = blocked(); !why.empty()) {
+            set_text(status_, why.c_str());
+            return;
+        }
+    }
     std::optional<mt::R2Key> key;
     if (upload) {
         key = load_r2_key();
@@ -730,6 +736,13 @@ void UpdatesWindow::download(bool upload) {
     }
     if (picked.empty()) {
         return;
+    }
+    // Asked again: Clean up may have started while the key was asked for.
+    if (blocked) {
+        if (const std::wstring why = blocked(); !why.empty()) {
+            set_text(status_, why.c_str());
+            return;
+        }
     }
     stop_worker();
     downloading_ = true;
