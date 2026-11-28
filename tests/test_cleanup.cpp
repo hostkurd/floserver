@@ -216,6 +216,28 @@ TEST_CASE("cleanup: when a file left: late uploads, abandoned lists, lists never
         CHECK(*m.at(kLin8512).left == at("2026-11-26T00:00:00Z"));  // 22 never went live: ignored
         CHECK(m.at(kLin8512).kind == CleanupKind::Wait);
     }
+    SUBCASE("a list missing here after the one that dropped it may have put it back: counts from the live upload") {
+        // 10 had it; 11 dropped it (live 1 Nov); 12 (made elsewhere) put it
+        // back; 13 dropped it again and went up on 27 Nov.
+        in.live_sequence = 13;
+        in.objects[0].last_modified = "2026-11-27T00:00:00.000Z";
+        in.saved = {saved(10, "2026-10-20T00:00:00Z", {kLin8512}), saved(11, "2026-10-31T00:00:00Z", {kLin8513}, at("2026-11-01T00:00:00Z")),
+                    saved(13, "2026-11-26T00:00:00Z", {kLin8513})};
+        m = by_path(plan_cleanup(in));
+        CHECK(*m.at(kLin8512).left == at("2026-11-27T00:00:00Z"));
+        CHECK(m.at(kLin8512).kind == CleanupKind::Wait);
+        CHECK_FALSE(m.at(kLin8512).ticked);
+        // With 12 saved here too (without it), 11's time stands.
+        in.saved.push_back(saved(12, "2026-11-10T00:00:00Z", {kLin8513}));
+        m = by_path(plan_cleanup(in));
+        CHECK(*m.at(kLin8512).left == at("2026-11-01T00:00:00Z"));
+        CHECK(m.at(kLin8512).kind == CleanupKind::Ready);
+        // A gap before the list that dropped it changes nothing.
+        in.saved.erase(in.saved.begin());
+        in.saved.push_back(saved(8, "2026-10-01T00:00:00Z", {kLin8512}));
+        m = by_path(plan_cleanup(in));
+        CHECK(*m.at(kLin8512).left == at("2026-11-01T00:00:00Z"));
+    }
     SUBCASE("the live list was made elsewhere: counts from its upload") {
         in.live_sequence = 23;
         in.saved = {saved(20, "2026-11-01T00:00:00Z", {kLin8512})};

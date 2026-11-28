@@ -305,6 +305,13 @@ std::vector<CleanupRow> plan_cleanup(const CleanupInput& input) {
         }
         went_live_by[i] = bound;
     }
+    // Whether every sequence from groups[i] to the live one is saved here:
+    // a list made elsewhere in between may have put a file back.
+    std::vector<bool> no_gap_after(groups.size(), false);
+    for (std::size_t i = groups.size(); i-- > 0;) {
+        no_gap_after[i] = i + 1 == groups.size() ? groups[i].sequence == input.live_sequence
+                                                  : no_gap_after[i + 1] && groups[i + 1].sequence == groups[i].sequence + 1;
+    }
 
     std::vector<CleanupRow> rows;
     for (const R2Object& o : input.objects) {
@@ -347,14 +354,19 @@ std::vector<CleanupRow> plan_cleanup(const CleanupInput& input) {
             // In the live sequence's list saved here (an abandoned twin), though not live nor next.
             row.kind = CleanupKind::Wait;
             row.note = "wait: in the newest list signed on this PC";
-        } else if (*last + 1 == groups.size() ? !live_since : !went_live_by[*last + 1]) {
+        } else if (*last + 1 == groups.size() || !no_gap_after[*last + 1] ? !live_since : !went_live_by[*last + 1]) {
             row.kind = CleanupKind::Unknown;
             row.note = "when the list without it went live isn't known";
         } else {
             // The next list saved here, or else the live one (made elsewhere).
-            sys_seconds left = *last + 1 == groups.size()
+            // With a list missing after that one, only the live list's
+            // upload is sure to be after it left (the live list lacks it).
+            sys_seconds left = *last + 1 == groups.size() || !no_gap_after[*last + 1]
                                    ? *live_since
                                    : std::max(groups[*last + 1].made, *went_live_by[*last + 1]);
+            if (*last + 1 < groups.size()) {
+                left = std::max(left, groups[*last + 1].made);
+            }
             // Uploaded again since: count from then.
             if (const auto up = s3_time(o.last_modified); up && *up > left) {
                 left = *up;
