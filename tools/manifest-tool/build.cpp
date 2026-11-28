@@ -278,13 +278,16 @@ Classified classify(const std::string& path) {
     if (!std::regex_match(file, pattern_of(*entry))) {
         entry = first_row;
         const bool source = file.ends_with(".tar.gz") || file.ends_with(".tar.xz");
+        // Only "<name>-<v>.tar.gz/.xz" is a source archive; any other tarball
+        // (a build the catalog doesn't know) is never one.
+        const bool source_name = file == join({name, "-", version, ".tar.gz"}) || file == join({name, "-", version, ".tar.xz"});
         const bool other_build =
             !entry->other_builds.empty() &&
             std::regex_match(file, std::regex(replace_all(std::string(entry->other_builds), "{v}",
                                                           regex_escape(version))));
         if (source || other_build) {
             c.note = true;
-            c.parts.source = source && !other_build;
+            c.parts.source = source_name && !other_build;
             c.message = join({path, source ? ": source archive, not listed"
                                            : ": another build of this release, not listed"});
         } else {

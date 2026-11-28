@@ -32,22 +32,117 @@ std::optional<std::string> path_under(std::string_view url, std::string_view cdn
     return std::string(url.substr(base.size()));
 }
 
-void add_first_url(const json& entry, std::string_view cdn, std::vector<std::string>& out) {
+// Every address of `entry` under `cdn` into `out`; false when it has none.
+bool add_cdn_urls(const json& entry, std::string_view cdn, std::vector<std::string>& out) {
     if (!entry.is_object()) {
-        return;
+        return false;
     }
     const auto urls = entry.find("urls");
     if (urls == entry.end() || !urls->is_array()) {
-        return;
+        return false;
     }
+    bool any = false;
     for (const json& u : *urls) {
         if (u.is_string()) {
             if (auto p = path_under(u.get<std::string>(), cdn)) {
                 out.push_back(std::move(*p));
-                return;
+                any = true;
             }
         }
     }
+    return any;
+}
+
+bool add_cdn_urls(const std::vector<std::string>& urls, std::string_view cdn, std::vector<std::string>& out) {
+    bool any = false;
+    for (const std::string& u : urls) {
+        if (auto p = path_under(u, cdn)) {
+            out.push_back(std::move(*p));
+            any = true;
+        }
+    }
+    return any;
+}
+
+// "2026-11-01T10:00:00.000Z" (an S3 LastModified) -> its time.
+std::optional<std::chrono::sys_seconds> s3_time(std::string_view text) {
+    if (text.size() < 19) {
+        return std::nullopt;
+    }
+    return core::parse_utc_time(std::string(text.substr(0, 19)) + "Z");
+}
+
+std::optional<std::string> read_small(const std::filesystem::path& p, std::size_t max) {
+    std::ifstream f(p, std::ios::binary);
+    if (!f) {
+        return std::nullopt;
+    }
+    std::string text(max + 1, '\0');
+    f.read(text.data(), static_cast<std::streamsize>(text.size()));
+    text.resize(static_cast<std::size_t>(f.gcount()));
+    if (text.size() > max) {
+        return std::nullopt;
+    }
+    return text;
+}
+
+struct SavedFolder {
+    std::filesystem::path path;
+    SavedList list;
+};
+
+// The signed lists saved under `folder`, with where each is.
+std::vector<SavedFolder> saved_folders(const std::filesystem::path& folder, std::string_view cdn) {
+    namespace fs = std::filesystem;
+    std::vector<SavedFolder> out;
+    std::error_code ec;
+    for (fs::directory_iterator it(folder, ec), end; !ec && it != end; it.increment(ec)) {
+        const std::string name = core::path_to_utf8(it->path().filename());
+        // "2026-11-25 sequence 12" or "... (2)"
+        std::error_code dir_ec;
+        if (name.size() < 21 || name.substr(10, 10) != " sequence " || !it->is_directory(dir_ec)) {
+            continue;
+        }
+        // Only a list that was signed could have gone live.
+        std::error_code sig_ec;
+        if (!fs::is_regular_file(it->path() / "manifest.json.sig", sig_ec)) {
+            continue;
+        }
+        const auto manifest = read_small(it->path() / "manifest.json", std::size_t{1} << 20);
+        if (!manifest) {
+            continue;
+        }
+        const json doc = json::parse(*manifest, nullptr, false);
+        auto paths = list_paths(*manifest, cdn);
+        const auto sequence = doc.is_object() ? doc.find("sequence") : doc.end();
+        if (!paths || sequence == doc.end() || !sequence->is_number_integer()) {
+            continue;
+        }
+        SavedFolder f;
+        f.path = it->path();
+        f.list.sequence = sequence->get<std::int64_t>();
+        f.list.paths = std::move(*paths);
+        std::optional<std::chrono::sys_seconds> made;
+        if (const auto steps = read_small(it->path() / "upload-steps.txt", std::size_t{64} * 1024)) {
+            // "FloServer runtime list, sequence 12, made 2026-11-25T10:00:00Z"
+            if (const auto at = steps->find(", made "); at != std::string::npos) {
+                made = core::parse_utc_time(steps->substr(at + 7, 20));
+            }
+        }
+        if (!made) {
+            // The folder's date: the end of that day, so never too early.
+            made = core::parse_utc_time(name.substr(0, 10) + "T23:59:59Z");
+        }
+        if (!made) {
+            continue;
+        }
+        f.list.made = *made;
+        if (const auto live = read_small(it->path() / "live-at.txt", 1024); live && live->starts_with("live at ")) {
+            f.list.live_at = core::parse_utc_time(live->substr(8, 20));
+        }
+        out.push_back(std::move(f));
+    }
+    return out;
 }
 
 // "php/8.5.12" for "php/8.5.12/<file>".
@@ -83,93 +178,132 @@ std::optional<std::vector<std::string>> list_paths(std::string_view manifest_jso
     }
     std::vector<std::string> out;
     for (const json& r : *runtimes) {
-        add_first_url(r, cdn, out);
+        if (!add_cdn_urls(r, cdn, out)) {
+            return std::nullopt;
+        }
     }
-    if (const auto app = doc.find("app"); app != doc.end()) {
-        add_first_url(*app, cdn, out);
+    if (const auto app = doc.find("app"); app != doc.end() && !app->is_null() && !add_cdn_urls(*app, cdn, out)) {
+        return std::nullopt;
+    }
+    return out;
+}
+
+std::optional<std::vector<std::string>> list_paths(const LiveList& live, std::string_view cdn) {
+    std::vector<std::string> out;
+    for (const core::RuntimeFile& r : live.runtimes) {
+        if (!add_cdn_urls(r.urls, cdn, out)) {
+            return std::nullopt;
+        }
+    }
+    if (live.app && !add_cdn_urls(live.app->urls, cdn, out)) {
+        return std::nullopt;
     }
     return out;
 }
 
 std::vector<SavedList> read_saved_lists(const std::filesystem::path& folder, std::string_view cdn) {
-    namespace fs = std::filesystem;
     std::vector<SavedList> out;
-    std::error_code ec;
-    for (fs::directory_iterator it(folder, ec), end; !ec && it != end; it.increment(ec)) {
-        const std::string name = core::path_to_utf8(it->path().filename());
-        // "2026-11-25 sequence 12" or "... (2)"
-        if (name.size() < 21 || name.substr(10, 10) != " sequence " || !it->is_directory(ec)) {
-            continue;
-        }
-        const auto read = [](const fs::path& p, std::size_t max) -> std::optional<std::string> {
-            std::ifstream f(p, std::ios::binary);
-            if (!f) {
-                return std::nullopt;
-            }
-            std::string text(max + 1, '\0');
-            f.read(text.data(), static_cast<std::streamsize>(text.size()));
-            text.resize(static_cast<std::size_t>(f.gcount()));
-            if (text.size() > max) {
-                return std::nullopt;
-            }
-            return text;
-        };
-        const auto manifest = read(it->path() / "manifest.json", std::size_t{1} << 20);
-        if (!manifest) {
-            continue;
-        }
-        const json doc = json::parse(*manifest, nullptr, false);
-        auto paths = list_paths(*manifest, cdn);
-        const auto sequence = doc.is_object() ? doc.find("sequence") : doc.end();
-        if (!paths || sequence == doc.end() || !sequence->is_number_integer()) {
-            continue;
-        }
-        SavedList s;
-        s.sequence = sequence->get<std::int64_t>();
-        s.paths = std::move(*paths);
-        std::optional<std::chrono::sys_seconds> made;
-        if (const auto steps = read(it->path() / "upload-steps.txt", std::size_t{64} * 1024)) {
-            // "FloServer runtime list, sequence 12, made 2026-11-25T10:00:00Z"
-            if (const auto at = steps->find(", made "); at != std::string::npos) {
-                made = core::parse_utc_time(steps->substr(at + 7, 20));
-            }
-        }
-        if (!made) {
-            made = core::parse_utc_time(name.substr(0, 10) + "T00:00:00Z");
-        }
-        if (!made) {
-            continue;
-        }
-        s.made = *made;
-        out.push_back(std::move(s));
+    for (SavedFolder& f : saved_folders(folder, cdn)) {
+        out.push_back(std::move(f.list));
     }
     return out;
 }
 
+bool mark_live(const std::filesystem::path& list_folder, std::chrono::sys_seconds when) {
+    std::error_code ec;
+    if (std::filesystem::exists(list_folder / "live-at.txt", ec)) {
+        return true;
+    }
+    std::ofstream f(list_folder / "live-at.txt", std::ios::binary | std::ios::trunc);
+    f << "live at " << format_utc_time(when) << "\r\n";
+    f.close();
+    return static_cast<bool>(f);
+}
+
+void mark_live_lists(const std::filesystem::path& folder, const LiveList& live, std::string_view cdn,
+                     std::chrono::sys_seconds when) {
+    const auto live_paths = list_paths(live, cdn);
+    if (!live_paths) {
+        return;
+    }
+    const std::set<std::string> want(live_paths->begin(), live_paths->end());
+    for (const SavedFolder& f : saved_folders(folder, cdn)) {
+        if (f.list.sequence == live.sequence && std::set<std::string>(f.list.paths.begin(), f.list.paths.end()) == want) {
+            (void)mark_live(f.path, when);
+        }
+    }
+}
+
 std::vector<CleanupRow> plan_cleanup(const CleanupInput& input) {
+    using std::chrono::sys_seconds;
+    // Without the live list, what is in use can't be told.
+    if (input.live_sequence <= 0 || input.live_paths.empty()) {
+        return {};
+    }
     std::set<std::string> in_use(input.live_paths.begin(), input.live_paths.end());
     in_use.insert(input.next_paths.begin(), input.next_paths.end());
-    // A source archive stays while a binary of its runtime and version is
-    // listed (GPL: the source goes with the binary), on any platform.
-    std::set<std::string> listed_folders;
+
+    // GPL: a source archive stays while a binary of its runtime and version
+    // stays on the CDN: one listed, or one Clean up never offers (another
+    // build, a file put there by hand).
+    std::set<std::string> staying_folders;
     for (const std::string& p : in_use) {
-        listed_folders.insert(folder_of(p));
+        staying_folders.insert(folder_of(p));
     }
-    std::vector<const SavedList*> saved;
-    saved.reserve(input.saved.size());
-    for (const SavedList& s : input.saved) {
-        saved.push_back(&s);
-    }
-    std::sort(saved.begin(), saved.end(), [](const SavedList* a, const SavedList* b) { return a->sequence < b->sequence; });
-    std::vector<std::set<std::string>> saved_paths;
-    std::vector<std::set<std::string>> saved_folders;
-    for (const SavedList* s : saved) {
-        saved_paths.emplace_back(s->paths.begin(), s->paths.end());
-        std::set<std::string> folders;
-        for (const std::string& p : s->paths) {
-            folders.insert(folder_of(p));
+    // When the live list went up: the later of the pair.
+    std::optional<sys_seconds> live_since;
+    for (const R2Object& o : input.objects) {
+        if (o.key == "manifest.json" || o.key == "manifest.json.sig") {
+            if (const auto t = s3_time(o.last_modified); t && (!live_since || *t > *live_since)) {
+                live_since = t;
+            }
+            continue;
         }
-        saved_folders.push_back(std::move(folders));
+        const CdnPath p = describe_cdn_path(o.key);
+        if (!p.source && (in_use.contains(o.key) || !p.listable)) {
+            staying_folders.insert(folder_of(o.key));
+        }
+    }
+
+    // The saved lists that could have been live, one per sequence (an
+    // abandoned list shares its sequence with the one that went up).
+    struct Group {
+        std::int64_t sequence = 0;
+        sys_seconds made;
+        std::optional<sys_seconds> known_live;  // no earlier than it went live
+        std::set<std::string> paths;
+        std::set<std::string> folders;
+    };
+    std::map<std::int64_t, Group> by_sequence;
+    for (const SavedList& s : input.saved) {
+        if (s.sequence > input.live_sequence) {
+            continue;  // never went live
+        }
+        Group& g = by_sequence[s.sequence];
+        g.sequence = s.sequence;
+        g.made = std::max(g.made, s.made);
+        if (s.live_at && (!g.known_live || *s.live_at > *g.known_live)) {
+            g.known_live = s.live_at;
+        }
+        for (const std::string& p : s.paths) {
+            g.paths.insert(p);
+            g.folders.insert(folder_of(p));
+        }
+    }
+    std::vector<Group> groups;
+    groups.reserve(by_sequence.size());
+    for (auto& [seq, g] : by_sequence) {
+        groups.push_back(std::move(g));
+    }
+    // Lists go live in sequence order, so the time a later list was seen
+    // live bounds when an earlier one went live: walk back taking the least.
+    std::vector<std::optional<sys_seconds>> went_live_by(groups.size());
+    std::optional<sys_seconds> bound = live_since;  // the live list, saved here or not
+    for (std::size_t i = groups.size(); i-- > 0;) {
+        if (groups[i].known_live && (!bound || *groups[i].known_live < *bound)) {
+            bound = groups[i].known_live;
+        }
+        went_live_by[i] = bound;
     }
 
     std::vector<CleanupRow> rows;
@@ -178,12 +312,13 @@ std::vector<CleanupRow> plan_cleanup(const CleanupInput& input) {
             continue;
         }
         const CdnPath p = describe_cdn_path(o.key);
-        if (!p.listable && !p.source) {
+        if (!may_delete(o.key)) {
             continue;  // manifest.json, files put there by hand, unknown folders: never offered
         }
         CleanupRow row;
         row.path = o.key;
         row.size = o.size;
+        row.source = p.source;
         if (p.runtime == kAppFolder) {
             row.title = "FloServer " + p.version;
         } else if (p.source) {
@@ -192,29 +327,40 @@ std::vector<CleanupRow> plan_cleanup(const CleanupInput& input) {
             row.title = file_title(p.runtime, p.version, p.variant, p.platform);
         }
         const std::string folder = folder_of(o.key);
-        if (p.source && listed_folders.contains(folder)) {
+        if (p.source && staying_folders.contains(folder)) {
             row.kind = CleanupKind::Kept;
-            row.note = "kept: " + runtime_title(p.runtime, p.version, "") + " is listed (its source goes with it)";
+            row.note = "kept: a " + runtime_title(p.runtime, p.version, "") + " binary stays (its source goes with it)";
             rows.push_back(std::move(row));
             continue;
         }
         // The last saved list that had it (a source: a binary of its version).
         std::optional<std::size_t> last;
-        for (std::size_t i = 0; i < saved.size(); ++i) {
-            if (p.source ? saved_folders[i].contains(folder) : saved_paths[i].contains(o.key)) {
+        for (std::size_t i = 0; i < groups.size(); ++i) {
+            if (p.source ? groups[i].folders.contains(folder) : groups[i].paths.contains(o.key)) {
                 last = i;
             }
         }
         if (!last) {
             row.kind = CleanupKind::Unknown;
             row.note = "in no list saved on this PC";
-        } else if (*last + 1 == saved.size()) {
-            // In the newest list signed here, though not live nor next.
+        } else if (*last + 1 == groups.size() && groups[*last].sequence == input.live_sequence) {
+            // In the live sequence's list saved here (an abandoned twin), though not live nor next.
             row.kind = CleanupKind::Wait;
             row.note = "wait: in the newest list signed on this PC";
+        } else if (*last + 1 == groups.size() ? !live_since : !went_live_by[*last + 1]) {
+            row.kind = CleanupKind::Unknown;
+            row.note = "when the list without it went live isn't known";
         } else {
-            row.left = saved[*last + 1]->made;
-            const bool long_ago = input.now - *row.left >= input.wait;
+            // The next list saved here, or else the live one (made elsewhere).
+            sys_seconds left = *last + 1 == groups.size()
+                                   ? *live_since
+                                   : std::max(groups[*last + 1].made, *went_live_by[*last + 1]);
+            // Uploaded again since: count from then.
+            if (const auto up = s3_time(o.last_modified); up && *up > left) {
+                left = *up;
+            }
+            row.left = left;
+            const bool long_ago = input.now - left >= input.wait;
             row.kind = long_ago ? CleanupKind::Ready : CleanupKind::Wait;
             if (!long_ago) {
                 row.note = "wait: left less than " + std::to_string(input.wait.count()) + " days ago";
@@ -223,6 +369,7 @@ std::vector<CleanupRow> plan_cleanup(const CleanupInput& input) {
         row.ticked = row.kind == CleanupKind::Ready;
         rows.push_back(std::move(row));
     }
+    tie_sources(rows);
     std::stable_sort(rows.begin(), rows.end(), [](const CleanupRow& a, const CleanupRow& b) {
         if (order_of(a.kind) != order_of(b.kind)) {
             return order_of(a.kind) < order_of(b.kind);
@@ -230,6 +377,29 @@ std::vector<CleanupRow> plan_cleanup(const CleanupInput& input) {
         return a.path < b.path;
     });
     return rows;
+}
+
+void tie_sources(std::vector<CleanupRow>& rows) {
+    std::set<std::string> binary_stays;
+    for (const CleanupRow& r : rows) {
+        if (!r.source && !r.ticked) {
+            binary_stays.insert(folder_of(r.path));
+        }
+    }
+    for (CleanupRow& r : rows) {
+        if (r.source && r.ticked && binary_stays.contains(folder_of(r.path))) {
+            r.ticked = false;
+            r.note = "goes only with every binary in its folder";
+        }
+    }
+}
+
+bool may_delete(std::string_view key) {
+    if (key.empty() || key.starts_with('/') || key.starts_with("manifest.json")) {
+        return false;
+    }
+    const CdnPath p = describe_cdn_path(key);
+    return p.listable || p.source;
 }
 
 std::string left_text(const CleanupRow& row, std::chrono::sys_seconds now) {

@@ -461,11 +461,12 @@ std::optional<std::vector<R2Object>> R2Bucket::list_objects(std::string& error, 
         if (xml_value(r.body, "IsTruncated").value_or("false") != "true") {
             return out;
         }
-        token = xml_unescape(xml_value(r.body, "NextContinuationToken").value_or(""));
-        if (token.empty()) {
-            error = "R2 said the listing goes on but gave no continuation token";
+        std::string next = xml_unescape(xml_value(r.body, "NextContinuationToken").value_or(""));
+        if (next.empty() || next == token) {
+            error = "R2 said the listing goes on but gave no new continuation token";
             return std::nullopt;
         }
+        token = std::move(next);
     }
     error = "R2's listing didn't end";
     return std::nullopt;
@@ -486,8 +487,10 @@ bool R2Bucket::delete_object(const std::string& object, std::string& error, cons
         error.clear();
         r = call(c, error, cancel);
     }
-    // S3 answers 204 whether it was there or not; 404 counts as gone too.
-    if (r.status == 204 || r.status == 200 || r.status == 404) {
+    // S3 answers 204 whether it was there or not; 404 counts as gone too,
+    // unless it's the bucket that isn't there.
+    if (r.status == 204 || r.status == 200 ||
+        (r.status == 404 && r.body.find("<Code>NoSuchBucket</Code>") == std::string::npos)) {
         error.clear();
         return true;
     }

@@ -55,6 +55,7 @@ public:
     int fail_lists = 0;            // listing pages to answer 503 first
     int fail_deletes = 0;          // deletes to answer delete_status first
     int delete_status = 403;
+    bool stuck_token = false;      // later pages give back the token they were sent
 
     core::HttpReply get(const std::string&, const core::HttpLimits&, const core::HttpBody&) override { return {}; }
 
@@ -136,10 +137,11 @@ public:
                 return r;
             }
             std::size_t start = 0;
+            std::string sent;
             if (const auto t = query.find("continuation-token="); t != std::string::npos) {
-                const std::string token = decode(query.substr(t + 19, query.find('&', t) - t - 19));
-                REQUIRE(token.starts_with("next&page="));  // sent unescaped, as given
-                start = std::stoul(token.substr(10));
+                sent = decode(query.substr(t + 19, query.find('&', t) - t - 19));
+                REQUIRE(sent.starts_with("next&page="));  // sent unescaped, as given
+                start = std::stoul(sent.substr(10));
             }
             std::vector<std::pair<std::string, std::string>> all(objects.begin(), objects.end());
             r.status = 200;
@@ -157,8 +159,8 @@ public:
             const bool more = start + list_page < all.size();
             r.body += std::string("<IsTruncated>") + (more ? "true" : "false") + "</IsTruncated>";
             if (more) {
-                r.body += "<NextContinuationToken>next&amp;page=" + std::to_string(start + list_page) +
-                          "</NextContinuationToken>";
+                const std::string page = stuck_token && !sent.empty() ? sent.substr(10) : std::to_string(start + list_page);
+                r.body += "<NextContinuationToken>next&amp;page=" + page + "</NextContinuationToken>";
             }
             r.body += "</ListBucketResult>";
             return r;
@@ -543,6 +545,11 @@ TEST_CASE("r2: list_objects reads every page and unescapes keys (D37.7)") {
         CHECK_FALSE(b.list_objects(error).has_value());
         CHECK(error.find("couldn't list") != std::string::npos);
     }
+    SUBCASE("the same continuation token again: refused, not a loop") {
+        r2.stuck_token = true;
+        CHECK_FALSE(b.list_objects(error).has_value());
+        CHECK(error.find("no new continuation token") != std::string::npos);
+    }
     SUBCASE("more objects than allowed: refused") {
         CHECK_FALSE(b.list_objects(error, nullptr, 3).has_value());
         CHECK(error.find("more than 3") != std::string::npos);
@@ -568,4 +575,8 @@ TEST_CASE("r2: delete_object (D37.7)") {
     CHECK(r2.objects.empty());
     CHECK_FALSE(b.delete_object("", error));
     CHECK_FALSE(b.delete_object("/manifest.json", error));
+    // A 404 for the bucket isn't "already gone".
+    r2.no_bucket = true;
+    CHECK_FALSE(b.delete_object("php/8.5.12/z.zip", error));
+    CHECK(error.find("NoSuchBucket") != std::string::npos);
 }
